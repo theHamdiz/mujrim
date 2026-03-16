@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/cli/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/comms/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/eval/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/search/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tests/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/types/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/arbiter/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/comms/target" />
+      <excludeFolder url="file://$MODULE_DIR$/eval/target" />
+      <excludeFolder url="file://$MODULE_DIR$/search/target" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
+      <excludeFolder url="file://$MODULE_DIR$/types/target" />
+      <excludeFolder url="file://$MODULE_DIR$/arbiter/target" />
+      <excludeFolder url="file://$MODULE_DIR$/ui/.svelte-kit" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

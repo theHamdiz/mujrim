@@ -1,0 +1,35 @@
+[package]
+name = "kishmat"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+categories = ["games", "game-engines"]
+description = "The first Arabian chess engine written in Rust"
+license = "MIT"
+repository = "https://github.com/theHamdiz/kishmat"
+readme = "README.md"
+
+[workspace]
+members = [
+    "arbiter",
+    "types",
+    "eval",
+    "search",
+    "comms"
+]
+
+[dependencies]
+clap = "4.6"
+mimalloc = { version = "0.1", default-features = false }
+arbiter = { path = "arbiter" }
+comms = { path = "comms" }
+types = { path = "types" }
+search = { path = "search" }
+eval = { path = "eval" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
