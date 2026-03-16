@@ -11,21 +11,24 @@ readme = "README.md"
 
 [workspace]
 members = [
-    "arbiter",
-    "types",
-    "eval",
-    "search",
-    "comms"
+    "crates/kishmat-types",
+    "crates/kishmat-eval",
+    "crates/kishmat-search",
+    "crates/kishmat-comms",
+    "crates/kishmat-tests",
+    "crates/kishmat-ui",
+    "crates/kishmat-updater",
 ]
 
 [dependencies]
 clap = "4.6"
 mimalloc = { version = "0.1", default-features = false }
-arbiter = { path = "arbiter" }
-comms = { path = "comms" }
-types = { path = "types" }
-search = { path = "search" }
-eval = { path = "eval" }
+
+# Workspace crates — `package` rename lets source code keep short `use` names
+types = { package = "kishmat-types", path = "crates/kishmat-types" }
+comms = { package = "kishmat-comms", path = "crates/kishmat-comms" }
+search = { package = "kishmat-search", path = "crates/kishmat-search" }
+eval = { package = "kishmat-eval", path = "crates/kishmat-eval" }
 
 [profile.release]
 opt-level = 3

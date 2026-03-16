@@ -1,0 +1,20 @@
+[package]
+name = "kishmat-ui"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "GUI for the Kishmat chess engine using iced"
+license = "MIT"
+
+[[bin]]
+name = "kishmat-ui"
+path = "src/main.rs"
+
+[dependencies]
+iced = { version = "0.13", features = ["canvas", "image"] }
+types = { package = "kishmat-types", path = "../kishmat-types" }
+search = { package = "kishmat-search", path = "../kishmat-search" }
+eval = { package = "kishmat-eval", path = "../kishmat-eval" }
+rfd = "0.15"
+image = "0.25"
+rand = "0.9"

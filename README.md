@@ -15,12 +15,13 @@
   <a href="#search"><img src="https://img.shields.io/badge/search-Lazy%20SMP-green?style=flat-square" alt="Lazy SMP" /></a>
   <a href="#protocol"><img src="https://img.shields.io/badge/protocol-UCI%20%7C%20XBoard-lightgrey?style=flat-square" alt="UCI | XBoard" /></a>
   <a href="#evaluation"><img src="https://img.shields.io/badge/eval-NNCorrL%20Hybrid-purple?style=flat-square" alt="NNCorrL" /></a>
-  <a href="#allocator"><img src="https://img.shields.io/badge/allocator-mimalloc-red?style=flat-square" alt="mimalloc" /></a>
+  <a href="#gui"><img src="https://img.shields.io/badge/gui-iced-cyan?style=flat-square" alt="iced GUI" /></a>
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="#features">Features</a> ·
+  <a href="#gui">GUI</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="#uci-options">UCI Options</a> ·
@@ -31,12 +32,14 @@
 
 ## What's New in v2.0.0
 
-- **NNCorrL Hybrid Evaluation** — KishMat-original Neural Network Correction Layer (768→32x2→1) adds pattern-based corrections to the classical eval
-- **Stockfish-Inspired Search Tuning** — Razoring, futility, LMR, LMP, and null-move parameters calibrated against top engine research
+- **Fully Modular Workspace** — Each logical component is its own crate under `crates/`, enabling partial updates and LEGO-like swappability
+- **GUI Application** — Native chess GUI built with [iced](https://iced.rs), featuring macOS-style grain textures, high-fidelity image pieces, and support for Human vs Human, Human vs Engine, and Engine vs Engine play
+- **Batch Updater** — GitHub-release-based updater (`kishmat-updater`) with per-component updates, progress bars, and SHA256 verification
+- **NNCorrL Hybrid Evaluation** — Neural Network Correction Layer (768→64×2→1) with SCReLU activation adds pattern-based corrections to the classical eval
+- **Stockfish-Inspired Search Tuning** — Razoring, futility, LMR, LMP, null-move, and correction history calibrated against top engine research
 - **XBoard/CECP Protocol** — Full support for WinBoard and XBoard GUIs
-- **100% UCI Compliance** — All standard UCI commands implemented: `debug`, `register`, `ponderhit`, `setoption`, plus standard options
-- **Enhanced History Gravity** — Stockfish-style gravity formula: `entry += bonus - entry * |bonus| / 16384`
 - **Opening Book** — Embedded Polyglot gambit-focused opening book
+- **Zero-Cost Modularity** — `lto = "fat"` + `codegen-units = 1` ensures full cross-crate inlining in release builds
 
 ---
 
@@ -45,32 +48,61 @@
 ```bash
 git clone https://github.com/theHamdiz/kishmat.git
 cd kishmat
+```
+
+### Using [just](https://just.systems) (recommended)
+
+```bash
+just release     # Build optimized engine binary
+just ui          # Build and launch the GUI
+just test        # Run all tests
+just bench       # Run ELO benchmark suite
+```
+
+### Using cargo directly
+
+```bash
+# Build the engine
 RUSTFLAGS="-C target-cpu=native" cargo build --release
-```
 
-Run in UCI mode (connects to any UCI-compatible GUI):
-
-```bash
+# Run in UCI mode (connects to any UCI-compatible GUI)
 ./target/release/kishmat uci
-```
 
-Run in XBoard/CECP mode (for WinBoard, XBoard):
-
-```bash
+# Run in XBoard/CECP mode
 ./target/release/kishmat xboard
-```
 
-Play interactively from the terminal:
-
-```bash
+# Play interactively from the terminal
 ./target/release/kishmat play -d 8
-```
 
-Run the benchmark suite:
+# Launch the GUI
+cargo run --release -p kishmat-ui
 
-```bash
+# Run the benchmark suite
 ./target/release/kishmat bench
 ```
+
+---
+
+## GUI
+
+KishMat includes a native chess GUI built with [iced](https://iced.rs):
+
+```bash
+just ui
+```
+
+### Features
+
+- **Three game modes**: Human vs Human, Human vs Engine, Engine vs Engine
+- **Load any UCI engine**: Use the built-in KishMat engine or load external UCI engines via file picker
+- **Premium design**: macOS-style subtle grain texture backgrounds, high-fidelity colored Staunton pieces
+- **Interactive board**: Click to select pieces and make moves, with legal move highlighting and last-move indicators
+- **Move history**: Scrollable algebraic notation panel
+- **Engine info**: Real-time search depth and evaluation display
+
+### Chess Pieces
+
+The GUI uses high-fidelity colored Staunton chess pieces. The piece set is CC-BY-SA 3.0 compatible. You can swap pieces by replacing the PNG spritesheets in `crates/kishmat-ui/assets/`.
 
 ---
 
@@ -80,7 +112,7 @@ Run the benchmark suite:
 
 | Feature | Description |
 |---|---|
-| **NNCorrL** | KishMat-original neural correction: 768→32x2→1 with clipped ReLU, bounded ±300cp |
+| **NNCorrL** | Neural correction: 768→64×2→1 with SCReLU, standalone + hybrid blending |
 | **Tapered Eval** | Game-phase interpolation between middlegame and endgame scores |
 | **PeSTO PSQT** | Piece-square tables for all pieces across both game phases |
 | **Material** | Separate MG/EG piece values |
@@ -107,12 +139,15 @@ Run the benchmark suite:
 | **Reverse Futility** | `77·depth - 74·improving` at depth ≤ 8 |
 | **Razoring** | Drops to qsearch when `eval ≤ α - 507 - 312·d²` |
 | **Futility Pruning** | `77·depth - 46·improving` at depth ≤ 6 |
-| **Singular Extensions** | TT move singularity with `β = ttScore - 3·depth` |
+| **Singular Extensions** | TT move singularity with double/negative extensions |
 | **Check Extension** | +1 ply when in check |
 | **ProbCut** | Reduced-depth verification for positions way above beta |
-| **IID** | Internal Iterative Deepening at PV nodes |
+| **IIR** | Internal Iterative Reduction at PV nodes |
 | **SEE Pruning** | Prune losing captures and quiet moves by SEE score |
 | **History Gravity** | `bonus - entry·|bonus|/16384` (capped at ±16384) |
+| **Continuation History** | 1-ply and 2-ply back move-piece tracking |
+| **Capture History** | Piece-to-square-to-captured-piece scoring |
+| **Correction History** | Pawn, material, minor piece, and non-pawn correction tables |
 | **Killer Moves** | 2 per ply |
 | **Countermove Heuristic** | Refutation move table |
 | **Delta Pruning** | In quiescence search |
@@ -134,18 +169,26 @@ Run the benchmark suite:
 
 ## Architecture
 
+KishMat is designed as a **fully modular workspace** — each logical component is its own crate, allowing independent updates and swappability (like LEGO bricks):
+
 ```
-kishmat/           # Root crate: CLI, entry point, mimalloc
-├── arbiter/       # Thin wrapper: engine → move API
-├── comms/         # UCI + XBoard protocol handlers, time management
-├── eval/          # Tapered eval, PeSTO PSQT, mobility, king safety, threats
-├── search/        # Alpha-beta, Lazy SMP, TT, SEE, NNCorrL, opening book
-│   └── nnue/      # Neural Network Correction Layer (768→32x2→1)
-└── types/         # Board, bitboards, move gen, Zobrist, attack tables
+kishmat/                          # Workspace root + main engine binary
+├── src/                          # CLI entry point (UCI, XBoard, play, bench)
+├── crates/
+│   ├── kishmat-types/            # Board, bitboards, move gen, Zobrist, attack tables
+│   ├── kishmat-eval/             # Tapered eval, PeSTO PSQT, mobility, king safety
+│   ├── kishmat-search/           # Alpha-beta, Lazy SMP, TT, SEE, NNUE, opening book
+│   │   └── src/nnue/             # Neural Network (768→64×2→1, SCReLU)
+│   ├── kishmat-comms/            # UCI + XBoard protocol handlers, time management
+│   ├── kishmat-tests/            # Integration tests across all engine crates
+│   ├── kishmat-ui/               # Native GUI (iced) — chess board, game modes
+│   │   └── assets/               # Chess piece spritesheets
+│   └── kishmat-updater/          # GitHub-based batch updater binary
+├── justfile                      # Build recipes (just ui, just test, etc.)
+└── Cargo.toml                    # Workspace definition + release profile
 ```
 
-All crates are workspace members. The search crate shares its TT
-across threads via `Arc` for Lazy SMP.
+**Zero-cost modularity**: All crates use `path` dependencies with `package` renames for ergonomic imports (`use types::*`). Release builds with `lto = "fat"` and `codegen-units = 1` ensure full cross-crate inlining — no performance penalty from the modular design.
 
 ---
 
@@ -168,7 +211,7 @@ across threads via `Arc` for Lazy SMP.
 Run the benchmark:
 
 ```bash
-kishmat bench -d 18
+just bench
 ```
 
 ---
@@ -207,31 +250,65 @@ Full support for XBoard and WinBoard GUIs:
 
 ---
 
+## Updater
+
+KishMat includes a self-updater that downloads updates from GitHub releases:
+
+```bash
+just check-updates   # Check for new releases
+just update          # Update all components
+```
+
+Or run the updater binary directly:
+
+```bash
+kishmat-updater check              # Check for updates
+kishmat-updater update all         # Update everything
+kishmat-updater update kishmat-ui  # Update only the GUI
+kishmat-updater list               # List installed components
+```
+
+---
+
 ## Development
 
-Requires [Rust](https://rustup.rs).
+Requires [Rust](https://rustup.rs) and optionally [just](https://just.systems).
 
 ```bash
-cargo build --release          # Optimized release build
-cargo test --workspace         # Run all tests
-cargo run --release -- bench   # Run ELO benchmark suite
-cargo run --release -- play    # Interactive play
-cargo run --release -- perft   # Perft test
+just build      # Debug build (all crates)
+just release    # Optimized release build
+just test       # Run all tests (16MB stack for deep search)
+just lint       # Run clippy
+just fmt        # Format code
+just check      # Check without building
+just ui         # Build and launch the GUI
 ```
 
-### Running Tests
+### Project Recipes
 
-```bash
-RUST_MIN_STACK=8388608 cargo test --workspace
-```
-
-The `RUST_MIN_STACK` is needed for the deep search recursion in debug mode.
+| Command | Description |
+|---|---|
+| `just build` | Debug build for all workspace crates |
+| `just release` | Optimized release build (`-C target-cpu=native`) |
+| `just test` | Run all tests with 16MB stack |
+| `just ui` | Build and launch the chess GUI |
+| `just run` | Run engine in UCI mode |
+| `just play` | Interactive terminal play |
+| `just bench` | Run ELO benchmark suite |
+| `just nps` | Quick NPS benchmark (depth 16) |
+| `just updater` | Build the updater binary |
+| `just check-updates` | Check for GitHub updates |
+| `just update` | Update all components |
+| `just lint` | Run clippy lints |
+| `just fmt` | Format all code |
 
 ---
 
 ## License
 
 MIT — see [License.md](License.md).
+
+Chess piece assets: CC-BY-SA 3.0 (based on cburnett Staunton set).
 
 ## Author
 

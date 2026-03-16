@@ -1,0 +1,10 @@
+[package]
+name = "kishmat-eval"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Evaluation functions for the Kishmat engine"
+license = "MIT"
+
+[dependencies]
+types = { package = "kishmat-types", path = "../kishmat-types" }

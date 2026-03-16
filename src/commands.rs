@@ -3,8 +3,8 @@
 use std::io::{self, Write};
 use std::time::Instant;
 
-use arbiter::Arbiter;
 use comms::{UciHandler, XBoardHandler};
+use search::SearchEngine;
 use types::{Board, Color};
 
 /// Runs the UCI protocol loop.
@@ -21,7 +21,7 @@ pub fn run_xboard() {
 
 /// Interactive play mode against the engine.
 pub fn run_play(depth: i32) {
-    let mut arbiter = Arbiter::new();
+    let mut engine = SearchEngine::new(64, 8);
     let mut board = Board::new();
 
     println!("╔══════════════════════════════════════╗");
@@ -77,8 +77,9 @@ pub fn run_play(depth: i32) {
             // Engine's turn
             println!("\n  Engine is thinking...");
             let start = Instant::now();
-            let best_move = arbiter.best_move(&mut board, depth);
+            let result = engine.search_depth(&mut board, depth);
             let elapsed = start.elapsed();
+            let best_move = result.best_move;
 
             println!("  Engine plays: {} ({:.1}s)", best_move.to_uci(), elapsed.as_secs_f64());
             board.make_move(best_move);
@@ -100,11 +101,11 @@ pub fn run_analyze(fen: &str, depth: i32) {
     println!("Analyzing position:");
     println!("{board}");
 
-    let mut arbiter = Arbiter::new();
-    let best_move = arbiter.best_move(&mut board, depth);
+    let mut engine = SearchEngine::new(64, 8);
+    let result = engine.search_depth(&mut board, depth);
 
-    println!("\nBest move: {}", best_move.to_uci());
-    println!("Evaluation: {} cp", eval::evaluate(&board));
+    println!("\nBest move: {}", result.best_move.to_uci());
+    println!("Evaluation: {} cp", result.score);
 }
 
 /// Run perft test.
@@ -186,8 +187,102 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     println!("╚══════════════════════════════════════════════╝");
     println!();
 
-    // Use full hardware resources for accurate benchmarking
-    let mut engine = SearchEngine::new(4096, 32);
+    // ── Hardware Detection ──────────────────────────────────────
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    println!("  Hardware Detection:");
+
+    // CPU info
+    #[cfg(target_arch = "aarch64")]
+    println!("    CPU arch:   aarch64 (ARM64)");
+    #[cfg(target_arch = "x86_64")]
+    println!("    CPU arch:   x86_64");
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    println!("    CPU arch:   {}", std::env::consts::ARCH);
+
+    println!("    CPU cores:  {}", num_threads);
+
+    // SIMD features (compile-time detection via target-cpu=native)
+    let mut simd_features = Vec::new();
+    #[cfg(target_arch = "aarch64")]
+    {
+        simd_features.push("NEON");
+        #[cfg(target_feature = "dotprod")]
+        simd_features.push("DotProd");
+        #[cfg(target_feature = "fp16")]
+        simd_features.push("FP16");
+        #[cfg(target_feature = "crc")]
+        simd_features.push("CRC32");
+        #[cfg(target_feature = "aes")]
+        simd_features.push("AES");
+        #[cfg(target_feature = "sha2")]
+        simd_features.push("SHA2");
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        #[cfg(target_feature = "avx2")]
+        simd_features.push("AVX2");
+        #[cfg(target_feature = "avx")]
+        simd_features.push("AVX");
+        #[cfg(target_feature = "sse4.2")]
+        simd_features.push("SSE4.2");
+        #[cfg(target_feature = "sse4.1")]
+        simd_features.push("SSE4.1");
+        #[cfg(target_feature = "popcnt")]
+        simd_features.push("POPCNT");
+        #[cfg(target_feature = "bmi2")]
+        simd_features.push("BMI2");
+    }
+    if simd_features.is_empty() {
+        println!("    SIMD:       (none detected at compile time)");
+    } else {
+        println!("    SIMD:       {}", simd_features.join(", "));
+    }
+
+    // GPU detection
+    #[cfg(target_os = "macos")]
+    {
+        let gpu_info = std::process::Command::new("system_profiler")
+            .args(["SPDisplaysDataType"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+
+        let metal_support = gpu_info.lines()
+            .find(|l| l.contains("Metal Support"))
+            .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+            .unwrap_or_else(|| "Not detected".to_string());
+        let gpu_model = gpu_info.lines()
+            .find(|l| l.contains("Chipset Model"))
+            .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        println!("    GPU:        {} ({})", gpu_model, metal_support);
+
+        // NPU (Apple Neural Engine) — present on Apple Silicon
+        #[cfg(target_arch = "aarch64")]
+        println!("    NPU:        Apple Neural Engine (available via CoreML)");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("    GPU:        N/A (no GPU detection on this platform)");
+        println!("    NPU:        N/A");
+    }
+
+    // Note about compute usage
+    println!();
+    println!("    ⚡ Using {} CPU threads for search (Lazy SMP)", num_threads);
+    println!("    ℹ  NNUE uses CPU SIMD. GPU/NPU acceleration requires CoreML integration.");
+
+    // Scale hash: 256MB per thread, minimum 4GB
+    let hash_mb = (num_threads * 256).max(4096);
+    println!("    📦 Hash table: {}MB", hash_mb);
+    println!();
+
+    let mut engine = SearchEngine::new(hash_mb, num_threads);
     let mut correct = 0;
     let mut total_positions = 0;
     let mut total_nodes = 0u64;

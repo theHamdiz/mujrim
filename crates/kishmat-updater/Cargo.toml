@@ -1,0 +1,21 @@
+[package]
+name = "kishmat-updater"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Batch updater for the Kishmat chess engine (GitHub-based)"
+license = "MIT"
+
+[[bin]]
+name = "kishmat-updater"
+path = "src/main.rs"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = "4.6"
+zip = "2"
+indicatif = "0.17"
+sha2 = "0.10"
+dirs = "6"

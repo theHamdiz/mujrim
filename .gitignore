@@ -1,9 +1,20 @@
+# Build artifacts
 /target
-arbiter/target/*
-cli/target/*
-comms/target/*
-eval/target/*
-search/target/*
-types/target/*
-tests/target/*
-ui/node_modules/*
+**/target
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.pdb
+
+# PGO data
+/tmp/kishmat-pgo/
