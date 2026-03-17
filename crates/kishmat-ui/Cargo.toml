@@ -11,10 +11,12 @@ name = "kishmat-ui"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.13", features = ["canvas", "image"] }
+iced = { version = "0.13", features = ["canvas", "image", "tokio"] }
 types = { package = "kishmat-types", path = "../kishmat-types" }
 search = { package = "kishmat-search", path = "../kishmat-search" }
 eval = { package = "kishmat-eval", path = "../kishmat-eval" }
 rfd = "0.15"
 image = "0.25"
 rand = "0.9"
+arboard = "3.6.1"
+rodio = "0.20"

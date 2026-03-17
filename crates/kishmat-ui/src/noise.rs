@@ -58,6 +58,7 @@ pub fn macos_grain_dark() -> Handle {
 }
 
 /// Medium gray variant for panels.
+#[allow(dead_code)]
 pub fn macos_grain_panel() -> Handle {
     generate_noise_texture(128, 0.03, 52, 52, 56)
 }

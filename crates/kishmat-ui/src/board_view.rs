@@ -1,4 +1,12 @@
-//! Board view — renders the chess board with image-based pieces.
+//! Board view — renders a premium chess board with chess.com-style warm colors.
+//!
+//! Features:
+//! - Dynamic square sizing based on window dimensions
+//! - Warm tan/walnut brown square colors
+//! - Embedded coordinate labels in corner squares (lichess-style)
+//! - Auto-sized piece images with smaller pawns
+//! - Selection glow, last-move highlights, legal move dots
+//! - Move animation overlay (floating piece lerp)
 
 use iced::widget::{button, column, container, row, text, Image};
 use iced::{Alignment, Color, Element};
@@ -7,34 +15,74 @@ use crate::game::GameState;
 use crate::pieces::PieceAssets;
 use crate::Msg;
 
-const SQ_SIZE: f32 = 72.0;
-const DOT_SIZE: f32 = SQ_SIZE * 0.25;
-const DOT_RADIUS: f32 = SQ_SIZE * 0.125;
-const PIECE_SIZE: f32 = SQ_SIZE * 0.85;
+/// Derived sizing from a single square size parameter.
+pub struct BoardMetrics {
+    pub sq: f32,
+    pub dot: f32,
+    pub dot_radius: f32,
+    pub piece: f32,
+    pub pawn: f32,
+    pub board_total: f32,
+}
 
-/// Renders the chess board as an 8×8 grid with image pieces.
-pub fn view_board<'a>(gs: &'a GameState, assets: &'a PieceAssets) -> Element<'a, Msg> {
+impl BoardMetrics {
+    pub fn from_sq(sq: f32) -> Self {
+        Self {
+            sq,
+            dot: sq * 0.28,
+            dot_radius: sq * 0.14,
+            piece: sq * 0.88,
+            pawn: sq * 0.70,
+            board_total: sq * 8.0,
+        }
+    }
+}
 
-    // File labels
+// ── Board color palette (chess.com warm style) ──────────────────
+const SQ_LIGHT: Color = Color::from_rgb(0.941, 0.851, 0.710);     // #F0D9B5 warm tan
+const SQ_DARK: Color = Color::from_rgb(0.710, 0.533, 0.388);      // #B58863 walnut brown
+const SQ_SELECTED: Color = Color::from_rgb(0.510, 0.592, 0.412);  // #829769 forest green
+const SQ_LAST_LIGHT: Color = Color::from_rgb(0.969, 0.969, 0.514);// #F7F783 light yellow
+const SQ_LAST_DARK: Color = Color::from_rgb(0.855, 0.824, 0.459); // #DAD275 dark yellow
+const SQ_LEGAL_LIGHT: Color = Color::from_rgb(0.820, 0.878, 0.600);
+const SQ_LEGAL_DARK: Color = Color::from_rgb(0.680, 0.753, 0.490);
+const COORD_LIGHT: Color = Color::from_rgb(0.710, 0.533, 0.388);  // matches dark square
+const COORD_DARK: Color = Color::from_rgb(0.941, 0.851, 0.710);   // matches light square
+
+/// Compact animation data (Copy for easy passing).
+#[derive(Clone, Copy)]
+pub struct AnimInfo {
+    pub from_sq: types::Square,
+    pub to_sq: types::Square,
+    pub piece: types::Piece,
+    pub color: types::Color,
+    pub progress: f32,
+    pub captured: Option<(types::Piece, types::Color)>,
+}
+
+/// Renders the chess board as an 8x8 grid with dynamic square size.
+pub fn view_board<'a>(
+    gs: &'a GameState,
+    assets: &'a PieceAssets,
+    sq_size: f32,
+    anim: Option<AnimInfo>,
+) -> Element<'a, Msg> {
+    let dot_size = sq_size * 0.28;
+    let dot_radius = sq_size * 0.14;
+    let piece_sz_normal = sq_size * 0.88;
+    let piece_sz_pawn = sq_size * 0.70;
+
     let files = if gs.flipped {
         ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a']
     } else {
         ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
     };
 
-    let mut board_col = column![].spacing(0).align_x(Alignment::Center);
+    let mut board_col = column![].spacing(0);
 
     for display_row in 0..8 {
         let rank = if gs.flipped { display_row } else { 7 - display_row };
-        let rank_label = text(format!(" {} ", rank + 1))
-            .size(13)
-            .color(Color::from_rgb(0.6, 0.6, 0.6));
-
-        let mut rank_row = row![
-            container(rank_label).width(22).center_y(SQ_SIZE)
-        ]
-        .spacing(0)
-        .align_y(Alignment::Center);
+        let mut rank_row = row![].spacing(0);
 
         for display_col in 0..8 {
             let file = if gs.flipped { 7 - display_col } else { display_col };
@@ -42,76 +90,159 @@ pub fn view_board<'a>(gs: &'a GameState, assets: &'a PieceAssets) -> Element<'a,
             let sq = types::Square::from_index(sq_index);
 
             let is_light = (rank + file) % 2 != 0;
-
-            // Determine square background color
             let is_selected = gs.selected_square == Some(sq);
             let is_highlight = gs.legal_highlights.contains(&sq);
             let is_last_move = gs.last_move_squares.contains(&sq);
 
+            // Square background color
             let bg_color = if is_selected {
-                Color::from_rgb(0.35, 0.58, 0.38) // selection green
+                SQ_SELECTED
             } else if is_highlight {
-                if is_light {
-                    Color::from_rgb(0.72, 0.84, 0.55) // light legal highlight
-                } else {
-                    Color::from_rgb(0.55, 0.72, 0.38) // dark legal highlight
-                }
+                if is_light { SQ_LEGAL_LIGHT } else { SQ_LEGAL_DARK }
             } else if is_last_move {
-                if is_light {
-                    Color::from_rgb(0.96, 0.96, 0.60) // light last move
-                } else {
-                    Color::from_rgb(0.73, 0.79, 0.36) // dark last move
-                }
+                if is_light { SQ_LAST_LIGHT } else { SQ_LAST_DARK }
             } else if is_light {
-                Color::from_rgb(0.94, 0.90, 0.83) // light square — warm cream
+                SQ_LIGHT
             } else {
-                Color::from_rgb(0.47, 0.60, 0.36) // dark square — green
+                SQ_DARK
             };
 
-            // Build cell content: either piece image or empty
-            let cell_content: Element<'a, Msg> = if let Some((piece, color)) = gs.board.piece_on(sq) {
-                let handle = assets.get(piece, color);
-                Image::new(handle.clone())
-                    .width(PIECE_SIZE)
-                    .height(PIECE_SIZE)
-                    .into()
-            } else if is_highlight {
-                // Show a dot for legal move targets on empty squares
+            // Coordinate label color (contrast with square)
+            let coord_color = if is_light { COORD_LIGHT } else { COORD_DARK };
+
+            // Check if this square's piece is being animated (hide it from the static render)
+            let hide_piece = anim.is_some_and(|a| a.from_sq == sq);
+            // Check if there's a captured piece fading out at this square
+            let fading_capture = anim.and_then(|a| {
+                if a.to_sq == sq {
+                    a.captured.map(|(p, c)| (p, c, a.progress))
+                } else {
+                    None
+                }
+            });
+
+            // Build cell content
+            let cell_content: Element<'a, Msg> = if let Some((fade_piece, fade_color, progress)) = fading_capture {
+                // Captured piece fading out
+                let handle = assets.get(fade_piece, fade_color);
+                let piece_sz = if fade_piece == types::Piece::Pawn { piece_sz_pawn } else { piece_sz_normal };
+                let opacity = (1.0 - progress).max(0.0);
                 container(
-                    container(text(""))
-                        .width(DOT_SIZE)
-                        .height(DOT_SIZE)
-                        .style(|_theme| container::Style {
-                            background: Some(iced::Background::Color(
-                                Color::from_rgba(0.0, 0.0, 0.0, 0.15),
-                            )),
-                            border: iced::Border {
-                                radius: DOT_RADIUS.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
+                    Image::new(handle.clone())
+                        .width(piece_sz)
+                        .height(piece_sz)
+                        .opacity(opacity),
                 )
-                .center_x(SQ_SIZE)
-                .center_y(SQ_SIZE)
+                .center_x(sq_size)
+                .center_y(sq_size)
                 .into()
+            } else if !hide_piece {
+                if let Some((piece, color)) = gs.board.piece_on(sq) {
+                    let handle = assets.get(piece, color);
+                    let piece_sz = if piece == types::Piece::Pawn { piece_sz_pawn } else { piece_sz_normal };
+                    container(
+                        Image::new(handle.clone())
+                            .width(piece_sz)
+                            .height(piece_sz),
+                    )
+                    .center_x(sq_size)
+                    .center_y(sq_size)
+                    .into()
+                } else if is_highlight {
+                    let dot_br: iced::border::Radius = dot_radius.into();
+                    container(
+                        container(text(""))
+                            .width(dot_size)
+                            .height(dot_size)
+                            .style(move |_theme| container::Style {
+                                background: Some(iced::Background::Color(
+                                    Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+                                )),
+                                border: iced::Border {
+                                    radius: dot_br,
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    )
+                    .center_x(sq_size)
+                    .center_y(sq_size)
+                    .into()
+                } else {
+                    text("").into()
+                }
             } else {
+                // Piece is being animated away — show empty square
                 text("").into()
             };
 
-            let cell = button(
+            // Overlay coordinate labels on edge squares
+            let has_rank_label = display_col == 0;
+            let has_file_label = display_row == 7;
+
+            let cell_with_coords: Element<'a, Msg> = if has_rank_label || has_file_label {
+                let mut overlay_col = column![].width(sq_size).height(sq_size);
+
+                if has_rank_label {
+                    overlay_col = overlay_col.push(
+                        text(format!(" {}", rank + 1))
+                            .size(10)
+                            .color(coord_color),
+                    );
+                }
+
+                let remaining = if has_rank_label && has_file_label {
+                    sq_size - 26.0
+                } else if has_rank_label {
+                    sq_size - 14.0
+                } else {
+                    sq_size - 14.0
+                };
+
+                overlay_col = overlay_col.push(
+                    container(cell_content)
+                        .center_x(sq_size)
+                        .center_y(remaining)
+                        .width(sq_size)
+                        .height(remaining),
+                );
+
+                if has_file_label {
+                    overlay_col = overlay_col.push(
+                        container(
+                            text(format!("{} ", files[display_col]))
+                                .size(10)
+                                .color(coord_color),
+                        )
+                        .width(sq_size)
+                        .align_x(Alignment::End),
+                    );
+                }
+
+                container(overlay_col)
+                    .width(sq_size)
+                    .height(sq_size)
+                    .into()
+            } else {
                 container(cell_content)
-                    .center_x(SQ_SIZE)
-                    .center_y(SQ_SIZE)
-                    .width(SQ_SIZE)
-                    .height(SQ_SIZE),
+                    .center_x(sq_size)
+                    .center_y(sq_size)
+                    .width(sq_size)
+                    .height(sq_size)
+                    .into()
+            };
+
+            let cell = button(
+                container(cell_with_coords)
+                    .width(sq_size)
+                    .height(sq_size),
             )
             .on_press(Msg::BoardClick(display_row, display_col))
-            .width(SQ_SIZE)
-            .height(SQ_SIZE)
+            .width(sq_size)
+            .height(sq_size)
             .style(move |_theme, status| {
                 let hover_overlay = if matches!(status, button::Status::Hovered) {
-                    0.06
+                    0.04
                 } else {
                     0.0
                 };
@@ -137,36 +268,21 @@ pub fn view_board<'a>(gs: &'a GameState, assets: &'a PieceAssets) -> Element<'a,
         board_col = board_col.push(rank_row);
     }
 
-    // File labels at bottom
-    let mut file_labels_row = row![
-        container(text("")).width(22)
-    ]
-    .spacing(0);
+    // If animation is active, overlay the floating piece on top
+    // (rendered as a positioned image; since iced doesn't support absolute
+    // positioning easily, we use a layered approach in main.rs instead)
 
-    for f in &files {
-        file_labels_row = file_labels_row.push(
-            container(
-                text(format!("{f}"))
-                    .size(12)
-                    .color(Color::from_rgb(0.6, 0.6, 0.6)),
-            )
-            .center_x(SQ_SIZE)
-            .width(SQ_SIZE),
-        );
-    }
-    board_col = board_col.push(file_labels_row);
-
-    // Wrap in a container with rounded corners and subtle shadow
+    // Board wrapper — clean dark frame
     container(board_col)
-        .padding(2)
         .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgb(0.25, 0.25, 0.25))),
+            background: Some(iced::Background::Color(Color::from_rgb(0.12, 0.10, 0.08))),
             border: iced::Border {
-                radius: 6.0.into(),
-                width: 1.0,
-                color: Color::from_rgb(0.15, 0.15, 0.15),
+                radius: 4.0.into(),
+                width: 3.0,
+                color: Color::from_rgb(0.15, 0.12, 0.10),
             },
             ..Default::default()
         })
         .into()
 }
+

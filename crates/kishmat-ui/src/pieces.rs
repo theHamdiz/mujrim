@@ -1,10 +1,23 @@
-//! Chess piece asset loader — slices spritesheets into individual piece images.
+//! Chess piece asset loader — loads individual PNG piece images.
+//!
+//! Uses the JohnPablok Cburnett chess set — professional, clean 2D pieces
+//! with transparent backgrounds. Each piece is a separate 256×256 PNG file.
 
 use iced::widget::image::Handle;
 
-/// Embedded piece spritesheets (compiled into the binary).
-const WHITE_SHEET: &[u8] = include_bytes!("../assets/white_pieces.png");
-const BLACK_SHEET: &[u8] = include_bytes!("../assets/black_pieces.png");
+/// Embedded piece images (compiled into the binary).
+const WK: &[u8] = include_bytes!("../assets/pieces/wK.png");
+const WQ: &[u8] = include_bytes!("../assets/pieces/wQ.png");
+const WR: &[u8] = include_bytes!("../assets/pieces/wR.png");
+const WB: &[u8] = include_bytes!("../assets/pieces/wB.png");
+const WN: &[u8] = include_bytes!("../assets/pieces/wN.png");
+const WP: &[u8] = include_bytes!("../assets/pieces/wP.png");
+const BK: &[u8] = include_bytes!("../assets/pieces/bK.png");
+const BQ: &[u8] = include_bytes!("../assets/pieces/bQ.png");
+const BR: &[u8] = include_bytes!("../assets/pieces/bR.png");
+const BB: &[u8] = include_bytes!("../assets/pieces/bB.png");
+const BN: &[u8] = include_bytes!("../assets/pieces/bN.png");
+const BP: &[u8] = include_bytes!("../assets/pieces/bP.png");
 
 /// Pre-loaded piece image handles for all 12 pieces.
 pub struct PieceAssets {
@@ -23,24 +36,21 @@ pub struct PieceAssets {
 }
 
 impl PieceAssets {
-    /// Load and slice the piece spritesheets.
+    /// Load all piece images from embedded PNG data.
     pub fn load() -> Self {
-        let white_pieces = slice_spritesheet(WHITE_SHEET);
-        let black_pieces = slice_spritesheet(BLACK_SHEET);
-
         Self {
-            white_king: white_pieces[0].clone(),
-            white_queen: white_pieces[1].clone(),
-            white_rook: white_pieces[2].clone(),
-            white_bishop: white_pieces[3].clone(),
-            white_knight: white_pieces[4].clone(),
-            white_pawn: white_pieces[5].clone(),
-            black_king: black_pieces[0].clone(),
-            black_queen: black_pieces[1].clone(),
-            black_rook: black_pieces[2].clone(),
-            black_bishop: black_pieces[3].clone(),
-            black_knight: black_pieces[4].clone(),
-            black_pawn: black_pieces[5].clone(),
+            white_king: Handle::from_bytes(WK),
+            white_queen: Handle::from_bytes(WQ),
+            white_rook: Handle::from_bytes(WR),
+            white_bishop: Handle::from_bytes(WB),
+            white_knight: Handle::from_bytes(WN),
+            white_pawn: Handle::from_bytes(WP),
+            black_king: Handle::from_bytes(BK),
+            black_queen: Handle::from_bytes(BQ),
+            black_rook: Handle::from_bytes(BR),
+            black_bishop: Handle::from_bytes(BB),
+            black_knight: Handle::from_bytes(BN),
+            black_pawn: Handle::from_bytes(BP),
         }
     }
 
@@ -63,83 +73,14 @@ impl PieceAssets {
     }
 }
 
-/// Slice a spritesheet PNG into 6 individual piece images.
-/// The spritesheet has pieces in a row: K, Q, R, B, N, P.
-/// We detect the green (#00FF00) background and make it transparent.
-fn slice_spritesheet(png_data: &[u8]) -> Vec<Handle> {
-    let img = image::load_from_memory(png_data)
-        .expect("Failed to load piece spritesheet")
-        .to_rgba8();
-
-    let (width, height) = img.dimensions();
-    let piece_width = width / 6;
-
-    let mut handles = Vec::with_capacity(6);
-
-    for i in 0..6 {
-        let x_start = i * piece_width;
-        let mut piece_img = image::RgbaImage::new(piece_width, height);
-
-        for y in 0..height {
-            for x in 0..piece_width {
-                let pixel = img.get_pixel(x_start + x, y);
-                let [r, g, b, _a] = pixel.0;
-
-                // Green-screen removal: make bright green pixels transparent
-                if g > 150 && r < 100 && b < 100 {
-                    piece_img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
-                } else if g > 120 && (g as i32 - r as i32) > 40 && (g as i32 - b as i32) > 40 {
-                    // Softer green — partially transparent for anti-aliased edges
-                    let green_ratio = (g as f32 - r.max(b) as f32) / g as f32;
-                    let alpha = ((1.0 - green_ratio) * 255.0) as u8;
-                    piece_img.put_pixel(x, y, image::Rgba([r, g / 2, b, alpha]));
-                } else {
-                    piece_img.put_pixel(x, y, *pixel);
-                }
-            }
-        }
-
-        // Encode to PNG bytes for iced Handle
-        let mut buf = Vec::new();
-        let encoder = image::codecs::png::PngEncoder::new(&mut buf);
-        image::ImageEncoder::write_image(
-            encoder,
-            piece_img.as_raw(),
-            piece_width,
-            height,
-            image::ExtendedColorType::Rgba8,
-        )
-        .expect("Failed to encode piece image");
-
-        handles.push(Handle::from_bytes(buf));
-    }
-
-    handles
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_spritesheet_loads_without_panic() {
-        // Just verifying the spritesheets can be decoded
-        let _white = slice_spritesheet(WHITE_SHEET);
-        let _black = slice_spritesheet(BLACK_SHEET);
-    }
-
-    #[test]
-    fn test_spritesheet_produces_6_pieces() {
-        let white = slice_spritesheet(WHITE_SHEET);
-        let black = slice_spritesheet(BLACK_SHEET);
-        assert_eq!(white.len(), 6);
-        assert_eq!(black.len(), 6);
-    }
-
-    #[test]
     fn test_piece_assets_load() {
         let assets = PieceAssets::load();
-        // Verify all 12 handles exist (accessing them doesn't panic)
+        // Verify all handles were created successfully
         let _ = &assets.white_king;
         let _ = &assets.white_queen;
         let _ = &assets.white_rook;
@@ -157,7 +98,6 @@ mod tests {
     #[test]
     fn test_get_returns_correct_piece() {
         let assets = PieceAssets::load();
-        // Verify each piece/color combination is accessible without panic
         for piece in types::Piece::ALL {
             for color in [types::Color::White, types::Color::Black] {
                 let _ = assets.get(piece, color);

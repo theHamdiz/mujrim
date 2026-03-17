@@ -224,3 +224,128 @@ fn test_fen_round_trip() {
         assert!(legal.len() > 0, "Position should have legal moves: {fen}");
     }
 }
+
+// ──────────────────────────────────────────────────────────────
+// Opening book integration
+// ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_opening_book_returns_move_for_startpos() {
+    setup();
+    let book = search::book::OpeningBook::load_embedded()
+        .expect("Embedded opening book should load");
+    let board = Board::new();
+    let mv = book.probe(&board);
+    assert!(
+        mv.is_some(),
+        "Opening book should have at least one move for the starting position"
+    );
+}
+
+#[test]
+fn test_opening_book_move_is_legal() {
+    setup();
+    let book = search::book::OpeningBook::load_embedded()
+        .expect("Embedded opening book should load");
+    let mut board = Board::new();
+    let book_move = book.probe(&board).expect("Book should return a move for startpos");
+    let legal = board.generate_legal_moves();
+    assert!(
+        legal.iter().any(|m| m.from == book_move.from && m.to == book_move.to),
+        "Book move {:?} should be in the legal moves list",
+        book_move,
+    );
+}
+
+#[test]
+fn test_opening_book_move_after_e4() {
+    setup();
+    let book = search::book::OpeningBook::load_embedded()
+        .expect("Embedded opening book should load");
+    // Play 1. e4 and check that book has a response
+    let mut board = Board::new();
+    let e2 = Square::from_index(12);
+    let e4 = Square::from_index(28);
+    let moves = board.generate_legal_moves();
+    let e2e4 = moves.iter().find(|m| m.from == e2 && m.to == e4)
+        .expect("e2e4 should be legal");
+    board.make_move(*e2e4);
+
+    let book_reply = book.probe(&board);
+    assert!(
+        book_reply.is_some(),
+        "Opening book should have a reply to 1. e4"
+    );
+    let reply = book_reply.unwrap();
+    let legal_after = board.generate_legal_moves();
+    assert!(
+        legal_after.iter().any(|m| m.from == reply.from && m.to == reply.to),
+        "Book reply to 1. e4 should be a legal move"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────
+// Mid-game search tests — reproduce engine freeze after book
+// deviation (Sicilian Defense, ~10 moves in).
+// FEN: r1bqk2r/pp2bppp/2np1n2/4p1B1/2B1P3/2N2N2/PP2QPPP/R2R2K1 b kq - 3 10
+// ──────────────────────────────────────────────────────────────
+
+const SICILIAN_FEN: &str = "r1bqk2r/pp2bppp/2np1n2/4p1B1/2B1P3/2N2N2/PP2QPPP/R2R2K1 b kq - 3 10";
+
+#[test]
+fn test_search_midgame_depth2() {
+    // Depth 2 completes instantly on this position (~500 nodes)
+    setup();
+    let mut board = Board::from_fen(SICILIAN_FEN).expect("Valid FEN");
+    let moves = board.generate_legal_moves();
+    assert!(moves.len() > 0, "Should have legal moves");
+
+    let mut engine = search::SearchEngine::new(16, 1);
+    let result = engine.search_depth(&mut board, 2);
+    let uci = result.best_move.to_uci();
+    assert!(!uci.is_empty(), "Engine should return a move");
+    assert!(result.nodes > 0, "Engine should search some nodes");
+}
+
+#[test]
+fn test_search_midgame_time_limited() {
+    // Time-limited search: the approach now used by the UI.
+    // Ensures the engine always responds within the time limit.
+    setup();
+    let mut board = Board::from_fen(SICILIAN_FEN).expect("Valid FEN");
+
+    let mut engine = search::SearchEngine::new(32, 1);
+    let result = engine.search_time(
+        &mut board,
+        std::time::Duration::from_secs(2),
+        64,
+    );
+    let uci = result.best_move.to_uci();
+    assert!(!uci.is_empty(), "Time-limited search should return a move");
+    assert!(result.nodes > 100, "Should search significant nodes in 2s");
+}
+
+#[test]
+fn test_search_midgame_time_limited_spawned_thread() {
+    // This matches the exact UI pattern: spawned thread with 8MB stack + time limit.
+    setup();
+    let mut board = Board::from_fen(SICILIAN_FEN).expect("Valid FEN");
+
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            types::init();
+            let mut engine = search::SearchEngine::new(64, 1);
+            engine.search_time(
+                &mut board,
+                std::time::Duration::from_secs(3),
+                64,
+            )
+        })
+        .expect("Failed to spawn thread");
+
+    let result = handle.join().expect("Engine thread should not panic");
+    let uci = result.best_move.to_uci();
+    assert!(!uci.is_empty(), "Spawned-thread search should return a move");
+    assert!(result.nodes > 0, "Should have searched nodes");
+}

@@ -188,9 +188,11 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     println!();
 
     // ── Hardware Detection ──────────────────────────────────────
-    let num_threads = std::thread::available_parallelism()
+    let cpu_cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    // Cap at 8 threads for bench to prevent hangs on high-core machines
+    let num_threads = cpu_cores.min(8);
 
     println!("  Hardware Detection:");
 
@@ -202,7 +204,7 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     println!("    CPU arch:   {}", std::env::consts::ARCH);
 
-    println!("    CPU cores:  {}", num_threads);
+    println!("    CPU cores:  {} (using {} for bench)", cpu_cores, num_threads);
 
     // SIMD features (compile-time detection via target-cpu=native)
     let mut simd_features = Vec::new();
@@ -266,20 +268,30 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
         #[cfg(target_arch = "aarch64")]
         println!("    NPU:        Apple Neural Engine (available via CoreML)");
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        println!("    GPU:        N/A (no GPU detection on this platform)");
+        let gpu_detected = detect_linux_gpu();
+        if gpu_detected.is_empty() {
+            println!("    GPU:        N/A (not detected)");
+        } else {
+            println!("    GPU:        {}", gpu_detected);
+        }
+        println!("    NPU:        N/A");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        println!("    GPU:        N/A (no detection for this platform)");
         println!("    NPU:        N/A");
     }
 
     // Note about compute usage
     println!();
-    println!("    ⚡ Using {} CPU threads for search (Lazy SMP)", num_threads);
-    println!("    ℹ  NNUE uses CPU SIMD. GPU/NPU acceleration requires CoreML integration.");
+    println!("    Threads:  {} (Lazy SMP)", num_threads);
+    println!("    Engine:   CPU SIMD only (no GPU acceleration)");
 
-    // Scale hash: 256MB per thread, minimum 4GB
-    let hash_mb = (num_threads * 256).max(4096);
-    println!("    📦 Hash table: {}MB", hash_mb);
+    // Reasonable hash: 64MB per thread, capped at 512MB
+    let hash_mb = (num_threads * 64).min(512);
+    println!("    Hash:     {}MB", hash_mb);
     println!();
 
     let mut engine = SearchEngine::new(hash_mb, num_threads);
@@ -292,7 +304,7 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
         let mut board = match Board::from_fen(fen) {
             Ok(b) => b,
             Err(e) => {
-                println!("  [{:>2}] SKIP — bad FEN: {e}", i + 1);
+                println!("  [{:>2}] SKIP -- bad FEN: {e}", i + 1);
                 continue;
             }
         };
@@ -303,7 +315,9 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
         let result = if let Some(ms) = time_ms {
             engine.search_time(&mut board, Duration::from_millis(ms), 64)
         } else {
-            engine.search_depth(&mut board, depth)
+            // Depth-based with 30s per-position hard limit to prevent
+            // any single position from dominating the benchmark runtime.
+            engine.search_time(&mut board, Duration::from_secs(30), depth)
         };
 
         let found = result.best_move.to_uci();
@@ -312,7 +326,7 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
         total_nodes += result.nodes;
         total_time_ms += result.elapsed.as_millis() as u64;
 
-        let marker = if ok { "✓" } else { "✗" };
+        let marker = if ok { "OK" } else { "--" };
         let pos_nps = if result.elapsed.as_millis() > 0 {
             result.nodes * 1000 / result.elapsed.as_millis() as u64
         } else {
@@ -327,10 +341,10 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
 
     println!();
 
-    // NPS measurement on startpos
+    // NPS measurement on startpos — time-limited to 5 seconds so it never hangs
     let mut startpos = Board::new();
     engine.clear();
-    let nps_result = engine.search_depth(&mut startpos, 18);
+    let nps_result = engine.search_time(&mut startpos, Duration::from_secs(5), 64);
     let nps = if nps_result.elapsed.as_millis() > 0 {
         nps_result.nodes * 1000 / nps_result.elapsed.as_millis() as u64
     } else {
@@ -345,7 +359,7 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     println!("╠══════════════════════════════════════════════╣");
     println!("║  Accuracy:    {:>2}/{:<2} ({:>5.1}%)                ║", correct, total_positions, accuracy);
     println!("║  Est. ELO:    ~{:<30}║", elo);
-    println!("║  NPS:         {:<31}║", format!("{} (depth 18, startpos)", format_nps(nps)));
+    println!("║  NPS:         {:<31}║", format!("{} (5s, startpos)", format_nps(nps)));
     println!("║  Total nodes: {:<31}║", format_nps(total_nodes));
     println!("║  Total time:  {:<31}║", format!("{total_time_ms}ms"));
     println!("╚══════════════════════════════════════════════╝");
@@ -370,3 +384,47 @@ fn estimate_elo(accuracy: f64) -> i32 {
     elo.round() as i32
 }
 
+/// Detect GPU on Linux using `lspci` (works for AMD, NVIDIA, Intel).
+#[cfg(target_os = "linux")]
+fn detect_linux_gpu() -> String {
+    // Try lspci first (most reliable)
+    if let Ok(output) = std::process::Command::new("lspci").output() {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            let mut gpus = Vec::new();
+            for line in stdout.lines() {
+                let lower = line.to_lowercase();
+                if lower.contains("vga") || lower.contains("3d") || lower.contains("display") {
+                    // Extract the device description (everything after the first ': ')
+                    if let Some(desc) = line.split(": ").nth(1) {
+                        gpus.push(desc.trim().to_string());
+                    }
+                }
+            }
+            if !gpus.is_empty() {
+                return gpus.join("; ");
+            }
+        }
+    }
+
+    // Fallback: check /sys/class/drm
+    if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("card") && !name.contains('-') {
+                let vendor_path = entry.path().join("device/vendor");
+                if let Ok(vendor) = std::fs::read_to_string(&vendor_path) {
+                    let vendor = vendor.trim();
+                    let vendor_name = match vendor {
+                        "0x1002" => "AMD/ATI",
+                        "0x10de" => "NVIDIA",
+                        "0x8086" => "Intel",
+                        _ => vendor,
+                    };
+                    return format!("{} (via sysfs)", vendor_name);
+                }
+            }
+        }
+    }
+
+    String::new()
+}

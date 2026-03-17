@@ -132,14 +132,20 @@ impl UciHandler {
                 "setoption" => self.handle_setoption(&parts[1..]),
                 "eval" => {
                     // Non-standard but useful: print the static evaluation
-                    let score = eval::evaluate(&self.board);
-                    uci_println(&format!("info string Classical eval: {score}cp"));
-                    if search::nnue::network::is_nnue_ready() {
-                        let mut state = search::nnue::NNUEState::new();
-                        let correction = search::nnue::evaluate_nnue(&self.board, &mut state);
-                        uci_println(&format!("info string NNUE correction: {correction}cp"));
-                        uci_println(&format!("info string Hybrid eval: {}cp", score + correction));
-                    }
+                    let classical = eval::evaluate(&self.board);
+                    uci_println(&format!("info string Classical eval: {classical}cp"));
+                    // NNUE is always available (embedded trained net)
+                    let mut state = eval::NNUEState::new();
+                    state.reinit_from(&self.board);
+                    let w_king = self.board.king_square(types::Color::White).index();
+                    let b_king = self.board.king_square(types::Color::Black).index();
+                    let entry = state.get_entry(w_king, b_king);
+                    let (boys, opps) = match self.board.side_to_move {
+                        types::Color::White => (&entry.white, &entry.black),
+                        types::Color::Black => (&entry.black, &entry.white),
+                    };
+                    let nnue_score = eval::nnue::forward(boys, opps);
+                    uci_println(&format!("info string NNUE eval: {nnue_score}cp"));
                 }
                 _ => {
                     // Unknown command — silently ignore per UCI spec

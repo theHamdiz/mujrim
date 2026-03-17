@@ -12,7 +12,7 @@ use types::{Board, Move, MoveList, Piece};
 use types::chess_move::NULL_MOVE;
 use crate::tt::{TranspositionTable, NodeType};
 use crate::see;
-use crate::nnue::{self, NNUEState};
+use eval::nnue::{self, NNUEState};
 
 /// Infinity score sentinel.
 const INF: i32 = 30_000;
@@ -110,23 +110,19 @@ fn update_history(entry: &mut i32, bonus: i32) {
     *entry += bonus - *entry * bonus.abs() / MAX_HISTORY;
 }
 
-/// Whether to use NNUE in the eval blend.
-/// Set to true once trained weights are loaded — untrained NNUE adds
-/// significant eval cost (~4K extra ops/call) with zero accuracy benefit.
-const USE_NNUE_BLEND: bool = false;
-
-/// Compute the evaluation for a position.
-/// With trained NNUE: blends NNUE + classical.
-/// Without: pure classical eval (fast, ~1M+ NPS).
+/// Compute the evaluation for a position using NNUE.
+/// Trained Akimbo-compatible net is always available (embedded at compile time).
 #[inline(always)]
 fn hybrid_eval(board: &Board, nnue_state: &mut NNUEState) -> i32 {
-    let classical = eval::evaluate(board);
-    if USE_NNUE_BLEND && nnue::network::is_nnue_ready() {
-        let nnue_score = nnue::evaluate_nnue(board, nnue_state);
-        (nnue_score + classical) / 2
-    } else {
-        classical
-    }
+    nnue_state.reinit_from(board);
+    let w_king = board.king_square(types::Color::White).index();
+    let b_king = board.king_square(types::Color::Black).index();
+    let entry = nnue_state.get_entry(w_king, b_king);
+    let (boys, opps) = match board.side_to_move {
+        types::Color::White => (&entry.white, &entry.black),
+        types::Color::Black => (&entry.black, &entry.white),
+    };
+    nnue::forward(boys, opps)
 }
 
 /// Get the piece index of the piece on `sq`. Returns 0 (pawn) if no piece.
@@ -357,8 +353,7 @@ impl SearchEngine {
     /// Creates a new search engine with the given TT size and thread count.
     pub fn new(tt_size_mb: usize, num_threads: usize) -> Self {
         let _ = lmr_table();
-        // Initialize NNUE
-        nnue::network::init_nnue();
+        // NNUE is always available (embedded trained net)
         Self {
             tt: Arc::new(TranspositionTable::new(tt_size_mb)),
             num_threads: num_threads.max(1),
@@ -412,6 +407,7 @@ impl SearchEngine {
                             &mut board_clone, &tt, &stopped, &mut state,
                             actual_depth, -INF, INF, 0, true,
                             time_limit, start, true, None,
+                            0, actual_depth,
                         );
                         if !stopped.load(Ordering::Relaxed) {
                             best_score = s;
@@ -458,6 +454,7 @@ impl SearchEngine {
                         board, &self.tt, &self.stopped, &mut state,
                         depth, alpha, beta, 0, true,
                         limits.time_limit, start_time, true, None,
+                        0, depth,
                     );
                     if self.stopped.load(Ordering::Relaxed) { break; }
 
@@ -478,6 +475,7 @@ impl SearchEngine {
                             board, &self.tt, &self.stopped, &mut state,
                             depth, -INF, INF, 0, true,
                             limits.time_limit, start_time, true, None,
+                            0, depth,
                         );
                         if !self.stopped.load(Ordering::Relaxed) { best_score = s; }
                         break;
@@ -489,6 +487,7 @@ impl SearchEngine {
                     board, &self.tt, &self.stopped, &mut state,
                     depth, -INF, INF, 0, true,
                     limits.time_limit, start_time, true, None,
+                    0, depth,
                 );
                 if self.stopped.load(Ordering::Relaxed) { break; }
                 best_score = s;
@@ -670,6 +669,8 @@ fn search_ab(
     start_time: Instant,
     is_root: bool,
     excluded_move: Option<Move>,
+    total_extensions: i32,
+    nominal_depth: i32,
 ) -> i32 {
     // Check stop periodically
     if state.nodes & 2047 == 0 {
@@ -692,8 +693,18 @@ fn search_ab(
 
     let in_check = board.in_check();
 
-    // Check extension — always extend when in check
-    if in_check { depth += 1; }
+    // Hard ply limit — prevent unbounded search from extensions
+    if ply >= MAX_PLY as i32 - 1 {
+        return if in_check { 0 } else { hybrid_eval(board, &mut state.nnue_state) };
+    }
+
+    // Check extension — extend when in check, gated by total extension
+    // budget to prevent check chains from causing unbounded growth.
+    let mut node_extensions = 0i32;
+    if in_check && total_extensions < nominal_depth * 2 {
+        depth += 1;
+        node_extensions += 1;
+    }
 
     // ── Mate distance pruning — prune if we can't possibly improve ──
     if !is_root {
@@ -782,7 +793,7 @@ fn search_ab(
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
             state.prev_piece[ply_usize] = 0;
-            let score = -search_ab(board, tt, stopped, state, depth - 1 - r, -beta, -beta + 1, ply + 1, false, time_limit, start_time, false, None);
+            let score = -search_ab(board, tt, stopped, state, depth - 1 - r, -beta, -beta + 1, ply + 1, false, time_limit, start_time, false, None, total_extensions, nominal_depth);
             board.unmake_null_move();
 
             if stopped.load(Ordering::Relaxed) { return 0; }
@@ -790,7 +801,7 @@ fn search_ab(
             if score >= beta {
                 // Verification search at higher depths to avoid zugzwang issues
                 if depth > 12 {
-                    let v_score = search_ab(board, tt, stopped, state, depth - 7, beta - 1, beta, ply, false, time_limit, start_time, false, None);
+                    let v_score = search_ab(board, tt, stopped, state, depth - 7, beta - 1, beta, ply, false, time_limit, start_time, false, None, total_extensions, nominal_depth);
                     if stopped.load(Ordering::Relaxed) { return 0; }
                     if v_score >= beta {
                         return beta;
@@ -815,7 +826,7 @@ fn search_ab(
                 board.make_move(mv);
                 state.prev_move[ply_usize] = mv;
                 // Reduced search
-                let score = -search_ab(board, tt, stopped, state, depth - 4, -pb_beta, -pb_beta + 1, ply + 1, false, time_limit, start_time, false, None);
+                let score = -search_ab(board, tt, stopped, state, depth - 4, -pb_beta, -pb_beta + 1, ply + 1, false, time_limit, start_time, false, None, total_extensions, nominal_depth);
                 board.unmake_move(mv);
 
                 if stopped.load(Ordering::Relaxed) { return 0; }
@@ -830,8 +841,11 @@ fn search_ab(
         depth -= 1;
     }
     // 4.7: Do-deeper — if TT depth is much shallower than current, search +1
-    if tt_depth >= 0 && tt_move.is_some() && tt_depth + 4 <= depth && !is_root {
+    if tt_depth >= 0 && tt_move.is_some() && tt_depth + 4 <= depth && !is_root
+        && total_extensions + node_extensions < nominal_depth * 2
+    {
         depth += 1;
+        node_extensions += 1;
     }
 
     let mut moves = board.generate_legal_moves();
@@ -901,6 +915,7 @@ fn search_ab(
                             (depth - 1) / 2, se_beta - 1, se_beta,
                             ply, false, time_limit, start_time, false,
                             Some(mv),
+                            total_extensions, nominal_depth,
                         );
                         if stopped.load(Ordering::Relaxed) { return 0; }
                         if se_score < se_beta {
@@ -919,13 +934,9 @@ fn search_ab(
             }
         }
 
-        // 4.3: Hindsight extension — if eval has been consistently bad
-        if ply >= 2 && !in_check && extension <= 0 {
-            let eval_2_back = state.static_evals[ply_usize.saturating_sub(2)];
-            if static_eval + eval_2_back < 0 {
-                extension = extension.max(0) + 1;
-            }
-        }
+        // Hindsight extension removed — the condition `static_eval + eval_2_back < 0`
+        // fires on nearly every node in disadvantageous positions, causing unbounded
+        // search tree growth that makes the engine hang at higher depths.
 
         // Get moved piece index for this move
         let moved_piece = piece_index_on(board, mv.from);
@@ -991,11 +1002,16 @@ fn search_ab(
 
         let score;
         let gives_check = board.in_check();
+        // Cap singular extensions using the total extension budget.
+        // All extensions (check, do-deeper, singular) share the same
+        // 2× nominal depth budget to prevent unbounded tree growth.
+        let extension = extension.min((nominal_depth * 2 - total_extensions - node_extensions).max(0));
+        let new_total_extensions = total_extensions + node_extensions + extension.max(0);
         let effective_depth = depth - 1 + extension;
 
         if moves_searched == 0 {
             // Full window search for the first move
-            score = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, is_pv, time_limit, start_time, false, None);
+            score = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, is_pv, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
         } else {
             // LMR: Late Move Reductions — enhanced with stat_score
             let mut reduction = 0;
@@ -1030,15 +1046,15 @@ fn search_ab(
             }
 
             // PVS null-window search with reduction
-            let mut s = -search_ab(board, tt, stopped, state, effective_depth - reduction, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None);
+            let mut s = -search_ab(board, tt, stopped, state, effective_depth - reduction, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
 
             // Re-search if reduced search fails high
             if s > alpha && reduction > 0 {
-                s = -search_ab(board, tt, stopped, state, effective_depth, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None);
+                s = -search_ab(board, tt, stopped, state, effective_depth, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
             }
             // Re-search with full window in PV
             if s > alpha && s < beta {
-                s = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, true, time_limit, start_time, false, None);
+                s = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, true, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
             }
             score = s;
         }
@@ -1164,8 +1180,12 @@ fn quiescence(
     state.nodes += 1;
     let in_check = board.in_check();
 
-    // Depth limit to prevent explosion in forced capture chains
-    if qs_ply >= MAX_QS_PLY && !in_check {
+    // Hard depth limit — prevents stack overflow and infinite check chains.
+    // This MUST apply even when in check (check evasions can chain indefinitely).
+    if ply >= MAX_PLY as i32 - 1 {
+        return hybrid_eval(board, &mut state.nnue_state);
+    }
+    if qs_ply >= MAX_QS_PLY {
         return hybrid_eval(board, &mut state.nnue_state);
     }
 
@@ -1222,13 +1242,14 @@ fn quiescence(
 
     let mut captures = board.generate_legal_captures();
 
-    // Also include queen promotions (tactically critical, not always flagged as captures)
-    let promos: Vec<Move> = board.generate_legal_moves().iter()
-        .filter(|m| m.is_promotion() && !m.is_capture() && m.promotion == Some(Piece::Queen))
-        .copied()
-        .collect();
-    for p in &promos {
-        captures.push(*p);
+    // Include queen promotions that aren't already in the capture list
+    // (non-capture queen promotions are tactically critical)
+    let all_moves = board.generate_legal_moves();
+    for i in 0..all_moves.len() {
+        let m = all_moves[i];
+        if m.is_promotion() && !m.is_capture() && m.promotion == Some(Piece::Queen) {
+            captures.push(m);
+        }
     }
 
     // Order captures by MVV-LVA for qsearch
