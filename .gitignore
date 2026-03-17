@@ -18,3 +18,9 @@ Thumbs.db
 
 # PGO data
 /tmp/kishmat-pgo/
+
+# Syzygy tablebases (downloaded at runtime)
+syzygy/
+
+# SPRT test results
+sprt/results.pgn

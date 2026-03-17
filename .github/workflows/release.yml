@@ -1,0 +1,262 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ══════════════════════════════════════════════════════════════
+  # Native builds — full workspace (engine + GUI + updater)
+  # ══════════════════════════════════════════════════════════════
+  build-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── macOS ──
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macOS ARM64 (Apple Silicon)
+            suffix: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            name: macOS x86_64 (Intel)
+            suffix: ""
+
+          # ── Linux ──
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: Linux x86_64
+            suffix: ""
+
+          # ── Windows ──
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: Windows x86_64
+            suffix: ".exe"
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release (full workspace)
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          DIR="kishmat-${TAG}-${{ matrix.target }}"
+          mkdir -p "$DIR"
+
+          # Copy all binaries
+          cp "target/${{ matrix.target }}/release/kishmat${{ matrix.suffix }}"         "$DIR/"
+          cp "target/${{ matrix.target }}/release/kishmat-ui${{ matrix.suffix }}"      "$DIR/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/kishmat-updater${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
+
+          # Copy docs
+          cp README.md License.md "$DIR/" 2>/dev/null || true
+
+          # Create archive
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a "${DIR}.zip" "$DIR"
+          else
+            tar czf "${DIR}.tar.gz" "$DIR"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: kishmat-*-${{ matrix.target }}.*
+
+  # ══════════════════════════════════════════════════════════════
+  # Cross-compiled builds — engine-only (no GUI, needs no GPU)
+  # For ARM SBCs, Buildroot, embedded Linux, Raspberry Pi, etc.
+  # ══════════════════════════════════════════════════════════════
+  build-cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── ARM64 Linux (Raspberry Pi 3/4/5, Pine64, etc.) ──
+          - target: aarch64-unknown-linux-gnu
+            name: Linux ARM64 (aarch64)
+
+          # ── ARM32 Linux (Raspberry Pi 2, older SBCs) ──
+          - target: armv7-unknown-linux-gnueabihf
+            name: Linux ARMv7 (armhf)
+
+          # ── Static MUSL builds (Buildroot, Alpine, any Linux) ──
+          - target: x86_64-unknown-linux-musl
+            name: Linux x86_64 (static/musl)
+
+          - target: aarch64-unknown-linux-musl
+            name: Linux ARM64 (static/musl)
+
+    name: ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cross build (engine + updater)
+        run: |
+          cross build --release --target ${{ matrix.target }} -p kishmat
+          cross build --release --target ${{ matrix.target }} -p kishmat-updater
+
+      - name: Package binaries
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          DIR="kishmat-${TAG}-${{ matrix.target }}"
+          mkdir -p "$DIR"
+
+          cp "target/${{ matrix.target }}/release/kishmat"         "$DIR/"
+          cp "target/${{ matrix.target }}/release/kishmat-updater" "$DIR/" 2>/dev/null || true
+          cp README.md License.md "$DIR/" 2>/dev/null || true
+
+          tar czf "${DIR}.tar.gz" "$DIR"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: kishmat-*-${{ matrix.target }}.*
+
+  # ══════════════════════════════════════════════════════════════
+  # macOS universal binary (x86_64 + aarch64 lipo'd together)
+  # ══════════════════════════════════════════════════════════════
+  build-macos-universal:
+    needs: build-native
+    runs-on: macos-latest
+    name: macOS Universal Binary
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create universal binary
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+
+          # Extract both macOS archives
+          cd artifacts
+          tar xzf "aarch64-apple-darwin/kishmat-${TAG}-aarch64-apple-darwin.tar.gz" 2>/dev/null || true
+          tar xzf "x86_64-apple-darwin/kishmat-${TAG}-x86_64-apple-darwin.tar.gz" 2>/dev/null || true
+
+          ARM_DIR="kishmat-${TAG}-aarch64-apple-darwin"
+          X86_DIR="kishmat-${TAG}-x86_64-apple-darwin"
+          UNI_DIR="../kishmat-${TAG}-universal-apple-darwin"
+          mkdir -p "$UNI_DIR"
+
+          # Lipo each binary
+          for bin in kishmat kishmat-ui kishmat-updater; do
+            if [ -f "$ARM_DIR/$bin" ] && [ -f "$X86_DIR/$bin" ]; then
+              lipo -create "$ARM_DIR/$bin" "$X86_DIR/$bin" -output "$UNI_DIR/$bin"
+              echo "✓ Created universal: $bin"
+            elif [ -f "$ARM_DIR/$bin" ]; then
+              cp "$ARM_DIR/$bin" "$UNI_DIR/$bin"
+            fi
+          done
+          cd ..
+
+          cp README.md License.md "$UNI_DIR/" 2>/dev/null || true
+          tar czf "kishmat-${TAG}-universal-apple-darwin.tar.gz" "$UNI_DIR"
+
+      - name: Upload universal artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: universal-apple-darwin
+          path: kishmat-*-universal-apple-darwin.tar.gz
+
+  # ══════════════════════════════════════════════════════════════
+  # Create GitHub Release with all artifacts
+  # ══════════════════════════════════════════════════════════════
+  release:
+    needs: [build-native, build-cross, build-macos-universal]
+    runs-on: ubuntu-latest
+    name: Publish Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-assets/ \;
+          echo "Release assets:"
+          ls -la release-assets/
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          body: |
+            ## KishMat Chess Engine ${{ github.ref_name }}
+
+            ### Downloads
+
+            | Platform | Architecture | Type | Contains |
+            |----------|-------------|------|----------|
+            | macOS | Universal (Intel + Apple Silicon) | Full | Engine + GUI + Updater |
+            | macOS | Apple Silicon (aarch64) | Full | Engine + GUI + Updater |
+            | macOS | Intel (x86_64) | Full | Engine + GUI + Updater |
+            | Linux | x86_64 (glibc) | Full | Engine + GUI + Updater |
+            | Linux | x86_64 (static/musl) | Engine | Engine + Updater |
+            | Linux | ARM64 (glibc) | Engine | Engine + Updater |
+            | Linux | ARM64 (static/musl) | Engine | Engine + Updater |
+            | Linux | ARMv7 (armhf) | Engine | Engine + Updater |
+            | Windows | x86_64 | Full | Engine + GUI + Updater |
+
+            **Book & NNUE network are embedded in the binary — no external files needed.**
+
+            ### Install
+            ```bash
+            # Extract and run
+            tar xzf kishmat-${{ github.ref_name }}-<platform>.tar.gz
+            ./kishmat uci         # UCI engine
+            ./kishmat-ui          # GUI
+            ./kishmat-updater check  # Check for updates
+            ```

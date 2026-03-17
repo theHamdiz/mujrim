@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>The world's first Egyptian Arab chess engine.</b><br/>
-  Written entirely in Rust. NNUE-enhanced, multi-protocol, tournament-ready.
+  Written entirely in Rust. NNUE-ready, multi-protocol, tournament-ready.
 </p>
 
 <p align="center">
@@ -14,8 +14,8 @@
   <a href="License.md"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" /></a>
   <a href="#search"><img src="https://img.shields.io/badge/search-Lazy%20SMP-green?style=flat-square" alt="Lazy SMP" /></a>
   <a href="#protocol"><img src="https://img.shields.io/badge/protocol-UCI%20%7C%20XBoard-lightgrey?style=flat-square" alt="UCI | XBoard" /></a>
-  <a href="#evaluation"><img src="https://img.shields.io/badge/eval-NNCorrL%20Hybrid-purple?style=flat-square" alt="NNCorrL" /></a>
-  <a href="#gui"><img src="https://img.shields.io/badge/gui-iced-cyan?style=flat-square" alt="iced GUI" /></a>
+  <a href="#evaluation"><img src="https://img.shields.io/badge/eval-Classical%20%2B%20NNUE-purple?style=flat-square" alt="Classical + NNUE" /></a>
+  <a href="#gui"><img src="https://img.shields.io/badge/gui-iced%200.14-cyan?style=flat-square" alt="iced 0.14 GUI" /></a>
 </p>
 
 <p align="center">
@@ -33,12 +33,26 @@
 ## What's New in v2.0.0
 
 - **Fully Modular Workspace** — Each logical component is its own crate under `crates/`, enabling partial updates and LEGO-like swappability
-- **GUI Application** — Native chess GUI built with [iced](https://iced.rs), featuring macOS-style grain textures, high-fidelity image pieces, and support for Human vs Human, Human vs Engine, and Engine vs Engine play
+- **GUI Application** — Native chess GUI built with [iced 0.14](https://iced.rs) featuring a Nova-inspired custom title bar, 8 board themes spanning the entire GUI, pharaonic backgrounds, and high-fidelity image pieces
+- **🎨 8 Board Themes** — Classic, Emerald, Ocean, Royal, Walnut, Midnight, Forest, Sakura — each controls all GUI colors (sidebar, panel, accent, text)
+- **🪙 Coin Flip** — Animated coin flip to determine which player gets White in Human vs Engine mode
+- **🎵 Background Music** — Procedurally generated Arabian/Hijaz-inspired ambient loop (100% royalty-free), with toggle control and 3 moods (Playful, Joyful, Mystique)
+- **🏛️ Pharaonic Pattern** — Egyptian-inspired geometric background with gold diamonds, lotus petals, and chevron friezes
+- **✨ Capture Animations** — Enhanced capture effects with white flash overlay and scale-up-then-fade animation
+- **📷 GIF Export** — Export any game as an animated GIF with full PNG chess piece rendering
+- **🔴 Screen Recording** — Cross-platform screen capture (macOS/Windows/Linux) with ffmpeg MP4 or GIF fallback
+- **📸 Screenshot** — One-click board screenshot button in the title bar
+- **♟️ Premoves** — Enable/disable premoves from the settings panel (on by default)
+- **♜ Chess Notation** — Move list shows check (+) and checkmate (#) symbols
+- **💾 Settings Persistence** — All GUI settings saved to TOML and auto-restored on launch
+- **🔧 Custom Title Bar** — Nova Editor-inspired title bar with pill-shaped action buttons, window dragging, 7px rounded window corners
 - **Batch Updater** — GitHub-release-based updater (`kishmat-updater`) with per-component updates, progress bars, and SHA256 verification
-- **NNCorrL Hybrid Evaluation** — Neural Network Correction Layer (768→64×2→1) with SCReLU activation adds pattern-based corrections to the classical eval
-- **Stockfish-Inspired Search Tuning** — Razoring, futility, LMR, LMP, null-move, and correction history calibrated against top engine research
+- **NNUE Evaluation** — 768→1024×2→1 perspective network with SCReLU and king buckets (Akimbo-compatible ~6 MB net.bin, compiled into binary)
+- **Classical Evaluation** — Tapered PeSTO PSQT, mobility, king safety, passed pawns, threats, space control
+- **Stockfish-Inspired Search** — Razoring, futility, LMR, LMP, null-move, and correction history calibrated against top engine research
 - **XBoard/CECP Protocol** — Full support for WinBoard and XBoard GUIs
 - **Opening Book** — Embedded Polyglot gambit-focused opening book
+- **Cross-Platform Installer** — `just install` creates a macOS .app bundle, Linux .desktop entry, or Windows Start Menu shortcut
 - **Zero-Cost Modularity** — `lto = "fat"` + `codegen-units = 1` ensures full cross-crate inlining in release builds
 
 ---
@@ -55,6 +69,7 @@ cd kishmat
 ```bash
 just release     # Build optimized engine binary
 just ui          # Build and launch the GUI
+just install     # Install as native app (macOS .app, Linux .desktop, Windows shortcut)
 just test        # Run all tests
 just bench       # Run ELO benchmark suite
 ```
@@ -85,7 +100,7 @@ cargo run --release -p kishmat-ui
 
 ## GUI
 
-KishMat includes a native chess GUI built with [iced](https://iced.rs):
+KishMat includes a native chess GUI built with [iced 0.14](https://iced.rs):
 
 ```bash
 just ui
@@ -93,12 +108,46 @@ just ui
 
 ### Features
 
-- **Three game modes**: Human vs Human, Human vs Engine, Engine vs Engine
-- **Load any UCI engine**: Use the built-in KishMat engine or load external UCI engines via file picker
-- **Premium design**: macOS-style subtle grain texture backgrounds, high-fidelity colored Staunton pieces
-- **Interactive board**: Click to select pieces and make moves, with legal move highlighting and last-move indicators
-- **Move history**: Scrollable algebraic notation panel
-- **Engine info**: Real-time search depth and evaluation display
+| Category | Details |
+|---|---|
+| **Game Modes** | Human vs Human, Human vs Engine, Engine vs Engine |
+| **External Engines** | Load any UCI engine via file picker |
+| **Coin Flip** | 🪙 Animated coin flip to determine White in HvE mode |
+| **Background Music** | 🎵 Procedural Arabian/Hijaz ambient loop with 3 moods + 🔊/🔇 toggle |
+| **Themes** | 8 board themes (Classic, Emerald, Ocean, Royal, Walnut, Midnight, Forest, Sakura) spanning full GUI |
+| **Title Bar** | Nova Editor-inspired custom title bar with pill-shaped action buttons, window drag, 7px rounded corners |
+| **Board** | chess.com-style warm colors, legal move dots, last-move highlights, coordinate labels |
+| **Piece Animation** | Smooth piece sliding (150ms), enhanced capture effects (350ms) with flash |
+| **Capture Effect** | White flash overlay + scale-up (1.3×) then fade-out |
+| **Premoves** | Pre-queue moves before opponent finishes (toggle in settings, on by default) |
+| **Chess Notation** | Move list shows check (+) and checkmate (#) symbols |
+| **GIF Export** | 📷 Export full game as animated GIF with PNG chess pieces |
+| **Screen Recording** | 🔴 Record gameplay to MP4 (via ffmpeg) or GIF fallback |
+| **Screenshot** | 📸 One-click board screenshot from the title bar |
+| **PGN Export** | Copy game notation to clipboard |
+| **Move History** | Wide scrollable notation panel with check/checkmate annotations |
+| **Engine Info** | Real-time search depth, score, NPS display |
+| **Settings** | 💾 All settings persisted to `settings.toml` and auto-restored on next launch |
+
+### Screen Recording
+
+The record button (⏺) in the title bar captures the screen at 10fps using `xcap`. When stopped (⏹), you can save as:
+- **MP4** (if `ffmpeg` is installed) — H.264 encoded, high quality
+- **GIF** (fallback) — scaled to 640px width
+
+Supported platforms: macOS, Windows, Linux.
+
+### Settings Persistence
+
+All GUI settings are automatically saved to a TOML file and restored on launch:
+
+| Platform | Config Location |
+|---|---|
+| **macOS** | `~/Library/Application Support/kishmat/settings.toml` |
+| **Linux** | `~/.config/kishmat/settings.toml` |
+| **Windows** | `%APPDATA%/kishmat/settings.toml` |
+
+Persisted settings include: board theme, coordinate display, animation speed, sound/music preferences, game mood, auto-flip, legal move highlights, last move highlights, and premoves.
 
 ### Chess Pieces
 
@@ -110,9 +159,12 @@ The GUI uses high-fidelity colored Staunton chess pieces. The piece set is CC-BY
 
 ### Evaluation
 
+KishMat uses a **classical evaluation** as its primary engine, with an NNUE module available in the eval crate.
+
+#### Classical Evaluation (Active)
+
 | Feature | Description |
 |---|---|
-| **NNCorrL** | Neural correction: 768→64×2→1 with SCReLU, standalone + hybrid blending |
 | **Tapered Eval** | Game-phase interpolation between middlegame and endgame scores |
 | **PeSTO PSQT** | Piece-square tables for all pieces across both game phases |
 | **Material** | Separate MG/EG piece values |
@@ -124,6 +176,22 @@ The GUI uses high-fidelity colored Staunton chess pieces. The piece set is CC-BY
 | **Rook on Open File** | Open/semi-open file bonuses |
 | **Space Control** | Central square control evaluation |
 | **Connected Rooks** | Bonus for connected rooks on rank or file |
+
+#### NNUE (Available, Not Yet Wired into Search)
+
+KishMat includes a fully implemented NNUE module in `kishmat-eval/src/nnue/`:
+
+| Component | Details |
+|---|---|
+| **Architecture** | 768 → 1024×2 → 1 (perspective network) |
+| **Activation** | SCReLU (Squared Clipped ReLU) |
+| **King Buckets** | 4 buckets (mirrored to 8 effective) for king-relative features |
+| **Quantization** | QA=255 (feature transformer), QB=64 (output layer) |
+| **Network File** | Akimbo-compatible `net.bin` (~6 MB), compiled into the binary |
+| **SIMD** | AVX2-accelerated forward pass with scalar fallback |
+| **Accumulator** | Incremental updates with cache table |
+
+> **Note:** The NNUE module is fully implemented and tested but is not yet integrated into the search loop. The engine currently uses the classical evaluation exclusively. NNUE integration into the search is planned for a future release.
 
 ### Search
 
@@ -177,14 +245,20 @@ kishmat/                          # Workspace root + main engine binary
 ├── crates/
 │   ├── kishmat-types/            # Board, bitboards, move gen, Zobrist, attack tables
 │   ├── kishmat-eval/             # Tapered eval, PeSTO PSQT, mobility, king safety
-│   ├── kishmat-search/           # Alpha-beta, Lazy SMP, TT, SEE, NNUE, opening book
-│   │   └── src/nnue/             # Neural Network (768→64×2→1, SCReLU)
+│   │   └── src/nnue/             # NNUE (768→1024×2→1, SCReLU, king buckets)
+│   ├── kishmat-search/           # Alpha-beta, Lazy SMP, TT, SEE, opening book
 │   ├── kishmat-comms/            # UCI + XBoard protocol handlers, time management
 │   ├── kishmat-tests/            # Integration tests across all engine crates
-│   ├── kishmat-ui/               # Native GUI (iced) — chess board, game modes
-│   │   └── assets/               # Chess piece spritesheets
+│   ├── kishmat-ui/               # Native GUI (iced 0.14) — chess board, game modes
+│   │   ├── src/
+│   │   │   ├── audio.rs          # Procedural BGM + move/capture sounds (3 moods)
+│   │   │   ├── board_view.rs     # Board rendering + 8 themes + capture flash
+│   │   │   ├── gif_export.rs     # Animated GIF export with PNG pieces
+│   │   │   ├── recording.rs      # Cross-platform screen recording
+│   │   │   └── noise.rs          # Pharaonic pattern + noise textures
+│   │   └── assets/               # Chess piece PNGs, logo, sounds
 │   └── kishmat-updater/          # GitHub-based batch updater binary
-├── justfile                      # Build recipes (just ui, just test, etc.)
+├── justfile                      # Build recipes (just ui, just install, etc.)
 └── Cargo.toml                    # Workspace definition + release profile
 ```
 
@@ -197,15 +271,15 @@ kishmat/                          # Workspace root + main engine binary
 ### Bratko-Kopec Test (v2.0.0)
 
 ```
-╔══════════════════════════════════════════════╗
-║                  RESULTS                    ║
-╠══════════════════════════════════════════════╣
-║  Accuracy:    10/24 ( 41.7%)                ║
-║  Est. ELO:    ~1775                          ║
-║  NPS:         19.79M (depth 18, startpos)    ║
-║  Total nodes: 694.25M                        ║
-║  Total time:  25007ms                        ║
-╚══════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║                      RESULTS                            ║
+╠══════════════════════════════════════════════════════════╣
+║  Accuracy:    10/24 ( 41.7%)                            ║
+║  Est. ELO:    ~1775                                      ║
+║  NPS:         19.79M (depth 18, startpos)                ║
+║  Total nodes: 694.25M                                    ║
+║  Total time:  25007ms                                    ║
+╚══════════════════════════════════════════════════════════╝
 ```
 
 Run the benchmark:
@@ -243,10 +317,26 @@ Full support for XBoard and WinBoard GUIs:
 | `Threads` | spin | 32 | 1–256 | Search threads (Lazy SMP) |
 | `MoveOverhead` | spin | 10 | 0–5000 | Time management safety margin (ms) |
 | `OwnBook` | check | true | — | Use embedded opening book |
-| `UseNNUE` | check | true | — | Enable NNCorrL neural correction |
 | `Ponder` | check | false | — | Pondering (accepted, not active) |
 | `UCI_AnalyseMode` | check | false | — | Analysis mode flag |
 | `UCI_Chess960` | check | false | — | Chess960 support flag |
+
+---
+
+## Installation
+
+KishMat includes a cross-platform installer that bundles all binaries. Book and NNUE weights are compiled directly into the binary — no external files needed.
+
+```bash
+just install     # Build + install for your platform
+just uninstall   # Remove all installed files
+```
+
+| Platform | What's Installed |
+|---|---|
+| **macOS** | `.app` bundle in `~/Applications` (GUI + CLI + updater), CLI in `~/.local/bin` |
+| **Linux** | Binaries in `~/.local/bin`, `.desktop` entry, HiDPI icons |
+| **Windows** | Binaries in `%LOCALAPPDATA%/KishMat`, Start Menu shortcut |
 
 ---
 
@@ -282,6 +372,7 @@ just lint       # Run clippy
 just fmt        # Format code
 just check      # Check without building
 just ui         # Build and launch the GUI
+just install    # Install as native app
 ```
 
 ### Project Recipes
@@ -292,10 +383,13 @@ just ui         # Build and launch the GUI
 | `just release` | Optimized release build (`-C target-cpu=native`) |
 | `just test` | Run all tests with 16MB stack |
 | `just ui` | Build and launch the chess GUI |
+| `just install` | Cross-platform installer (macOS .app, Linux .desktop, Windows shortcut) |
+| `just uninstall` | Remove all installed files |
 | `just run` | Run engine in UCI mode |
 | `just play` | Interactive terminal play |
 | `just bench` | Run ELO benchmark suite |
 | `just nps` | Quick NPS benchmark (depth 16) |
+| `just pgo` | Profile-guided optimization build (nightly Rust) |
 | `just updater` | Build the updater binary |
 | `just check-updates` | Check for GitHub updates |
 | `just update` | Update all components |

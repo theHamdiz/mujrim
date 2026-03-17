@@ -1,0 +1,69 @@
+# KishMat Tunable Parameters
+# 
+# Each parameter has: name, current value, min, max, step
+# Use SPRT testing to find optimal values.
+#
+# Format: name = { value = X, min = Y, max = Z, step = S }
+
+[search]
+
+[search.null_move]
+base_r = { value = 5, min = 3, max = 7, step = 1 }
+depth_divisor = { value = 5, min = 3, max = 8, step = 1 }
+eval_divisor = { value = 200, min = 100, max = 400, step = 50 }
+eval_max = { value = 3, min = 1, max = 5, step = 1 }
+
+[search.lmr]
+base = { value = 77, min = 50, max = 110, step = 5 }  # 0.77 * 100
+divisor = { value = 236, min = 180, max = 300, step = 10 }  # 2.36 * 100
+history_divisor = { value = 4096, min = 2000, max = 8000, step = 500 }
+corr_divisor = { value = 448, min = 200, max = 800, step = 50 }
+
+[search.rfp]
+margin_per_depth = { value = 77, min = 50, max = 120, step = 5 }
+improving_bonus = { value = 46, min = 20, max = 80, step = 5 }
+max_depth = { value = 8, min = 6, max = 12, step = 1 }
+
+[search.razoring]
+base = { value = 507, min = 300, max = 700, step = 50 }
+quadratic = { value = 312, min = 200, max = 500, step = 25 }
+max_depth = { value = 3, min = 2, max = 5, step = 1 }
+
+[search.futility]
+margin_per_depth = { value = 77, min = 50, max = 120, step = 5 }
+improving_bonus = { value = 46, min = 20, max = 80, step = 5 }
+max_depth = { value = 6, min = 4, max = 10, step = 1 }
+
+[search.singular]
+margin_multiplier = { value = 3, min = 1, max = 6, step = 1 }
+min_depth = { value = 8, min = 6, max = 12, step = 1 }
+double_ext_margin = { value = 25, min = 10, max = 50, step = 5 }
+
+[search.probcut]
+beta_margin = { value = 200, min = 100, max = 400, step = 25 }
+
+[search.lmp]
+base = { value = 3, min = 1, max = 6, step = 1 }
+max_depth = { value = 8, min = 5, max = 12, step = 1 }
+
+[search.aspiration]
+initial_delta = { value = 10, min = 5, max = 25, step = 2 }
+
+[search.see_pruning]
+quiet_margin = { value = -60, min = -120, max = -20, step = 10 }
+capture_base = { value = -20, min = -40, max = -5, step = 5 }
+max_depth = { value = 4, min = 2, max = 8, step = 1 }
+
+[history]
+max_history = { value = 16384, min = 8000, max = 32000, step = 2000 }
+max_bonus = { value = 1950, min = 1000, max = 3000, step = 100 }
+
+[correction]
+pawn_weight = { value = 1890, min = 1000, max = 3000, step = 100 }
+material_weight = { value = 1461, min = 800, max = 2500, step = 100 }
+minor_weight = { value = 1292, min = 600, max = 2200, step = 100 }
+
+[time]
+default_moves_to_go = { value = 30, min = 20, max = 50, step = 5 }
+incremental_fraction = { value = 0.7, min = 0.5, max = 1.0, step = 0.05 }
+hard_limit_multiplier = { value = 3.0, min = 2.0, max = 5.0, step = 0.5 }

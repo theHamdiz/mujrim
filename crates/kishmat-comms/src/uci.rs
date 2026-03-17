@@ -41,6 +41,10 @@ pub struct UciHandler {
     debug_mode: bool,
     /// Whether to use NNUE evaluation
     use_nnue: bool,
+    /// Multi-PV count (1 = normal, >1 = show N best lines)
+    multi_pv: usize,
+    /// Contempt value (positive = avoid draws)
+    contempt: i32,
 }
 
 impl Default for UciHandler {
@@ -72,6 +76,8 @@ impl UciHandler {
             use_book: has_book,
             debug_mode: false,
             use_nnue: true,
+            multi_pv: 1,
+            contempt: 24,
         }
     }
 
@@ -174,6 +180,9 @@ impl UciHandler {
         uci_println("option name OwnBook type check default true");
         uci_println("option name UseNNUE type check default true");
         uci_println("option name Ponder type check default false");
+        uci_println("option name MultiPV type spin default 1 min 1 max 500");
+        uci_println("option name Contempt type spin default 24 min -100 max 100");
+        uci_println("option name SyzygyPath type string default <empty>");
         uci_println("option name UCI_AnalyseMode type check default false");
         uci_println("option name UCI_Chess960 type check default false");
         uci_println("uciok");
@@ -237,6 +246,28 @@ impl UciHandler {
             "ponder" | "uci_analysemode" | "uci_chess960" => {
                 if self.debug_mode {
                     eprintln!("info string Option {name} acknowledged");
+                }
+            }
+            "multipv" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    self.multi_pv = n.clamp(1, 500);
+                    if self.debug_mode {
+                        eprintln!("info string MultiPV set to {}", self.multi_pv);
+                    }
+                }
+            }
+            "contempt" => {
+                if let Ok(c) = value.parse::<i32>() {
+                    self.contempt = c.clamp(-100, 100);
+                    if self.debug_mode {
+                        eprintln!("info string Contempt set to {}", self.contempt);
+                    }
+                }
+            }
+            "syzygypath" => {
+                // Store the path for future Syzygy tablebase integration
+                if self.debug_mode {
+                    eprintln!("info string SyzygyPath set to {value} (not yet active)");
                 }
             }
             _ => {
@@ -469,17 +500,13 @@ impl UciHandler {
     }
 
     /// Estimates the number of moves remaining in the game based on game phase.
+    /// Uses a smooth function of piece count for better accuracy.
     fn estimate_moves_remaining(&self) -> u64 {
         let total_pieces = self.board.total_piece_count() as u64;
-        if total_pieces > 24 {
-            35 // Opening/early middlegame
-        } else if total_pieces > 16 {
-            30 // Middlegame
-        } else if total_pieces > 8 {
-            25 // Early endgame
-        } else {
-            20 // Deep endgame (fewer pieces → shorter game expected)
-        }
+        // Smoother scaling: 20 + piece_count * 0.5
+        // Ranges from ~20 (2 kings) to ~36 (32 pieces)
+        let estimate = 20 + total_pieces / 2;
+        estimate.clamp(15, 40)
     }
 
     /// Runs a perft test and prints results.

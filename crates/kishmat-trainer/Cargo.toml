@@ -1,0 +1,12 @@
+[package]
+name = "kishmat-trainer"
+version = "2.0.0"
+edition = "2024"
+description = "NNUE training pipeline for KishMat — self-play datagen and bullet trainer integration"
+
+[dependencies]
+types = { package = "kishmat-types", path = "../kishmat-types" }
+search = { package = "kishmat-search", path = "../kishmat-search" }
+eval = { package = "kishmat-eval", path = "../kishmat-eval" }
+gpu = { package = "kishmat-gpu", path = "../kishmat-gpu" }
+rand = "0.9"

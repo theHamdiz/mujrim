@@ -12,7 +12,7 @@ use types::{Board, Move, MoveList, Piece};
 use types::chess_move::NULL_MOVE;
 use crate::tt::{TranspositionTable, NodeType};
 use crate::see;
-use eval::nnue::{self, NNUEState};
+use eval::nnue::NNUEState;
 
 /// Infinity score sentinel.
 const INF: i32 = 30_000;
@@ -32,10 +32,10 @@ const MAX_HISTORY: i32 = 16384;
 const NUM_PIECES: usize = 6;
 /// Number of squares.
 const NUM_SQUARES: usize = 64;
-/// History pruning margin per depth (Akimbo: -1682*d, Viridithas: -3186).
-const HISTORY_PRUNING_MARGIN: i32 = -2000;
-/// History divisor for LMR stat_score adjustment.
-const HISTORY_LMR_DIVISOR: i32 = 8192;
+/// History pruning margin per depth (Akimbo: -1682*d).
+const HISTORY_PRUNING_MARGIN: i32 = -1682;
+/// History divisor for LMR stat_score adjustment (Akimbo: 4096).
+const HISTORY_LMR_DIVISOR: i32 = 4096;
 /// Correction history table size (power of 2 for fast masking).
 const CORR_HIST_SIZE: usize = 16384;
 const CORR_HIST_MASK: usize = CORR_HIST_SIZE - 1;
@@ -48,6 +48,9 @@ const CORR_WEIGHT_SUM: i32 = PAWN_CORR_WEIGHT + MATERIAL_CORR_WEIGHT + MINOR_COR
 const MAX_CORR_ENTRY: i32 = 512;
 /// LMR correction multiplier (Viridithas: 448).
 const LMR_CORR_MUL: i32 = 448;
+/// Contempt score — positive = engine avoids draws against weaker opponents.
+/// 0 = no draw bias, 10 = conservative, 20-50 = tournament.
+const CONTEMPT: i32 = 10;
 
 /// Reverse futility pruning margin — Stockfish: `futilityMult * depth`.
 /// futilityMult = 77 (adjusted for TT hit).
@@ -111,18 +114,12 @@ fn update_history(entry: &mut i32, bonus: i32) {
 }
 
 /// Compute the evaluation for a position using NNUE.
-/// Trained Akimbo-compatible net is always available (embedded at compile time).
+/// Uses the cached accumulator table — avoids full recompute when the
+/// board's piece bitboards haven't changed since the last eval in the
+/// same king-bucket pair.
 #[inline(always)]
 fn hybrid_eval(board: &Board, nnue_state: &mut NNUEState) -> i32 {
-    nnue_state.reinit_from(board);
-    let w_king = board.king_square(types::Color::White).index();
-    let b_king = board.king_square(types::Color::Black).index();
-    let entry = nnue_state.get_entry(w_king, b_king);
-    let (boys, opps) = match board.side_to_move {
-        types::Color::White => (&entry.white, &entry.black),
-        types::Color::Black => (&entry.black, &entry.white),
-    };
-    nnue::forward(boys, opps)
+    nnue_state.evaluate(board)
 }
 
 /// Get the piece index of the piece on `sq`. Returns 0 (pawn) if no piece.
@@ -460,7 +457,7 @@ impl SearchEngine {
 
                     if s <= alpha {
                         alpha = (s - delta).max(-INF);
-                        beta = (s + delta).min(INF);
+                        // Don't widen beta on fail-low — keep asymmetric window
                         delta *= 2;
                     } else if s >= beta {
                         beta = (s + delta).min(INF);
@@ -557,15 +554,15 @@ impl SearchEngine {
             if let Some(tl) = limits.time_limit {
                 let elapsed_now = start_time.elapsed();
 
-                // Base soft time: 50% of hard limit
-                let mut soft_mul = 0.5f64;
+                // Base soft time: 45% of hard limit (slightly lower than 50% for speed)
+                let mut soft_mul = 0.45f64;
 
-                // 5.2: Stability adjustment — stable best move → resolve faster
-                // stability 0 = just changed → 0.80, stability 10 = very stable → 0.40
-                let stability_factor = 0.80 - (stability as f64 * 0.04);
-                soft_mul *= stability_factor / 0.80; // normalize so 0 stability = 1.0x
+                // Stability adjustment — stable best move → resolve faster
+                // stability 0 = just changed → 0.70, stability 10 = very stable → 0.35
+                let stability_factor = 0.70 - (stability as f64 * 0.035);
+                soft_mul *= stability_factor / 0.70; // normalize so 0 stability = 1.0x
 
-                // 5.1: Node-based TM — if best move got most nodes, we're confident
+                // Node-based TM — if best move got most nodes, we're confident
                 if depth > 8 && state.nodes > 0 {
                     let best_nodes = root_node_counts.get(&key).copied().unwrap_or(0);
                     let frac = best_nodes as f64 / state.nodes as f64;
@@ -574,19 +571,25 @@ impl SearchEngine {
                     soft_mul *= node_mul;
                 }
 
-                // 5.3: Score trend — increase time on significant score drops
+                // Score trend — increase time on significant score drops
                 if depth >= 3 {
                     let score_drop = prev_prev_score - best_score;
-                    if score_drop > 30 {
-                        // Score dropped significantly — spend more time
-                        soft_mul *= 1.0 + (score_drop as f64 / 200.0).min(0.5);
-                    } else if score_drop < -30 {
-                        // Score improved significantly — can resolve faster
-                        soft_mul *= 0.85;
+                    if score_drop > 20 {
+                        // Score dropped — spend proportionally more time
+                        soft_mul *= 1.0 + (score_drop as f64 / 150.0).min(0.6);
+                    } else if score_drop < -20 {
+                        // Score improved — resolve faster
+                        soft_mul *= 0.80;
                     }
                 }
 
-                let soft_limit = tl.mul_f64(soft_mul.clamp(0.2, 1.5));
+                // Fail-low emergency: if best move changed this iteration, extend time
+                if depth >= 6 && prev_best_move != NULL_MOVE && best_move != NULL_MOVE
+                    && (best_move.from != prev_best_move.from || best_move.to != prev_best_move.to) {
+                    soft_mul *= 1.3; // give 30% more time when best move changes at depth >= 6
+                }
+
+                let soft_limit = tl.mul_f64(soft_mul.clamp(0.15, 1.5));
 
                 if elapsed_now >= soft_limit {
                     self.stopped.store(true, Ordering::SeqCst);
@@ -689,7 +692,8 @@ fn search_ab(
     state.pv_len[ply_usize] = 0;
 
     // Draw detection (repetition, 50-move, insufficient material)
-    if !is_root && board.is_draw() { return 0; }
+    // Apply contempt: positive CONTEMPT means we avoid draws
+    if !is_root && board.is_draw() { return CONTEMPT; }
 
     let in_check = board.in_check();
 
@@ -753,11 +757,22 @@ fn search_ab(
     state.nodes += 1;
     let us = board.side_to_move;
 
-    // Static eval — KishMat hybrid: classical eval + NNCorrL correction
+    // Static eval — NNUE + correction history
     let raw_eval = hybrid_eval(board, &mut state.nnue_state);
     // Apply correction history adjustment
     let corr = state.correction(board);
-    let static_eval = raw_eval + corr;
+    let mut static_eval = raw_eval + corr;
+
+    // Use TT score to refine static eval when available (Stockfish technique)
+    // If the TT entry has a valid bound, the search result is a better estimate
+    // of the position's true value than our static eval.
+    if let Some(tt_sc) = tt_score {
+        match tt_node_type {
+            NodeType::Exact => static_eval = tt_sc,
+            NodeType::LowerBound => { if tt_sc > static_eval { static_eval = tt_sc; } }
+            NodeType::UpperBound => { if tt_sc < static_eval { static_eval = tt_sc; } }
+        }
+    }
     state.static_evals[ply_usize] = static_eval;
 
     // "Improving" flag: is our static eval better than 2 plies ago?
@@ -771,8 +786,8 @@ fn search_ab(
         // 4.4: Reverse Futility Pruning with TT guards
         // Skip when TT was a PV node or TT move is a capture
         let tt_move_is_capture = tt_move.map_or(false, |m| m.is_capture());
-        let tt_was_pv = is_pv || (tt_node_type == NodeType::Exact);
-        if depth <= 8 && !tt_was_pv && !tt_move_is_capture {
+        let rfp_tt_was_pv = tt_was_pv || (tt_node_type == NodeType::Exact);
+        if depth <= 8 && !rfp_tt_was_pv && !tt_move_is_capture {
             let margin = rfp_margin(depth, improving);
             if static_eval - margin >= beta {
                 return static_eval;
@@ -848,12 +863,6 @@ fn search_ab(
         node_extensions += 1;
     }
 
-    let mut moves = board.generate_legal_moves();
-
-    if moves.is_empty() {
-        return if in_check { -MATE_SCORE + ply } else { 0 };
-    }
-
     // Get the previous move for countermove lookup
     let prev_mv = if ply > 0 { state.prev_move[ply_usize.saturating_sub(1)] } else { NULL_MOVE };
 
@@ -863,6 +872,12 @@ fn search_ab(
     } else {
         NULL_MOVE
     };
+
+    let mut moves = board.generate_legal_moves();
+
+    if moves.is_empty() {
+        return if in_check { -MATE_SCORE + ply } else { 0 };
+    }
 
     // Move ordering: score all moves using stat_score for quiets
     let move_scores = score_moves_with_stat(board, &moves, tt_move, &state.killers[ply_usize], state, us.index(), ply_usize, countermove);
@@ -881,6 +896,11 @@ fn search_ab(
     let mut node_type = NodeType::UpperBound;
     let mut moves_searched = 0;
     let mut move_scores = move_scores;
+
+    // Track searched quiet moves for history malus (Stockfish-style)
+    let mut searched_quiets: Vec<Move> = Vec::with_capacity(32);
+    // Track searched captures for capture history malus
+    let mut searched_captures: Vec<Move> = Vec::with_capacity(16);
 
     // Singular extension data
     let can_do_singular = excluded_move.is_none()
@@ -1015,8 +1035,10 @@ fn search_ab(
         } else {
             // LMR: Late Move Reductions — enhanced with stat_score
             let mut reduction = 0;
+            let is_losing_capture = mv.is_capture() && !see::see_ge(board, mv, 0);
             if moves_searched >= 2 && depth >= 3
-                && !mv.is_capture() && !mv.is_promotion()
+                && (!mv.is_capture() || is_losing_capture)
+                && !mv.is_promotion()
             {
                 let d = (depth as usize).min(63);
                 let m = moves_searched.min(63);
@@ -1031,8 +1053,18 @@ fn search_ab(
                 // Moves giving check get less reduction
                 if gives_check { reduction -= 1; }
 
-                // stat_score-based adjustment (sum of all histories)
-                reduction -= mv_stat_score / HISTORY_LMR_DIVISOR;
+                if !mv.is_capture() {
+                    // stat_score-based adjustment (sum of all histories) — quiets only
+                    reduction -= mv_stat_score / HISTORY_LMR_DIVISOR;
+                } else {
+                    // Capture history adjustment for losing captures
+                    let cap_hist_score = if let Some((cap_p, _)) = board.piece_on(mv.to) {
+                        state.cap_hist[moved_piece][mv.to.index()][cap_p.index()]
+                    } else { 0 };
+                    reduction -= cap_hist_score / (HISTORY_LMR_DIVISOR * 2);
+                    // Losing captures get extra reduction
+                    reduction += 1;
+                }
 
                 // Correction magnitude: high correction → eval is unreliable → reduce less
                 reduction -= corr.abs() / LMR_CORR_MUL;
@@ -1107,20 +1139,17 @@ fn search_ab(
                         }
 
                         // Penalize quiet moves searched before the cutoff
-                        for j in 0..i {
-                            let prev = moves[j];
-                            if !prev.is_capture() {
-                                if excluded_move.is_some_and(|em| em.from == prev.from && em.to == prev.to) {
-                                    continue;
-                                }
-                                let prev_piece_idx = piece_index_on(board, prev.from);
-                                update_history(&mut state.history[ci][prev.from.index()][prev.to.index()], -bonus);
-                                // Penalize in continuation history too
-                                if ply > 0 {
-                                    let pp = state.prev_piece[ply_usize.saturating_sub(1)];
-                                    let pt = state.prev_move[ply_usize.saturating_sub(1)].to.index();
-                                    update_history(&mut state.cont_hist[pp][pt][prev_piece_idx][prev.to.index()], -bonus);
-                                }
+                        for prev in &searched_quiets {
+                            if excluded_move.is_some_and(|em| em.from == prev.from && em.to == prev.to) {
+                                continue;
+                            }
+                            let prev_piece_idx = piece_index_on(board, prev.from);
+                            update_history(&mut state.history[ci][prev.from.index()][prev.to.index()], -bonus);
+                            // Penalize in continuation history too
+                            if ply > 0 {
+                                let pp = state.prev_piece[ply_usize.saturating_sub(1)];
+                                let pt = state.prev_move[ply_usize.saturating_sub(1)].to.index();
+                                update_history(&mut state.cont_hist[pp][pt][prev_piece_idx][prev.to.index()], -bonus);
                             }
                         }
 
@@ -1133,6 +1162,13 @@ fn search_ab(
                         if let Some((cap_piece, _)) = board.piece_on(mv.to) {
                             update_history(&mut state.cap_hist[moved_piece][mv.to.index()][cap_piece.index()], bonus);
                         }
+                        // Capture history malus: penalize captures that were searched before the cutoff capture
+                        for prev_cap in &searched_captures {
+                            let prev_piece_idx = piece_index_on(board, prev_cap.from);
+                            if let Some((prev_cap_piece, _)) = board.piece_on(prev_cap.to) {
+                                update_history(&mut state.cap_hist[prev_piece_idx][prev_cap.to.index()][prev_cap_piece.index()], -bonus);
+                            }
+                        }
                     }
                     if excluded_move.is_none() {
                         tt.store(board.hash, depth, score, NodeType::LowerBound, best_move, tt_was_pv);
@@ -1140,6 +1176,15 @@ fn search_ab(
                     return best_score;
                 }
             }
+        }
+
+        // Track searched quiet moves for history malus
+        if !mv.is_capture() && !mv.is_promotion() {
+            searched_quiets.push(mv);
+        }
+        // Track searched captures for capture history malus
+        if mv.is_capture() {
+            searched_captures.push(mv);
         }
     }
 
@@ -1190,7 +1235,9 @@ fn quiescence(
     }
 
     // TT probe in qsearch (important for stability!)
+    let mut qs_tt_move = None;
     if let Some(entry) = tt.probe(board.hash) {
+        qs_tt_move = Some(entry.best_move);
         if entry.depth >= 0 {
             match entry.node_type {
                 NodeType::Exact => return entry.score,
@@ -1242,18 +1289,36 @@ fn quiescence(
 
     let mut captures = board.generate_legal_captures();
 
-    // Include queen promotions that aren't already in the capture list
-    // (non-capture queen promotions are tactically critical)
-    let all_moves = board.generate_legal_moves();
-    for i in 0..all_moves.len() {
-        let m = all_moves[i];
-        if m.is_promotion() && !m.is_capture() && m.promotion == Some(Piece::Queen) {
-            captures.push(m);
+    // Include non-capture queen promotions (tactically critical).
+    // Only generate the full move list if we're on the promotion rank
+    // to avoid the cost of generating all legal moves at every qsearch node.
+    let promo_rank_mask = if board.side_to_move == types::Color::White {
+        0xFF00_0000_0000_0000u64 // rank 8
+    } else {
+        0x0000_0000_0000_00FFu64 // rank 1
+    };
+    let our_pawns = board.piece_bb(Piece::Pawn, board.side_to_move);
+    if our_pawns != 0 {
+        // Check if any pawn is one step from promotion
+        let pre_promo = if board.side_to_move == types::Color::White {
+            (our_pawns << 8) & promo_rank_mask & !board.all_occupancy()
+        } else {
+            (our_pawns >> 8) & promo_rank_mask & !board.all_occupancy()
+        };
+        if pre_promo != 0 {
+            // Only then generate all moves to find queen promotions
+            let all_moves = board.generate_legal_moves();
+            for i in 0..all_moves.len() {
+                let m = all_moves[i];
+                if m.is_promotion() && !m.is_capture() && m.promotion == Some(Piece::Queen) {
+                    captures.push(m);
+                }
+            }
         }
     }
 
-    // Order captures by MVV-LVA for qsearch
-    order_captures(board, &mut captures, None);
+    // Order captures by MVV-LVA + capture history for qsearch
+    order_captures_with_history(board, &mut captures, qs_tt_move, &state.cap_hist);
 
     if captures.is_empty() {
         return best_score;
@@ -1385,6 +1450,47 @@ fn order_captures(board: &Board, moves: &mut MoveList, tt_move: Option<Move>) {
         let sb = capture_score(board, *b, tt_move);
         sb.cmp(&sa)
     });
+}
+
+/// Order captures by MVV-LVA + capture history (for qsearch).
+/// Uses capture history to break ties and improve move ordering quality.
+#[inline]
+fn order_captures_with_history(
+    board: &Board,
+    moves: &mut MoveList,
+    tt_move: Option<Move>,
+    cap_hist: &[[[i32; NUM_PIECES]; NUM_SQUARES]; NUM_PIECES],
+) {
+    if moves.len() <= 1 { return; }
+    moves.sort_by(|a, b| {
+        let sa = capture_score_with_history(board, *a, tt_move, cap_hist);
+        let sb = capture_score_with_history(board, *b, tt_move, cap_hist);
+        sb.cmp(&sa)
+    });
+}
+
+#[inline(always)]
+fn capture_score_with_history(
+    board: &Board,
+    mv: Move,
+    tt_move: Option<Move>,
+    cap_hist: &[[[i32; NUM_PIECES]; NUM_SQUARES]; NUM_PIECES],
+) -> i32 {
+    if let Some(ttm) = tt_move {
+        if mv.from == ttm.from && mv.to == ttm.to { return 10_000_000; }
+    }
+    let victim_val = if let Some((p, _)) = board.piece_on(mv.to) { piece_value(p) }
+    else if mv.flag == types::chess_move::MoveFlag::EnPassant { 100 } else { 0 };
+    let attacker_val = if let Some((p, _)) = board.piece_on(mv.from) { piece_value(p) } else { 0 };
+    let base = victim_val * 10 - attacker_val + if mv.is_promotion() { 900 } else { 0 };
+
+    // Add capture history score — moved piece × to square × captured piece
+    let moved_piece = piece_index_on(board, mv.from);
+    let ch_score = if let Some((cap_p, _)) = board.piece_on(mv.to) {
+        cap_hist[moved_piece][mv.to.index()][cap_p.index()]
+    } else { 0 };
+
+    base + ch_score / 32
 }
 
 #[inline(always)]

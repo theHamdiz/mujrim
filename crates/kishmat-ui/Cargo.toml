@@ -11,7 +11,7 @@ name = "kishmat-ui"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.13", features = ["canvas", "image", "tokio"] }
+iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
 types = { package = "kishmat-types", path = "../kishmat-types" }
 search = { package = "kishmat-search", path = "../kishmat-search" }
 eval = { package = "kishmat-eval", path = "../kishmat-eval" }
@@ -20,3 +20,12 @@ image = "0.25"
 rand = "0.9"
 arboard = "3.6.1"
 rodio = "0.20"
+gif = "0.13"
+xcap = "0.9"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+updater = { package = "kishmat-updater", path = "../kishmat-updater" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"

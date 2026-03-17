@@ -18,6 +18,8 @@ members = [
     "crates/kishmat-tests",
     "crates/kishmat-ui",
     "crates/kishmat-updater",
+    "crates/kishmat-gpu",
+    "crates/kishmat-trainer",
 ]
 
 [dependencies]
@@ -29,6 +31,8 @@ types = { package = "kishmat-types", path = "crates/kishmat-types" }
 comms = { package = "kishmat-comms", path = "crates/kishmat-comms" }
 search = { package = "kishmat-search", path = "crates/kishmat-search" }
 eval = { package = "kishmat-eval", path = "crates/kishmat-eval" }
+gpu = { package = "kishmat-gpu", path = "crates/kishmat-gpu" }
+trainer = { package = "kishmat-trainer", path = "crates/kishmat-trainer" }
 
 [profile.release]
 opt-level = 3

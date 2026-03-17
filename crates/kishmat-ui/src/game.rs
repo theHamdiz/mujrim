@@ -15,6 +15,12 @@ pub struct GameState {
     pub flipped: bool,
     /// Whether the game is over.
     pub game_over: bool,
+    /// Queued premoves: (from, to) pairs executed when it becomes our turn.
+    pub premove_queue: Vec<(Square, Square)>,
+    /// User-drawn annotation arrows: (from, to) pairs drawn on the board.
+    pub arrows: Vec<(Square, Square)>,
+    /// Starting square of an arrow being drawn (right-click drag).
+    pub arrow_start: Option<Square>,
 }
 
 impl GameState {
@@ -26,6 +32,9 @@ impl GameState {
             last_move_squares: Vec::new(),
             flipped: false,
             game_over: false,
+            premove_queue: Vec::new(),
+            arrows: Vec::new(),
+            arrow_start: None,
         }
     }
 
@@ -49,6 +58,7 @@ impl GameState {
 
     /// Try to make a move from the selected square to `target`.
     /// Returns `Some(move)` if legal, `None` otherwise.
+    #[allow(dead_code)]
     pub fn try_move(&mut self, target: Square) -> Option<types::Move> {
         let from = self.selected_square?;
         let legal = self.board.generate_legal_moves();

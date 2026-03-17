@@ -3,8 +3,12 @@ name = "kishmat-updater"
 version = "2.0.0"
 edition = "2024"
 authors = ["Ahmad Hamdi Emara"]
-description = "Batch updater for the Kishmat chess engine (GitHub-based)"
+description = "Updater and asset manager for the Kishmat chess engine"
 license = "MIT"
+
+[lib]
+name = "kishmat_updater"
+path = "src/lib.rs"
 
 [[bin]]
 name = "kishmat-updater"
@@ -16,6 +20,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = "4.6"
 zip = "2"
+tar = "0.4"
+flate2 = "1"
 indicatif = "0.17"
 sha2 = "0.10"
 dirs = "6"
+toml = "0.8"
