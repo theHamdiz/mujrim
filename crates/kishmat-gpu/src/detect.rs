@@ -164,6 +164,7 @@ fn detect_metal() -> Option<GpuBackend> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn detect_metal() -> Option<GpuBackend> {
     None
 }

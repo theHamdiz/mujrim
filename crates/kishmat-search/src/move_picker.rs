@@ -232,10 +232,9 @@ impl MovePicker {
                         && self.killers[0] != NULL_MOVE
                         && !self.is_tt_move_inline(self.killers[0])
                     {
-                        let k0 = self.killers[0];
-                        if self.is_legal_quiet_cached(k0) {
+                        if let Some(legal_mv) = self.find_legal_quiet_cached(self.killers[0]) {
                             self.killer0_yielded = true;
-                            return Some(k0);
+                            return Some(legal_mv);
                         }
                     }
                     // Try killer 1
@@ -243,10 +242,9 @@ impl MovePicker {
                         && self.killers[1] != NULL_MOVE
                         && !self.is_tt_move_inline(self.killers[1])
                     {
-                        let k1 = self.killers[1];
-                        if self.is_legal_quiet_cached(k1) {
+                        if let Some(legal_mv) = self.find_legal_quiet_cached(self.killers[1]) {
                             self.killer1_yielded = true;
-                            return Some(k1);
+                            return Some(legal_mv);
                         }
                     }
                 }
@@ -259,10 +257,9 @@ impl MovePicker {
                         && !self.is_tt_move_inline(self.countermove)
                         && !self.is_killer_inline(self.countermove)
                     {
-                        let cm = self.countermove;
-                        if self.is_legal_quiet_cached(cm) {
+                        if let Some(legal_mv) = self.find_legal_quiet_cached(self.countermove) {
                             self.cm_yielded = true;
-                            return Some(cm);
+                            return Some(legal_mv);
                         }
                     }
                 }
@@ -340,12 +337,19 @@ impl MovePicker {
         self.countermove != NULL_MOVE && mv.from == self.countermove.from && mv.to == self.countermove.to
     }
 
-    /// Check if a quiet move is legal using cached legal moves (no regeneration).
-    fn is_legal_quiet_cached(&self, mv: Move) -> bool {
-        (0..self.legal_moves.len()).any(|i| {
-            self.legal_moves[i].from == mv.from && self.legal_moves[i].to == mv.to
-                && !self.legal_moves[i].is_capture()
-                && self.legal_moves[i].promotion == mv.promotion
+    /// Find the matching legal quiet move from cached legal moves.
+    /// Returns the actual legal move (with correct flags) or None.
+    fn find_legal_quiet_cached(&self, mv: Move) -> Option<Move> {
+        (0..self.legal_moves.len()).find_map(|i| {
+            let lm = self.legal_moves[i];
+            if lm.from == mv.from && lm.to == mv.to
+                && !lm.is_capture()
+                && lm.promotion == mv.promotion
+            {
+                Some(lm)
+            } else {
+                None
+            }
         })
     }
 

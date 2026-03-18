@@ -9,7 +9,7 @@
 //! The board's piece bitboards are stored alongside each entry so we can
 //! detect whether the cached accumulator is still valid or needs a refresh.
 
-use super::network::{Accumulator, HIDDEN, NUM_BUCKETS, net, get_base_index, get_bucket};
+use super::network::{Accumulator, NUM_BUCKETS, net, get_base_index, get_bucket};
 
 /// Number of piece bitboards we track: 6 pieces × 2 colors = 12.
 const NUM_BBS: usize = 12;
@@ -182,12 +182,10 @@ impl NNUEState {
     }
 }
 
-/// Add a feature's weights to an accumulator (non-SIMD for clarity).
+/// Add a feature's weights to an accumulator (SIMD-accelerated).
 #[inline]
 fn add_feature(acc: &mut Accumulator, weights: &Accumulator) {
-    for i in 0..HIDDEN {
-        acc.vals[i] += weights.vals[i];
-    }
+    super::simd::vector_add(&mut acc.vals, &weights.vals);
 }
 
 /// Allocate a boxed, zeroed value of any type.

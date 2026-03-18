@@ -12,6 +12,8 @@ use types::{Board, Move, MoveList, Piece};
 use types::chess_move::NULL_MOVE;
 use crate::tt::{TranspositionTable, NodeType};
 use crate::see;
+
+
 use eval::nnue::NNUEState;
 
 /// Infinity score sentinel.
@@ -830,12 +832,22 @@ fn search_ab(
         // 4.6: ProbCut with eval guard — only when static_eval is high enough
         if depth >= 5 && beta.abs() < MATE_SCORE - 100 && static_eval >= beta - 200 {
             let pb_beta = beta + 200;
-            // Try captures first
+            // Generate captures, score them, and pick best incrementally (no full sort)
             let mut caps = board.generate_legal_captures();
-            order_captures(board, &mut caps, tt_move);
+            let mut cap_scores: Vec<i32> = (0..caps.len()).map(|i| {
+                capture_score(board, caps[i], tt_move)
+            }).collect();
 
-            for i in 0..caps.len() {
-                let mv = caps[i];
+            for idx in 0..caps.len() {
+                // Find best remaining capture
+                let mut best = idx;
+                for j in (idx + 1)..caps.len() {
+                    if cap_scores[j] > cap_scores[best] { best = j; }
+                }
+                caps.swap(idx, best);
+                cap_scores.swap(idx, best);
+
+                let mv = caps[idx];
                 if !see::see_ge(board, mv, 0) { continue; }
 
                 board.make_move(mv);
@@ -881,7 +893,6 @@ fn search_ab(
 
     // Move ordering: score all moves using stat_score for quiets
     let move_scores = score_moves_with_stat(board, &moves, tt_move, &state.killers[ply_usize], state, us.index(), ply_usize, countermove);
-
     // TT prefetch for first move
     if !moves.is_empty() {
         let best_idx = pick_best_index(&move_scores, 0);
@@ -1288,34 +1299,8 @@ fn quiescence(
     if stand_pat > alpha { alpha = stand_pat; }
 
     let mut captures = board.generate_legal_captures();
-
-    // Include non-capture queen promotions (tactically critical).
-    // Only generate the full move list if we're on the promotion rank
-    // to avoid the cost of generating all legal moves at every qsearch node.
-    let promo_rank_mask = if board.side_to_move == types::Color::White {
-        0xFF00_0000_0000_0000u64 // rank 8
-    } else {
-        0x0000_0000_0000_00FFu64 // rank 1
-    };
-    let our_pawns = board.piece_bb(Piece::Pawn, board.side_to_move);
-    if our_pawns != 0 {
-        // Check if any pawn is one step from promotion
-        let pre_promo = if board.side_to_move == types::Color::White {
-            (our_pawns << 8) & promo_rank_mask & !board.all_occupancy()
-        } else {
-            (our_pawns >> 8) & promo_rank_mask & !board.all_occupancy()
-        };
-        if pre_promo != 0 {
-            // Only then generate all moves to find queen promotions
-            let all_moves = board.generate_legal_moves();
-            for i in 0..all_moves.len() {
-                let m = all_moves[i];
-                if m.is_promotion() && !m.is_capture() && m.promotion == Some(Piece::Queen) {
-                    captures.push(m);
-                }
-            }
-        }
-    }
+    // Note: generate_legal_captures() already includes non-capture promotions
+    // via gen_pawn_captures() — no need to generate all legal moves.
 
     // Order captures by MVV-LVA + capture history for qsearch
     order_captures_with_history(board, &mut captures, qs_tt_move, &state.cap_hist);
@@ -1377,17 +1362,6 @@ fn estimate_capture_value(board: &Board, mv: Move) -> i32 {
     }
 }
 
-/// Score all moves for ordering. Returns a parallel Vec of scores.
-#[inline]
-#[allow(dead_code)]
-fn score_moves(board: &Board, moves: &MoveList, tt_move: Option<Move>, killers: &[Move; 2], history: &[[i32; 64]; 64], countermove: Move) -> Vec<i32> {
-    let mut scores = Vec::with_capacity(moves.len());
-    for i in 0..moves.len() {
-        scores.push(move_score(board, moves[i], tt_move, killers, history, countermove));
-    }
-    scores
-}
-
 /// Score all moves with full stat_score (main + continuation histories) for quiets
 /// and capture history for captures.
 #[inline]
@@ -1441,17 +1415,6 @@ fn pick_best_index(scores: &[i32], start: usize) -> usize {
     best_idx
 }
 
-/// Order captures by MVV-LVA.
-#[inline]
-fn order_captures(board: &Board, moves: &mut MoveList, tt_move: Option<Move>) {
-    if moves.len() <= 1 { return; }
-    moves.sort_by(|a, b| {
-        let sa = capture_score(board, *a, tt_move);
-        let sb = capture_score(board, *b, tt_move);
-        sb.cmp(&sa)
-    });
-}
-
 /// Order captures by MVV-LVA + capture history (for qsearch).
 /// Uses capture history to break ties and improve move ordering quality.
 #[inline]
@@ -1502,29 +1465,6 @@ fn capture_score(board: &Board, mv: Move, tt_move: Option<Move>) -> i32 {
     else if mv.flag == types::chess_move::MoveFlag::EnPassant { 100 } else { 0 };
     let attacker = if let Some((p, _)) = board.piece_on(mv.from) { piece_value(p) } else { 0 };
     victim * 10 - attacker + if mv.is_promotion() { 900 } else { 0 }
-}
-
-#[inline(always)]
-fn move_score(board: &Board, mv: Move, tt_move: Option<Move>, killers: &[Move; 2], history: &[[i32; 64]; 64], countermove: Move) -> i32 {
-    if let Some(ttm) = tt_move {
-        if mv.from == ttm.from && mv.to == ttm.to { return 10_000_000; }
-    }
-    let mut score = 0i32;
-    if mv.is_capture() {
-        let victim = if let Some((p, _)) = board.piece_on(mv.to) { piece_value(p) }
-        else if mv.flag == types::chess_move::MoveFlag::EnPassant { 100 } else { 0 };
-        let attacker = if let Some((p, _)) = board.piece_on(mv.from) { piece_value(p) } else { 0 };
-        score += 1_000_000 + victim * 10 - attacker;
-    }
-    if mv.is_promotion() { score += 900_000; }
-    if !mv.is_capture() {
-        if mv.from == killers[0].from && mv.to == killers[0].to { score += 800_000; }
-        else if mv.from == killers[1].from && mv.to == killers[1].to { score += 700_000; }
-        // ── Countermove bonus (indexed by previous move) ──
-        else if countermove != NULL_MOVE && mv.from == countermove.from && mv.to == countermove.to { score += 600_000; }
-        else { score += history[mv.from.index()][mv.to.index()].max(0); }
-    }
-    score
 }
 
 #[inline(always)]

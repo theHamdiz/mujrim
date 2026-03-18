@@ -43,6 +43,17 @@ pub fn vector_update(
     scalar::vector_update(acc, all_weights, adds, subs)
 }
 
+/// Add src weights to dst accumulator: dst[i] += src[i].
+/// Simpler than `vector_update` — no index multiplication overhead.
+#[inline]
+pub fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+    #[cfg(target_feature = "avx2")]
+    unsafe { avx2::vector_add(dst, src) }
+
+    #[cfg(not(target_feature = "avx2"))]
+    scalar::vector_add(dst, src)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Scalar fallback (works on all platforms)
 // ═══════════════════════════════════════════════════════════════════
@@ -66,6 +77,16 @@ mod scalar {
             sum += screlu(acc[i]) * weights[i] as i32;
         }
         sum
+    }
+
+    /// Scalar accumulator add: dst[i] += src[i].
+    pub fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        const CHUNK: usize = 16;
+        for chunk_start in (0..HIDDEN).step_by(CHUNK) {
+            for j in 0..CHUNK {
+                dst[chunk_start + j] = dst[chunk_start + j].wrapping_add(src[chunk_start + j]);
+            }
+        }
     }
 
     /// Scalar accumulator update.
@@ -140,6 +161,18 @@ mod avx2 {
             }
 
             horizontal_sum_i32(sum)
+        }
+    }
+
+    /// AVX2 accumulator add: dst[i] += src[i].
+    pub unsafe fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let d = _mm256_loadu_si256(dst.as_ptr().add(i).cast());
+                let s = _mm256_loadu_si256(src.as_ptr().add(i).cast());
+                let r = _mm256_add_epi16(d, s);
+                _mm256_storeu_si256(dst.as_mut_ptr().add(i).cast(), r);
+            }
         }
     }
 

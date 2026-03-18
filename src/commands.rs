@@ -191,8 +191,8 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     let cpu_cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    // Cap at 8 threads for bench to prevent hangs on high-core machines
-    let num_threads = cpu_cores.min(8);
+    // Reserve 2 cores for the OS / background tasks, but always use at least 1
+    let num_threads = cpu_cores.saturating_sub(2).max(1);
 
     println!("  Hardware Detection:");
 
@@ -289,8 +289,8 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     println!("    Threads:  {} (Lazy SMP)", num_threads);
     println!("    Engine:   CPU SIMD only (no GPU acceleration)");
 
-    // Reasonable hash: 64MB per thread, capped at 512MB
-    let hash_mb = (num_threads * 64).min(512);
+    // Bench hash: 4GB to match UCI default and fully utilize available RAM
+    let hash_mb = 4096;
     println!("    Hash:     {}MB", hash_mb);
     println!();
 
