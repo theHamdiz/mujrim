@@ -3,7 +3,9 @@
 use std::io::{self, Write};
 use std::time::Instant;
 
-use comms::{UciHandler, XBoardHandler};
+use comms::UciHandler;
+#[cfg(feature = "xboard")]
+use comms::XBoardHandler;
 use search::SearchEngine;
 use types::{Board, Color};
 
@@ -14,6 +16,7 @@ pub fn run_uci() {
 }
 
 /// Runs the XBoard/CECP protocol loop.
+#[cfg(feature = "xboard")]
 pub fn run_xboard() {
     let mut handler = XBoardHandler::new();
     handler.run();
@@ -315,9 +318,10 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
         let result = if let Some(ms) = time_ms {
             engine.search_time(&mut board, Duration::from_millis(ms), 64)
         } else {
-            // Depth-based with 30s per-position hard limit to prevent
-            // any single position from dominating the benchmark runtime.
-            engine.search_time(&mut board, Duration::from_secs(30), depth)
+            // Use search_time with a generous 5-minute per-position limit.
+            // This ensures SMP threads have a time-based stop signal while
+            // giving enough time to reach depth 14-18+ on most positions.
+            engine.search_time(&mut board, Duration::from_secs(300), depth)
         };
 
         let found = result.best_move.to_uci();

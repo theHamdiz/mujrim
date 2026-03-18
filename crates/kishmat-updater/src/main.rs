@@ -79,6 +79,24 @@ fn main() {
                         .default_value(kishmat_updater::syzygy::DEFAULT_SYZYGY_DIR),
                 ),
         )
+        .subcommand(
+            Command::new("nnue")
+                .about("Download NNUE neural network weights")
+                .arg(
+                    Arg::new("network")
+                        .short('n')
+                        .long("network")
+                        .help("Specific network to download (or 'all'/'list')")
+                        .default_value("all"),
+                )
+                .arg(
+                    Arg::new("dir")
+                        .short('d')
+                        .long("dir")
+                        .help("Output directory (default: ./nnue/)")
+                        .default_value(kishmat_updater::nnue::DEFAULT_NNUE_DIR),
+                ),
+        )
         .get_matches();
 
     match matches.subcommand() {
@@ -92,6 +110,11 @@ fn main() {
             let pieces = sub.get_one::<String>("pieces").unwrap();
             let dir = sub.get_one::<String>("dir").unwrap();
             cmd_syzygy(pieces, dir);
+        }
+        Some(("nnue", sub)) => {
+            let network = sub.get_one::<String>("network").unwrap();
+            let dir = sub.get_one::<String>("dir").unwrap();
+            cmd_nnue(network, dir);
         }
         _ => cmd_check(),
     }
@@ -145,6 +168,121 @@ fn cmd_syzygy(pieces: &str, dir: &str) {
         }
         Err(e) => {
             eprintln!("  ✗ Download failed: {e}");
+        }
+    }
+}
+
+fn cmd_nnue(network: &str, dir: &str) {
+    use kishmat_updater::nnue::*;
+
+    let dest = std::path::PathBuf::from(dir);
+
+    println!("╔══════════════════════════════════════╗");
+    println!("║   NNUE Network Downloader            ║");
+    println!("╚══════════════════════════════════════╝");
+    println!();
+
+    if network == "list" {
+        println!("  Available NNUE networks:");
+        println!();
+        for (i, net) in NETWORKS.iter().enumerate() {
+            let size_mb = net.approx_size as f64 / (1024.0 * 1024.0);
+            let installed = dest.join(net.filename).exists();
+            let marker = if installed { "✓" } else { " " };
+            println!("  {marker} [{i}] {:<20} ({:<30}  ~{:.1} MB)", 
+                     net.name, net.architecture, size_mb);
+            println!("        Engine: {}  File: {}", net.engine, net.filename);
+        }
+        println!();
+
+        let files = list_network_files(&dest);
+        if !files.is_empty() {
+            let usage = disk_usage(&dest);
+            let usage_mb = usage as f64 / (1024.0 * 1024.0);
+            println!("  Installed in {}: {} files ({:.1} MB)", dest.display(), files.len(), usage_mb);
+        } else {
+            println!("  No networks installed in {}", dest.display());
+        }
+        println!();
+        println!("  To download all: kishmat-updater nnue");
+        println!("  To download one: kishmat-updater nnue -n \"Akimbo 1024\"");
+        return;
+    }
+
+    println!("  Destination: {}", dest.display());
+    println!();
+
+    if network == "all" {
+        println!("  Downloading all {} networks...", NETWORKS.len());
+        println!();
+
+        let progress: Option<ProgressCallback> = Some(Box::new(|name, status| {
+            match status {
+                DownloadStatus::Skipped => println!("  ⊘ {name} (already exists)"),
+                DownloadStatus::Downloading(size) => {
+                    let mb = size as f64 / (1024.0 * 1024.0);
+                    print!("  ↓ {name} (~{:.1} MB) ...", mb);
+                }
+                DownloadStatus::Done => println!(" ✓"),
+                DownloadStatus::Failed(e) => println!(" ✗ {e}"),
+            }
+        }));
+
+        match download_all(&dest, progress) {
+            Ok(summary) => {
+                println!();
+                println!("  ✓ Download complete!");
+                println!("    Downloaded: {}", summary.downloaded);
+                println!("    Failed:     {}", summary.failed);
+
+                let usage = disk_usage(&dest);
+                let usage_mb = usage as f64 / (1024.0 * 1024.0);
+                println!("    Disk usage: {:.1} MB", usage_mb);
+                println!("    Path:       {}", summary.target_dir.display());
+                println!();
+                println!("  To use: setoption name EvalFile value {}/akimbo-1024.bin", dest.display());
+            }
+            Err(e) => {
+                eprintln!("  ✗ Download failed: {e}");
+            }
+        }
+    } else {
+        // Find matching network by name (case-insensitive partial match)
+        let net = NETWORKS.iter().find(|n| {
+            n.name.to_lowercase().contains(&network.to_lowercase()) ||
+            n.filename.to_lowercase().contains(&network.to_lowercase())
+        });
+
+        match net {
+            Some(net_info) => {
+                let size_mb = net_info.approx_size as f64 / (1024.0 * 1024.0);
+                println!("  Network: {} ({}, ~{:.1} MB)", net_info.name, net_info.architecture, size_mb);
+                println!();
+
+                let progress: Option<ProgressCallback> = Some(Box::new(|name, status| {
+                    match status {
+                        DownloadStatus::Skipped => println!("  ⊘ {name} (already exists)"),
+                        DownloadStatus::Downloading(_) => print!("  ↓ Downloading {name} ..."),
+                        DownloadStatus::Done => println!(" ✓"),
+                        DownloadStatus::Failed(e) => println!(" ✗ {e}"),
+                    }
+                }));
+
+                match download_network(net_info, &dest, progress.as_ref()) {
+                    Ok(()) => {
+                        println!();
+                        println!("  ✓ Saved to: {}/{}", dest.display(), net_info.filename);
+                        println!("  To use: setoption name EvalFile value {}/{}", dest.display(), net_info.filename);
+                    }
+                    Err(e) => {
+                        eprintln!("  ✗ Download failed: {e}");
+                    }
+                }
+            }
+            None => {
+                eprintln!("  ✗ Unknown network: {network}");
+                eprintln!("  Use 'kishmat-updater nnue -n list' to see available networks.");
+            }
         }
     }
 }

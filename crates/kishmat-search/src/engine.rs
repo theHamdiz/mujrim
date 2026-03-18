@@ -12,6 +12,8 @@ use types::{Board, Move, MoveList, Piece};
 use types::chess_move::NULL_MOVE;
 use crate::tt::{TranspositionTable, NodeType};
 use crate::see;
+use crate::search_params::SearchParams;
+use crate::move_picker::MovePicker;
 
 
 use eval::nnue::NNUEState;
@@ -22,10 +24,8 @@ const INF: i32 = 30_000;
 const MATE_SCORE: i32 = 29_000;
 /// Maximum search ply depth.
 const MAX_PLY: usize = 128;
-/// Aspiration window initial width — Stockfish uses 10cp.
-const ASPIRATION_WINDOW: i32 = 10;
 /// Delta pruning margin in quiescence — standard queen value.
-const DELTA_MARGIN: i32 = 200;
+const DELTA_MARGIN: i32 = 400;
 /// Maximum quiescence search depth to prevent explosion in tactical chaos.
 const MAX_QS_PLY: i32 = 8;
 /// Maximum history score (Stockfish uses 16384).
@@ -34,10 +34,6 @@ const MAX_HISTORY: i32 = 16384;
 const NUM_PIECES: usize = 6;
 /// Number of squares.
 const NUM_SQUARES: usize = 64;
-/// History pruning margin per depth (Akimbo: -1682*d).
-const HISTORY_PRUNING_MARGIN: i32 = -1682;
-/// History divisor for LMR stat_score adjustment (Akimbo: 4096).
-const HISTORY_LMR_DIVISOR: i32 = 4096;
 /// Correction history table size (power of 2 for fast masking).
 const CORR_HIST_SIZE: usize = 16384;
 const CORR_HIST_MASK: usize = CORR_HIST_SIZE - 1;
@@ -48,59 +44,17 @@ const MINOR_CORR_WEIGHT: i32 = 1292;
 const CORR_WEIGHT_SUM: i32 = PAWN_CORR_WEIGHT + MATERIAL_CORR_WEIGHT + MINOR_CORR_WEIGHT;
 /// Max correction entry magnitude.
 const MAX_CORR_ENTRY: i32 = 512;
-/// LMR correction multiplier (Viridithas: 448).
-const LMR_CORR_MUL: i32 = 448;
-/// Contempt score — positive = engine avoids draws against weaker opponents.
-/// 0 = no draw bias, 10 = conservative, 20-50 = tournament.
-const CONTEMPT: i32 = 10;
-
-/// Reverse futility pruning margin — Stockfish: `futilityMult * depth`.
-/// futilityMult = 77 (adjusted for TT hit).
-#[inline(always)]
-fn rfp_margin(depth: i32, improving: bool) -> i32 {
-    77 * depth - if improving { 74 } else { 0 }
-}
-
-/// Razoring margin — Stockfish: `507 + 312 * depth * depth`.
-#[inline(always)]
-fn razoring_margin(depth: i32) -> i32 {
-    507 + 312 * depth * depth
-}
-
-/// Futility margin — Stockfish: `77 * depth` with improving correction.
-#[inline(always)]
-fn futility_margin(depth: i32, improving: bool) -> i32 {
-    77 * depth - if improving { 46 } else { 0 }
-}
-
-/// Singular extension margin — Stockfish: `3 * depth`.
-#[inline(always)]
-fn se_margin(depth: i32) -> i32 {
-    3 * depth
-}
-
-/// Late Move Pruning threshold — Stockfish formula: `(3 + depth²) / (2 - improving)`.
-#[inline(always)]
-fn lmp_threshold(depth: i32, improving: bool) -> usize {
-    ((3 + depth * depth) / if improving { 1 } else { 2 }) as usize
-}
-
-/// Null-move reduction — Stockfish: `5 + depth/5`.
-#[inline(always)]
-fn null_move_r(depth: i32, eval: i32, beta: i32) -> i32 {
-    5 + depth / 5 + ((eval - beta) / 200).min(3)
-}
 
 /// Precomputed LMR reduction table — Stockfish formula.
-static LMR_TABLE: std::sync::OnceLock<[[i32; 64]; 64]> = std::sync::OnceLock::new();
+static LMR_TABLE: std::sync::OnceLock<[[i32; 128]; 128]> = std::sync::OnceLock::new();
 
 #[inline(always)]
-fn lmr_table() -> &'static [[i32; 64]; 64] {
+fn lmr_table() -> &'static [[i32; 128]; 128] {
     LMR_TABLE.get_or_init(|| {
-        let mut table = [[0i32; 64]; 64];
-        for depth in 1..64 {
-            for moves in 1..64 {
-                // Stockfish: 0.77 + ln(depth) * ln(moveCount) / 2.36
+        let mut table = [[0i32; 128]; 128];
+        for depth in 1..128 {
+            for moves in 1..128 {
+                // Stockfish formula: 0.77 + ln(depth) * ln(moveCount) / 2.36
                 table[depth][moves] = (0.77 + (depth as f64).ln() * (moves as f64).ln() / 2.36) as i32;
             }
         }
@@ -340,6 +294,8 @@ pub struct SearchEngine {
     pub tt: Arc<TranspositionTable>,
     pub num_threads: usize,
     stopped: Arc<AtomicBool>,
+    /// Per-network search parameters (swapped when NNUE net changes).
+    pub params: SearchParams,
 }
 
 impl Default for SearchEngine {
@@ -357,7 +313,18 @@ impl SearchEngine {
             tt: Arc::new(TranspositionTable::new(tt_size_mb)),
             num_threads: num_threads.max(1),
             stopped: Arc::new(AtomicBool::new(false)),
+            params: SearchParams::default(),
         }
+    }
+
+    /// Set the search parameters (e.g. when switching NNUE networks).
+    pub fn set_params(&mut self, params: SearchParams) {
+        self.params = params;
+    }
+
+    /// Configure search params for a given network preset name.
+    pub fn set_params_for_preset(&mut self, preset: &str) {
+        self.params = SearchParams::for_preset(preset);
     }
 
     /// Performs search with Lazy SMP.
@@ -376,6 +343,7 @@ impl SearchEngine {
             let max_depth = limits.max_depth;
             let time_limit = limits.time_limit;
             let start = start_time;
+            let params_clone = self.params.clone();
 
             handles.push(std::thread::Builder::new()
                 .stack_size(16 * 1024 * 1024)
@@ -393,6 +361,7 @@ impl SearchEngine {
                     let mut best_move = NULL_MOVE;
                     let mut completed_depth = 0i32;
 
+
                     for depth in 1..=max_depth {
                         let actual_depth = (depth as i32 + depth_offset).max(1).min(max_depth);
 
@@ -406,7 +375,7 @@ impl SearchEngine {
                             &mut board_clone, &tt, &stopped, &mut state,
                             actual_depth, -INF, INF, 0, true,
                             time_limit, start, true, None,
-                            0, actual_depth,
+                            0, actual_depth, &params_clone,
                         );
                         if !stopped.load(Ordering::Relaxed) {
                             best_score = s;
@@ -436,6 +405,7 @@ impl SearchEngine {
         // Node counts per root move for node-based TM
         let mut root_node_counts: std::collections::HashMap<(usize, usize), u64> = std::collections::HashMap::new();
 
+
         for depth in 1..=limits.max_depth {
             if self.stopped.load(Ordering::Relaxed) { break; }
 
@@ -444,7 +414,7 @@ impl SearchEngine {
             // Aspiration windows after depth 5
             if depth >= 5 && best_score.abs() < MATE_SCORE - 100 {
                 // 4.8: Eval-based aspiration narrowing (Viridithas)
-                let mut delta = ASPIRATION_WINDOW + best_score.abs() / 30155;
+                let mut delta = self.params.aspiration_window + best_score.abs() / 256;
                 let mut alpha = best_score - delta;
                 let mut beta = best_score + delta;
 
@@ -453,7 +423,7 @@ impl SearchEngine {
                         board, &self.tt, &self.stopped, &mut state,
                         depth, alpha, beta, 0, true,
                         limits.time_limit, start_time, true, None,
-                        0, depth,
+                        0, depth, &self.params,
                     );
                     if self.stopped.load(Ordering::Relaxed) { break; }
 
@@ -468,15 +438,12 @@ impl SearchEngine {
                         break;
                     }
 
-                    if delta > 500 {
-                        let s = search_ab(
-                            board, &self.tt, &self.stopped, &mut state,
-                            depth, -INF, INF, 0, true,
-                            limits.time_limit, start_time, true, None,
-                            0, depth,
-                        );
-                        if !self.stopped.load(Ordering::Relaxed) { best_score = s; }
-                        break;
+                    // Stockfish never falls back to full-width search.
+                    // Just keep widening — the loop terminates naturally
+                    // when the score falls within [alpha, beta].
+                    if delta > 2000 {
+                        alpha = -INF;
+                        beta = INF;
                     }
                 }
                 if self.stopped.load(Ordering::Relaxed) { break; }
@@ -485,7 +452,7 @@ impl SearchEngine {
                     board, &self.tt, &self.stopped, &mut state,
                     depth, -INF, INF, 0, true,
                     limits.time_limit, start_time, true, None,
-                    0, depth,
+                    0, depth, &self.params,
                 );
                 if self.stopped.load(Ordering::Relaxed) { break; }
                 best_score = s;
@@ -555,20 +522,20 @@ impl SearchEngine {
             if let Some(tl) = limits.time_limit {
                 let elapsed_now = start_time.elapsed();
 
-                // Base soft time: 45% of hard limit (slightly lower than 50% for speed)
-                let mut soft_mul = 0.45f64;
+                // Base soft time: 50% of hard limit
+                let mut soft_mul = 0.50f64;
 
                 // Stability adjustment — stable best move → resolve faster
-                // stability 0 = just changed → 0.70, stability 10 = very stable → 0.35
-                let stability_factor = 0.70 - (stability as f64 * 0.035);
-                soft_mul *= stability_factor / 0.70; // normalize so 0 stability = 1.0x
+                // stability 0 = just changed → 1.0x, stability 10 = very stable → 0.65x
+                let stability_factor = 1.0 - (stability as f64 * 0.035);
+                soft_mul *= stability_factor;
 
                 // Node-based TM — if best move got most nodes, we're confident
                 if depth > 8 && state.nodes > 0 {
                     let best_nodes = root_node_counts.get(&key).copied().unwrap_or(0);
                     let frac = best_nodes as f64 / state.nodes as f64;
                     // Akimbo: (1.5 - frac) * 1.35
-                    let node_mul = ((1.5 - frac) * 1.35).clamp(0.5, 2.0);
+                    let node_mul = ((1.5 - frac) * 1.35).clamp(0.7, 1.8);
                     soft_mul *= node_mul;
                 }
 
@@ -580,7 +547,7 @@ impl SearchEngine {
                         soft_mul *= 1.0 + (score_drop as f64 / 150.0).min(0.6);
                     } else if score_drop < -20 {
                         // Score improved — resolve faster
-                        soft_mul *= 0.80;
+                        soft_mul *= 0.85;
                     }
                 }
 
@@ -590,7 +557,7 @@ impl SearchEngine {
                     soft_mul *= 1.3; // give 30% more time when best move changes at depth >= 6
                 }
 
-                let soft_limit = tl.mul_f64(soft_mul.clamp(0.15, 1.5));
+                let soft_limit = tl.mul_f64(soft_mul.clamp(0.25, 1.5));
 
                 if elapsed_now >= soft_limit {
                     self.stopped.store(true, Ordering::SeqCst);
@@ -675,6 +642,7 @@ fn search_ab(
     excluded_move: Option<Move>,
     total_extensions: i32,
     nominal_depth: i32,
+    params: &SearchParams,
 ) -> i32 {
     // Check stop periodically
     if state.nodes & 2047 == 0 {
@@ -693,8 +661,9 @@ fn search_ab(
     state.pv_len[ply_usize] = 0;
 
     // Draw detection (repetition, 50-move, insufficient material)
-    // Apply contempt: positive CONTEMPT means we avoid draws
-    if !is_root && board.is_draw() { return CONTEMPT; }
+    // Return 0 for draws — contempt should only be applied at root level,
+    // not inside the tree where it poisons minimax scoring.
+    if !is_root && board.is_draw() { return 0; }
 
     let in_check = board.in_check();
 
@@ -765,8 +734,6 @@ fn search_ab(
     let mut static_eval = raw_eval + corr;
 
     // Use TT score to refine static eval when available (Stockfish technique)
-    // If the TT entry has a valid bound, the search result is a better estimate
-    // of the position's true value than our static eval.
     if let Some(tt_sc) = tt_score {
         match tt_node_type {
             NodeType::Exact => static_eval = tt_sc,
@@ -789,14 +756,15 @@ fn search_ab(
         let tt_move_is_capture = tt_move.map_or(false, |m| m.is_capture());
         let rfp_tt_was_pv = tt_was_pv || (tt_node_type == NodeType::Exact);
         if depth <= 8 && !rfp_tt_was_pv && !tt_move_is_capture {
-            let margin = rfp_margin(depth, improving);
+            let margin = params.rfp_margin(depth, improving);
             if static_eval - margin >= beta {
-                return static_eval;
+                // Return averaged score to avoid leaking raw static eval
+                return (static_eval + beta) / 2;
             }
         }
 
-        // Razoring — Stockfish: alpha - 507 - 312 * depth² (quadratic)
-        if depth <= 3 && static_eval <= alpha - razoring_margin(depth) {
+        // Razoring — quadratic margin
+        if depth <= 3 && static_eval <= alpha - params.razoring_margin(depth) {
             return quiescence(board, tt, stopped, state, alpha, beta, ply, 0, time_limit, start_time);
         }
 
@@ -804,20 +772,20 @@ fn search_ab(
         // Don't NMP if TT says position is bad (fail-low at beta)
         let nmp_tt_ok = !tt_score.is_some_and(|s| tt_node_type == NodeType::UpperBound && s < beta);
         if depth > 2 && !board.is_endgame() && static_eval >= beta && nmp_tt_ok {
-            let r = null_move_r(depth, static_eval, beta);
+            let r = params.null_move_r(depth, static_eval, beta);
 
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
             state.prev_piece[ply_usize] = 0;
-            let score = -search_ab(board, tt, stopped, state, depth - 1 - r, -beta, -beta + 1, ply + 1, false, time_limit, start_time, false, None, total_extensions, nominal_depth);
+            let score = -search_ab(board, tt, stopped, state, depth - 1 - r, -beta, -beta + 1, ply + 1, false, time_limit, start_time, false, None, total_extensions, nominal_depth, params);
             board.unmake_null_move();
 
             if stopped.load(Ordering::Relaxed) { return 0; }
 
             if score >= beta {
                 // Verification search at higher depths to avoid zugzwang issues
-                if depth > 12 {
-                    let v_score = search_ab(board, tt, stopped, state, depth - 7, beta - 1, beta, ply, false, time_limit, start_time, false, None, total_extensions, nominal_depth);
+                if depth > 10 {
+                    let v_score = search_ab(board, tt, stopped, state, depth - r, beta - 1, beta, ply, false, time_limit, start_time, false, None, total_extensions, nominal_depth, params);
                     if stopped.load(Ordering::Relaxed) { return 0; }
                     if v_score >= beta {
                         return beta;
@@ -852,7 +820,7 @@ fn search_ab(
                 board.make_move(mv);
                 state.prev_move[ply_usize] = mv;
                 // Reduced search
-                let score = -search_ab(board, tt, stopped, state, depth - 4, -pb_beta, -pb_beta + 1, ply + 1, false, time_limit, start_time, false, None, total_extensions, nominal_depth);
+                let score = -search_ab(board, tt, stopped, state, depth - 4, -pb_beta, -pb_beta + 1, ply + 1, false, time_limit, start_time, false, None, total_extensions, nominal_depth, params);
                 board.unmake_move(mv);
 
                 if stopped.load(Ordering::Relaxed) { return 0; }
@@ -860,6 +828,7 @@ fn search_ab(
             }
         }
     }
+
 
     // ── IIR + Do-deeper ────────
     if tt_move.is_none() && depth >= 4 {
@@ -884,28 +853,60 @@ fn search_ab(
         NULL_MOVE
     };
 
-    let mut moves = board.generate_legal_moves();
+    // ── Staged MovePicker: lazily generates and scores moves ──
+    // Captures scored by MVV-LVA + capture history, quiets by stat_score.
+    // If a TT move or good capture causes a cutoff, quiets are never generated.
+    let us_idx = us.index();
+    let killers_copy = state.killers[ply_usize];
+    let mut picker = MovePicker::new(tt_move, killers_copy, countermove);
 
-    if moves.is_empty() {
+    // Extract raw pointers to scoring data to avoid borrow conflicts.
+    // Safety: These tables are only read by the closures during `picker.next()`
+    // and only written after the call returns (in the loop body below).
+    let cap_hist_ptr = &*state.cap_hist as *const [[[i32; NUM_PIECES]; NUM_SQUARES]; NUM_PIECES];
+    let history_ptr = &*state.history as *const [[[i32; 64]; 64]; 2];
+    let cont_hist_ptr = &*state.cont_hist as *const [[[[i32; NUM_SQUARES]; NUM_PIECES]; NUM_SQUARES]; NUM_PIECES];
+    let cont_hist2_ptr = &*state.cont_hist2 as *const [[[[i32; NUM_SQUARES]; NUM_PIECES]; NUM_SQUARES]; NUM_PIECES];
+    let prev_piece_snap = state.prev_piece;
+    let prev_move_snap = state.prev_move;
+    let ply_snap = ply_usize;
+
+    let score_capture = |b: &Board, mv: Move| -> i32 {
+        let piece = b.piece_on(mv.from).map_or(0, |(p, _)| p.index());
+        let victim = if let Some((p, _)) = b.piece_on(mv.to) { piece_value(p) }
+        else if mv.flag == types::chess_move::MoveFlag::EnPassant { 100 } else { 0 };
+        let attacker = if let Some((p, _)) = b.piece_on(mv.from) { piece_value(p) } else { 0 };
+        let cap_hist_score = if let Some((cap_p, _)) = b.piece_on(mv.to) {
+            unsafe { (*cap_hist_ptr)[piece][mv.to.index()][cap_p.index()] }
+        } else { 0 };
+        victim * 10 - attacker + cap_hist_score / 16 + if mv.is_promotion() { 900 } else { 0 }
+    };
+    let score_quiet = |b: &Board, mv: Move| -> i32 {
+        let piece = b.piece_on(mv.from).map_or(0, |(p, _)| p.index());
+        let mut score = unsafe { (*history_ptr)[us_idx][mv.from.index()][mv.to.index()] };
+        if ply_snap > 0 {
+            let pp = prev_piece_snap[ply_snap.saturating_sub(1)];
+            let pt = prev_move_snap[ply_snap.saturating_sub(1)].to.index();
+            score += unsafe { (*cont_hist_ptr)[pp][pt][piece][mv.to.index()] };
+        }
+        if ply_snap > 1 {
+            let pp2 = prev_piece_snap[ply_snap.saturating_sub(2)];
+            let pt2 = prev_move_snap[ply_snap.saturating_sub(2)].to.index();
+            score += unsafe { (*cont_hist2_ptr)[pp2][pt2][piece][mv.to.index()] };
+        }
+        score
+    };
+
+    // Check for no legal moves (checkmate / stalemate)
+    picker.ensure_legal_moves(board);
+    if picker.total_legal() == 0 {
         return if in_check { -MATE_SCORE + ply } else { 0 };
     }
 
-    // Move ordering: score all moves using stat_score for quiets
-    let move_scores = score_moves_with_stat(board, &moves, tt_move, &state.killers[ply_usize], state, us.index(), ply_usize, countermove);
-    // TT prefetch for first move
-    if !moves.is_empty() {
-        let best_idx = pick_best_index(&move_scores, 0);
-        let first_mv = moves[best_idx];
-        board.make_move(first_mv);
-        tt.prefetch(board.hash);
-        board.unmake_move(first_mv);
-    }
-
-    let mut best_move = moves[0];
+    let mut best_move = NULL_MOVE;
     let mut best_score = -INF;
     let mut node_type = NodeType::UpperBound;
     let mut moves_searched = 0;
-    let mut move_scores = move_scores;
 
     // Track searched quiet moves for history malus (Stockfish-style)
     let mut searched_quiets: Vec<Move> = Vec::with_capacity(32);
@@ -920,13 +921,7 @@ fn search_ab(
         && tt_node_type != NodeType::UpperBound
         && tt_score.is_some_and(|s| s.abs() < MATE_SCORE - 100);
 
-    for i in 0..moves.len() {
-        // Pick best move from remaining (incremental sort)
-        let best_idx = pick_best_index(&move_scores, i);
-        moves.swap(i, best_idx);
-        move_scores.swap(i, best_idx);
-
-        let mv = moves[i];
+    while let Some(mv) = picker.next(board, &score_capture, &score_quiet) {
 
         // Skip the excluded move (for singular extension verification)
         if excluded_move.is_some_and(|em| em.from == mv.from && em.to == mv.to && em.promotion == mv.promotion) {
@@ -939,13 +934,13 @@ fn search_ab(
             if let Some(ttm) = tt_move {
                 if mv.from == ttm.from && mv.to == ttm.to {
                     if let Some(tt_sc) = tt_score {
-                        let se_beta = tt_sc - se_margin(depth);
+                        let se_beta = tt_sc - params.se_margin(depth);
                         let se_score = search_ab(
                             board, tt, stopped, state,
                             (depth - 1) / 2, se_beta - 1, se_beta,
                             ply, false, time_limit, start_time, false,
                             Some(mv),
-                            total_extensions, nominal_depth,
+                            total_extensions, nominal_depth, params,
                         );
                         if stopped.load(Ordering::Relaxed) { return 0; }
                         if se_score < se_beta {
@@ -979,8 +974,8 @@ fn search_ab(
         };
 
         // Late Move Pruning — Stockfish formula: (3 + depth²) / (2 - improving)
-        if !is_pv && !in_check && depth <= 8
-            && moves_searched >= lmp_threshold(depth, improving)
+        if !is_pv && !in_check && depth <= params.lmp_depth_limit
+            && moves_searched >= params.lmp_threshold(depth, improving)
             && !mv.is_capture() && !mv.is_promotion()
             && best_score > -MATE_SCORE + 100
         {
@@ -988,20 +983,20 @@ fn search_ab(
         }
 
         // ── History pruning: skip quiet moves with terrible stat_score ──
-        if !is_pv && !in_check && depth <= 6
+        if !is_pv && !in_check && depth <= params.hist_prune_depth_limit
             && !mv.is_capture() && !mv.is_promotion()
             && moves_searched > 0
             && best_score > -MATE_SCORE + 100
-            && mv_stat_score < HISTORY_PRUNING_MARGIN * depth
+            && mv_stat_score < params.hist_prune_margin * depth
         {
             continue;
         }
 
         // Futility pruning — Stockfish: 77 * depth
-        if !is_pv && !in_check && depth <= 6
+        if !is_pv && !in_check && depth <= params.futility_depth_limit
             && !mv.is_capture() && !mv.is_promotion()
             && moves_searched > 0
-            && static_eval + futility_margin(depth, improving) <= alpha
+            && static_eval + params.futility_margin(depth, improving) <= alpha
             && best_score > -MATE_SCORE + 100
         {
             continue;
@@ -1009,13 +1004,13 @@ fn search_ab(
 
         // SEE pruning for losing captures and quiet moves at low depth
         // Margins adjusted by stat_score for quiets
-        if depth <= 4 && !is_pv && moves_searched > 0
+        if depth <= params.see_prune_depth_limit && !is_pv && moves_searched > 0
             && best_score > -MATE_SCORE + 100
         {
-            if mv.is_capture() && !see::see_ge(board, mv, -20 * depth * depth) {
+            if mv.is_capture() && !see::see_ge(board, mv, params.see_capture_margin * depth) {
                 continue;
             }
-            let see_quiet_margin = -60 * depth + mv_stat_score / 300;
+            let see_quiet_margin = params.see_quiet_margin * depth + mv_stat_score / 300;
             if !mv.is_capture() && !mv.is_promotion() && !see::see_ge(board, mv, see_quiet_margin) {
                 continue;
             }
@@ -1033,7 +1028,7 @@ fn search_ab(
         let score;
         let gives_check = board.in_check();
         // Cap singular extensions using the total extension budget.
-        // All extensions (check, do-deeper, singular) share the same
+        // All extensions (do-deeper, singular) share the same
         // 2× nominal depth budget to prevent unbounded tree growth.
         let extension = extension.min((nominal_depth * 2 - total_extensions - node_extensions).max(0));
         let new_total_extensions = total_extensions + node_extensions + extension.max(0);
@@ -1041,7 +1036,7 @@ fn search_ab(
 
         if moves_searched == 0 {
             // Full window search for the first move
-            score = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, is_pv, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
+            score = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, is_pv, time_limit, start_time, false, None, new_total_extensions, nominal_depth, params);
         } else {
             // LMR: Late Move Reductions — enhanced with stat_score
             let mut reduction = 0;
@@ -1050,8 +1045,8 @@ fn search_ab(
                 && (!mv.is_capture() || is_losing_capture)
                 && !mv.is_promotion()
             {
-                let d = (depth as usize).min(63);
-                let m = moves_searched.min(63);
+                let d = (depth as usize).min(127);
+                let m = moves_searched.min(127);
                 reduction = lmr_table()[d][m];
 
                 // PV nodes get less reduction
@@ -1065,22 +1060,22 @@ fn search_ab(
 
                 if !mv.is_capture() {
                     // stat_score-based adjustment (sum of all histories) — quiets only
-                    reduction -= mv_stat_score / HISTORY_LMR_DIVISOR;
+                    reduction -= mv_stat_score / params.hist_lmr_div;
                 } else {
                     // Capture history adjustment for losing captures
                     let cap_hist_score = if let Some((cap_p, _)) = board.piece_on(mv.to) {
                         state.cap_hist[moved_piece][mv.to.index()][cap_p.index()]
                     } else { 0 };
-                    reduction -= cap_hist_score / (HISTORY_LMR_DIVISOR * 2);
+                    reduction -= cap_hist_score / (params.hist_lmr_div * 2);
                     // Losing captures get extra reduction
                     reduction += 1;
                 }
 
                 // Correction magnitude: high correction → eval is unreliable → reduce less
-                reduction -= corr.abs() / LMR_CORR_MUL;
+                reduction -= corr.abs() / params.lmr_corr_mul;
 
                 // Cut node gets more reduction (Stockfish)
-                if !is_pv && node_type == NodeType::UpperBound { reduction += 2; }
+                if !is_pv && node_type == NodeType::UpperBound { reduction += params.lmr_cut_node_bonus; }
                 // 7.2: TT PV node gets less reduction — historically important
                 if tt_was_pv { reduction -= 1; }
 
@@ -1088,15 +1083,15 @@ fn search_ab(
             }
 
             // PVS null-window search with reduction
-            let mut s = -search_ab(board, tt, stopped, state, effective_depth - reduction, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
+            let mut s = -search_ab(board, tt, stopped, state, effective_depth - reduction, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None, new_total_extensions, nominal_depth, params);
 
             // Re-search if reduced search fails high
             if s > alpha && reduction > 0 {
-                s = -search_ab(board, tt, stopped, state, effective_depth, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
+                s = -search_ab(board, tt, stopped, state, effective_depth, -alpha - 1, -alpha, ply + 1, false, time_limit, start_time, false, None, new_total_extensions, nominal_depth, params);
             }
             // Re-search with full window in PV
             if s > alpha && s < beta {
-                s = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, true, time_limit, start_time, false, None, new_total_extensions, nominal_depth);
+                s = -search_ab(board, tt, stopped, state, effective_depth, -beta, -alpha, ply + 1, true, time_limit, start_time, false, None, new_total_extensions, nominal_depth, params);
             }
             score = s;
         }
@@ -1124,8 +1119,10 @@ fn search_ab(
                 state.pv_len[ply_usize] = child_len + 1;
 
                 if score >= beta {
-                    // Stockfish: bonus = min(depth * depth, 2000)
-                    let bonus = (depth * depth).min(2000);
+                    // Stockfish-style linear bonus: 300 * depth - 300
+                    // Better scaling than quadratic — prevents all deep nodes
+                    // from getting the same capped bonus.
+                    let bonus = (300 * depth - 300).clamp(0, 2000);
                     let ci = us.index();
 
                     if !mv.is_capture() {
@@ -1198,6 +1195,18 @@ fn search_ab(
         }
     }
 
+    // ── Post-loop mate/stalemate detection ──
+    // With lazy move generation, we only know there are no legal moves
+    // after trying to iterate. If moves_searched==0 and no excluded move
+    // was skipped, this is checkmate or stalemate.
+    if moves_searched == 0 {
+        if excluded_move.is_some() {
+            // We were in singular extension search — excluded move is the only legal one
+            return alpha;
+        }
+        return if in_check { -MATE_SCORE + ply } else { 0 };
+    }
+
     if excluded_move.is_none() {
         tt.store(board.hash, depth, best_score, node_type, best_move, tt_was_pv);
         // Update correction history with search outcome vs static eval
@@ -1263,19 +1272,50 @@ fn quiescence(
     }
 
     // When in check, search ALL moves (not just captures) to find escape
+    // Score them by TT move priority + capture value for better ordering.
     if in_check {
-        let moves = board.generate_legal_moves();
+        let mut moves = board.generate_legal_moves();
         if moves.is_empty() { return -MATE_SCORE + ply; }
+
+        // Score check evasions: TT move first, then captures by MVV-LVA, then quiets
+        let mut move_scores = Vec::with_capacity(moves.len());
+        for i in 0..moves.len() {
+            let mv = moves[i];
+            let score = if qs_tt_move.is_some_and(|ttm| mv.from == ttm.from && mv.to == ttm.to) {
+                1_000_000 // TT move first
+            } else if mv.is_capture() {
+                // MVV-LVA
+                let victim = if let Some((p, _)) = board.piece_on(mv.to) { piece_value(p) } else { 0 };
+                let attacker = if let Some((p, _)) = board.piece_on(mv.from) { piece_value(p) } else { 0 };
+                100_000 + victim * 10 - attacker
+            } else if mv.is_promotion() {
+                200_000
+            } else {
+                0
+            };
+            move_scores.push(score);
+        }
 
         let mut best_score = -INF;
         let mut best_move = moves[0];
         let alpha_orig = alpha;
-        for i in 0..moves.len() {
-            board.make_move(moves[i]);
+        for idx in 0..moves.len() {
+            // Incremental selection sort: find best remaining
+            let mut best_idx = idx;
+            for j in (idx + 1)..moves.len() {
+                if move_scores[j] > move_scores[best_idx] {
+                    best_idx = j;
+                }
+            }
+            moves.swap(idx, best_idx);
+            move_scores.swap(idx, best_idx);
+
+            let mv = moves[idx];
+            board.make_move(mv);
             let score = -quiescence(board, tt, stopped, state, -beta, -alpha, ply + 1, qs_ply + 1, time_limit, start_time);
-            board.unmake_move(moves[i]);
+            board.unmake_move(mv);
             if stopped.load(Ordering::Relaxed) { return 0; }
-            if score > best_score { best_score = score; best_move = moves[i]; }
+            if score > best_score { best_score = score; best_move = mv; }
             if score > alpha { alpha = score; }
             if score >= beta {
                 tt.store(board.hash, 0, best_score, NodeType::LowerBound, best_move, false);
@@ -1375,58 +1415,6 @@ fn estimate_capture_value(board: &Board, mv: Move) -> i32 {
     }
 }
 
-/// Score all moves with full stat_score (main + continuation histories) for quiets
-/// and capture history for captures.
-#[inline]
-fn score_moves_with_stat(board: &Board, moves: &MoveList, tt_move: Option<Move>, killers: &[Move; 2], state: &ThreadState, us: usize, ply: usize, countermove: Move) -> Vec<i32> {
-    let mut scores = Vec::with_capacity(moves.len());
-    for i in 0..moves.len() {
-        let mv = moves[i];
-        // TT move gets highest priority
-        if let Some(ttm) = tt_move {
-            if mv.from == ttm.from && mv.to == ttm.to {
-                scores.push(10_000_000);
-                continue;
-            }
-        }
-        let piece = piece_index_on(board, mv.from);
-        if mv.is_capture() {
-            // Capture ordering: MVV-LVA base + capture history
-            let victim = if let Some((p, _)) = board.piece_on(mv.to) { piece_value(p) }
-            else if mv.flag == types::chess_move::MoveFlag::EnPassant { 100 } else { 0 };
-            let attacker = if let Some((p, _)) = board.piece_on(mv.from) { piece_value(p) } else { 0 };
-            let cap_hist_score = if let Some((cap_p, _)) = board.piece_on(mv.to) {
-                state.cap_hist[piece][mv.to.index()][cap_p.index()]
-            } else { 0 };
-            let s = 1_000_000 + victim * 10 - attacker + cap_hist_score / 16;
-            scores.push(s + if mv.is_promotion() { 900_000 } else { 0 });
-        } else if mv.is_promotion() {
-            scores.push(900_000);
-        } else {
-            // Quiet: stat_score = main history + continuation histories
-            let stat = state.stat_score(mv, us, piece, ply);
-            if mv.from == killers[0].from && mv.to == killers[0].to { scores.push(800_000); }
-            else if mv.from == killers[1].from && mv.to == killers[1].to { scores.push(700_000); }
-            else if countermove != NULL_MOVE && mv.from == countermove.from && mv.to == countermove.to { scores.push(600_000); }
-            else { scores.push(stat.max(0)); }
-        }
-    }
-    scores
-}
-
-/// Pick the index of the best move from position `start` to end.
-#[inline]
-fn pick_best_index(scores: &[i32], start: usize) -> usize {
-    let mut best_idx = start;
-    let mut best_score = scores[start];
-    for i in (start + 1)..scores.len() {
-        if scores[i] > best_score {
-            best_score = scores[i];
-            best_idx = i;
-        }
-    }
-    best_idx
-}
 
 /// Order captures by MVV-LVA + capture history (for qsearch).
 /// Uses capture history to break ties and improve move ordering quality.

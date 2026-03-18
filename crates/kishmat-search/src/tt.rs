@@ -268,7 +268,12 @@ impl TranspositionTable {
         unsafe {
             std::arch::x86_64::_mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            // PLDL1KEEP: prefetch for load into L1 cache, temporal locality
+            std::arch::asm!("prfm pldl1keep, [{ptr}]", ptr = in(reg) ptr);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let _ = ptr;
     }
 
@@ -309,7 +314,7 @@ impl TranspositionTable {
             // Try to load any entry for scoring
             let data = entry.data.load(Ordering::Relaxed);
             let entry_depth = (data & 0xFFFF) as u16 as i16 as i32;
-            let entry_age = ((data >> 50) & 0xFF) as u8;
+            let entry_age = ((data >> 52) & 0xFF) as u8;
 
             let age_penalty = if entry_age != current_gen { -1000 } else { 0 };
             let entry_score = entry_depth + age_penalty;

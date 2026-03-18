@@ -22,5 +22,15 @@ Thumbs.db
 # Syzygy tablebases (downloaded at runtime)
 syzygy/
 
+# NNUE networks (downloaded at runtime)
+nnue/
+
+# External NNUE networks in resources (only the embedded net.bin is tracked)
+crates/kishmat-eval/resources/*.nnue
+crates/kishmat-eval/resources/*.nnue.zst
+crates/kishmat-eval/resources/akimbo-*.bin
+crates/kishmat-eval/resources/stockfish-*.nnue
+crates/kishmat-eval/resources/viridithas-*
+
 # SPRT test results
 sprt/results.pgn

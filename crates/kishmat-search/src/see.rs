@@ -105,38 +105,91 @@ pub fn see(board: &Board, mv: Move) -> i32 {
 }
 
 /// Returns true if SEE of the capture is >= threshold.
-/// Faster than full SEE — bails early when the running gain
-/// makes it impossible to cross the threshold.
+/// Fully inline swap algorithm — no fallback to full `see()`.
 #[inline]
 pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
-    // Quick check: initial capture value
+    let to = mv.to.index();
+    let from = mv.from.index();
+
     let initial_value = if let Some((captured, _)) = board.piece_on(mv.to) {
         SEE_VALUES[captured.index()]
     } else if mv.flag == types::chess_move::MoveFlag::EnPassant {
         SEE_VALUES[0]
     } else {
-        return threshold <= 0; // Not a capture — SEE is 0
+        return threshold <= 0;
     };
 
-    // If capturing piece value alone can't even match threshold, bail
     let moving_piece = if let Some((piece, _)) = board.piece_on(mv.from) {
         piece
     } else {
         return threshold <= 0;
     };
 
-    // Balance: what we gain minus what we risk losing
+    // Quick balance checks
     let mut balance = initial_value - threshold;
-
-    // If even capturing for free doesn't meet threshold, fail
     if balance < 0 { return false; }
-
-    // If we can afford to lose our piece and still meet threshold, pass
     balance -= SEE_VALUES[moving_piece.index()];
     if balance >= 0 { return true; }
 
-    // Need full evaluation — fall back to complete SEE
-    see(board, mv) >= threshold
+    // Full inline swap loop
+    let mut white_pieces = [0u64; 6];
+    let mut black_pieces = [0u64; 6];
+    for &piece in &Piece::ALL {
+        white_pieces[piece.index()] = board.piece_bb(piece, Color::White);
+        black_pieces[piece.index()] = board.piece_bb(piece, Color::Black);
+    }
+
+    let mut occupancy = board.all_occupancy() & !(1u64 << from);
+    let mut side = board.side_to_move.opponent();
+
+    loop {
+        let attackers = all_attackers(to, occupancy, &white_pieces, &black_pieces);
+        let side_bb = match side {
+            Color::White => &white_pieces,
+            Color::Black => &black_pieces,
+        };
+        let side_attackers = attackers & side_bb.iter().fold(0u64, |acc, &bb| acc | bb);
+
+        if side_attackers == 0 { break; }
+
+        // Find least valuable attacker
+        let mut lva_piece = Piece::King;
+        let mut lva_sq = 0;
+        for &piece in &Piece::ALL {
+            let atk = side_attackers & side_bb[piece.index()];
+            if atk != 0 {
+                lva_piece = piece;
+                lva_sq = get_lsb(atk);
+                break;
+            }
+        }
+
+        let lva_bit = 1u64 << lva_sq;
+        occupancy &= !lva_bit;
+        match side {
+            Color::White => white_pieces[lva_piece.index()] &= !lva_bit,
+            Color::Black => black_pieces[lva_piece.index()] &= !lva_bit,
+        }
+
+        balance = -balance - 1 - SEE_VALUES[lva_piece.index()];
+
+        if balance >= 0 {
+            if lva_piece == Piece::King {
+                let opp_bb = match side.opponent() {
+                    Color::White => &white_pieces,
+                    Color::Black => &black_pieces,
+                };
+                let opp_atk = all_attackers(to, occupancy, &white_pieces, &black_pieces)
+                    & opp_bb.iter().fold(0u64, |acc, &bb| acc | bb);
+                if opp_atk != 0 { break; }
+            }
+            break;
+        }
+
+        side = side.opponent();
+    }
+
+    side != board.side_to_move
 }
 
 /// Get all attackers to a given square.

@@ -314,4 +314,49 @@ mod tests {
         assert_eq!(score_incremental, score_scratch,
             "Incremental ({score_incremental}) vs scratch ({score_scratch}) mismatch");
     }
+
+    #[test]
+    fn nnue_weight_diagnostic() {
+        types::init();
+        let net = super::super::network::net();
+        
+        // Feature bias
+        let bias = &net.feature_bias.vals;
+        let bias_nz = bias.iter().filter(|&&v| v != 0).count();
+        eprintln!("Feature bias: nonzero={}/{}, range=[{}, {}]", 
+            bias_nz, bias.len(), bias.iter().min().unwrap(), bias.iter().max().unwrap());
+        
+        // Output weights
+        let ow0 = &net.output_weights[0].vals;
+        let ow1 = &net.output_weights[1].vals;
+        eprintln!("Output weights[0]: nonzero={}/{}, range=[{}, {}]",
+            ow0.iter().filter(|&&v| v != 0).count(), ow0.len(), 
+            ow0.iter().min().unwrap(), ow0.iter().max().unwrap());
+        eprintln!("Output weights[1]: nonzero={}/{}, range=[{}, {}]",
+            ow1.iter().filter(|&&v| v != 0).count(), ow1.len(),
+            ow1.iter().min().unwrap(), ow1.iter().max().unwrap());
+        eprintln!("Output bias: {}", net.output_bias);
+
+        // Evaluate key positions 
+        let mut state = NNUEState::new();
+        let board = Board::new();
+        let s1 = state.evaluate(&board);
+        eprintln!("Starting pos: {} cp", s1);
+
+        let b2 = Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let s2 = state.evaluate(&b2);
+        eprintln!("W up queen: {} cp", s2);
+
+        let b3 = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w Qkq - 0 1").unwrap();
+        let s3 = state.evaluate(&b3);
+        eprintln!("W down queen: {} cp", s3);
+
+        // BK position 1: Black to play, Qd1+ is winning back exchange
+        let bk1 = Board::from_fen("1k1r4/pp1b1R2/3q2pp/4p3/2B5/4Q3/PPP2B2/2K5 b - - 0 1").unwrap();
+        let bk1s = state.evaluate(&bk1);
+        eprintln!("BK #1 (black, exp d6d1): {} cp", bk1s);
+
+        assert!(s2 > s1, "White up queen ({s2}) should be > start ({s1})");
+        assert!(s3 < s1, "White down queen ({s3}) should be < start ({s1})");
+    }
 }

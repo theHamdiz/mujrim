@@ -8,8 +8,10 @@
 //! - `bench`: Run ELO estimation benchmark
 //! - `perft`: Run perft test
 
+#[cfg(feature = "mimalloc")]
 use mimalloc::MiMalloc;
 
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -109,7 +111,10 @@ fn main() {
             commands::run_uci();
         }
         Some(("xboard", _)) => {
+            #[cfg(feature = "xboard")]
             commands::run_xboard();
+            #[cfg(not(feature = "xboard"))]
+            eprintln!("XBoard protocol support disabled (compile with --features xboard)");
         }
         Some(("play", sub)) => {
             let depth: i32 = sub.get_one::<String>("depth")

@@ -7,6 +7,7 @@ use std::io::{self, BufRead, Write};
 use std::time::Duration;
 use types::{Board, Move, Color};
 use search::SearchEngine;
+#[cfg(feature = "book")]
 use search::book::OpeningBook;
 
 /// Immediately writes a line to stdout and flushes.
@@ -22,6 +23,7 @@ fn xboard_println(msg: &str) {
 pub struct XBoardHandler {
     pub board: Board,
     engine: SearchEngine,
+    #[cfg(feature = "book")]
     book: Option<OpeningBook>,
     use_book: bool,
     /// Remaining time in centiseconds
@@ -49,11 +51,16 @@ impl Default for XBoardHandler {
 impl XBoardHandler {
     pub fn new() -> Self {
         types::init();
+        #[cfg(feature = "book")]
         let book = OpeningBook::load_embedded().ok();
+        #[cfg(feature = "book")]
         let has_book = book.is_some();
+        #[cfg(not(feature = "book"))]
+        let has_book = false;
         Self {
             board: Board::new(),
             engine: SearchEngine::new(256, 4), // Conservative defaults for XBoard
+            #[cfg(feature = "book")]
             book,
             use_book: has_book,
             time_remaining_cs: 30000, // 5 minutes default
@@ -206,6 +213,7 @@ impl XBoardHandler {
     /// Think and send the best move.
     fn think_and_move(&mut self) {
         // Try opening book
+        #[cfg(feature = "book")]
         if self.use_book {
             if let Some(ref book) = self.book {
                 if let Some(book_move) = book.probe(&self.board) {

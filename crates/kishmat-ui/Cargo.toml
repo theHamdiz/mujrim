@@ -6,6 +6,11 @@ authors = ["Ahmad Hamdi Emara"]
 description = "GUI for the Kishmat chess engine using iced"
 license = "MIT"
 
+[features]
+default = ["book", "nnue"]
+book = ["search/book"]
+nnue = ["search/nnue"]
+
 [[bin]]
 name = "kishmat-ui"
 path = "src/main.rs"

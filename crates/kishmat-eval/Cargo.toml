@@ -6,5 +6,12 @@ authors = ["Ahmad Hamdi Emara"]
 description = "Evaluation functions for the Kishmat engine"
 license = "MIT"
 
+[features]
+default = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue"]
+nnue = []
+simd = []
+akimbo-nnue = ["nnue"]
+stockfish-nnue = ["nnue"]
+
 [dependencies]
 types = { package = "kishmat-types", path = "../kishmat-types" }

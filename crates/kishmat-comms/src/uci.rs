@@ -11,6 +11,7 @@ use std::io::{self, BufRead, Write};
 use std::time::Duration;
 use types::{Board, Move};
 use search::SearchEngine;
+#[cfg(feature = "book")]
 use search::book::OpeningBook;
 
 /// Default move overhead in milliseconds (for GUI lag, OS scheduler, etc.)
@@ -34,6 +35,7 @@ pub struct UciHandler {
     /// Number of search threads
     num_threads: usize,
     /// Opening book
+    #[cfg(feature = "book")]
     book: Option<OpeningBook>,
     /// Whether to use the opening book
     use_book: bool,
@@ -65,13 +67,18 @@ fn uci_println(msg: &str) {
 impl UciHandler {
     pub fn new() -> Self {
         types::init();
+        #[cfg(feature = "book")]
         let book = OpeningBook::load_embedded().ok();
+        #[cfg(feature = "book")]
         let has_book = book.is_some();
+        #[cfg(not(feature = "book"))]
+        let has_book = false;
         Self {
             board: Board::new(),
             engine: SearchEngine::new(DEFAULT_HASH_MB, default_threads()),
             move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
             num_threads: default_threads(),
+            #[cfg(feature = "book")]
             book,
             use_book: has_book,
             debug_mode: false,
@@ -410,6 +417,7 @@ impl UciHandler {
         };
 
         // Try opening book first
+        #[cfg(feature = "book")]
         if self.use_book && !infinite {
             if let Some(ref book) = self.book {
                 if let Some(book_move) = book.probe(&self.board) {

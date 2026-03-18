@@ -21,6 +21,12 @@ pub struct DatagenConfig {
     pub draw_adjudication_plies: u32,
     /// Adjudicate win if |eval| > this
     pub win_adjudication_cp: i32,
+    /// Optional external network path to use during self-play.
+    /// If `None`, uses the embedded default network.
+    pub network_path: Option<String>,
+    /// Search parameter preset to use during self-play.
+    /// Maps to `SearchParams::for_preset()` (e.g. "akimbo", "stockfish").
+    pub search_preset: String,
 }
 
 impl Default for DatagenConfig {
@@ -37,6 +43,8 @@ impl Default for DatagenConfig {
             draw_adjudication_cp: 10,
             draw_adjudication_plies: 10,
             win_adjudication_cp: 1000,
+            network_path: None,
+            search_preset: "akimbo".to_string(),
         }
     }
 }
@@ -60,6 +68,9 @@ pub struct TrainingConfig {
     pub wdl_weight: f64,
     /// Network architecture string (hidden layer sizes)
     pub architecture: String,
+    /// Optional base network path to use for fine-tuning.
+    /// If `None`, trains from scratch.
+    pub base_network: Option<String>,
 }
 
 impl Default for TrainingConfig {
@@ -73,6 +84,7 @@ impl Default for TrainingConfig {
             lr_schedule: "cosine".to_string(),
             wdl_weight: 0.5,
             architecture: "768->1024x2->1".to_string(),
+            base_network: None,
         }
     }
 }

@@ -242,11 +242,12 @@ struct App {
     status: String,
     engine_info: String,
     assets: PieceAssets,
-    #[allow(dead_code)]
     bg_pattern: iced::widget::image::Handle,
-    #[allow(dead_code)]
     chess_bg: iced::widget::image::Handle,
+    /// Subtle noise grain overlay for material-textured feel.
+    panel_grain: iced::widget::image::Handle,
     logo: iced::widget::image::Handle,
+    #[cfg(feature = "book")]
     book: Option<search::book::OpeningBook>,
     sound: Option<audio::SoundEngine>,
     animation: Option<AnimationState>,
@@ -259,6 +260,9 @@ struct App {
     syzygy_status: String,
     syzygy_wdl_count: usize,
     syzygy_dtz_count: usize,
+    // NNUE network state
+    nnue_status: String,
+    nnue_installed_count: usize,
     // Tuning state
     tuning_params: Option<updater::tuning::TunableParams>,
     tuning_status: String,
@@ -392,6 +396,8 @@ enum Msg {
     SwitchOptionsTab(OptionsTab),
     SyzygyDownload,
     SyzygyDownloadDone(String),
+    NnueDownload,
+    NnueDownloadDone(String),
     TuneLoad,
     TuneSetParam(String, String, f64),
     TuneSave,
@@ -426,9 +432,11 @@ impl Default for App {
             assets: PieceAssets::load(),
             bg_pattern: noise::pharaonic_pattern(256),
             chess_bg: noise::chess_blur_background(512, 384),
+            panel_grain: noise::macos_grain_panel(),
             logo: iced::widget::image::Handle::from_bytes(
                 include_bytes!("../assets/logo.png").as_slice(),
             ),
+            #[cfg(feature = "book")]
             book: search::book::OpeningBook::load_embedded().ok(),
             sound, animation: None, window_height: 850.0,
             bgm_on: true, coin_flip: CoinFlipState::Idle,
@@ -437,6 +445,8 @@ impl Default for App {
             syzygy_status: String::new(),
             syzygy_wdl_count: 0,
             syzygy_dtz_count: 0,
+            nnue_status: String::new(),
+            nnue_installed_count: 0,
             tuning_params: None,
             tuning_status: String::new(),
         }
@@ -1143,6 +1153,39 @@ impl App {
                 let (wdl, dtz) = updater::syzygy::check_installed(&syzygy_dir);
                 self.syzygy_wdl_count = wdl;
                 self.syzygy_dtz_count = dtz;
+                // Also refresh NNUE status
+                let nnue_dir = updater::nnue::default_nnue_path();
+                let installed = updater::nnue::check_installed(&nnue_dir);
+                self.nnue_installed_count = installed.iter().filter(|(_, exists)| *exists).count();
+                if self.nnue_installed_count > 0 {
+                    let usage = updater::nnue::disk_usage(&nnue_dir);
+                    let mb = usage as f64 / (1024.0 * 1024.0);
+                    self.nnue_status = format!("{}/{} networks ({:.1} MB)",
+                        self.nnue_installed_count, updater::nnue::NETWORKS.len(), mb);
+                } else {
+                    self.nnue_status = "Not installed".to_string();
+                }
+                Task::none()
+            }
+            Msg::NnueDownload => {
+                self.nnue_status = "Downloading NNUE networks...".to_string();
+                Task::perform(
+                    async {
+                        let dest = updater::nnue::default_nnue_path();
+                        match updater::nnue::download_all(&dest, None) {
+                            Ok(s) => format!("✓ {} downloaded, {} failed",
+                                s.downloaded, s.failed),
+                            Err(e) => format!("✗ {e}"),
+                        }
+                    },
+                    Msg::NnueDownloadDone,
+                )
+            }
+            Msg::NnueDownloadDone(result) => {
+                self.nnue_status = result;
+                let nnue_dir = updater::nnue::default_nnue_path();
+                let installed = updater::nnue::check_installed(&nnue_dir);
+                self.nnue_installed_count = installed.iter().filter(|(_, exists)| *exists).count();
                 Task::none()
             }
             Msg::TuneLoad => {
@@ -1183,6 +1226,7 @@ impl App {
     fn trigger_engine_move(&self) -> Task<Msg> {
         if let Some(ref gs) = self.game {
             // ── Try opening book first (instant response) ─────────────
+            #[cfg(feature = "book")]
             if self.engine_cfg.use_book {
                 if let Some(ref book) = self.book {
                     if let Some(book_move) = book.probe(&gs.board) {
@@ -1702,7 +1746,7 @@ impl App {
             ].spacing(8).align_y(Alignment::Center),
             row![text("Capture Effect").size(12).color(TEXT_SECONDARY).width(130), capture_anim_picker]
                 .spacing(8).align_y(Alignment::Center),
-        ].spacing(4);
+        ].spacing(8);
 
         // Audio section
         let mood_picker = pick_list(
@@ -1723,7 +1767,7 @@ impl App {
             ].spacing(8).align_y(Alignment::Center),
             row![text("Game Mood").size(12).color(TEXT_SECONDARY).width(130), mood_picker]
                 .spacing(8).align_y(Alignment::Center),
-        ].spacing(4);
+        ].spacing(8);
 
         // Game section
         let game_section = column![
@@ -1741,7 +1785,7 @@ impl App {
                 Msg::SetMultiPremoves(!s.multi_premoves)),
             config_toggle("Draw Arrows", s.draw_arrows,
                 Msg::SetDrawArrows(!s.draw_arrows)),
-        ].spacing(4);
+        ].spacing(8);
 
         let close_btn = button(
             container(text("✕ Close").size(14).color(Color::WHITE))
@@ -1789,13 +1833,27 @@ impl App {
 
         // Build tab content
         let tab_content: Element<'_, Msg> = if settings_tab_active {
-            column![
-                display_section,
-                Space::new().height(12),
-                audio_section,
-                Space::new().height(12),
-                game_section,
-            ].spacing(0).into()
+            scrollable(
+                column![
+                    display_section,
+                    Space::new().height(16),
+                    container(Space::new().height(1)).width(Length::Fill)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
+                            ..Default::default()
+                        }),
+                    Space::new().height(16),
+                    audio_section,
+                    Space::new().height(16),
+                    container(Space::new().height(1)).width(Length::Fill)
+                        .style(|_| container::Style {
+                            background: Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
+                            ..Default::default()
+                        }),
+                    Space::new().height(16),
+                    game_section,
+                ].spacing(0)
+            ).height(450).into()
         } else {
             // Tools tab
             let syzygy_section = column![
@@ -1811,7 +1869,22 @@ impl App {
                 ].spacing(8).align_y(Alignment::Center),
                 Space::new().height(4),
                 styled_button("⬇ Download 3-4-5 Piece Tables (~1 GB)", Msg::SyzygyDownload),
-            ].spacing(4);
+            ].spacing(6);
+
+            let nnue_section = column![
+                text("NNUE Networks").size(14).color(ACCENT_TEAL),
+                Space::new().height(4),
+                row![
+                    text("Status:").size(12).color(TEXT_SECONDARY).width(60),
+                    text(&self.nnue_status).size(12).color(TEXT_PRIMARY),
+                ].spacing(8).align_y(Alignment::Center),
+                row![
+                    text("Path:").size(12).color(TEXT_SECONDARY).width(60),
+                    text("./nnue/").size(12).color(TEXT_PRIMARY),
+                ].spacing(8).align_y(Alignment::Center),
+                Space::new().height(4),
+                styled_button("⬇ Download All NNUE Networks", Msg::NnueDownload),
+            ].spacing(6);
 
             let mut tuning_section = column![
                 text("Parameter Tuning").size(14).color(ACCENT_TEAL),
@@ -1866,17 +1939,19 @@ impl App {
                 text("Updates").size(14).color(ACCENT_TEAL),
                 Space::new().height(4),
                 styled_button("Check for Updates", Msg::CheckForUpdates),
-            ].spacing(4);
+            ].spacing(6);
 
             scrollable(
                 column![
                     syzygy_section,
                     Space::new().height(12),
+                    nnue_section,
+                    Space::new().height(12),
                     tuning_section,
                     Space::new().height(12),
                     updates_section,
                 ].spacing(0)
-            ).height(400).into()
+            ).height(450).into()
         };
 
         let modal_content = container(
@@ -1888,7 +1963,7 @@ impl App {
                 tab_content,
                 Space::new().height(16),
                 close_btn,
-            ].spacing(0).align_x(Alignment::Center).width(420),
+            ].spacing(0).align_x(Alignment::Center).width(520),
         ).padding(24)
         .style(|_theme| container::Style {
             background: Some(iced::Background::Color(Color::from_rgba(0.08, 0.08, 0.16, 0.96))),

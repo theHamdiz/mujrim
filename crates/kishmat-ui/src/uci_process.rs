@@ -80,6 +80,33 @@ impl UciProcess {
         }
     }
 
+    /// Switch the NNUE network via UCI `setoption`.
+    /// `path` should be an absolute or relative path to a .nnue or .bin file.
+    pub fn set_network(&mut self, path: &str) -> Result<(), String> {
+        self.send(&format!("setoption name EvalFile value {path}"))?;
+        self.send("isready")?;
+        self.wait_for("readyok")?;
+        Ok(())
+    }
+
+    /// Set a UCI option (generic).
+    pub fn set_option(&mut self, name: &str, value: &str) -> Result<(), String> {
+        self.send(&format!("setoption name {name} value {value}"))?;
+        self.send("isready")?;
+        self.wait_for("readyok")?;
+        Ok(())
+    }
+
+    /// Set the number of search threads.
+    pub fn set_threads(&mut self, threads: usize) -> Result<(), String> {
+        self.set_option("Threads", &threads.to_string())
+    }
+
+    /// Set the hash table size in MB.
+    pub fn set_hash(&mut self, mb: usize) -> Result<(), String> {
+        self.set_option("Hash", &mb.to_string())
+    }
+
     /// Sends the quit command and kills the process.
     pub fn quit(&mut self) {
         let _ = self.send("quit");

@@ -20,10 +20,13 @@ const QA: i16 = 255;
 /// (once for each perspective).
 #[inline(always)]
 pub fn flatten(acc: &[i16; HIDDEN], weights: &[i16; HIDDEN]) -> i32 {
-    #[cfg(target_feature = "avx2")]
-    unsafe { avx2::flatten(acc, weights) }
+    #[cfg(all(feature = "simd", target_feature = "avx2"))]
+    unsafe { return avx2::flatten(acc, weights); }
 
-    #[cfg(not(target_feature = "avx2"))]
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    unsafe { return neon::flatten(acc, weights); }
+
+    #[allow(unreachable_code)]
     scalar::flatten(acc, weights)
 }
 
@@ -36,10 +39,13 @@ pub fn vector_update(
     adds: &[usize],
     subs: &[usize],
 ) {
-    #[cfg(target_feature = "avx2")]
-    unsafe { avx2::vector_update(acc, all_weights, adds, subs) }
+    #[cfg(all(feature = "simd", target_feature = "avx2"))]
+    unsafe { return avx2::vector_update(acc, all_weights, adds, subs); }
 
-    #[cfg(not(target_feature = "avx2"))]
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    unsafe { return neon::vector_update(acc, all_weights, adds, subs); }
+
+    #[allow(unreachable_code)]
     scalar::vector_update(acc, all_weights, adds, subs)
 }
 
@@ -47,10 +53,13 @@ pub fn vector_update(
 /// Simpler than `vector_update` — no index multiplication overhead.
 #[inline]
 pub fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
-    #[cfg(target_feature = "avx2")]
-    unsafe { avx2::vector_add(dst, src) }
+    #[cfg(all(feature = "simd", target_feature = "avx2"))]
+    unsafe { return avx2::vector_add(dst, src); }
 
-    #[cfg(not(target_feature = "avx2"))]
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    unsafe { return neon::vector_add(dst, src); }
+
+    #[allow(unreachable_code)]
     scalar::vector_add(dst, src)
 }
 
@@ -58,10 +67,13 @@ pub fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
 /// Used for removing features in incremental accumulator updates.
 #[inline]
 pub fn vector_sub(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
-    #[cfg(target_feature = "avx2")]
-    unsafe { avx2::vector_sub(dst, src) }
+    #[cfg(all(feature = "simd", target_feature = "avx2"))]
+    unsafe { return avx2::vector_sub(dst, src); }
 
-    #[cfg(not(target_feature = "avx2"))]
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    unsafe { return neon::vector_sub(dst, src); }
+
+    #[allow(unreachable_code)]
     scalar::vector_sub(dst, src)
 }
 
@@ -155,7 +167,7 @@ mod scalar {
 // AVX2 implementation (x86_64 with -C target-feature=+avx2)
 // ═══════════════════════════════════════════════════════════════════
 
-#[cfg(target_feature = "avx2")]
+#[cfg(all(feature = "simd", target_feature = "avx2"))]
 mod avx2 {
     #![allow(clippy::undocumented_unsafe_blocks)]
     use super::*;
@@ -249,6 +261,113 @@ mod avx2 {
             let upper_32 = _mm_shuffle_epi32::<0b00_00_00_01>(sum_64);
             let sum_32 = _mm_add_epi32(upper_32, sum_64);
             _mm_cvtsi128_si32(sum_32)
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// NEON implementation (aarch64 — Apple Silicon, ARM64 Linux)
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+#[allow(dead_code)]
+mod neon {
+    #![allow(clippy::undocumented_unsafe_blocks)]
+    use super::*;
+    use std::arch::aarch64::*;
+
+    /// Number of i16 values per NEON register (128-bit).
+    const CHUNK: usize = 8;
+
+    /// NEON SCReLU flatten: processes 8 i16 values at a time.
+    /// Formula: sum(clamp(acc[i], 0, QA)² × weights[i])
+    #[inline]
+    pub unsafe fn flatten(acc: &[i16; HIDDEN], weights: &[i16; HIDDEN]) -> i32 {
+        unsafe {
+            let mut sum0 = vdupq_n_s32(0);
+            let mut sum1 = vdupq_n_s32(0);
+            let min = vdupq_n_s16(0);
+            let max = vdupq_n_s16(QA);
+
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                // Load 8 accumulator values and clamp to [0, QA]
+                let v_raw = vld1q_s16(acc.as_ptr().add(i));
+                let v = vminq_s16(vmaxq_s16(v_raw, min), max);
+
+                // Load 8 weights
+                let w = vld1q_s16(weights.as_ptr().add(i));
+
+                // Compute v * w (element-wise i16 multiply, keeping low 16 bits)
+                let vw = vmulq_s16(v, w);
+
+                // Widening multiply-accumulate: v * vw → i32
+                // Low half: multiply low 4 × i16 pairs, accumulate into i32
+                let v_lo = vget_low_s16(v);
+                let vw_lo = vget_low_s16(vw);
+                sum0 = vmlal_s16(sum0, v_lo, vw_lo);
+
+                // High half
+                let v_hi = vget_high_s16(v);
+                let vw_hi = vget_high_s16(vw);
+                sum1 = vmlal_s16(sum1, v_hi, vw_hi);
+            }
+
+            // Combine the two accumulators
+            let total = vaddq_s32(sum0, sum1);
+            // Horizontal sum: 4 × i32 → scalar
+            vaddvq_s32(total)
+        }
+    }
+
+    /// NEON accumulator add: dst[i] += src[i].
+    pub unsafe fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let d = vld1q_s16(dst.as_ptr().add(i));
+                let s = vld1q_s16(src.as_ptr().add(i));
+                let r = vaddq_s16(d, s);
+                vst1q_s16(dst.as_mut_ptr().add(i), r);
+            }
+        }
+    }
+
+    /// NEON accumulator sub: dst[i] -= src[i].
+    pub unsafe fn vector_sub(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let d = vld1q_s16(dst.as_ptr().add(i));
+                let s = vld1q_s16(src.as_ptr().add(i));
+                let r = vsubq_s16(d, s);
+                vst1q_s16(dst.as_mut_ptr().add(i), r);
+            }
+        }
+    }
+
+    /// NEON accumulator update: add/subtract weight rows using 128-bit ops.
+    pub unsafe fn vector_update(
+        acc: &mut [i16; HIDDEN],
+        all_weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let mut v = vld1q_s16(acc.as_ptr().add(i));
+
+                for &add_idx in adds {
+                    let offset = add_idx * HIDDEN + i;
+                    let w = vld1q_s16(all_weights.as_ptr().add(offset));
+                    v = vqaddq_s16(v, w); // saturating add
+                }
+
+                for &sub_idx in subs {
+                    let offset = sub_idx * HIDDEN + i;
+                    let w = vld1q_s16(all_weights.as_ptr().add(offset));
+                    v = vqsubq_s16(v, w); // saturating sub
+                }
+
+                vst1q_s16(acc.as_mut_ptr().add(i), v);
+            }
         }
     }
 }

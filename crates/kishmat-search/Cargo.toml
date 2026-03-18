@@ -6,6 +6,11 @@ authors = ["Ahmad Hamdi Emara"]
 description = "Search engine for the Kishmat chess engine"
 license = "MIT"
 
+[features]
+default = ["book", "nnue"]
+book = []
+nnue = ["eval/nnue"]
+
 [dependencies]
 types = { package = "kishmat-types", path = "../kishmat-types" }
 eval = { package = "kishmat-eval", path = "../kishmat-eval" }

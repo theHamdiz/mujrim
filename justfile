@@ -214,6 +214,226 @@ check:
     cargo check --workspace
 
 # ──────────────────────────────────────────────────────────────
+# NNUE Network Adapter Variants
+# ──────────────────────────────────────────────────────────────
+
+# Build with ALL NNUE adapters (Akimbo + Stockfish) — default
+build-full:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🧠 Building with all NNUE adapters (Akimbo + Stockfish)..."
+    RUSTFLAGS="-C target-cpu=native" cargo build --release
+    echo "✅ Full build complete: target/release/kishmat"
+
+# Build with Akimbo-family adapter only (no Stockfish .nnue support)
+build-akimbo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🧠 Building with Akimbo NNUE adapter only..."
+    RUSTFLAGS="-C target-cpu=native" cargo build --release --no-default-features \
+        --features "mimalloc,trainer,gpu,xboard,book,nnue,simd,akimbo-nnue"
+    echo "✅ Akimbo-only build complete: target/release/kishmat"
+
+# Build with Stockfish adapter only (no external Akimbo loader)
+build-stockfish:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🧠 Building with Stockfish NNUE adapter only..."
+    RUSTFLAGS="-C target-cpu=native" cargo build --release --no-default-features \
+        --features "mimalloc,trainer,gpu,xboard,book,nnue,simd,stockfish-nnue"
+    echo "✅ Stockfish-only build complete: target/release/kishmat"
+
+# Build with embedded NNUE only (no external network loading)
+build-embedded:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🧠 Building with embedded NNUE only (no adapters)..."
+    RUSTFLAGS="-C target-cpu=native" cargo build --release --no-default-features \
+        --features "mimalloc,trainer,gpu,xboard,book,nnue,simd"
+    echo "✅ Embedded-only build complete: target/release/kishmat"
+
+# Build minimal engine (no book, no adapters, no GUI extras)
+build-minimal:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🧠 Building minimal engine (NNUE only, no adapters/book)..."
+    RUSTFLAGS="-C target-cpu=native" cargo build --release -p kishmat --no-default-features \
+        --features "nnue,simd"
+    echo "✅ Minimal build complete: target/release/kishmat"
+
+# List all available NNUE build variants
+build-variants:
+    @echo "Available NNUE build variants:"
+    @echo "  just build-full       — All adapters (Akimbo + Stockfish) [default]"
+    @echo "  just build-akimbo     — Akimbo-family adapter only"
+    @echo "  just build-stockfish  — Stockfish .nnue adapter only"
+    @echo "  just build-embedded   — Embedded net only (no external loading)"
+    @echo "  just build-minimal    — Minimal engine (no book, no adapters)"
+    @echo ""
+    @echo "Network management:"
+    @echo "  just nets             — Download ALL latest networks"
+    @echo "  just net-stockfish    — Download latest Stockfish networks"
+    @echo "  just net-akimbo       — Download latest Akimbo network"
+    @echo "  just net-viridithas   — Download latest Viridithas network"
+    @echo "  just net-status       — Show downloaded networks"
+    @echo ""
+    @echo "Build + bench with specific net:"
+    @echo "  just bench-net <file> — Bench with an external .nnue / .bin network"
+
+# ──────────────────────────────────────────────────────────────
+# NNUE Network Downloads
+# Download latest networks from top open-source engines.
+# All networks are saved to crates/kishmat-eval/resources/
+# and excluded from Git via .gitignore.
+# ──────────────────────────────────────────────────────────────
+
+# Directory for all downloaded networks
+nets_dir := "crates/kishmat-eval/resources"
+
+# Download ALL latest NNUE networks from supported engines
+nets: net-stockfish net-akimbo net-viridithas
+    #!/usr/bin/env bash
+    echo ""
+    echo "✅ All networks downloaded!"
+    just net-status
+
+# Download latest Stockfish NNUE networks (big + small)
+net-stockfish:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR="{{nets_dir}}"
+    mkdir -p "$DIR"
+    echo "🐟 Downloading Stockfish 18 networks..."
+
+    # Get net names from Stockfish sf_18 release tag (evaluate.h)
+    EVAL_H=$(curl -sL "https://raw.githubusercontent.com/official-stockfish/Stockfish/sf_18/src/evaluate.h")
+    BIG=$(echo "$EVAL_H" | grep -o 'nn-[a-f0-9]\{12\}\.nnue' | head -1)
+    SMALL=$(echo "$EVAL_H" | grep -o 'nn-[a-f0-9]\{12\}\.nnue' | tail -1)
+
+    if [ -z "$BIG" ]; then
+        echo "  ⚠️  Could not detect Stockfish big net name. Using fallback."
+        BIG="nn-c288c895ea92.nnue"
+    fi
+
+    # Download big net
+    if [ -f "$DIR/$BIG" ]; then
+        echo "  ✓ $BIG already exists ($(du -h "$DIR/$BIG" | cut -f1))"
+    else
+        echo "  → Downloading $BIG..."
+        curl -sL -o "$DIR/$BIG" "https://tests.stockfishchess.org/api/nn/$BIG"
+        echo "  ✓ $BIG ($(du -h "$DIR/$BIG" | cut -f1))"
+    fi
+
+    # Download small net (if different from big)
+    if [ -n "$SMALL" ] && [ "$SMALL" != "$BIG" ]; then
+        if [ -f "$DIR/$SMALL" ]; then
+            echo "  ✓ $SMALL already exists ($(du -h "$DIR/$SMALL" | cut -f1))"
+        else
+            echo "  → Downloading $SMALL..."
+            curl -sL -o "$DIR/$SMALL" "https://tests.stockfishchess.org/api/nn/$SMALL"
+            echo "  ✓ $SMALL ($(du -h "$DIR/$SMALL" | cut -f1))"
+        fi
+    fi
+
+# Download latest Akimbo NNUE network
+net-akimbo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR="{{nets_dir}}"
+    mkdir -p "$DIR"
+    echo "🎯 Downloading Akimbo network (latest release)..."
+
+    # Try GitHub releases API for jw1912/akimbo
+    URL=$(curl -sL "https://api.github.com/repos/jw1912/akimbo/releases/latest" \
+          | grep -o '"browser_download_url":\s*"[^"]*net\.bin"' \
+          | head -1 \
+          | sed 's/.*"browser_download_url":\s*"//' | sed 's/"$//')
+
+    if [ -n "$URL" ]; then
+        FNAME="akimbo-latest.bin"
+        echo "  → Downloading from: $URL"
+        curl -sL -o "$DIR/$FNAME" "$URL"
+        echo "  ✓ $FNAME ($(du -h "$DIR/$FNAME" | cut -f1))"
+    else
+        echo "  ℹ️  No standalone net.bin in Akimbo releases."
+        echo "     The embedded net.bin (6MB, 768→1024×2→1) is already compiled in."
+        if [ -f "$DIR/net.bin" ]; then
+            echo "  ✓ net.bin already present ($(du -h "$DIR/net.bin" | cut -f1))"
+        fi
+    fi
+
+# Download latest Viridithas NNUE network
+net-viridithas:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR="{{nets_dir}}"
+    mkdir -p "$DIR"
+    echo "🔮 Downloading Viridithas network (latest release)..."
+
+    # Get download URL from GitHub releases API
+    URL=$(curl -sL "https://api.github.com/repos/cosmobobak/viridithas-networks/releases/latest" \
+          | grep -o '"browser_download_url":\s*"[^"]*"' \
+          | head -1 \
+          | sed 's/"browser_download_url":\s*"//' | sed 's/"$//')
+
+    if [ -z "$URL" ]; then
+        echo "  ⚠️  Could not find Viridithas network release."
+        exit 0
+    fi
+
+    FNAME=$(basename "$URL")
+    echo "  → Downloading $FNAME..."
+    curl -sL -o "$DIR/$FNAME" "$URL"
+
+    # Decompress if .zst
+    if echo "$FNAME" | grep -q '\.zst$'; then
+        if command -v zstd &>/dev/null; then
+            echo "  → Decompressing $FNAME..."
+            zstd -d --rm -f "$DIR/$FNAME" 2>/dev/null
+            DECOMPRESSED="${FNAME%.zst}"
+            echo "  ✓ $DECOMPRESSED ($(du -h "$DIR/$DECOMPRESSED" | cut -f1))"
+        else
+            echo "  ⚠️  Install zstd to decompress: brew install zstd"
+            echo "  ✓ $FNAME (compressed, $(du -h "$DIR/$FNAME" | cut -f1))"
+        fi
+    else
+        echo "  ✓ $FNAME ($(du -h "$DIR/$FNAME" | cut -f1))"
+    fi
+
+# Show all downloaded NNUE networks
+net-status:
+    #!/usr/bin/env bash
+    DIR="{{nets_dir}}"
+    echo "📦 NNUE Networks in $DIR:"
+    echo ""
+    if [ -d "$DIR" ]; then
+        for f in "$DIR"/*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            size=$(du -h "$f" | cut -f1)
+            case "$name" in
+                nn-*.nnue)  engine="Stockfish" ;;
+                net.bin)    engine="Akimbo (embedded)" ;;
+                akimbo*)    engine="Akimbo (external)" ;;
+                viridithas*)engine="Viridithas" ;;
+                *.nnue*)    engine="NNUE" ;;
+                *.bin)      engine="Binary" ;;
+                *)          engine="Unknown" ;;
+            esac
+            printf "  %-40s %8s  [%s]\n" "$name" "$size" "$engine"
+        done
+    else
+        echo "  (no networks directory)"
+    fi
+
+# Benchmark with a specific external network file
+bench-net net_path depth="12":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🧪 Benchmarking with network: {{net_path}}"
+    RUSTFLAGS="-C target-cpu=native" cargo run --release -- bench -d {{depth}} --net "{{net_path}}"
+
+# ──────────────────────────────────────────────────────────────
 # Install KishMat — bundles everything into a single package
 # Book + NNUE network are compiled into the binary (fastest: direct memory access)
 # - macOS:   .app bundle in ~/Applications with CLI engine + updater

@@ -22,17 +22,29 @@ members = [
     "crates/kishmat-trainer",
 ]
 
+[features]
+default = ["mimalloc", "trainer", "gpu", "xboard", "book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue"]
+mimalloc = ["dep:mimalloc"]
+trainer = ["dep:trainer"]
+gpu = ["dep:gpu"]
+xboard = ["comms/xboard"]
+book = ["comms/book"]
+nnue = ["comms/nnue"]
+simd = ["eval/simd"]
+akimbo-nnue = ["eval/akimbo-nnue"]
+stockfish-nnue = ["eval/stockfish-nnue"]
+
 [dependencies]
 clap = "4.6"
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # Workspace crates — `package` rename lets source code keep short `use` names
 types = { package = "kishmat-types", path = "crates/kishmat-types" }
 comms = { package = "kishmat-comms", path = "crates/kishmat-comms" }
 search = { package = "kishmat-search", path = "crates/kishmat-search" }
 eval = { package = "kishmat-eval", path = "crates/kishmat-eval" }
-gpu = { package = "kishmat-gpu", path = "crates/kishmat-gpu" }
-trainer = { package = "kishmat-trainer", path = "crates/kishmat-trainer" }
+gpu = { package = "kishmat-gpu", path = "crates/kishmat-gpu", optional = true }
+trainer = { package = "kishmat-trainer", path = "crates/kishmat-trainer", optional = true }
 
 [profile.release]
 opt-level = 3
