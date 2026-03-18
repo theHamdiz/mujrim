@@ -4,52 +4,51 @@
 //! to the current position. It is updated incrementally when pieces move
 //! and refreshed from scratch when the king changes bucket.
 //!
-//! **Performance-critical**: The cache table avoids recomputing accumulators
-//! from scratch when the same king-bucket combination is revisited.
-//! The board's piece bitboards are stored alongside each entry so we can
-//! detect whether the cached accumulator is still valid or needs a refresh.
+//! **Key optimization**: Diff-based incremental updates (à la Akimbo) —
+//! instead of recomputing all 32 piece features from scratch, we only
+//! add/subtract the features that changed between the cached and current
+//! board state. With typical moves changing 2-4 piece bitboard entries,
+//! this is ~10x faster than full recompute.
 
-use super::network::{Accumulator, NUM_BUCKETS, net, get_base_index, get_bucket};
+use super::network::{Accumulator, NUM_BUCKETS, net, get_base_index, get_bucket, forward};
+use types::{Board, Color, Piece};
 
-/// Number of piece bitboards we track: 6 pieces × 2 colors = 12.
+/// Number of bitboards we track for cache comparison.
+/// Layout: [white_occ, black_occ, pawn..king×2] = 14 total.
+/// But simpler: use 12 per-piece bitboards like before.
 const NUM_BBS: usize = 12;
 
+/// SEE piece values used for material scaling (matching Akimbo).
+const SEE_VALS: [i32; 6] = [100, 450, 450, 650, 1250, 0];
+
 /// Board bitmask state for accumulator cache validation.
-/// Tracks which piece configurations have been computed.
 pub struct EvalEntry {
-    /// Snapshot of the board's piece bitboards at the time this entry was computed.
-    /// Layout: [white_pawn, white_knight, ..., white_king, black_pawn, ..., black_king]
+    /// Snapshot of the board's 12 piece bitboards (pieces[2][6]).
     pub bbs: [u64; NUM_BBS],
     pub white: Accumulator,
     pub black: Accumulator,
 }
 
 /// Accumulator cache indexed by [white_king_bucket][black_king_bucket].
-/// This avoids recomputing the accumulator from scratch when the king
-/// hasn't changed bucket — we can just look up the cached state.
 pub struct EvalTable {
     pub table: Box<[[EvalEntry; 2 * NUM_BUCKETS]; 2 * NUM_BUCKETS]>,
 }
 
 impl Default for EvalTable {
     fn default() -> Self {
-        // Allocate zeroed memory and fill with default accumulators
         let mut table: Box<[[EvalEntry; 2 * NUM_BUCKETS]; 2 * NUM_BUCKETS]> =
             unsafe { boxed_and_zeroed() };
-
         for row in table.iter_mut() {
             for entry in row.iter_mut() {
                 entry.white = Accumulator::default();
                 entry.black = Accumulator::default();
-                // bbs are already zeroed — acts as "never computed"
             }
         }
-
         Self { table }
     }
 }
 
-/// NNUE state for use in the search. Wraps the accumulator table.
+/// NNUE state for use in the search.
 pub struct NNUEState {
     pub table: EvalTable,
 }
@@ -61,41 +60,32 @@ impl NNUEState {
         }
     }
 
-    /// Snapshot the board's piece bitboards into a flat array.
+    /// Snapshot the board's piece bitboards: [white_pawn..white_king, black_pawn..black_king].
     #[inline(always)]
-    fn snapshot_bbs(board: &types::Board) -> [u64; NUM_BBS] {
-        use types::{Color, Piece};
+    fn snapshot_bbs(board: &Board) -> [u64; NUM_BBS] {
         [
-            board.piece_bb(Piece::Pawn, Color::White),
-            board.piece_bb(Piece::Knight, Color::White),
-            board.piece_bb(Piece::Bishop, Color::White),
-            board.piece_bb(Piece::Rook, Color::White),
-            board.piece_bb(Piece::Queen, Color::White),
-            board.piece_bb(Piece::King, Color::White),
-            board.piece_bb(Piece::Pawn, Color::Black),
-            board.piece_bb(Piece::Knight, Color::Black),
-            board.piece_bb(Piece::Bishop, Color::Black),
-            board.piece_bb(Piece::Rook, Color::Black),
-            board.piece_bb(Piece::Queen, Color::Black),
-            board.piece_bb(Piece::King, Color::Black),
+            board.pieces[0][0], board.pieces[0][1], board.pieces[0][2],
+            board.pieces[0][3], board.pieces[0][4], board.pieces[0][5],
+            board.pieces[1][0], board.pieces[1][1], board.pieces[1][2],
+            board.pieces[1][3], board.pieces[1][4], board.pieces[1][5],
         ]
     }
 
-    /// Evaluate the position using NNUE accumulators.
-    ///
-    /// Uses a cache keyed by (white_king_bucket, black_king_bucket).
-    /// If the cached bitboard snapshot matches the current board, the
-    /// cached accumulators are reused directly. Otherwise, they are
-    /// recomputed from scratch and the cache is updated.
-    ///
-    /// This is the **critical optimization**: the old code called
-    /// `reinit_from` on every eval, doing ~2048 × 32 i16 additions
-    /// per call. With caching, most calls in the search tree hit the
-    /// cache and cost essentially nothing.
-    pub fn evaluate(&mut self, board: &types::Board) -> i32 {
-        use types::Color;
-        use super::network::forward;
+    /// Material scaling factor (Akimbo: `eval * (700 + mat/32) / 1024`).
+    #[inline(always)]
+    fn material_scale(board: &Board) -> i32 {
+        let knights = (board.pieces[0][Piece::Knight.index()] | board.pieces[1][Piece::Knight.index()]).count_ones() as i32;
+        let bishops = (board.pieces[0][Piece::Bishop.index()] | board.pieces[1][Piece::Bishop.index()]).count_ones() as i32;
+        let rooks   = (board.pieces[0][Piece::Rook.index()]   | board.pieces[1][Piece::Rook.index()]).count_ones() as i32;
+        let queens  = (board.pieces[0][Piece::Queen.index()]  | board.pieces[1][Piece::Queen.index()]).count_ones() as i32;
 
+        let mat = knights * SEE_VALS[1] + bishops * SEE_VALS[2]
+                + rooks * SEE_VALS[3] + queens * SEE_VALS[4];
+        700 + mat / 32
+    }
+
+    /// Evaluate the position using NNUE with incremental accumulator updates.
+    pub fn evaluate(&mut self, board: &Board) -> i32 {
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();
 
@@ -106,9 +96,14 @@ impl NNUEState {
         let entry = &mut self.table.table[wb][bb];
 
         // Check if cached accumulators are still valid
-        if entry.bbs != current_bbs {
-            // Cache miss — full recompute
+        let is_fresh = entry.bbs.iter().all(|&b| b == 0);
+        if is_fresh {
+            // Fresh entry — full compute
             Self::compute_entry(entry, board, w_king, b_king);
+            entry.bbs = current_bbs;
+        } else if entry.bbs != current_bbs {
+            // Diff-based incremental update
+            Self::update_entry_diff(entry, &current_bbs, w_king, b_king);
             entry.bbs = current_bbs;
         }
 
@@ -117,58 +112,98 @@ impl NNUEState {
             Color::White => (&entry.white, &entry.black),
             Color::Black => (&entry.black, &entry.white),
         };
-        forward(boys, opps)
+        let raw = forward(boys, opps);
+
+        // Material scaling (Akimbo: eval * (700 + mat/32) / 1024)
+        let scale = Self::material_scale(board);
+        raw * scale / 1024
+    }
+
+    /// Incremental diff-based update: find bitboard differences and add/sub features.
+    fn update_entry_diff(entry: &mut EvalEntry, new_bbs: &[u64; NUM_BBS], w_king: usize, b_king: usize) {
+        let old_bbs = entry.bbs;
+        let net = net();
+
+        let wflip: usize = if w_king % 8 > 3 { 7 } else { 0 };
+        let bflip: usize = if b_king % 8 > 3 { 7 } else { 0 } ^ 56;
+
+        // Our BBS layout: [w_pawn, w_knight, w_bishop, w_rook, w_queen, w_king,
+        //                   b_pawn, b_knight, b_bishop, b_rook, b_queen, b_king]
+        // Index: side_idx * 6 + piece_idx
+        for side_idx in 0..2usize {
+            for piece_idx in 0..6usize {
+                let bb_idx = side_idx * 6 + piece_idx;
+                let old_bb = old_bbs[bb_idx];
+                let new_bb = new_bbs[bb_idx];
+
+                if old_bb == new_bb { continue; } // No change for this piece/color
+
+                let wbase = get_base_index::<0>(side_idx, piece_idx, w_king);
+                let bbase = get_base_index::<1>(side_idx, piece_idx, b_king);
+
+                // Features to add (new but not old)
+                let mut add_diff = new_bb & !old_bb;
+                while add_diff != 0 {
+                    let sq = add_diff.trailing_zeros() as usize;
+                    add_diff &= add_diff - 1;
+
+                    let w_feat = wbase + (sq ^ wflip);
+                    let b_feat = bbase + (sq ^ bflip);
+
+                    super::simd::vector_add(&mut entry.white.vals, &net.feature_weights[w_feat].vals);
+                    super::simd::vector_add(&mut entry.black.vals, &net.feature_weights[b_feat].vals);
+                }
+
+                // Features to subtract (old but not new)
+                let mut sub_diff = old_bb & !new_bb;
+                while sub_diff != 0 {
+                    let sq = sub_diff.trailing_zeros() as usize;
+                    sub_diff &= sub_diff - 1;
+
+                    let w_feat = wbase + (sq ^ wflip);
+                    let b_feat = bbase + (sq ^ bflip);
+
+                    super::simd::vector_sub(&mut entry.white.vals, &net.feature_weights[w_feat].vals);
+                    super::simd::vector_sub(&mut entry.black.vals, &net.feature_weights[b_feat].vals);
+                }
+            }
+        }
     }
 
     /// Fully recompute the accumulators from a board position.
-    /// Uses the Board's bitboard interface.
-    pub fn reinit_from(&mut self, board: &types::Board) {
-        use types::Color;
-
+    pub fn reinit_from(&mut self, board: &Board) {
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();
-
         let wb = get_bucket::<0>(w_king);
         let bb = get_bucket::<1>(b_king);
-
         let entry = &mut self.table.table[wb][bb];
         Self::compute_entry(entry, board, w_king, b_king);
         entry.bbs = Self::snapshot_bbs(board);
     }
 
-    /// Compute accumulators for a specific entry (the actual work).
-    fn compute_entry(entry: &mut EvalEntry, board: &types::Board, w_king: usize, b_king: usize) {
-        use types::{Color, Piece};
-
-        // Reset to bias
+    /// Compute accumulators from scratch (the actual work).
+    fn compute_entry(entry: &mut EvalEntry, board: &Board, w_king: usize, b_king: usize) {
         entry.white = Accumulator::default();
         entry.black = Accumulator::default();
 
-        // For each piece on the board, add its feature
-        let pieces = [Piece::Pawn, Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen, Piece::King];
-        let colors = [Color::White, Color::Black];
-
         let net = net();
+        let wflip: usize = if w_king % 8 > 3 { 7 } else { 0 };
+        let bflip: usize = if b_king % 8 > 3 { 7 } else { 0 } ^ 56;
 
-        for (pc_idx, &piece) in pieces.iter().enumerate() {
-            for (side_idx, &color) in colors.iter().enumerate() {
-                let mut bb_pieces = board.piece_bb(piece, color);
+        for side_idx in 0..2usize {
+            for piece_idx in 0..6usize {
+                let mut bb_pieces = board.pieces[side_idx][piece_idx];
                 while bb_pieces != 0 {
                     let sq = bb_pieces.trailing_zeros() as usize;
                     bb_pieces &= bb_pieces - 1;
 
-                    // White perspective feature
-                    let w_base = get_base_index::<0>(side_idx, pc_idx, w_king);
-                    let w_sq = if w_king % 8 > 3 { sq ^ 7 } else { sq };
-                    let w_feat = w_base + w_sq;
-                    add_feature(&mut entry.white, &net.feature_weights[w_feat]);
+                    let w_base = get_base_index::<0>(side_idx, piece_idx, w_king);
+                    let w_feat = w_base + (sq ^ wflip);
+                    super::simd::vector_add(&mut entry.white.vals, &net.feature_weights[w_feat].vals);
 
-                    // Black perspective feature
-                    let b_base = get_base_index::<1>(side_idx, pc_idx, b_king);
-                    let b_sq = sq ^ 56; // Rank flip for black perspective
-                    let b_sq = if (b_king ^ 56) % 8 > 3 { b_sq ^ 7 } else { b_sq };
-                    let b_feat = b_base + b_sq;
-                    add_feature(&mut entry.black, &net.feature_weights[b_feat]);
+                    let b_base = get_base_index::<1>(side_idx, piece_idx, b_king);
+                    let b_feat = b_base + (sq ^ bflip);
+                    super::simd::vector_add(&mut entry.black.vals, &net.feature_weights[b_feat].vals);
                 }
             }
         }
@@ -180,12 +215,6 @@ impl NNUEState {
         let bb = get_bucket::<1>(b_king);
         &self.table.table[wb][bb]
     }
-}
-
-/// Add a feature's weights to an accumulator (SIMD-accelerated).
-#[inline]
-fn add_feature(acc: &mut Accumulator, weights: &Accumulator) {
-    super::simd::vector_add(&mut acc.vals, &weights.vals);
 }
 
 /// Allocate a boxed, zeroed value of any type.
@@ -205,7 +234,6 @@ unsafe fn boxed_and_zeroed<T>() -> Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::Board;
 
     #[test]
     fn test_reinit_no_panic() {
@@ -221,24 +249,19 @@ mod tests {
         let board = Board::new();
         let mut state = NNUEState::new();
         state.reinit_from(&board);
-
-        let w_king = board.king_square(types::Color::White).index();
-        let b_king = board.king_square(types::Color::Black).index();
+        let w_king = board.king_square(Color::White).index();
+        let b_king = board.king_square(Color::Black).index();
         let entry = state.get_entry(w_king, b_king);
-
-        // After adding piece features, values should not all be zero
         let sum: i64 = entry.white.vals.iter().map(|&v| v as i64).sum();
         assert!(sum != 0, "White accumulator is all zeros after reinit");
     }
 
     #[test]
-    fn test_evaluate_returns_nonzero() {
+    fn test_evaluate_returns_reasonable() {
         types::init();
         let board = Board::new();
         let mut state = NNUEState::new();
-        // evaluate should work and return a reasonable value
         let score = state.evaluate(&board);
-        // Starting position should be relatively equal (within ±200cp)
         assert!(score.abs() < 200, "Starting position eval {score} seems unreasonable");
     }
 
@@ -249,7 +272,6 @@ mod tests {
         let mut state = NNUEState::new();
         let score1 = state.evaluate(&board);
         let score2 = state.evaluate(&board);
-        // Same position should return same score (cache hit)
         assert_eq!(score1, score2, "Cached evaluation should be identical");
     }
 
@@ -261,7 +283,35 @@ mod tests {
         let mut state = NNUEState::new();
         let score1 = state.evaluate(&board1);
         let score2 = state.evaluate(&board2);
-        // Missing black queen should give white a big advantage
         assert!(score2 > score1, "Missing queen should increase eval: start={score1}, missing_q={score2}");
+    }
+
+    #[test]
+    fn test_material_scaling() {
+        types::init();
+        let mg = Board::new();
+        let eg = Board::from_fen("4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1").unwrap();
+        let mg_scale = NNUEState::material_scale(&mg);
+        let eg_scale = NNUEState::material_scale(&eg);
+        assert!(mg_scale > eg_scale, "Middlegame should have higher scale: mg={mg_scale}, eg={eg_scale}");
+    }
+
+    #[test]
+    fn test_incremental_update_consistency() {
+        types::init();
+        let board1 = Board::new();
+        let board2 = Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1").unwrap();
+
+        // Method 1: Evaluate board1 first (populates cache), then board2 (incremental diff)
+        let mut state1 = NNUEState::new();
+        let _ = state1.evaluate(&board1);
+        let score_incremental = state1.evaluate(&board2);
+
+        // Method 2: Evaluate board2 from scratch (fresh state)
+        let mut state2 = NNUEState::new();
+        let score_scratch = state2.evaluate(&board2);
+
+        assert_eq!(score_incremental, score_scratch,
+            "Incremental ({score_incremental}) vs scratch ({score_scratch}) mismatch");
     }
 }

@@ -459,7 +459,6 @@ impl SearchEngine {
 
                     if s <= alpha {
                         alpha = (s - delta).max(-INF);
-                        // Don't widen beta on fail-low — keep asymmetric window
                         delta *= 2;
                     } else if s >= beta {
                         beta = (s + delta).min(INF);
@@ -1288,8 +1287,22 @@ fn quiescence(
         return best_score;
     }
 
-    // ── Fail-soft stand-pat using hybrid eval ──
-    let stand_pat = hybrid_eval(board, &mut state.nnue_state);
+    // ── Fail-soft stand-pat using hybrid eval + correction history ──
+    let raw_eval = hybrid_eval(board, &mut state.nnue_state);
+    let corr = state.correction(board);
+    let mut stand_pat = raw_eval + corr;
+
+    // TT score adjustment in QS (Akimbo technique):
+    // Use TT score to refine stand-pat when TT bound agrees with direction.
+    if let Some(entry) = tt.probe(board.hash) {
+        let tt_sc = entry.score;
+        match entry.node_type {
+            NodeType::Exact => stand_pat = tt_sc,
+            NodeType::LowerBound => { if tt_sc > stand_pat { stand_pat = tt_sc; } }
+            NodeType::UpperBound => { if tt_sc < stand_pat { stand_pat = tt_sc; } }
+        }
+    }
+
     let mut best_score = stand_pat;
 
     if stand_pat >= beta { return best_score; }

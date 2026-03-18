@@ -54,6 +54,17 @@ pub fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
     scalar::vector_add(dst, src)
 }
 
+/// Subtract src weights from dst accumulator: dst[i] -= src[i].
+/// Used for removing features in incremental accumulator updates.
+#[inline]
+pub fn vector_sub(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+    #[cfg(target_feature = "avx2")]
+    unsafe { avx2::vector_sub(dst, src) }
+
+    #[cfg(not(target_feature = "avx2"))]
+    scalar::vector_sub(dst, src)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Scalar fallback (works on all platforms)
 // ═══════════════════════════════════════════════════════════════════
@@ -85,6 +96,16 @@ mod scalar {
         for chunk_start in (0..HIDDEN).step_by(CHUNK) {
             for j in 0..CHUNK {
                 dst[chunk_start + j] = dst[chunk_start + j].wrapping_add(src[chunk_start + j]);
+            }
+        }
+    }
+
+    /// Scalar accumulator sub: dst[i] -= src[i].
+    pub fn vector_sub(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        const CHUNK: usize = 16;
+        for chunk_start in (0..HIDDEN).step_by(CHUNK) {
+            for j in 0..CHUNK {
+                dst[chunk_start + j] = dst[chunk_start + j].wrapping_sub(src[chunk_start + j]);
             }
         }
     }
@@ -171,6 +192,18 @@ mod avx2 {
                 let d = _mm256_loadu_si256(dst.as_ptr().add(i).cast());
                 let s = _mm256_loadu_si256(src.as_ptr().add(i).cast());
                 let r = _mm256_add_epi16(d, s);
+                _mm256_storeu_si256(dst.as_mut_ptr().add(i).cast(), r);
+            }
+        }
+    }
+
+    /// AVX2 accumulator sub: dst[i] -= src[i].
+    pub unsafe fn vector_sub(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let d = _mm256_loadu_si256(dst.as_ptr().add(i).cast());
+                let s = _mm256_loadu_si256(src.as_ptr().add(i).cast());
+                let r = _mm256_sub_epi16(d, s);
                 _mm256_storeu_si256(dst.as_mut_ptr().add(i).cast(), r);
             }
         }
