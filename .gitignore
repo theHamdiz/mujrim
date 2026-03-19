@@ -33,4 +33,5 @@ crates/kishmat-eval/resources/stockfish-*.nnue
 crates/kishmat-eval/resources/viridithas-*
 
 # SPRT test results
-sprt/results.pgndist/
+sprt/results.pgn
+dist/
