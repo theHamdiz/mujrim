@@ -96,15 +96,18 @@ pub fn find_network(query: &str) -> Option<&'static NnueNetwork> {
     let q = query.to_lowercase();
     NETWORKS.iter().find(|n| {
         n.filename.to_lowercase() == q
-        || n.name.to_lowercase().contains(&q)
-        || n.engine.to_lowercase() == q
+            || n.name.to_lowercase().contains(&q)
+            || n.engine.to_lowercase() == q
     })
 }
 
 /// Find all networks from a given engine.
 pub fn find_by_engine(engine: &str) -> Vec<&'static NnueNetwork> {
     let e = engine.to_lowercase();
-    NETWORKS.iter().filter(|n| n.engine.to_lowercase() == e).collect()
+    NETWORKS
+        .iter()
+        .filter(|n| n.engine.to_lowercase() == e)
+        .collect()
 }
 
 /// Get the resources directory (for compile-time embedded nets).
@@ -147,7 +150,10 @@ pub fn download_network(
     }
 
     if let Some(cb) = progress {
-        cb(network.filename, DownloadStatus::Downloading(network.approx_size));
+        cb(
+            network.filename,
+            DownloadStatus::Downloading(network.approx_size),
+        );
     }
 
     let client = reqwest::blocking::Client::builder()
@@ -176,7 +182,7 @@ pub fn download_all(
         .map_err(|e| format!("Failed to create directory {}: {e}", dest_dir.display()))?;
 
     let mut downloaded = 0usize;
-    let mut skipped = 0usize;
+    let skipped = 0usize;
     let mut failed = 0usize;
 
     for network in NETWORKS {
@@ -208,45 +214,52 @@ pub fn download_all(
 
 /// Check which networks are installed in a directory.
 pub fn check_installed(dir: &Path) -> Vec<(&'static NnueNetwork, bool)> {
-    NETWORKS.iter()
+    NETWORKS
+        .iter()
         .map(|net| (net, dir.join(net.filename).exists()))
         .collect()
 }
 
 /// Get the total disk usage of the NNUE directory.
 pub fn disk_usage(dir: &Path) -> u64 {
-    if !dir.exists() { return 0; }
+    if !dir.exists() {
+        return 0;
+    }
     fs::read_dir(dir)
-        .map(|r| r.filter_map(|e| e.ok())
-            .filter_map(|e| e.metadata().ok())
-            .map(|m| m.len())
-            .sum())
+        .map(|r| {
+            r.filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
         .unwrap_or(0)
 }
 
 /// List network files in a directory (not just known ones).
 pub fn list_network_files(dir: &Path) -> Vec<(String, u64)> {
-    if !dir.exists() { return Vec::new(); }
+    if !dir.exists() {
+        return Vec::new();
+    }
     fs::read_dir(dir)
-        .map(|r| r.filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.ends_with(".bin") || name.ends_with(".nnue")
-            })
-            .filter_map(|e| {
-                let size = e.metadata().ok()?.len();
-                Some((e.file_name().to_string_lossy().to_string(), size))
-            })
-            .collect())
+        .map(|r| {
+            r.filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.ends_with(".bin") || name.ends_with(".nnue")
+                })
+                .filter_map(|e| {
+                    let size = e.metadata().ok()?.len();
+                    Some((e.file_name().to_string_lossy().to_string(), size))
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-fn download_file(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    dest: &Path,
-) -> Result<(), String> {
-    let mut response = client.get(url).send()
+fn download_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<(), String> {
+    let mut response = client
+        .get(url)
+        .send()
         .map_err(|e| format!("Request failed for {url}: {e}"))?;
 
     if !response.status().is_success() {
@@ -255,19 +268,22 @@ fn download_file(
 
     // Write to a temp file first, then rename (atomic-ish)
     let temp_path = dest.with_extension("tmp");
-    let mut file = fs::File::create(&temp_path)
-        .map_err(|e| format!("Create file: {e}"))?;
+    let mut file = fs::File::create(&temp_path).map_err(|e| format!("Create file: {e}"))?;
 
     let mut buffer = [0u8; 65536];
     loop {
-        let n = response.read(&mut buffer).map_err(|e| format!("Read: {e}"))?;
-        if n == 0 { break; }
-        file.write_all(&buffer[..n]).map_err(|e| format!("Write: {e}"))?;
+        let n = response
+            .read(&mut buffer)
+            .map_err(|e| format!("Read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])
+            .map_err(|e| format!("Write: {e}"))?;
     }
 
     // Rename temp to final destination
-    fs::rename(&temp_path, dest)
-        .map_err(|e| format!("Rename {}: {e}", dest.display()))?;
+    fs::rename(&temp_path, dest).map_err(|e| format!("Rename {}: {e}", dest.display()))?;
 
     Ok(())
 }
@@ -298,7 +314,11 @@ mod tests {
         let mut names: Vec<&str> = NETWORKS.iter().map(|n| n.filename).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), NETWORKS.len(), "Duplicate filenames in NETWORKS");
+        assert_eq!(
+            names.len(),
+            NETWORKS.len(),
+            "Duplicate filenames in NETWORKS"
+        );
     }
 
     #[test]

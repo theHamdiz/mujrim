@@ -62,7 +62,10 @@ impl GameState {
     pub fn try_move(&mut self, target: Square) -> Option<types::Move> {
         let from = self.selected_square?;
         let legal = self.board.generate_legal_moves();
-        let mv = legal.iter().find(|m| m.from == from && m.to == target).copied()?;
+        let mv = legal
+            .iter()
+            .find(|m| m.from == from && m.to == target)
+            .copied()?;
 
         self.last_move_squares = vec![mv.from, mv.to];
         self.board.make_move(mv);

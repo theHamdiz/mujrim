@@ -11,5 +11,5 @@
 //! kishmat train bench --net net.bin
 //! ```
 
-pub mod datagen;
 pub mod config;
+pub mod datagen;

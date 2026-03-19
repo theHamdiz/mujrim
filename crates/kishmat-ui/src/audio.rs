@@ -74,17 +74,17 @@ impl SoundEngine {
 
     pub fn play_move(&self) {
         if let Ok(source) = rodio::Decoder::new(Cursor::new(self.move_sound.clone())) {
-            let _ = self.stream_handle.play_raw(
-                rodio::source::Source::convert_samples(source),
-            );
+            let _ = self
+                .stream_handle
+                .play_raw(rodio::source::Source::convert_samples(source));
         }
     }
 
     pub fn play_capture(&self) {
         if let Ok(source) = rodio::Decoder::new(Cursor::new(self.capture_sound.clone())) {
-            let _ = self.stream_handle.play_raw(
-                rodio::source::Source::convert_samples(source),
-            );
+            let _ = self
+                .stream_handle
+                .play_raw(rodio::source::Source::convert_samples(source));
         }
     }
 
@@ -123,7 +123,9 @@ impl SoundEngine {
     }
 
     pub fn is_bgm_playing(&self) -> bool {
-        self.bgm_sink.as_ref().is_some_and(|s| !s.is_paused() && !s.empty())
+        self.bgm_sink
+            .as_ref()
+            .is_some_and(|s| !s.is_paused() && !s.empty())
     }
 
     pub fn toggle_bgm(&mut self, preferred_track: BgmTrack) -> bool {
@@ -186,7 +188,9 @@ fn generate_capture_wav() -> Vec<u8> {
         let noise = if t < 0.010 {
             rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
             ((rng >> 16) as f64 / 32768.0 - 1.0) * 0.5
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let env = (-t / 0.012).exp();
         s.push(((tone + tone2 + noise) * env * 0.7 * 32767.0) as i16);
     }
@@ -225,8 +229,11 @@ fn generate_menu_bgm() -> Vec<u8> {
 
         let mut mix = drone + note + shimmer + pad;
         let fd = 0.5;
-        if t < fd { mix *= t / fd; }
-        else if t > dur - fd { mix *= (dur - t) / fd; }
+        if t < fd {
+            mix *= t / fd;
+        } else if t > dur - fd {
+            mix *= (dur - t) / fd;
+        }
 
         s.push((mix * 32767.0).clamp(-32767.0, 32767.0) as i16);
     }
@@ -273,12 +280,17 @@ fn generate_game_playful() -> Vec<u8> {
         let shaker = if beat_phase < 0.05 {
             let pseudo = ((t * 43758.5453).sin() * 2.0).fract();
             pseudo * 0.02 * (1.0 - beat_phase / 0.05)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let mut mix = bass + note + bright + shaker;
         let fd = 0.8;
-        if t < fd { mix *= t / fd; }
-        else if t > dur - fd { mix *= (dur - t) / fd; }
+        if t < fd {
+            mix *= t / fd;
+        } else if t > dur - fd {
+            mix *= (dur - t) / fd;
+        }
 
         s.push((mix * 32767.0).clamp(-32767.0, 32767.0) as i16);
     }
@@ -314,7 +326,9 @@ fn generate_game_joyful() -> Vec<u8> {
         let pad_att = (cross_t / 0.3).min(1.0);
         let pad_dec = if cross_t > chord_dur - 0.3 {
             (chord_dur - cross_t) / 0.3
-        } else { 1.0 };
+        } else {
+            1.0
+        };
         let pad_env = pad_att * pad_dec;
 
         let mut chord_sum = 0.0_f64;
@@ -337,8 +351,11 @@ fn generate_game_joyful() -> Vec<u8> {
 
         let mut mix = pad + arp + sub;
         let fd = 1.0;
-        if t < fd { mix *= t / fd; }
-        else if t > dur - fd { mix *= (dur - t) / fd; }
+        if t < fd {
+            mix *= t / fd;
+        } else if t > dur - fd {
+            mix *= (dur - t) / fd;
+        }
 
         s.push((mix * 32767.0).clamp(-32767.0, 32767.0) as i16);
     }
@@ -375,7 +392,9 @@ fn generate_game_mystique() -> Vec<u8> {
         let ghost_att = (ghost_t / 0.1).min(1.0);
         let ghost_dec = (-ghost_t / 2.0).exp();
         let ghost = (2.0 * std::f64::consts::PI * ghost_freq * 2.0 * t).sin()
-            * 0.03 * ghost_att * ghost_dec;
+            * 0.03
+            * ghost_att
+            * ghost_dec;
 
         // Distant shimmer
         let shim_lfo = (2.0 * std::f64::consts::PI * 0.03 * t).sin().max(0.0);
@@ -383,8 +402,11 @@ fn generate_game_mystique() -> Vec<u8> {
 
         let mut mix = drone + sub + pad + ghost + shimmer;
         let fd = 1.0;
-        if t < fd { mix *= t / fd; }
-        else if t > dur - fd { mix *= (dur - t) / fd; }
+        if t < fd {
+            mix *= t / fd;
+        } else if t > dur - fd {
+            mix *= (dur - t) / fd;
+        }
 
         s.push((mix * 32767.0).clamp(-32767.0, 32767.0) as i16);
     }
@@ -409,7 +431,9 @@ fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     wav.extend_from_slice(&16u16.to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_size.to_le_bytes());
-    for &s in samples { wav.extend_from_slice(&s.to_le_bytes()); }
+    for &s in samples {
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
     wav
 }
 

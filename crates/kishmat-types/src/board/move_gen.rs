@@ -1,11 +1,11 @@
 //! Legal and pseudo-legal move generation.
 
+use super::attack_tables::*;
+use super::{BLACK_KING_CASTLE, BLACK_QUEEN_CASTLE, Board, WHITE_KING_CASTLE, WHITE_QUEEN_CASTLE};
 use crate::bitboard::*;
 use crate::chess_move::{Move, MoveList};
 use crate::piece::{Color, Piece};
 use crate::square::Square;
-use super::attack_tables::*;
-use super::{Board, WHITE_KING_CASTLE, WHITE_QUEEN_CASTLE, BLACK_KING_CASTLE, BLACK_QUEEN_CASTLE};
 
 impl Board {
     /// Returns true if the given square is attacked by the given color.
@@ -14,7 +14,9 @@ impl Board {
         let occ = self.all_occupancy();
 
         // Pawn attacks: check if any opponent pawn attacks this square
-        if pawn_attacks(by_color.opponent().index(), sq_idx) & self.piece_bb(Piece::Pawn, by_color) != 0 {
+        if pawn_attacks(by_color.opponent().index(), sq_idx) & self.piece_bb(Piece::Pawn, by_color)
+            != 0
+        {
             return true;
         }
         // Knight
@@ -27,12 +29,16 @@ impl Board {
         }
         // Bishop / Queen (diagonals)
         let diag = bishop_attacks(sq_idx, occ);
-        if diag & (self.piece_bb(Piece::Bishop, by_color) | self.piece_bb(Piece::Queen, by_color)) != 0 {
+        if diag & (self.piece_bb(Piece::Bishop, by_color) | self.piece_bb(Piece::Queen, by_color))
+            != 0
+        {
             return true;
         }
         // Rook / Queen (lines)
         let lines = rook_attacks(sq_idx, occ);
-        if lines & (self.piece_bb(Piece::Rook, by_color) | self.piece_bb(Piece::Queen, by_color)) != 0 {
+        if lines & (self.piece_bb(Piece::Rook, by_color) | self.piece_bb(Piece::Queen, by_color))
+            != 0
+        {
             return true;
         }
 
@@ -125,7 +131,8 @@ impl Board {
                 if occ & to_bb == 0 {
                     if to.rank() == promo_rank {
                         // Promotion
-                        for promo_piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                        for promo_piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
+                        {
                             moves.push(Move::promotion(from, to, promo_piece));
                         }
                     } else {
@@ -159,10 +166,10 @@ impl Board {
             }
 
             // En passant
-            if let Some(ep_sq) = self.en_passant {
-                if pawn_atk & ep_sq.bitboard() != 0 {
-                    moves.push(Move::en_passant(from, ep_sq));
-                }
+            if let Some(ep_sq) = self.en_passant
+                && pawn_atk & ep_sq.bitboard() != 0
+            {
+                moves.push(Move::en_passant(from, ep_sq));
             }
         }
     }
@@ -262,7 +269,9 @@ impl Board {
 
     fn gen_king_moves(&self, color: Color, moves: &mut MoveList) {
         let king_bb = self.piece_bb(Piece::King, color);
-        if king_bb == 0 { return; }
+        if king_bb == 0 {
+            return;
+        }
         let from_idx = get_lsb(king_bb);
         let from = Square::from_index(from_idx);
         let friendly = self.color_occupancy(color);
@@ -301,7 +310,8 @@ impl Board {
                 }
                 // Queenside: E1 -> C1, need B1/C1/D1 empty, E1/D1/C1 not attacked
                 if self.castling_rights & WHITE_QUEEN_CASTLE != 0 {
-                    let between = Square::B1.bitboard() | Square::C1.bitboard() | Square::D1.bitboard();
+                    let between =
+                        Square::B1.bitboard() | Square::C1.bitboard() | Square::D1.bitboard();
                     if occ & between == 0
                         && !self.is_square_attacked(Square::E1, enemy)
                         && !self.is_square_attacked(Square::D1, enemy)
@@ -323,7 +333,8 @@ impl Board {
                     }
                 }
                 if self.castling_rights & BLACK_QUEEN_CASTLE != 0 {
-                    let between = Square::B8.bitboard() | Square::C8.bitboard() | Square::D8.bitboard();
+                    let between =
+                        Square::B8.bitboard() | Square::C8.bitboard() | Square::D8.bitboard();
                     if occ & between == 0
                         && !self.is_square_attacked(Square::E8, enemy)
                         && !self.is_square_attacked(Square::D8, enemy)
@@ -360,10 +371,10 @@ impl Board {
             }
 
             // En passant
-            if let Some(ep_sq) = self.en_passant {
-                if pawn_atk & ep_sq.bitboard() != 0 {
-                    moves.push(Move::en_passant(from, ep_sq));
-                }
+            if let Some(ep_sq) = self.en_passant
+                && pawn_atk & ep_sq.bitboard() != 0
+            {
+                moves.push(Move::en_passant(from, ep_sq));
             }
 
             // Non-capture promotions (also tactical)
@@ -415,7 +426,9 @@ impl Board {
 
     fn gen_king_captures(&self, color: Color, moves: &mut MoveList) {
         let king_bb = self.piece_bb(Piece::King, color);
-        if king_bb == 0 { return; }
+        if king_bb == 0 {
+            return;
+        }
         let from_idx = get_lsb(king_bb);
         let from = Square::from_index(from_idx);
         let enemies = self.color_occupancy(color.opponent());
@@ -455,7 +468,6 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use super::super::Board;
-    use crate::board::attack_tables::init_attack_tables;
     use crate::chess_move::MoveFlag;
     use crate::piece::{Color, Piece};
     use crate::square::Square;
@@ -471,7 +483,11 @@ mod tests {
         setup();
         let mut board = Board::new();
         let moves = board.generate_legal_moves();
-        assert_eq!(moves.len(), 20, "Starting position should have 20 legal moves");
+        assert_eq!(
+            moves.len(),
+            20,
+            "Starting position should have 20 legal moves"
+        );
     }
 
     #[test]
@@ -603,8 +619,11 @@ mod tests {
         for mv in &moves {
             let mut b2 = board.clone();
             b2.make_move(*mv);
-            assert!(!b2.is_in_check(Color::White),
-                "Move {} leaves king in check!", mv);
+            assert!(
+                !b2.is_in_check(Color::White),
+                "Move {} leaves king in check!",
+                mv
+            );
         }
     }
 
@@ -627,7 +646,8 @@ mod tests {
         let fen = "r3k2r/pppppppp/8/8/5q2/8/PPPPP1PP/R3K2R w KQkq - 0 1";
         let mut board = Board::from_fen(fen).unwrap();
         let moves = board.generate_legal_moves();
-        let kcastle: Vec<_> = moves.iter()
+        let kcastle: Vec<_> = moves
+            .iter()
             .filter(|m| m.flag == MoveFlag::KingCastle)
             .collect();
         // Should NOT be able to castle kingside (queen attacks f1)
@@ -654,13 +674,17 @@ mod tests {
 
         // Kingside castle
         let moves = board.generate_legal_moves();
-        let kcastle = moves.iter()
+        let kcastle = moves
+            .iter()
             .find(|m| m.flag == MoveFlag::KingCastle)
             .expect("Kingside castle should exist");
         board.make_move(*kcastle);
 
         assert_eq!(board.king_square(Color::White), Square::G1);
-        assert_eq!(board.piece_on(Square::F1), Some((Piece::Rook, Color::White)));
+        assert_eq!(
+            board.piece_on(Square::F1),
+            Some((Piece::Rook, Color::White))
+        );
         assert_eq!(board.piece_on(Square::H1), None);
         assert_eq!(board.piece_on(Square::E1), None);
     }
@@ -673,10 +697,14 @@ mod tests {
         let fen = "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3";
         let mut board = Board::from_fen(fen).unwrap();
         let moves = board.generate_legal_moves();
-        let ep_moves: Vec<_> = moves.iter()
+        let ep_moves: Vec<_> = moves
+            .iter()
             .filter(|m| m.flag == MoveFlag::EnPassant)
             .collect();
-        assert!(ep_moves.len() >= 1, "Should have at least 1 en passant move");
+        assert!(
+            ep_moves.len() >= 1,
+            "Should have at least 1 en passant move"
+        );
     }
 
     #[test]
@@ -685,7 +713,8 @@ mod tests {
         let fen = "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3";
         let mut board = Board::from_fen(fen).unwrap();
         let moves = board.generate_legal_moves();
-        let ep = moves.iter()
+        let ep = moves
+            .iter()
             .find(|m| m.flag == MoveFlag::EnPassant)
             .expect("Should have EP move");
 
@@ -693,8 +722,11 @@ mod tests {
         board.make_move(*ep);
 
         // The captured pawn should be gone
-        assert_eq!(board.piece_on(captured_sq), None,
-            "En passant captured pawn should be removed");
+        assert_eq!(
+            board.piece_on(captured_sq),
+            None,
+            "En passant captured pawn should be removed"
+        );
         // The capturing pawn should be on the ep square
         assert_eq!(board.piece_on(ep.to), Some((Piece::Pawn, Color::White)));
     }
@@ -719,10 +751,15 @@ mod tests {
         let fen = "1n6/P7/8/8/8/8/8/4K2k w - - 0 1";
         let mut board = Board::from_fen(fen).unwrap();
         let moves = board.generate_legal_moves();
-        let promo_caps: Vec<_> = moves.iter()
+        let promo_caps: Vec<_> = moves
+            .iter()
             .filter(|m| m.flag == MoveFlag::PromotionCapture)
             .collect();
-        assert_eq!(promo_caps.len(), 4, "Should have 4 promotion-capture options");
+        assert_eq!(
+            promo_caps.len(),
+            4,
+            "Should have 4 promotion-capture options"
+        );
     }
 
     // ── All moves are legal ─────────────────────────────────────────────────
@@ -746,8 +783,12 @@ mod tests {
             for mv in &moves {
                 let mut b2 = board.clone();
                 b2.make_move(*mv);
-                assert!(!b2.is_in_check(us),
-                    "Move {} leaves own king in check in position: {}", mv, fen);
+                assert!(
+                    !b2.is_in_check(us),
+                    "Move {} leaves own king in check in position: {}",
+                    mv,
+                    fen
+                );
             }
         }
     }

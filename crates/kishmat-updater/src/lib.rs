@@ -6,7 +6,6 @@
 //! - Tunable parameter management (params.toml)
 //! - GitHub release checking and updates
 
-pub mod syzygy;
 pub mod nnue;
+pub mod syzygy;
 pub mod tuning;
-

@@ -26,7 +26,11 @@ impl UciProcess {
         let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
         let reader = BufReader::new(stdout);
 
-        let mut proc = Self { child, stdin, reader };
+        let mut proc = Self {
+            child,
+            stdin,
+            reader,
+        };
 
         // Initialize UCI handshake
         proc.send("uci")?;
@@ -39,9 +43,9 @@ impl UciProcess {
 
     /// Sends a command to the engine.
     pub fn send(&mut self, cmd: &str) -> Result<(), String> {
-        writeln!(self.stdin, "{cmd}")
-            .map_err(|e| format!("Failed to write to engine: {e}"))?;
-        self.stdin.flush()
+        writeln!(self.stdin, "{cmd}").map_err(|e| format!("Failed to write to engine: {e}"))?;
+        self.stdin
+            .flush()
             .map_err(|e| format!("Failed to flush: {e}"))?;
         Ok(())
     }

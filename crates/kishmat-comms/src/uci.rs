@@ -7,12 +7,12 @@
 //! - setoption support (Hash, MoveOverhead)
 //! - Advanced time management
 
-use std::io::{self, BufRead, Write};
-use std::time::Duration;
-use types::{Board, Move};
 use search::SearchEngine;
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
+use std::io::{self, BufRead, Write};
+use std::time::Duration;
+use types::{Board, Move};
 
 /// Default move overhead in milliseconds (for GUI lag, OS scheduler, etc.)
 const DEFAULT_MOVE_OVERHEAD_MS: u64 = 10;
@@ -23,7 +23,10 @@ const DEFAULT_HASH_MB: usize = 4096;
 /// Default number of search threads (Ryzen 9950X = 16C/32T)
 /// Default threads = number of CPU cores (clamped to 1..=256).
 fn default_threads() -> usize {
-    std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1).clamp(1, 256)
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
+        .clamp(1, 256)
 }
 
 /// The UCI handler, owning the board and search engine.
@@ -234,7 +237,10 @@ impl UciHandler {
             "moveoverhead" => {
                 if let Ok(ms) = value.parse::<u64>() {
                     self.move_overhead_ms = ms.min(5000);
-                    eprintln!("info string MoveOverhead set to {} ms", self.move_overhead_ms);
+                    eprintln!(
+                        "info string MoveOverhead set to {} ms",
+                        self.move_overhead_ms
+                    );
                 }
             }
             "ownbook" => {
@@ -295,7 +301,11 @@ impl UciHandler {
 
         if args[0] == "startpos" {
             self.board = Board::new();
-            move_start_idx = if args.len() > 1 && args[1] == "moves" { 2 } else { 1 };
+            move_start_idx = if args.len() > 1 && args[1] == "moves" {
+                2
+            } else {
+                1
+            };
             // If next arg isn't "moves", set idx past end
             if move_start_idx == 1 {
                 move_start_idx = args.len();
@@ -423,7 +433,10 @@ impl UciHandler {
                 if let Some(book_move) = book.probe(&self.board) {
                     // Verify book move is legal
                     let legal = self.board.generate_legal_moves();
-                    if legal.iter().any(|m| m.from == book_move.from && m.to == book_move.to) {
+                    if legal
+                        .iter()
+                        .any(|m| m.from == book_move.from && m.to == book_move.to)
+                    {
                         uci_println(&format!("info string Book move"));
                         uci_println(&format!("bestmove {}", book_move.to_uci()));
                         return;
@@ -546,15 +559,21 @@ mod tests {
 
     #[test]
     fn test_uci_handler_creation() {
-        let mut handler = UciHandler::new();
-        assert_eq!(handler.board.to_fen(), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let handler = UciHandler::new();
+        assert_eq!(
+            handler.board.to_fen(),
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
     }
 
     #[test]
     fn test_parse_position_startpos() {
         let mut handler = UciHandler::new();
         handler.handle_position(&["startpos"]);
-        assert_eq!(handler.board.to_fen(), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(
+            handler.board.to_fen(),
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
     }
 
     #[test]
@@ -563,17 +582,27 @@ mod tests {
         handler.handle_position(&["startpos", "moves", "e2e4", "e7e5"]);
         assert_eq!(handler.board.side_to_move, types::Color::White);
         // Verify pawns moved
-        assert_eq!(handler.board.piece_on(types::Square::E4),
-            Some((types::Piece::Pawn, types::Color::White)));
-        assert_eq!(handler.board.piece_on(types::Square::E5),
-            Some((types::Piece::Pawn, types::Color::Black)));
+        assert_eq!(
+            handler.board.piece_on(types::Square::E4),
+            Some((types::Piece::Pawn, types::Color::White))
+        );
+        assert_eq!(
+            handler.board.piece_on(types::Square::E5),
+            Some((types::Piece::Pawn, types::Color::Black))
+        );
     }
 
     #[test]
     fn test_parse_position_fen() {
         let mut handler = UciHandler::new();
         handler.handle_position(&[
-            "fen", "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR", "b", "KQkq", "e3", "0", "1"
+            "fen",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR",
+            "b",
+            "KQkq",
+            "e3",
+            "0",
+            "1",
         ]);
         assert_eq!(handler.board.side_to_move, types::Color::Black);
     }
@@ -582,8 +611,15 @@ mod tests {
     fn test_parse_position_fen_with_moves() {
         let mut handler = UciHandler::new();
         handler.handle_position(&[
-            "fen", "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR", "b", "KQkq", "e3", "0", "1",
-            "moves", "e7e5"
+            "fen",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR",
+            "b",
+            "KQkq",
+            "e3",
+            "0",
+            "1",
+            "moves",
+            "e7e5",
         ]);
         assert_eq!(handler.board.side_to_move, types::Color::White);
     }
@@ -612,14 +648,20 @@ mod tests {
     fn test_parse_uci_move_legal() {
         let mut handler = UciHandler::new();
         let mv = handler.parse_uci_move("e2e4");
-        assert!(mv.is_some(), "e2e4 should be a legal move from starting position");
+        assert!(
+            mv.is_some(),
+            "e2e4 should be a legal move from starting position"
+        );
     }
 
     #[test]
     fn test_parse_uci_move_illegal() {
         let mut handler = UciHandler::new();
         let mv = handler.parse_uci_move("e2e5");
-        assert!(mv.is_none(), "e2e5 should not be legal from starting position");
+        assert!(
+            mv.is_none(),
+            "e2e5 should not be legal from starting position"
+        );
     }
 
     #[test]
@@ -632,7 +674,10 @@ mod tests {
 
         // New position should fully replace the old one
         handler.handle_position(&["startpos"]);
-        assert_eq!(handler.board.to_fen(), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(
+            handler.board.to_fen(),
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
     }
 
     #[test]
@@ -640,12 +685,13 @@ mod tests {
         let mut handler = UciHandler::new();
         // Italian Game opening
         handler.handle_position(&[
-            "startpos", "moves",
-            "e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"
+            "startpos", "moves", "e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6",
         ]);
         // Should not crash, board should be valid
         assert_eq!(handler.board.side_to_move, types::Color::White);
-        assert!(handler.board.total_piece_count() == 32, "No captures in Italian opening");
+        assert!(
+            handler.board.total_piece_count() == 32,
+            "No captures in Italian opening"
+        );
     }
 }
-

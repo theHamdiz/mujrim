@@ -13,14 +13,14 @@
 //! - Passed pawn king proximity
 //! - Connectivity (defended pieces)
 
-use types::{Board, Color, Piece};
-use types::bitboard::{Bitboard, iter_bits, count_bits};
-use types::board::attack_tables::*;
 use crate::psqt;
+use types::bitboard::{Bitboard, count_bits, iter_bits};
+use types::board::attack_tables::*;
+use types::{Board, Color, Piece};
 
 // ── Material values ─────────────────────────────────────────────────────────
 const MG_PIECE_VALUES: [i32; 6] = [82, 337, 365, 477, 1025, 0];
-const EG_PIECE_VALUES: [i32; 6] = [94, 281, 297, 512,  936, 0];
+const EG_PIECE_VALUES: [i32; 6] = [94, 281, 297, 512, 936, 0];
 
 // ── Game phase ──────────────────────────────────────────────────────────────
 const PHASE_VALUES: [i32; 6] = [0, 1, 1, 2, 4, 0];
@@ -35,15 +35,17 @@ const BISHOP_MOB_MG: [i32; 14] = [-48, -20, 16, 26, 38, 51, 55, 63, 63, 68, 81, 
 const BISHOP_MOB_EG: [i32; 14] = [-59, -23, -3, 13, 24, 42, 54, 57, 65, 73, 78, 86, 88, 97];
 // Rook: max 14 moves
 const ROOK_MOB_MG: [i32; 15] = [-60, -20, 2, 3, 3, 11, 22, 31, 40, 40, 41, 48, 57, 57, 62];
-const ROOK_MOB_EG: [i32; 15] = [-78, -17, 23, 39, 70, 99, 103, 121, 134, 139, 158, 164, 168, 169, 172];
+const ROOK_MOB_EG: [i32; 15] = [
+    -78, -17, 23, 39, 70, 99, 103, 121, 134, 139, 158, 164, 168, 169, 172,
+];
 // Queen: max 27 moves
 const QUEEN_MOB_MG: [i32; 28] = [
-    -30, -12, -8, -9, 20, 23, 23, 35, 38, 53, 64, 65, 65, 66,
-    67, 67, 72, 72, 77, 79, 93, 108, 108, 108, 110, 114, 114, 116,
+    -30, -12, -8, -9, 20, 23, 23, 35, 38, 53, 64, 65, 65, 66, 67, 67, 72, 72, 77, 79, 93, 108, 108,
+    108, 110, 114, 114, 116,
 ];
 const QUEEN_MOB_EG: [i32; 28] = [
-    -48, -30, -7, 19, 40, 55, 59, 75, 78, 96, 96, 100, 121, 127,
-    131, 133, 136, 141, 147, 150, 151, 168, 168, 171, 182, 182, 192, 219,
+    -48, -30, -7, 19, 40, 55, 59, 75, 78, 96, 96, 100, 121, 127, 131, 133, 136, 141, 147, 150, 151,
+    168, 168, 171, 182, 182, 192, 219,
 ];
 
 // ── King safety ─────────────────────────────────────────────────────────────
@@ -101,8 +103,14 @@ const SPACE_BONUS: i32 = 4;
 
 // ── File & rank masks ───────────────────────────────────────────────────────
 const FILE_MASKS: [Bitboard; 8] = [
-    0x0101010101010101, 0x0202020202020202, 0x0404040404040404, 0x0808080808080808,
-    0x1010101010101010, 0x2020202020202020, 0x4040404040404040, 0x8080808080808080,
+    0x0101010101010101,
+    0x0202020202020202,
+    0x0404040404040404,
+    0x0808080808080808,
+    0x1010101010101010,
+    0x2020202020202020,
+    0x4040404040404040,
+    0x8080808080808080,
 ];
 
 const ADJACENT_FILES: [Bitboard; 8] = [
@@ -117,12 +125,18 @@ const ADJACENT_FILES: [Bitboard; 8] = [
 ];
 
 const RANK_MASKS: [Bitboard; 8] = [
-    0x00000000000000FF, 0x000000000000FF00, 0x0000000000FF0000, 0x00000000FF000000,
-    0x000000FF00000000, 0x0000FF0000000000, 0x00FF000000000000, 0xFF00000000000000,
+    0x00000000000000FF,
+    0x000000000000FF00,
+    0x0000000000FF0000,
+    0x00000000FF000000,
+    0x000000FF00000000,
+    0x0000FF0000000000,
+    0x00FF000000000000,
+    0xFF00000000000000,
 ];
 
-const CENTER_FILES: Bitboard = 0x0404040404040404 | 0x0808080808080808
-    | 0x1010101010101010 | 0x2020202020202020; // C-F files
+const CENTER_FILES: Bitboard =
+    0x0404040404040404 | 0x0808080808080808 | 0x1010101010101010 | 0x2020202020202020; // C-F files
 
 // ── King zone: 3x3 area around king + two squares forward ───────────────────
 #[inline(always)]
@@ -141,7 +155,11 @@ pub fn evaluate(board: &Board) -> i32 {
     let (mg, eg, phase) = evaluate_full(board);
     let phase = phase.clamp(0, TOTAL_PHASE);
     let score = (mg * phase + eg * (TOTAL_PHASE - phase)) / TOTAL_PHASE;
-    if board.side_to_move == Color::White { score } else { -score }
+    if board.side_to_move == Color::White {
+        score
+    } else {
+        -score
+    }
 }
 
 /// Full evaluation returning (mg, eg, phase) from White's perspective.
@@ -185,7 +203,11 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
             phase += PHASE_VALUES[piece.index()] * count;
 
             for sq_idx in iter_bits(bb) {
-                let idx = if color == Color::White { sq_idx } else { sq_idx ^ 56 };
+                let idx = if color == Color::White {
+                    sq_idx
+                } else {
+                    sq_idx ^ 56
+                };
                 mg += sign * psqt::mg_value(piece, idx);
                 eg += sign * psqt::eg_value(piece, idx);
             }
@@ -199,14 +221,20 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         let mob = count_bits(atk) as usize;
         mg += KNIGHT_MOB_MG[mob.min(8)];
         eg += KNIGHT_MOB_EG[mob.min(8)];
-        if atk & bk_zone != 0 { w_attackers_count += 1; w_attacker_weight += ATTACKER_WEIGHTS[0]; }
+        if atk & bk_zone != 0 {
+            w_attackers_count += 1;
+            w_attacker_weight += ATTACKER_WEIGHTS[0];
+        }
     }
     for sq_idx in iter_bits(board.piece_bb(Piece::Knight, Color::Black)) {
         let atk = knight_attacks(sq_idx) & !b_occ & !w_pawn_attacks;
         let mob = count_bits(atk) as usize;
         mg -= KNIGHT_MOB_MG[mob.min(8)];
         eg -= KNIGHT_MOB_EG[mob.min(8)];
-        if atk & wk_zone != 0 { b_attackers_count += 1; b_attacker_weight += ATTACKER_WEIGHTS[0]; }
+        if atk & wk_zone != 0 {
+            b_attackers_count += 1;
+            b_attacker_weight += ATTACKER_WEIGHTS[0];
+        }
     }
 
     // Bishops
@@ -215,14 +243,20 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         let mob = count_bits(atk) as usize;
         mg += BISHOP_MOB_MG[mob.min(13)];
         eg += BISHOP_MOB_EG[mob.min(13)];
-        if atk & bk_zone != 0 { w_attackers_count += 1; w_attacker_weight += ATTACKER_WEIGHTS[1]; }
+        if atk & bk_zone != 0 {
+            w_attackers_count += 1;
+            w_attacker_weight += ATTACKER_WEIGHTS[1];
+        }
     }
     for sq_idx in iter_bits(board.piece_bb(Piece::Bishop, Color::Black)) {
         let atk = bishop_attacks(sq_idx, occ) & !b_occ & !w_pawn_attacks;
         let mob = count_bits(atk) as usize;
         mg -= BISHOP_MOB_MG[mob.min(13)];
         eg -= BISHOP_MOB_EG[mob.min(13)];
-        if atk & wk_zone != 0 { b_attackers_count += 1; b_attacker_weight += ATTACKER_WEIGHTS[1]; }
+        if atk & wk_zone != 0 {
+            b_attackers_count += 1;
+            b_attacker_weight += ATTACKER_WEIGHTS[1];
+        }
     }
 
     // Rooks
@@ -231,19 +265,25 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         let mob = count_bits(atk) as usize;
         mg += ROOK_MOB_MG[mob.min(14)];
         eg += ROOK_MOB_EG[mob.min(14)];
-        if atk & bk_zone != 0 { w_attackers_count += 1; w_attacker_weight += ATTACKER_WEIGHTS[2]; }
+        if atk & bk_zone != 0 {
+            w_attackers_count += 1;
+            w_attacker_weight += ATTACKER_WEIGHTS[2];
+        }
 
         // Rook on open/semi-open file
         let file = sq_idx % 8;
         if FILE_MASKS[file] & all_pawns == 0 {
-            mg += ROOK_ON_OPEN_FILE_MG; eg += ROOK_ON_OPEN_FILE_EG;
+            mg += ROOK_ON_OPEN_FILE_MG;
+            eg += ROOK_ON_OPEN_FILE_EG;
         } else if FILE_MASKS[file] & w_pawns == 0 {
-            mg += ROOK_ON_SEMI_OPEN_MG; eg += ROOK_ON_SEMI_OPEN_EG;
+            mg += ROOK_ON_SEMI_OPEN_MG;
+            eg += ROOK_ON_SEMI_OPEN_EG;
         }
 
         // Rook on 7th rank
         if sq_idx / 8 == 6 {
-            mg += ROOK_ON_SEVENTH_MG; eg += ROOK_ON_SEVENTH_EG;
+            mg += ROOK_ON_SEVENTH_MG;
+            eg += ROOK_ON_SEVENTH_EG;
         }
     }
     for sq_idx in iter_bits(board.piece_bb(Piece::Rook, Color::Black)) {
@@ -251,17 +291,23 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         let mob = count_bits(atk) as usize;
         mg -= ROOK_MOB_MG[mob.min(14)];
         eg -= ROOK_MOB_EG[mob.min(14)];
-        if atk & wk_zone != 0 { b_attackers_count += 1; b_attacker_weight += ATTACKER_WEIGHTS[2]; }
+        if atk & wk_zone != 0 {
+            b_attackers_count += 1;
+            b_attacker_weight += ATTACKER_WEIGHTS[2];
+        }
 
         let file = sq_idx % 8;
         if FILE_MASKS[file] & all_pawns == 0 {
-            mg -= ROOK_ON_OPEN_FILE_MG; eg -= ROOK_ON_OPEN_FILE_EG;
+            mg -= ROOK_ON_OPEN_FILE_MG;
+            eg -= ROOK_ON_OPEN_FILE_EG;
         } else if FILE_MASKS[file] & b_pawns == 0 {
-            mg -= ROOK_ON_SEMI_OPEN_MG; eg -= ROOK_ON_SEMI_OPEN_EG;
+            mg -= ROOK_ON_SEMI_OPEN_MG;
+            eg -= ROOK_ON_SEMI_OPEN_EG;
         }
 
         if sq_idx / 8 == 1 {
-            mg -= ROOK_ON_SEVENTH_MG; eg -= ROOK_ON_SEVENTH_EG;
+            mg -= ROOK_ON_SEVENTH_MG;
+            eg -= ROOK_ON_SEVENTH_EG;
         }
     }
 
@@ -271,14 +317,20 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         let mob = count_bits(atk) as usize;
         mg += QUEEN_MOB_MG[mob.min(27)];
         eg += QUEEN_MOB_EG[mob.min(27)];
-        if atk & bk_zone != 0 { w_attackers_count += 1; w_attacker_weight += ATTACKER_WEIGHTS[3]; }
+        if atk & bk_zone != 0 {
+            w_attackers_count += 1;
+            w_attacker_weight += ATTACKER_WEIGHTS[3];
+        }
     }
     for sq_idx in iter_bits(board.piece_bb(Piece::Queen, Color::Black)) {
         let atk = queen_attacks(sq_idx, occ) & !b_occ & !w_pawn_attacks;
         let mob = count_bits(atk) as usize;
         mg -= QUEEN_MOB_MG[mob.min(27)];
         eg -= QUEEN_MOB_EG[mob.min(27)];
-        if atk & wk_zone != 0 { b_attackers_count += 1; b_attacker_weight += ATTACKER_WEIGHTS[3]; }
+        if atk & wk_zone != 0 {
+            b_attackers_count += 1;
+            b_attacker_weight += ATTACKER_WEIGHTS[3];
+        }
     }
 
     // ── King safety ─────────────────────────────────────────────────────
@@ -296,9 +348,11 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
     // Pawn shield
     {
         let (ws_mg, ws_eg) = eval_pawn_shield(board, Color::White, wk_sq);
-        mg += ws_mg; eg += ws_eg;
+        mg += ws_mg;
+        eg += ws_eg;
         let (bs_mg, bs_eg) = eval_pawn_shield(board, Color::Black, bk_sq);
-        mg -= bs_mg; eg -= bs_eg;
+        mg -= bs_mg;
+        eg -= bs_eg;
     }
 
     // Pawn storm
@@ -312,37 +366,46 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
     // ── Pawn structure ──────────────────────────────────────────────────
     {
         let (w_mg, w_eg) = eval_pawn_structure(w_pawns, b_pawns, Color::White, bk_sq, wk_sq);
-        mg += w_mg; eg += w_eg;
+        mg += w_mg;
+        eg += w_eg;
         let (b_mg, b_eg) = eval_pawn_structure(b_pawns, w_pawns, Color::Black, wk_sq, bk_sq);
-        mg -= b_mg; eg -= b_eg;
+        mg -= b_mg;
+        eg -= b_eg;
     }
 
     // ── Bishop pair ─────────────────────────────────────────────────────
     if board.piece_count(Piece::Bishop, Color::White) >= 2 {
-        mg += BISHOP_PAIR_MG; eg += BISHOP_PAIR_EG;
+        mg += BISHOP_PAIR_MG;
+        eg += BISHOP_PAIR_EG;
     }
     if board.piece_count(Piece::Bishop, Color::Black) >= 2 {
-        mg -= BISHOP_PAIR_MG; eg -= BISHOP_PAIR_EG;
+        mg -= BISHOP_PAIR_MG;
+        eg -= BISHOP_PAIR_EG;
     }
 
     // ── Knight outposts ─────────────────────────────────────────────────
     {
         let (w_mg, w_eg) = eval_outposts(board, Color::White, b_pawns, b_pawn_attacks);
-        mg += w_mg; eg += w_eg;
+        mg += w_mg;
+        eg += w_eg;
         let (b_mg, b_eg) = eval_outposts(board, Color::Black, w_pawns, w_pawn_attacks);
-        mg -= b_mg; eg -= b_eg;
+        mg -= b_mg;
+        eg -= b_eg;
     }
 
     // ── Threats ──────────────────────────────────────────────────────────
     {
         let (w_mg, w_eg) = eval_threats(board, Color::White, w_pawn_attacks, b_pawn_attacks);
-        mg += w_mg; eg += w_eg;
+        mg += w_mg;
+        eg += w_eg;
         let (b_mg, b_eg) = eval_threats(board, Color::Black, b_pawn_attacks, w_pawn_attacks);
-        mg -= b_mg; eg -= b_eg;
+        mg -= b_mg;
+        eg -= b_eg;
     }
 
     // ── Space ───────────────────────────────────────────────────────────
-    if phase > 12 { // Only in middlegame with many pieces
+    if phase > 12 {
+        // Only in middlegame with many pieces
         let w_space = eval_space(board, Color::White, w_pawns, w_pawn_attacks);
         let b_space = eval_space(board, Color::Black, b_pawns, b_pawn_attacks);
         mg += (w_space - b_space) * SPACE_BONUS;
@@ -356,7 +419,8 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
             for sq in iter_bits(w_rooks) {
                 let r_atk = rook_attacks(sq, occ);
                 if r_atk & w_rooks & !((1u64) << sq) != 0 {
-                    mg += CONNECTED_ROOKS_MG; eg += CONNECTED_ROOKS_EG;
+                    mg += CONNECTED_ROOKS_MG;
+                    eg += CONNECTED_ROOKS_EG;
                     break;
                 }
             }
@@ -366,7 +430,8 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
             for sq in iter_bits(b_rooks) {
                 let r_atk = rook_attacks(sq, occ);
                 if r_atk & b_rooks & !((1u64) << sq) != 0 {
-                    mg -= CONNECTED_ROOKS_MG; eg -= CONNECTED_ROOKS_EG;
+                    mg -= CONNECTED_ROOKS_MG;
+                    eg -= CONNECTED_ROOKS_EG;
                     break;
                 }
             }
@@ -404,7 +469,9 @@ fn eval_pawn_shield(board: &Board, color: Color, king_sq: usize) -> (i32, i32) {
         Color::Black => (king_sq / 8).wrapping_sub(1),
     };
 
-    if shield_rank > 7 { return (0, 0); }
+    if shield_rank > 7 {
+        return (0, 0);
+    }
 
     let mut count = 0u32;
     for df in -1i32..=1 {
@@ -429,12 +496,14 @@ fn eval_pawn_storm(enemy_pawns: Bitboard, our_color: Color, king_sq: usize) -> (
 
     for df in -1i32..=1 {
         let f = king_file as i32 + df;
-        if f < 0 || f >= 8 { continue; }
+        if f < 0 || f >= 8 {
+            continue;
+        }
         let file_pawns = enemy_pawns & FILE_MASKS[f as usize];
         for sq in iter_bits(file_pawns) {
             let rank = sq / 8;
             let effective_rank = match our_color {
-                Color::White => rank,           // Enemy pawn on high rank = closer to our king
+                Color::White => rank, // Enemy pawn on high rank = closer to our king
                 Color::Black => 7 - rank,
             };
             if effective_rank < 8 {
@@ -501,20 +570,36 @@ fn eval_pawn_structure(
         let behind_mask = match color {
             Color::White => {
                 let mut m = 0u64;
-                for r in 0..rank { m |= ADJACENT_FILES[file] & RANK_MASKS[r]; }
+                for r in 0..rank {
+                    m |= ADJACENT_FILES[file] & RANK_MASKS[r];
+                }
                 m
             }
             Color::Black => {
                 let mut m = 0u64;
-                for r in (rank + 1)..8 { m |= ADJACENT_FILES[file] & RANK_MASKS[r]; }
+                for r in (rank + 1)..8 {
+                    m |= ADJACENT_FILES[file] & RANK_MASKS[r];
+                }
                 m
             }
         };
         if our_pawns & behind_mask == 0 && adjacent_pawns == 0 {
             // Check if stop square is controlled by enemy pawn
             let stop_sq = match color {
-                Color::White => if rank < 7 { Some(sq_idx + 8) } else { None },
-                Color::Black => if rank > 0 { Some(sq_idx - 8) } else { None },
+                Color::White => {
+                    if rank < 7 {
+                        Some(sq_idx + 8)
+                    } else {
+                        None
+                    }
+                }
+                Color::Black => {
+                    if rank > 0 {
+                        Some(sq_idx - 8)
+                    } else {
+                        None
+                    }
+                }
             };
             if let Some(stop) = stop_sq {
                 let enemy_pawn_atk = pawn_attacks(color.index(), stop);
@@ -530,12 +615,16 @@ fn eval_pawn_structure(
         let ahead_mask = match color {
             Color::White => {
                 let mut m = 0u64;
-                for r in (rank + 1)..8 { m |= blocking_files & RANK_MASKS[r]; }
+                for r in (rank + 1)..8 {
+                    m |= blocking_files & RANK_MASKS[r];
+                }
                 m
             }
             Color::Black => {
                 let mut m = 0u64;
-                for r in 0..rank { m |= blocking_files & RANK_MASKS[r]; }
+                for r in 0..rank {
+                    m |= blocking_files & RANK_MASKS[r];
+                }
                 m
             }
         };
@@ -554,8 +643,20 @@ fn eval_pawn_structure(
 
             // Supported passed pawn (another pawn behind it)
             let support_mask = match color {
-                Color::White => if rank > 0 { ADJACENT_FILES[file] & RANK_MASKS[rank - 1] } else { 0 },
-                Color::Black => if rank < 7 { ADJACENT_FILES[file] & RANK_MASKS[rank + 1] } else { 0 },
+                Color::White => {
+                    if rank > 0 {
+                        ADJACENT_FILES[file] & RANK_MASKS[rank - 1]
+                    } else {
+                        0
+                    }
+                }
+                Color::Black => {
+                    if rank < 7 {
+                        ADJACENT_FILES[file] & RANK_MASKS[rank + 1]
+                    } else {
+                        0
+                    }
+                }
             };
             if our_pawns & support_mask != 0 {
                 eg += 15 * (rel_rank as i32);
@@ -604,12 +705,16 @@ fn eval_outposts(
             let ahead_adj = match color {
                 Color::White => {
                     let mut m = 0u64;
-                    for r in (rank + 1)..8 { m |= ADJACENT_FILES[file] & RANK_MASKS[r]; }
+                    for r in (rank + 1)..8 {
+                        m |= ADJACENT_FILES[file] & RANK_MASKS[r];
+                    }
                     m
                 }
                 Color::Black => {
                     let mut m = 0u64;
-                    for r in 0..rank { m |= ADJACENT_FILES[file] & RANK_MASKS[r]; }
+                    for r in 0..rank {
+                        m |= ADJACENT_FILES[file] & RANK_MASKS[r];
+                    }
                     m
                 }
             };
@@ -637,12 +742,16 @@ fn eval_outposts(
             let ahead_adj = match color {
                 Color::White => {
                     let mut m = 0u64;
-                    for r in (rank + 1)..8 { m |= ADJACENT_FILES[file] & RANK_MASKS[r]; }
+                    for r in (rank + 1)..8 {
+                        m |= ADJACENT_FILES[file] & RANK_MASKS[r];
+                    }
                     m
                 }
                 Color::Black => {
                     let mut m = 0u64;
-                    for r in 0..rank { m |= ADJACENT_FILES[file] & RANK_MASKS[r]; }
+                    for r in 0..rank {
+                        m |= ADJACENT_FILES[file] & RANK_MASKS[r];
+                    }
                     m
                 }
             };
@@ -723,7 +832,12 @@ fn eval_threats(
 
 // ── Space ───────────────────────────────────────────────────────────────────
 #[inline]
-fn eval_space(_board: &Board, color: Color, our_pawns: Bitboard, our_pawn_attacks: Bitboard) -> i32 {
+fn eval_space(
+    _board: &Board,
+    color: Color,
+    our_pawns: Bitboard,
+    our_pawn_attacks: Bitboard,
+) -> i32 {
     let safe_zone = match color {
         Color::White => RANK_MASKS[1] | RANK_MASKS[2] | RANK_MASKS[3], // ranks 2-4
         Color::Black => RANK_MASKS[4] | RANK_MASKS[5] | RANK_MASKS[6], // ranks 5-7
@@ -736,7 +850,9 @@ fn eval_space(_board: &Board, color: Color, our_pawns: Bitboard, our_pawn_attack
 mod tests {
     use super::*;
 
-    fn setup() { types::init(); }
+    fn setup() {
+        types::init();
+    }
 
     #[test]
     fn test_starting_position_roughly_equal() {
@@ -749,7 +865,8 @@ mod tests {
     fn test_material_advantage_missing_queen() {
         setup();
         let base = evaluate(&Board::new());
-        let board = Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let board =
+            Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         assert!(evaluate(&board) > base + 600);
     }
 
@@ -757,7 +874,8 @@ mod tests {
     fn test_material_advantage_missing_rook() {
         setup();
         let base = evaluate(&Board::new());
-        let board = Board::from_fen("rnbqkbn1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQq - 0 1").unwrap();
+        let board =
+            Board::from_fen("rnbqkbn1/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQq - 0 1").unwrap();
         assert!(evaluate(&board) > base + 300);
     }
 
@@ -765,7 +883,9 @@ mod tests {
     fn test_symmetry() {
         setup();
         let w = evaluate(&Board::new());
-        let b = evaluate(&Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").unwrap());
+        let b = evaluate(
+            &Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").unwrap(),
+        );
         assert!((w + b).abs() < 30, "Symmetry broken: w={w}, b={b}");
     }
 
@@ -817,7 +937,10 @@ mod tests {
         setup();
         let open = evaluate(&Board::from_fen("4k3/8/8/8/8/8/1P6/R3K3 w - - 0 1").unwrap());
         let closed = evaluate(&Board::from_fen("4k3/8/8/8/8/8/P7/R3K3 w - - 0 1").unwrap());
-        assert!(open > closed, "Rook on open file should score higher: open={open}, closed={closed}");
+        assert!(
+            open > closed,
+            "Rook on open file should score higher: open={open}, closed={closed}"
+        );
     }
 
     #[test]
@@ -826,6 +949,9 @@ mod tests {
         // Knight in center vs corner should have better mobility
         let center = evaluate(&Board::from_fen("4k3/8/8/4N3/8/8/8/4K3 w - - 0 1").unwrap());
         let corner = evaluate(&Board::from_fen("4k3/8/8/8/8/8/8/N3K3 w - - 0 1").unwrap());
-        assert!(center > corner, "Center knight should score higher: center={center}, corner={corner}");
+        assert!(
+            center > corner,
+            "Center knight should score higher: center={center}, corner={corner}"
+        );
     }
 }

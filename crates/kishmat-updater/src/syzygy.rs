@@ -142,7 +142,12 @@ pub fn download_tables(
             }
 
             if let Some(ref cb) = progress {
-                cb(file_idx, total_files, &file_name, DownloadStatus::Downloading);
+                cb(
+                    file_idx,
+                    total_files,
+                    &file_name,
+                    DownloadStatus::Downloading,
+                );
             }
 
             let url = format!("{base_url}/{file_name}");
@@ -179,49 +184,59 @@ pub fn check_installed(dir: &Path) -> (usize, usize) {
         return (0, 0);
     }
     let rtbw = fs::read_dir(dir)
-        .map(|r| r.filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "rtbw"))
-            .count())
+        .map(|r| {
+            r.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rtbw"))
+                .count()
+        })
         .unwrap_or(0);
     let rtbz = fs::read_dir(dir)
-        .map(|r| r.filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "rtbz"))
-            .count())
+        .map(|r| {
+            r.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rtbz"))
+                .count()
+        })
         .unwrap_or(0);
     (rtbw, rtbz)
 }
 
 /// Get the total disk usage of a Syzygy directory.
 pub fn disk_usage(dir: &Path) -> u64 {
-    if !dir.exists() { return 0; }
+    if !dir.exists() {
+        return 0;
+    }
     fs::read_dir(dir)
-        .map(|r| r.filter_map(|e| e.ok())
-            .filter_map(|e| e.metadata().ok())
-            .map(|m| m.len())
-            .sum())
+        .map(|r| {
+            r.filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
         .unwrap_or(0)
 }
 
-fn download_file(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    dest: &Path,
-) -> Result<(), String> {
-    let mut response = client.get(url).send()
+fn download_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<(), String> {
+    let mut response = client
+        .get(url)
+        .send()
         .map_err(|e| format!("Request failed: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
 
-    let mut file = fs::File::create(dest)
-        .map_err(|e| format!("Create file: {e}"))?;
+    let mut file = fs::File::create(dest).map_err(|e| format!("Create file: {e}"))?;
 
     let mut buffer = [0u8; 65536];
     loop {
-        let n = response.read(&mut buffer).map_err(|e| format!("Read: {e}"))?;
-        if n == 0 { break; }
-        file.write_all(&buffer[..n]).map_err(|e| format!("Write: {e}"))?;
+        let n = response
+            .read(&mut buffer)
+            .map_err(|e| format!("Read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])
+            .map_err(|e| format!("Write: {e}"))?;
     }
 
     Ok(())
@@ -231,139 +246,89 @@ fn download_file(
 // Table name lists — complete Syzygy endgame tables
 // ═══════════════════════════════════════════════════════════════
 
-const TABLES_3: &[&str] = &[
-    "KBvK", "KNvK", "KPvK", "KQvK", "KRvK",
-];
+const TABLES_3: &[&str] = &["KBvK", "KNvK", "KPvK", "KQvK", "KRvK"];
 
 const TABLES_4: &[&str] = &[
-    "KBBvK", "KBNvK", "KBPvK", "KBvKB", "KBvKN", "KBvKP",
-    "KNNvK", "KNPvK", "KNvKN", "KNvKP",
-    "KPPvK", "KPvKP",
-    "KQBvK", "KQNvK", "KQPvK", "KQvKB", "KQvKN", "KQvKP", "KQvKQ", "KQvKR",
+    "KBBvK", "KBNvK", "KBPvK", "KBvKB", "KBvKN", "KBvKP", "KNNvK", "KNPvK", "KNvKN", "KNvKP",
+    "KPPvK", "KPvKP", "KQBvK", "KQNvK", "KQPvK", "KQvKB", "KQvKN", "KQvKP", "KQvKQ", "KQvKR",
     "KRBvK", "KRNvK", "KRPvK", "KRvKB", "KRvKN", "KRvKP", "KRvKR",
 ];
 
 const TABLES_5: &[&str] = &[
     // 4v1
-    "KBBBvK", "KBBNvK", "KBBPvK", "KBNNvK", "KBNPvK", "KBPPvK",
-    "KNNNvK", "KNNPvK", "KNPPvK", "KPPPvK",
-    "KQBBvK", "KQBNvK", "KQBPvK", "KQNNvK", "KQNPvK", "KQPPvK",
-    "KQQBvK", "KQQNvK", "KQQPvK", "KQQQvK", "KQQRvK",
-    "KQRBvK", "KQRNvK", "KQRPvK", "KQRRvK",
-    "KRBBvK", "KRBNvK", "KRBPvK", "KRNNvK", "KRNPvK", "KRPPvK",
-    "KRRBvK", "KRRNvK", "KRRPvK", "KRRRvK",
+    "KBBBvK", "KBBNvK", "KBBPvK", "KBNNvK", "KBNPvK", "KBPPvK", "KNNNvK", "KNNPvK", "KNPPvK",
+    "KPPPvK", "KQBBvK", "KQBNvK", "KQBPvK", "KQNNvK", "KQNPvK", "KQPPvK", "KQQBvK", "KQQNvK",
+    "KQQPvK", "KQQQvK", "KQQRvK", "KQRBvK", "KQRNvK", "KQRPvK", "KQRRvK", "KRBBvK", "KRBNvK",
+    "KRBPvK", "KRNNvK", "KRNPvK", "KRPPvK", "KRRBvK", "KRRNvK", "KRRPvK", "KRRRvK",
     // 3v2
-    "KBBvKB", "KBBvKN", "KBBvKP", "KBBvKQ", "KBBvKR",
-    "KBNvKB", "KBNvKN", "KBNvKP", "KBNvKQ", "KBNvKR",
-    "KBPvKB", "KBPvKN", "KBPvKP", "KBPvKQ", "KBPvKR",
-    "KNNvKB", "KNNvKN", "KNNvKP", "KNNvKQ", "KNNvKR",
-    "KNPvKB", "KNPvKN", "KNPvKP", "KNPvKQ", "KNPvKR",
-    "KPPvKB", "KPPvKN", "KPPvKP", "KPPvKQ", "KPPvKR",
-    "KQBvKQ", "KQBvKR",
-    "KQNvKQ", "KQNvKR",
-    "KQPvKQ", "KQPvKR",
-    "KQQvKQ", "KQQvKR",
-    "KQRvKQ", "KQRvKR",
-    "KRBvKQ", "KRBvKR",
-    "KRNvKQ", "KRNvKR",
-    "KRPvKB", "KRPvKN", "KRPvKP", "KRPvKQ", "KRPvKR",
-    "KRRvKQ", "KRRvKR",
+    "KBBvKB", "KBBvKN", "KBBvKP", "KBBvKQ", "KBBvKR", "KBNvKB", "KBNvKN", "KBNvKP", "KBNvKQ",
+    "KBNvKR", "KBPvKB", "KBPvKN", "KBPvKP", "KBPvKQ", "KBPvKR", "KNNvKB", "KNNvKN", "KNNvKP",
+    "KNNvKQ", "KNNvKR", "KNPvKB", "KNPvKN", "KNPvKP", "KNPvKQ", "KNPvKR", "KPPvKB", "KPPvKN",
+    "KPPvKP", "KPPvKQ", "KPPvKR", "KQBvKQ", "KQBvKR", "KQNvKQ", "KQNvKR", "KQPvKQ", "KQPvKR",
+    "KQQvKQ", "KQQvKR", "KQRvKQ", "KQRvKR", "KRBvKQ", "KRBvKR", "KRNvKQ", "KRNvKR", "KRPvKB",
+    "KRPvKN", "KRPvKP", "KRPvKQ", "KRPvKR", "KRRvKQ", "KRRvKR",
 ];
 
 // 6-piece tables — representative set (the full set has ~500+ tables)
 const TABLES_6: &[&str] = &[
     // 5v1
-    "KBBBBvK", "KBBBNvK", "KBBBPvK", "KBBNNvK", "KBBNPvK", "KBBPPvK",
-    "KBNNNvK", "KBNNPvK", "KBNPPvK", "KBPPPvK",
-    "KNNNNvK", "KNNNPvK", "KNNPPvK", "KNPPPvK", "KPPPPvK",
-    "KQBBBvK", "KQBBNvK", "KQBBPvK", "KQBNNvK", "KQBNPvK", "KQBPPvK",
-    "KQNNNvK", "KQNNPvK", "KQNPPvK", "KQPPPvK",
-    "KQQBBvK", "KQQBNvK", "KQQBPvK", "KQQNNvK", "KQQNPvK", "KQQPPvK",
-    "KQQQBvK", "KQQQNvK", "KQQQPvK", "KQQQQvK", "KQQQRvK",
-    "KQQRBvK", "KQQRNvK", "KQQRPvK", "KQQRRvK",
-    "KQRBBvK", "KQRBNvK", "KQRBPvK", "KQRNNvK", "KQRNPvK", "KQRPPvK",
-    "KQRRBvK", "KQRRNvK", "KQRRPvK", "KQRRRvK",
-    "KRBBBvK", "KRBBNvK", "KRBBPvK", "KRBNNvK", "KRBNPvK", "KRBPPvK",
-    "KRNNNvK", "KRNNPvK", "KRNPPvK", "KRPPPvK",
-    "KRRBBvK", "KRRBNvK", "KRRBPvK", "KRRNNvK", "KRRNPvK", "KRRPPvK",
-    "KRRRBvK", "KRRRNvK", "KRRRPvK", "KRRRRvK",
+    "KBBBBvK", "KBBBNvK", "KBBBPvK", "KBBNNvK", "KBBNPvK", "KBBPPvK", "KBNNNvK", "KBNNPvK",
+    "KBNPPvK", "KBPPPvK", "KNNNNvK", "KNNNPvK", "KNNPPvK", "KNPPPvK", "KPPPPvK", "KQBBBvK",
+    "KQBBNvK", "KQBBPvK", "KQBNNvK", "KQBNPvK", "KQBPPvK", "KQNNNvK", "KQNNPvK", "KQNPPvK",
+    "KQPPPvK", "KQQBBvK", "KQQBNvK", "KQQBPvK", "KQQNNvK", "KQQNPvK", "KQQPPvK", "KQQQBvK",
+    "KQQQNvK", "KQQQPvK", "KQQQQvK", "KQQQRvK", "KQQRBvK", "KQQRNvK", "KQQRPvK", "KQQRRvK",
+    "KQRBBvK", "KQRBNvK", "KQRBPvK", "KQRNNvK", "KQRNPvK", "KQRPPvK", "KQRRBvK", "KQRRNvK",
+    "KQRRPvK", "KQRRRvK", "KRBBBvK", "KRBBNvK", "KRBBPvK", "KRBNNvK", "KRBNPvK", "KRBPPvK",
+    "KRNNNvK", "KRNNPvK", "KRNPPvK", "KRPPPvK", "KRRBBvK", "KRRBNvK", "KRRBPvK", "KRRNNvK",
+    "KRRNPvK", "KRRPPvK", "KRRRBvK", "KRRRNvK", "KRRRPvK", "KRRRRvK",
     // 4v2 (most common/important)
-    "KBBBvKB", "KBBBvKN", "KBBBvKP", "KBBBvKQ", "KBBBvKR",
-    "KBBNvKB", "KBBNvKN", "KBBNvKP", "KBBNvKQ", "KBBNvKR",
-    "KBBPvKB", "KBBPvKN", "KBBPvKP", "KBBPvKQ", "KBBPvKR",
-    "KBNNvKB", "KBNNvKN", "KBNNvKP", "KBNNvKQ", "KBNNvKR",
-    "KBNPvKB", "KBNPvKN", "KBNPvKP", "KBNPvKQ", "KBNPvKR",
-    "KBPPvKB", "KBPPvKN", "KBPPvKP", "KBPPvKQ", "KBPPvKR",
-    "KNNNvKB", "KNNNvKN", "KNNNvKP", "KNNNvKQ", "KNNNvKR",
-    "KNNPvKB", "KNNPvKN", "KNNPvKP", "KNNPvKQ", "KNNPvKR",
-    "KNPPvKB", "KNPPvKN", "KNPPvKP", "KNPPvKQ", "KNPPvKR",
-    "KPPPvKB", "KPPPvKN", "KPPPvKP", "KPPPvKQ", "KPPPvKR",
-    "KQBBvKB", "KQBBvKN", "KQBBvKP", "KQBBvKQ", "KQBBvKR",
-    "KQBNvKB", "KQBNvKN", "KQBNvKP", "KQBNvKQ", "KQBNvKR",
-    "KQBPvKB", "KQBPvKN", "KQBPvKP", "KQBPvKQ", "KQBPvKR",
-    "KQNNvKB", "KQNNvKN", "KQNNvKP", "KQNNvKQ", "KQNNvKR",
-    "KQNPvKB", "KQNPvKN", "KQNPvKP", "KQNPvKQ", "KQNPvKR",
-    "KQPPvKB", "KQPPvKN", "KQPPvKP", "KQPPvKQ", "KQPPvKR",
-    "KQQBvKB", "KQQBvKN", "KQQBvKP", "KQQBvKQ", "KQQBvKR",
-    "KQQNvKB", "KQQNvKN", "KQQNvKP", "KQQNvKQ", "KQQNvKR",
-    "KQQPvKB", "KQQPvKN", "KQQPvKP", "KQQPvKQ", "KQQPvKR",
-    "KQQQvKB", "KQQQvKN", "KQQQvKP", "KQQQvKQ", "KQQQvKR",
-    "KQQRvKB", "KQQRvKN", "KQQRvKP", "KQQRvKQ", "KQQRvKR",
-    "KQRBvKB", "KQRBvKN", "KQRBvKP", "KQRBvKQ", "KQRBvKR",
-    "KQRNvKB", "KQRNvKN", "KQRNvKP", "KQRNvKQ", "KQRNvKR",
-    "KQRPvKB", "KQRPvKN", "KQRPvKP", "KQRPvKQ", "KQRPvKR",
-    "KQRRvKB", "KQRRvKN", "KQRRvKP", "KQRRvKQ", "KQRRvKR",
-    "KRBBvKB", "KRBBvKN", "KRBBvKP", "KRBBvKQ", "KRBBvKR",
-    "KRBNvKB", "KRBNvKN", "KRBNvKP", "KRBNvKQ", "KRBNvKR",
-    "KRBPvKB", "KRBPvKN", "KRBPvKP", "KRBPvKQ", "KRBPvKR",
-    "KRNNvKB", "KRNNvKN", "KRNNvKP", "KRNNvKQ", "KRNNvKR",
-    "KRNPvKB", "KRNPvKN", "KRNPvKP", "KRNPvKQ", "KRNPvKR",
-    "KRPPvKB", "KRPPvKN", "KRPPvKP", "KRPPvKQ", "KRPPvKR",
-    "KRRBvKB", "KRRBvKN", "KRRBvKP", "KRRBvKQ", "KRRBvKR",
-    "KRRNvKB", "KRRNvKN", "KRRNvKP", "KRRNvKQ", "KRRNvKR",
-    "KRRPvKB", "KRRPvKN", "KRRPvKP", "KRRPvKQ", "KRRPvKR",
-    "KRRRvKB", "KRRRvKN", "KRRRvKP", "KRRRvKQ", "KRRRvKR",
+    "KBBBvKB", "KBBBvKN", "KBBBvKP", "KBBBvKQ", "KBBBvKR", "KBBNvKB", "KBBNvKN", "KBBNvKP",
+    "KBBNvKQ", "KBBNvKR", "KBBPvKB", "KBBPvKN", "KBBPvKP", "KBBPvKQ", "KBBPvKR", "KBNNvKB",
+    "KBNNvKN", "KBNNvKP", "KBNNvKQ", "KBNNvKR", "KBNPvKB", "KBNPvKN", "KBNPvKP", "KBNPvKQ",
+    "KBNPvKR", "KBPPvKB", "KBPPvKN", "KBPPvKP", "KBPPvKQ", "KBPPvKR", "KNNNvKB", "KNNNvKN",
+    "KNNNvKP", "KNNNvKQ", "KNNNvKR", "KNNPvKB", "KNNPvKN", "KNNPvKP", "KNNPvKQ", "KNNPvKR",
+    "KNPPvKB", "KNPPvKN", "KNPPvKP", "KNPPvKQ", "KNPPvKR", "KPPPvKB", "KPPPvKN", "KPPPvKP",
+    "KPPPvKQ", "KPPPvKR", "KQBBvKB", "KQBBvKN", "KQBBvKP", "KQBBvKQ", "KQBBvKR", "KQBNvKB",
+    "KQBNvKN", "KQBNvKP", "KQBNvKQ", "KQBNvKR", "KQBPvKB", "KQBPvKN", "KQBPvKP", "KQBPvKQ",
+    "KQBPvKR", "KQNNvKB", "KQNNvKN", "KQNNvKP", "KQNNvKQ", "KQNNvKR", "KQNPvKB", "KQNPvKN",
+    "KQNPvKP", "KQNPvKQ", "KQNPvKR", "KQPPvKB", "KQPPvKN", "KQPPvKP", "KQPPvKQ", "KQPPvKR",
+    "KQQBvKB", "KQQBvKN", "KQQBvKP", "KQQBvKQ", "KQQBvKR", "KQQNvKB", "KQQNvKN", "KQQNvKP",
+    "KQQNvKQ", "KQQNvKR", "KQQPvKB", "KQQPvKN", "KQQPvKP", "KQQPvKQ", "KQQPvKR", "KQQQvKB",
+    "KQQQvKN", "KQQQvKP", "KQQQvKQ", "KQQQvKR", "KQQRvKB", "KQQRvKN", "KQQRvKP", "KQQRvKQ",
+    "KQQRvKR", "KQRBvKB", "KQRBvKN", "KQRBvKP", "KQRBvKQ", "KQRBvKR", "KQRNvKB", "KQRNvKN",
+    "KQRNvKP", "KQRNvKQ", "KQRNvKR", "KQRPvKB", "KQRPvKN", "KQRPvKP", "KQRPvKQ", "KQRPvKR",
+    "KQRRvKB", "KQRRvKN", "KQRRvKP", "KQRRvKQ", "KQRRvKR", "KRBBvKB", "KRBBvKN", "KRBBvKP",
+    "KRBBvKQ", "KRBBvKR", "KRBNvKB", "KRBNvKN", "KRBNvKP", "KRBNvKQ", "KRBNvKR", "KRBPvKB",
+    "KRBPvKN", "KRBPvKP", "KRBPvKQ", "KRBPvKR", "KRNNvKB", "KRNNvKN", "KRNNvKP", "KRNNvKQ",
+    "KRNNvKR", "KRNPvKB", "KRNPvKN", "KRNPvKP", "KRNPvKQ", "KRNPvKR", "KRPPvKB", "KRPPvKN",
+    "KRPPvKP", "KRPPvKQ", "KRPPvKR", "KRRBvKB", "KRRBvKN", "KRRBvKP", "KRRBvKQ", "KRRBvKR",
+    "KRRNvKB", "KRRNvKN", "KRRNvKP", "KRRNvKQ", "KRRNvKR", "KRRPvKB", "KRRPvKN", "KRRPvKP",
+    "KRRPvKQ", "KRRPvKR", "KRRRvKB", "KRRRvKN", "KRRRvKP", "KRRRvKQ", "KRRRvKR",
     // 3v3 (most important)
-    "KBBvKBB", "KBBvKBN", "KBBvKBP", "KBBvKNN", "KBBvKNP", "KBBvKPP",
-    "KBBvKQB", "KBBvKQN", "KBBvKQP", "KBBvKRB", "KBBvKRN", "KBBvKRP", "KBBvKRR",
-    "KBNvKBN", "KBNvKBP", "KBNvKNN", "KBNvKNP", "KBNvKPP",
-    "KBNvKQB", "KBNvKQN", "KBNvKQP", "KBNvKRB", "KBNvKRN", "KBNvKRP", "KBNvKRR",
-    "KBPvKBP", "KBPvKNN", "KBPvKNP", "KBPvKPP",
-    "KBPvKQB", "KBPvKQN", "KBPvKQP", "KBPvKRB", "KBPvKRN", "KBPvKRP", "KBPvKRR",
-    "KNNvKNN", "KNNvKNP", "KNNvKPP",
-    "KNNvKQB", "KNNvKQN", "KNNvKQP", "KNNvKRB", "KNNvKRN", "KNNvKRP", "KNNvKRR",
-    "KNPvKNP", "KNPvKPP",
-    "KNPvKQB", "KNPvKQN", "KNPvKQP", "KNPvKRB", "KNPvKRN", "KNPvKRP", "KNPvKRR",
-    "KPPvKPP",
-    "KPPvKQB", "KPPvKQN", "KPPvKQP", "KPPvKRB", "KPPvKRN", "KPPvKRP", "KPPvKRR",
-    "KQBvKQB", "KQBvKQN", "KQBvKQP", "KQBvKRB", "KQBvKRN", "KQBvKRP", "KQBvKRR",
-    "KQNvKQN", "KQNvKQP", "KQNvKRB", "KQNvKRN", "KQNvKRP", "KQNvKRR",
-    "KQPvKQP", "KQPvKRB", "KQPvKRN", "KQPvKRP", "KQPvKRR",
-    "KQQvKQQ", "KQQvKQR", "KQQvKRR",
-    "KQRvKQR", "KQRvKRR",
-    "KRBvKRB", "KRBvKRN", "KRBvKRP", "KRBvKRR",
-    "KRNvKRN", "KRNvKRP", "KRNvKRR",
-    "KRPvKRP", "KRPvKRR",
-    "KRRvKRR",
+    "KBBvKBB", "KBBvKBN", "KBBvKBP", "KBBvKNN", "KBBvKNP", "KBBvKPP", "KBBvKQB", "KBBvKQN",
+    "KBBvKQP", "KBBvKRB", "KBBvKRN", "KBBvKRP", "KBBvKRR", "KBNvKBN", "KBNvKBP", "KBNvKNN",
+    "KBNvKNP", "KBNvKPP", "KBNvKQB", "KBNvKQN", "KBNvKQP", "KBNvKRB", "KBNvKRN", "KBNvKRP",
+    "KBNvKRR", "KBPvKBP", "KBPvKNN", "KBPvKNP", "KBPvKPP", "KBPvKQB", "KBPvKQN", "KBPvKQP",
+    "KBPvKRB", "KBPvKRN", "KBPvKRP", "KBPvKRR", "KNNvKNN", "KNNvKNP", "KNNvKPP", "KNNvKQB",
+    "KNNvKQN", "KNNvKQP", "KNNvKRB", "KNNvKRN", "KNNvKRP", "KNNvKRR", "KNPvKNP", "KNPvKPP",
+    "KNPvKQB", "KNPvKQN", "KNPvKQP", "KNPvKRB", "KNPvKRN", "KNPvKRP", "KNPvKRR", "KPPvKPP",
+    "KPPvKQB", "KPPvKQN", "KPPvKQP", "KPPvKRB", "KPPvKRN", "KPPvKRP", "KPPvKRR", "KQBvKQB",
+    "KQBvKQN", "KQBvKQP", "KQBvKRB", "KQBvKRN", "KQBvKRP", "KQBvKRR", "KQNvKQN", "KQNvKQP",
+    "KQNvKRB", "KQNvKRN", "KQNvKRP", "KQNvKRR", "KQPvKQP", "KQPvKRB", "KQPvKRN", "KQPvKRP",
+    "KQPvKRR", "KQQvKQQ", "KQQvKQR", "KQQvKRR", "KQRvKQR", "KQRvKRR", "KRBvKRB", "KRBvKRN",
+    "KRBvKRP", "KRBvKRR", "KRNvKRN", "KRNvKRP", "KRNvKRR", "KRPvKRP", "KRPvKRR", "KRRvKRR",
 ];
 
 // 7-piece tables — only the most critical endings (full set is enormous)
 const TABLES_7: &[&str] = &[
     // Pawn endings (most practical)
-    "KPPPPvKP", "KPPPPvKN", "KPPPPvKB", "KPPPPvKR", "KPPPPvKQ",
-    "KPPPvKPP", "KPPPvKNP", "KPPPvKBP",
-    "KPPvKPPP",
-    // Rook endings (most common in practice)
-    "KRPPPvKR", "KRPPvKRP", "KRPvKRPP",
-    "KRRPvKRR", "KRRvKRRP",
-    // Queen endings  
-    "KQPPPvKQ", "KQPPvKQP", "KQPvKQPP",
-    // Rook vs minor + pawns
-    "KRPPvKBP", "KRPPvKNP", "KRPvKBPP", "KRPvKNPP",
-    "KRBPvKRP", "KRNPvKRP",
+    "KPPPPvKP", "KPPPPvKN", "KPPPPvKB", "KPPPPvKR", "KPPPPvKQ", "KPPPvKPP", "KPPPvKNP", "KPPPvKBP",
+    "KPPvKPPP", // Rook endings (most common in practice)
+    "KRPPPvKR", "KRPPvKRP", "KRPvKRPP", "KRRPvKRR", "KRRvKRRP", // Queen endings
+    "KQPPPvKQ", "KQPPvKQP", "KQPvKQPP", // Rook vs minor + pawns
+    "KRPPvKBP", "KRPPvKNP", "KRPvKBPP", "KRPvKNPP", "KRBPvKRP", "KRNPvKRP",
     // Common practical endings
-    "KBPPPvKB", "KBPPPvKN", "KNPPPvKB", "KNPPPvKN",
-    "KBPPvKBP", "KBPPvKNP", "KNPPvKBP", "KNPPvKNP",
+    "KBPPPvKB", "KBPPPvKN", "KNPPPvKB", "KNPPPvKN", "KBPPvKBP", "KBPPvKNP", "KNPPvKBP", "KNPPvKNP",
 ];
 
 #[cfg(test)]
@@ -373,10 +338,16 @@ mod tests {
     #[test]
     fn test_table_counts() {
         let standard = table_names(SyzygyPieceSet::Standard);
-        assert!(standard.len() >= 100, "Should have 100+ tables for 3-4-5 piece");
+        assert!(
+            standard.len() >= 100,
+            "Should have 100+ tables for 3-4-5 piece"
+        );
 
         let extended = table_names(SyzygyPieceSet::Extended);
-        assert!(extended.len() > standard.len(), "6-piece set should be larger");
+        assert!(
+            extended.len() > standard.len(),
+            "6-piece set should be larger"
+        );
 
         let full = table_names(SyzygyPieceSet::Full);
         assert!(full.len() > extended.len(), "7-piece set should be largest");

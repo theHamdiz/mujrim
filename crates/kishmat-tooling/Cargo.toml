@@ -1,0 +1,15 @@
+[package]
+name = "kishmat-tooling"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Trait-based developer tooling for KishMat recipes"
+license = "MIT"
+
+[[bin]]
+name = "kishmat-tooling"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+kishmat-updater = { path = "../kishmat-updater" }

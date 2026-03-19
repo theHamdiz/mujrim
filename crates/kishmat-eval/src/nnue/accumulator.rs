@@ -10,7 +10,7 @@
 //! board state. With typical moves changing 2-4 piece bitboard entries,
 //! this is ~10x faster than full recompute.
 
-use super::network::{Accumulator, NUM_BUCKETS, net, get_base_index, get_bucket, forward};
+use super::network::{Accumulator, NUM_BUCKETS, forward, get_base_index, get_bucket, net};
 use types::{Board, Color, Piece};
 
 /// Number of bitboards we track for cache comparison.
@@ -64,23 +64,39 @@ impl NNUEState {
     #[inline(always)]
     fn snapshot_bbs(board: &Board) -> [u64; NUM_BBS] {
         [
-            board.pieces[0][0], board.pieces[0][1], board.pieces[0][2],
-            board.pieces[0][3], board.pieces[0][4], board.pieces[0][5],
-            board.pieces[1][0], board.pieces[1][1], board.pieces[1][2],
-            board.pieces[1][3], board.pieces[1][4], board.pieces[1][5],
+            board.pieces[0][0],
+            board.pieces[0][1],
+            board.pieces[0][2],
+            board.pieces[0][3],
+            board.pieces[0][4],
+            board.pieces[0][5],
+            board.pieces[1][0],
+            board.pieces[1][1],
+            board.pieces[1][2],
+            board.pieces[1][3],
+            board.pieces[1][4],
+            board.pieces[1][5],
         ]
     }
 
     /// Material scaling factor (Akimbo: `eval * (700 + mat/32) / 1024`).
     #[inline(always)]
     fn material_scale(board: &Board) -> i32 {
-        let knights = (board.pieces[0][Piece::Knight.index()] | board.pieces[1][Piece::Knight.index()]).count_ones() as i32;
-        let bishops = (board.pieces[0][Piece::Bishop.index()] | board.pieces[1][Piece::Bishop.index()]).count_ones() as i32;
-        let rooks   = (board.pieces[0][Piece::Rook.index()]   | board.pieces[1][Piece::Rook.index()]).count_ones() as i32;
-        let queens  = (board.pieces[0][Piece::Queen.index()]  | board.pieces[1][Piece::Queen.index()]).count_ones() as i32;
+        let knights = (board.pieces[0][Piece::Knight.index()]
+            | board.pieces[1][Piece::Knight.index()])
+        .count_ones() as i32;
+        let bishops = (board.pieces[0][Piece::Bishop.index()]
+            | board.pieces[1][Piece::Bishop.index()])
+        .count_ones() as i32;
+        let rooks = (board.pieces[0][Piece::Rook.index()] | board.pieces[1][Piece::Rook.index()])
+            .count_ones() as i32;
+        let queens = (board.pieces[0][Piece::Queen.index()] | board.pieces[1][Piece::Queen.index()])
+            .count_ones() as i32;
 
-        let mat = knights * SEE_VALS[1] + bishops * SEE_VALS[2]
-                + rooks * SEE_VALS[3] + queens * SEE_VALS[4];
+        let mat = knights * SEE_VALS[1]
+            + bishops * SEE_VALS[2]
+            + rooks * SEE_VALS[3]
+            + queens * SEE_VALS[4];
         700 + mat / 32
     }
 
@@ -120,7 +136,12 @@ impl NNUEState {
     }
 
     /// Incremental diff-based update: find bitboard differences and add/sub features.
-    fn update_entry_diff(entry: &mut EvalEntry, new_bbs: &[u64; NUM_BBS], w_king: usize, b_king: usize) {
+    fn update_entry_diff(
+        entry: &mut EvalEntry,
+        new_bbs: &[u64; NUM_BBS],
+        w_king: usize,
+        b_king: usize,
+    ) {
         let old_bbs = entry.bbs;
         let net = net();
 
@@ -136,7 +157,9 @@ impl NNUEState {
                 let old_bb = old_bbs[bb_idx];
                 let new_bb = new_bbs[bb_idx];
 
-                if old_bb == new_bb { continue; } // No change for this piece/color
+                if old_bb == new_bb {
+                    continue;
+                } // No change for this piece/color
 
                 let wbase = get_base_index::<0>(side_idx, piece_idx, w_king);
                 let bbase = get_base_index::<1>(side_idx, piece_idx, b_king);
@@ -150,8 +173,14 @@ impl NNUEState {
                     let w_feat = wbase + (sq ^ wflip);
                     let b_feat = bbase + (sq ^ bflip);
 
-                    super::simd::vector_add(&mut entry.white.vals, &net.feature_weights[w_feat].vals);
-                    super::simd::vector_add(&mut entry.black.vals, &net.feature_weights[b_feat].vals);
+                    super::simd::vector_add(
+                        &mut entry.white.vals,
+                        &net.feature_weights[w_feat].vals,
+                    );
+                    super::simd::vector_add(
+                        &mut entry.black.vals,
+                        &net.feature_weights[b_feat].vals,
+                    );
                 }
 
                 // Features to subtract (old but not new)
@@ -163,8 +192,14 @@ impl NNUEState {
                     let w_feat = wbase + (sq ^ wflip);
                     let b_feat = bbase + (sq ^ bflip);
 
-                    super::simd::vector_sub(&mut entry.white.vals, &net.feature_weights[w_feat].vals);
-                    super::simd::vector_sub(&mut entry.black.vals, &net.feature_weights[b_feat].vals);
+                    super::simd::vector_sub(
+                        &mut entry.white.vals,
+                        &net.feature_weights[w_feat].vals,
+                    );
+                    super::simd::vector_sub(
+                        &mut entry.black.vals,
+                        &net.feature_weights[b_feat].vals,
+                    );
                 }
             }
         }
@@ -199,11 +234,17 @@ impl NNUEState {
 
                     let w_base = get_base_index::<0>(side_idx, piece_idx, w_king);
                     let w_feat = w_base + (sq ^ wflip);
-                    super::simd::vector_add(&mut entry.white.vals, &net.feature_weights[w_feat].vals);
+                    super::simd::vector_add(
+                        &mut entry.white.vals,
+                        &net.feature_weights[w_feat].vals,
+                    );
 
                     let b_base = get_base_index::<1>(side_idx, piece_idx, b_king);
                     let b_feat = b_base + (sq ^ bflip);
-                    super::simd::vector_add(&mut entry.black.vals, &net.feature_weights[b_feat].vals);
+                    super::simd::vector_add(
+                        &mut entry.black.vals,
+                        &net.feature_weights[b_feat].vals,
+                    );
                 }
             }
         }
@@ -262,7 +303,10 @@ mod tests {
         let board = Board::new();
         let mut state = NNUEState::new();
         let score = state.evaluate(&board);
-        assert!(score.abs() < 200, "Starting position eval {score} seems unreasonable");
+        assert!(
+            score.abs() < 200,
+            "Starting position eval {score} seems unreasonable"
+        );
     }
 
     #[test]
@@ -279,11 +323,15 @@ mod tests {
     fn test_evaluate_different_positions() {
         types::init();
         let board1 = Board::new();
-        let board2 = Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let board2 =
+            Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let mut state = NNUEState::new();
         let score1 = state.evaluate(&board1);
         let score2 = state.evaluate(&board2);
-        assert!(score2 > score1, "Missing queen should increase eval: start={score1}, missing_q={score2}");
+        assert!(
+            score2 > score1,
+            "Missing queen should increase eval: start={score1}, missing_q={score2}"
+        );
     }
 
     #[test]
@@ -293,14 +341,18 @@ mod tests {
         let eg = Board::from_fen("4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1").unwrap();
         let mg_scale = NNUEState::material_scale(&mg);
         let eg_scale = NNUEState::material_scale(&eg);
-        assert!(mg_scale > eg_scale, "Middlegame should have higher scale: mg={mg_scale}, eg={eg_scale}");
+        assert!(
+            mg_scale > eg_scale,
+            "Middlegame should have higher scale: mg={mg_scale}, eg={eg_scale}"
+        );
     }
 
     #[test]
     fn test_incremental_update_consistency() {
         types::init();
         let board1 = Board::new();
-        let board2 = Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1").unwrap();
+        let board2 =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1").unwrap();
 
         // Method 1: Evaluate board1 first (populates cache), then board2 (incremental diff)
         let mut state1 = NNUEState::new();
@@ -311,43 +363,60 @@ mod tests {
         let mut state2 = NNUEState::new();
         let score_scratch = state2.evaluate(&board2);
 
-        assert_eq!(score_incremental, score_scratch,
-            "Incremental ({score_incremental}) vs scratch ({score_scratch}) mismatch");
+        assert_eq!(
+            score_incremental, score_scratch,
+            "Incremental ({score_incremental}) vs scratch ({score_scratch}) mismatch"
+        );
     }
 
     #[test]
     fn nnue_weight_diagnostic() {
         types::init();
         let net = super::super::network::net();
-        
+
         // Feature bias
         let bias = &net.feature_bias.vals;
         let bias_nz = bias.iter().filter(|&&v| v != 0).count();
-        eprintln!("Feature bias: nonzero={}/{}, range=[{}, {}]", 
-            bias_nz, bias.len(), bias.iter().min().unwrap(), bias.iter().max().unwrap());
-        
+        eprintln!(
+            "Feature bias: nonzero={}/{}, range=[{}, {}]",
+            bias_nz,
+            bias.len(),
+            bias.iter().min().unwrap(),
+            bias.iter().max().unwrap()
+        );
+
         // Output weights
         let ow0 = &net.output_weights[0].vals;
         let ow1 = &net.output_weights[1].vals;
-        eprintln!("Output weights[0]: nonzero={}/{}, range=[{}, {}]",
-            ow0.iter().filter(|&&v| v != 0).count(), ow0.len(), 
-            ow0.iter().min().unwrap(), ow0.iter().max().unwrap());
-        eprintln!("Output weights[1]: nonzero={}/{}, range=[{}, {}]",
-            ow1.iter().filter(|&&v| v != 0).count(), ow1.len(),
-            ow1.iter().min().unwrap(), ow1.iter().max().unwrap());
+        eprintln!(
+            "Output weights[0]: nonzero={}/{}, range=[{}, {}]",
+            ow0.iter().filter(|&&v| v != 0).count(),
+            ow0.len(),
+            ow0.iter().min().unwrap(),
+            ow0.iter().max().unwrap()
+        );
+        eprintln!(
+            "Output weights[1]: nonzero={}/{}, range=[{}, {}]",
+            ow1.iter().filter(|&&v| v != 0).count(),
+            ow1.len(),
+            ow1.iter().min().unwrap(),
+            ow1.iter().max().unwrap()
+        );
         eprintln!("Output bias: {}", net.output_bias);
 
-        // Evaluate key positions 
+        // Evaluate key positions
         let mut state = NNUEState::new();
         let board = Board::new();
         let s1 = state.evaluate(&board);
         eprintln!("Starting pos: {} cp", s1);
 
-        let b2 = Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
+        let b2 =
+            Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let s2 = state.evaluate(&b2);
         eprintln!("W up queen: {} cp", s2);
 
-        let b3 = Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w Qkq - 0 1").unwrap();
+        let b3 =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNB1KBNR w Qkq - 0 1").unwrap();
         let s3 = state.evaluate(&b3);
         eprintln!("W down queen: {} cp", s3);
 

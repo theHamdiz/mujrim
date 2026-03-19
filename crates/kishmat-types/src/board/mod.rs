@@ -1,13 +1,13 @@
-pub mod zobrist;
 pub mod attack_tables;
 mod move_gen;
+pub mod zobrist;
 
-use std::fmt;
+use self::zobrist::zobrist;
 use crate::bitboard::*;
 use crate::chess_move::{Move, MoveFlag};
 use crate::piece::{Color, Piece};
 use crate::square::Square;
-use self::zobrist::zobrist;
+use std::fmt;
 
 // ── Castling rights bit flags ───────────────────────────────────────────────
 pub const WHITE_KING_CASTLE: u8 = 0b0001;
@@ -110,7 +110,10 @@ impl Board {
 
     /// Places a piece on the board (used during setup / FEN parsing).
     pub fn put_piece(&mut self, piece: Piece, color: Color, square: Square) {
-        set_bit(&mut self.pieces[color.index()][piece.index()], square.index());
+        set_bit(
+            &mut self.pieces[color.index()][piece.index()],
+            square.index(),
+        );
         set_bit(&mut self.occupancy[color.index()], square.index());
         // Update hash
         self.hash ^= zobrist().piece_keys[color.index()][piece.index()][square.index()];
@@ -118,7 +121,10 @@ impl Board {
 
     /// Removes a piece from the board.
     pub fn remove_piece(&mut self, piece: Piece, color: Color, square: Square) {
-        clear_bit(&mut self.pieces[color.index()][piece.index()], square.index());
+        clear_bit(
+            &mut self.pieces[color.index()][piece.index()],
+            square.index(),
+        );
         clear_bit(&mut self.occupancy[color.index()], square.index());
         self.hash ^= zobrist().piece_keys[color.index()][piece.index()][square.index()];
     }
@@ -128,7 +134,11 @@ impl Board {
         let sq_bb = square.bitboard();
         for color_idx in 0..2usize {
             if self.occupancy[color_idx] & sq_bb != 0 {
-                let color = if color_idx == 0 { Color::White } else { Color::Black };
+                let color = if color_idx == 0 {
+                    Color::White
+                } else {
+                    Color::Black
+                };
                 for piece in Piece::ALL {
                     if self.pieces[color_idx][piece.index()] & sq_bb != 0 {
                         return Some((piece, color));
@@ -189,7 +199,8 @@ impl Board {
         self.history.push(undo);
 
         // Determine what piece is moving
-        let piece = self.piece_on(from)
+        let piece = self
+            .piece_on(from)
             .expect("make_move: no piece on source square")
             .0;
 
@@ -291,20 +302,29 @@ impl Board {
 
         self.side_to_move = us;
 
-        let undo = self.history.pop().expect("unmake_move: empty history stack");
+        let undo = self
+            .history
+            .pop()
+            .expect("unmake_move: empty history stack");
 
         let from = mv.from;
         let to = mv.to;
 
         // Determine the piece that was placed (after promotion, it might differ)
         let placed_piece = mv.promotion.unwrap_or_else(|| {
-            self.piece_on(to).expect("unmake_move: no piece on target square").0
+            self.piece_on(to)
+                .expect("unmake_move: no piece on target square")
+                .0
         });
 
         // Remove pieces from destination, put original piece back on source
         self.remove_piece(placed_piece, us, to);
         // The original piece was always the moving piece (pawn if promoted)
-        let original_piece = if mv.is_promotion() { Piece::Pawn } else { placed_piece };
+        let original_piece = if mv.is_promotion() {
+            Piece::Pawn
+        } else {
+            placed_piece
+        };
         self.put_piece(original_piece, us, from);
 
         // Restore captured piece
@@ -406,7 +426,11 @@ impl Board {
                 if let Some(skip) = ch.to_digit(10) {
                     file += skip as usize;
                 } else {
-                    let color = if ch.is_uppercase() { Color::White } else { Color::Black };
+                    let color = if ch.is_uppercase() {
+                        Color::White
+                    } else {
+                        Color::Black
+                    };
                     let piece = Piece::from_char(ch)
                         .ok_or_else(|| format!("invalid piece char in FEN: '{ch}'"))?;
                     if file >= 8 {
@@ -444,18 +468,21 @@ impl Board {
 
         // 4. En passant target square
         if parts[3] != "-" {
-            let ep_sq: Square = parts[3].parse()
+            let ep_sq: Square = parts[3]
+                .parse()
                 .map_err(|e: String| format!("invalid en passant square: {e}"))?;
             board.en_passant = Some(ep_sq);
             board.hash ^= zobrist().en_passant_keys[ep_sq.file() as usize];
         }
 
         // 5. Halfmove clock
-        board.halfmove_clock = parts[4].parse()
+        board.halfmove_clock = parts[4]
+            .parse()
             .map_err(|_| format!("invalid halfmove clock: '{}'", parts[4]))?;
 
         // 6. Fullmove number
-        board.fullmove_number = parts[5].parse()
+        board.fullmove_number = parts[5]
+            .parse()
             .map_err(|_| format!("invalid fullmove number: '{}'", parts[5]))?;
 
         Ok(board)
@@ -495,17 +522,29 @@ impl Board {
 
         // 2. Active color
         fen.push(' ');
-        fen.push(if self.side_to_move == Color::White { 'w' } else { 'b' });
+        fen.push(if self.side_to_move == Color::White {
+            'w'
+        } else {
+            'b'
+        });
 
         // 3. Castling
         fen.push(' ');
         if self.castling_rights == 0 {
             fen.push('-');
         } else {
-            if self.castling_rights & WHITE_KING_CASTLE != 0 { fen.push('K'); }
-            if self.castling_rights & WHITE_QUEEN_CASTLE != 0 { fen.push('Q'); }
-            if self.castling_rights & BLACK_KING_CASTLE != 0 { fen.push('k'); }
-            if self.castling_rights & BLACK_QUEEN_CASTLE != 0 { fen.push('q'); }
+            if self.castling_rights & WHITE_KING_CASTLE != 0 {
+                fen.push('K');
+            }
+            if self.castling_rights & WHITE_QUEEN_CASTLE != 0 {
+                fen.push('Q');
+            }
+            if self.castling_rights & BLACK_KING_CASTLE != 0 {
+                fen.push('k');
+            }
+            if self.castling_rights & BLACK_QUEEN_CASTLE != 0 {
+                fen.push('q');
+            }
         }
 
         // 4. En passant
@@ -516,7 +555,10 @@ impl Board {
         }
 
         // 5 & 6. Halfmove clock and fullmove number
-        fen.push_str(&format!(" {} {}", self.halfmove_clock, self.fullmove_number));
+        fen.push_str(&format!(
+            " {} {}",
+            self.halfmove_clock, self.fullmove_number
+        ));
 
         fen
     }
@@ -567,7 +609,9 @@ impl Board {
     /// Checks only reversible positions (since last pawn move or capture).
     pub fn has_repetition(&self) -> bool {
         let len = self.hash_history.len();
-        if len < 4 { return false; }
+        if len < 4 {
+            return false;
+        }
 
         // Only need to check back to the last irreversible move
         let check_len = (self.halfmove_clock as usize).min(len);
@@ -640,14 +684,14 @@ impl Board {
         let king_rank = king_square.rank() as i32;
         let shield_rank = king_rank + color.pawn_direction() / 8;
 
-        if shield_rank < 0 || shield_rank > 7 {
+        if !(0..=7).contains(&shield_rank) {
             return 0;
         }
 
         let mut mask = 0u64;
         for df in -1..=1 {
             let f = king_file + df;
-            if f >= 0 && f < 8 {
+            if (0..8).contains(&f) {
                 let sq = Square::from_file_rank(f as u8, shield_rank as u8);
                 mask |= sq.bitboard();
             }
@@ -684,7 +728,11 @@ impl fmt::Display for Board {
                 let ch = match self.piece_on(sq) {
                     Some((piece, color)) => {
                         let c = piece.to_char();
-                        if color == Color::Black { c.to_ascii_lowercase() } else { c }
+                        if color == Color::Black {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c
+                        }
                     }
                     None => '.',
                 };
@@ -698,10 +746,18 @@ impl fmt::Display for Board {
         if self.castling_rights == 0 {
             write!(f, "-")?;
         } else {
-            if self.castling_rights & WHITE_KING_CASTLE != 0 { write!(f, "K")?; }
-            if self.castling_rights & WHITE_QUEEN_CASTLE != 0 { write!(f, "Q")?; }
-            if self.castling_rights & BLACK_KING_CASTLE != 0 { write!(f, "k")?; }
-            if self.castling_rights & BLACK_QUEEN_CASTLE != 0 { write!(f, "q")?; }
+            if self.castling_rights & WHITE_KING_CASTLE != 0 {
+                write!(f, "K")?;
+            }
+            if self.castling_rights & WHITE_QUEEN_CASTLE != 0 {
+                write!(f, "Q")?;
+            }
+            if self.castling_rights & BLACK_KING_CASTLE != 0 {
+                write!(f, "k")?;
+            }
+            if self.castling_rights & BLACK_QUEEN_CASTLE != 0 {
+                write!(f, "q")?;
+            }
         }
         writeln!(f)?;
         write!(f, "  En passant: ")?;
@@ -734,7 +790,7 @@ mod tests {
     fn test_starting_position_fen_roundtrip() {
         setup();
         let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-        let mut board = Board::from_fen(fen).unwrap();
+        let board = Board::from_fen(fen).unwrap();
         assert_eq!(board.to_fen(), fen);
     }
 
@@ -742,7 +798,7 @@ mod tests {
     fn test_fen_with_position() {
         setup();
         let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
-        let mut board = Board::from_fen(fen).unwrap();
+        let board = Board::from_fen(fen).unwrap();
         assert_eq!(board.to_fen(), fen);
     }
 
@@ -758,7 +814,8 @@ mod tests {
             "r2q1rk1/pP1p2pp/Q4n2/bbp1p3/Np6/1B3NBn/pPPP1PPP/R3K2R b KQ - 0 1",
         ];
         for fen in fens {
-            let mut board = Board::from_fen(fen).unwrap_or_else(|e| panic!("Failed to parse FEN '{fen}': {e}"));
+            let board =
+                Board::from_fen(fen).unwrap_or_else(|e| panic!("Failed to parse FEN '{fen}': {e}"));
             assert_eq!(board.to_fen(), fen, "FEN roundtrip failed for: {fen}");
         }
     }
@@ -778,7 +835,7 @@ mod tests {
     #[test]
     fn test_piece_counts_starting_position() {
         setup();
-        let mut board = Board::new();
+        let board = Board::new();
         assert_eq!(board.piece_count(Piece::Pawn, Color::White), 8);
         assert_eq!(board.piece_count(Piece::Pawn, Color::Black), 8);
         assert_eq!(board.piece_count(Piece::Rook, Color::White), 2);
@@ -792,7 +849,7 @@ mod tests {
     #[test]
     fn test_king_square() {
         setup();
-        let mut board = Board::new();
+        let board = Board::new();
         assert_eq!(board.king_square(Color::White), Square::E1);
         assert_eq!(board.king_square(Color::Black), Square::E8);
     }
@@ -800,10 +857,19 @@ mod tests {
     #[test]
     fn test_piece_on_starting_position() {
         setup();
-        let mut board = Board::new();
-        assert_eq!(board.piece_on(Square::E1), Some((Piece::King, Color::White)));
-        assert_eq!(board.piece_on(Square::D8), Some((Piece::Queen, Color::Black)));
-        assert_eq!(board.piece_on(Square::A2), Some((Piece::Pawn, Color::White)));
+        let board = Board::new();
+        assert_eq!(
+            board.piece_on(Square::E1),
+            Some((Piece::King, Color::White))
+        );
+        assert_eq!(
+            board.piece_on(Square::D8),
+            Some((Piece::Queen, Color::Black))
+        );
+        assert_eq!(
+            board.piece_on(Square::A2),
+            Some((Piece::Pawn, Color::White))
+        );
         assert_eq!(board.piece_on(Square::E4), None);
     }
 
@@ -834,10 +900,15 @@ mod tests {
         for mv in &moves {
             board.make_move(*mv);
             board.unmake_move(*mv);
-            assert_eq!(board.to_fen(), original_fen,
-                "FEN mismatch after make/unmake of {mv}");
-            assert_eq!(board.hash, original_hash,
-                "Zobrist hash mismatch after make/unmake of {mv}");
+            assert_eq!(
+                board.to_fen(),
+                original_fen,
+                "FEN mismatch after make/unmake of {mv}"
+            );
+            assert_eq!(
+                board.hash, original_hash,
+                "Zobrist hash mismatch after make/unmake of {mv}"
+            );
         }
     }
 
@@ -854,10 +925,15 @@ mod tests {
         for mv in &moves {
             board.make_move(*mv);
             board.unmake_move(*mv);
-            assert_eq!(board.to_fen(), original_fen,
-                "FEN mismatch after make/unmake of {mv}");
-            assert_eq!(board.hash, original_hash,
-                "Hash mismatch after make/unmake of {mv}");
+            assert_eq!(
+                board.to_fen(),
+                original_fen,
+                "FEN mismatch after make/unmake of {mv}"
+            );
+            assert_eq!(
+                board.hash, original_hash,
+                "Hash mismatch after make/unmake of {mv}"
+            );
         }
     }
 
@@ -874,10 +950,15 @@ mod tests {
         for mv in &moves {
             board.make_move(*mv);
             board.unmake_move(*mv);
-            assert_eq!(board.to_fen(), original_fen,
-                "FEN mismatch after make/unmake of {mv} in KiwiPete");
-            assert_eq!(board.hash, original_hash,
-                "Hash mismatch after make/unmake of {mv} in KiwiPete");
+            assert_eq!(
+                board.to_fen(),
+                original_fen,
+                "FEN mismatch after make/unmake of {mv} in KiwiPete"
+            );
+            assert_eq!(
+                board.hash, original_hash,
+                "Hash mismatch after make/unmake of {mv} in KiwiPete"
+            );
         }
     }
 
@@ -891,7 +972,9 @@ mod tests {
         let mut played = Vec::new();
         for _ in 0..10 {
             let moves = board.generate_legal_moves();
-            if moves.is_empty() { break; }
+            if moves.is_empty() {
+                break;
+            }
             let mv = moves[0];
             board.make_move(mv);
             played.push(mv);
@@ -902,7 +985,11 @@ mod tests {
             board.unmake_move(*mv);
         }
 
-        assert_eq!(board.to_fen(), original_fen, "Board not restored after deep sequence");
+        assert_eq!(
+            board.to_fen(),
+            original_fen,
+            "Board not restored after deep sequence"
+        );
     }
 
     // ── En passant ──────────────────────────────────────────────────────────
@@ -926,7 +1013,10 @@ mod tests {
         board.make_move(Move::double_pawn(Square::E7, Square::E5));
         assert_eq!(board.en_passant, Some(Square::E6));
         board.make_move(Move::quiet(Square::G1, Square::F3)); // knight move
-        assert_eq!(board.en_passant, None, "EP should be cleared after non-double-push");
+        assert_eq!(
+            board.en_passant, None,
+            "EP should be cleared after non-double-push"
+        );
     }
 
     // ── Castling rights ─────────────────────────────────────────────────────
@@ -940,10 +1030,16 @@ mod tests {
 
         // Move white king
         board.make_move(Move::quiet(Square::E1, Square::F1));
-        assert_eq!(board.castling_rights & (WHITE_KING_CASTLE | WHITE_QUEEN_CASTLE), 0,
-            "White castling should be revoked after king move");
+        assert_eq!(
+            board.castling_rights & (WHITE_KING_CASTLE | WHITE_QUEEN_CASTLE),
+            0,
+            "White castling should be revoked after king move"
+        );
         // Black castling should be preserved
-        assert_ne!(board.castling_rights & (BLACK_KING_CASTLE | BLACK_QUEEN_CASTLE), 0);
+        assert_ne!(
+            board.castling_rights & (BLACK_KING_CASTLE | BLACK_QUEEN_CASTLE),
+            0
+        );
     }
 
     #[test]
@@ -953,10 +1049,16 @@ mod tests {
         let mut board = Board::from_fen(fen).unwrap();
 
         board.make_move(Move::quiet(Square::H1, Square::G1)); // White kingside rook
-        assert_eq!(board.castling_rights & WHITE_KING_CASTLE, 0,
-            "White kingside castling should be revoked");
-        assert_ne!(board.castling_rights & WHITE_QUEEN_CASTLE, 0,
-            "White queenside castling should be preserved");
+        assert_eq!(
+            board.castling_rights & WHITE_KING_CASTLE,
+            0,
+            "White kingside castling should be revoked"
+        );
+        assert_ne!(
+            board.castling_rights & WHITE_QUEEN_CASTLE,
+            0,
+            "White queenside castling should be preserved"
+        );
     }
 
     #[test]
@@ -964,13 +1066,16 @@ mod tests {
         setup();
         // Black rook captures white's a1 rook directly
         let fen = "r3k2r/pppppppp/8/8/8/8/1PPPPPPP/r3K2R w Kkq - 0 1";
-        let mut board = Board::from_fen(fen).unwrap();
+        let board = Board::from_fen(fen).unwrap();
 
         // White's a1 rook is already captured (replaced by black rook)
         // So white queenside castling should already be gone? No — the FEN says only K.
         // Let's test: black rook is ON a1, meaning the white rook was captured.
-        assert_eq!(board.castling_rights & WHITE_QUEEN_CASTLE, 0,
-            "White queenside castling should not be possible with no rook on a1");
+        assert_eq!(
+            board.castling_rights & WHITE_QUEEN_CASTLE,
+            0,
+            "White queenside castling should not be possible with no rook on a1"
+        );
     }
 
     // ── Zobrist hashing ─────────────────────────────────────────────────────
@@ -1001,16 +1106,25 @@ mod tests {
         };
 
         // Verify initial hash
-        assert_eq!(board.hash, recalculate_hash(&board),
-            "Initial hash mismatch");
+        assert_eq!(
+            board.hash,
+            recalculate_hash(&board),
+            "Initial hash mismatch"
+        );
 
         // Play 20 random-ish moves and verify hash at each step
         for _ in 0..20 {
             let moves = board.generate_legal_moves();
-            if moves.is_empty() { break; }
+            if moves.is_empty() {
+                break;
+            }
             board.make_move(moves[0]);
-            assert_eq!(board.hash, recalculate_hash(&board),
-                "Hash mismatch after move, FEN: {}", board.to_fen());
+            assert_eq!(
+                board.hash,
+                recalculate_hash(&board),
+                "Hash mismatch after move, FEN: {}",
+                board.to_fen()
+            );
         }
     }
 
@@ -1037,28 +1151,28 @@ mod tests {
     #[test]
     fn test_not_in_check_starting() {
         setup();
-        let mut board = Board::new();
+        let board = Board::new();
         assert!(!board.in_check());
     }
 
     #[test]
     fn test_material_count_starting() {
         setup();
-        let mut board = Board::new();
+        let board = Board::new();
         assert_eq!(board.material_count(), 0);
     }
 
     #[test]
     fn test_insufficient_material_kk() {
         setup();
-        let mut board = Board::from_fen("8/8/4k3/8/8/4K3/8/8 w - - 0 1").unwrap();
+        let board = Board::from_fen("8/8/4k3/8/8/4K3/8/8 w - - 0 1").unwrap();
         assert!(board.is_draw(), "K vs K should be a draw");
     }
 
     #[test]
     fn test_insufficient_material_kbk() {
         setup();
-        let mut board = Board::from_fen("8/8/4k3/8/8/4K3/8/3B4 w - - 0 1").unwrap();
+        let board = Board::from_fen("8/8/4k3/8/8/4K3/8/3B4 w - - 0 1").unwrap();
         assert!(board.is_draw(), "K+B vs K should be a draw");
     }
 
@@ -1074,11 +1188,12 @@ mod tests {
     #[test]
     fn test_display_does_not_panic() {
         setup();
-        let mut board = Board::new();
+        let board = Board::new();
         let _ = format!("{board}");
 
-        let board2 = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
+        let board2 =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .unwrap();
         let _ = format!("{board2}");
     }
 }
-

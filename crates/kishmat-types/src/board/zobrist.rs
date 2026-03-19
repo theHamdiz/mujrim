@@ -1,6 +1,6 @@
 use rand::Rng;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use crate::piece::Piece;
 
@@ -22,10 +22,10 @@ impl Zobrist {
         let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_CAFE_BABE);
 
         let mut piece_keys = [[[0u64; 64]; 6]; 2];
-        for color in 0..2 {
-            for piece in 0..Piece::COUNT {
-                for square in 0..64 {
-                    piece_keys[color][piece][square] = rng.random();
+        for color_keys in &mut piece_keys {
+            for piece_keys in color_keys.iter_mut().take(Piece::COUNT) {
+                for key in piece_keys.iter_mut() {
+                    *key = rng.random();
                 }
             }
         }

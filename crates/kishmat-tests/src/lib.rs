@@ -3,9 +3,9 @@
 
 #[cfg(test)]
 mod integration {
-    use types::{Board, Color, Piece, Square};
     use search::SearchEngine;
     use std::time::Duration;
+    use types::{Board, Color, Piece, Square};
 
     fn setup() {
         types::init();
@@ -33,7 +33,9 @@ mod integration {
             // Verify move is legal
             let legal = board.generate_legal_moves();
             assert!(
-                legal.iter().any(|m| m.from == result.best_move.from && m.to == result.best_move.to),
+                legal
+                    .iter()
+                    .any(|m| m.from == result.best_move.from && m.to == result.best_move.to),
                 "Engine returned illegal move {} at ply {ply}",
                 result.best_move
             );
@@ -57,13 +59,17 @@ mod integration {
         let mut engine = SearchEngine::new(2, 1);
 
         for _ in 0..40 {
-            if board.is_game_over() { return; }
+            if board.is_game_over() {
+                return;
+            }
 
             let result = engine.search_time(&mut board, Duration::from_millis(20), 64);
 
             let legal = board.generate_legal_moves();
             assert!(
-                legal.iter().any(|m| m.from == result.best_move.from && m.to == result.best_move.to),
+                legal
+                    .iter()
+                    .any(|m| m.from == result.best_move.from && m.to == result.best_move.to),
                 "Engine returned illegal move under time pressure: {}",
                 result.best_move
             );
@@ -88,12 +94,21 @@ mod integration {
 
         // Board should reflect the move sequence
         assert_eq!(handler.board.side_to_move, Color::White);
-        assert_eq!(handler.board.piece_on(Square::E4), Some((Piece::Pawn, Color::White)));
-        assert_eq!(handler.board.piece_on(Square::E5), Some((Piece::Pawn, Color::Black)));
+        assert_eq!(
+            handler.board.piece_on(Square::E4),
+            Some((Piece::Pawn, Color::White))
+        );
+        assert_eq!(
+            handler.board.piece_on(Square::E5),
+            Some((Piece::Pawn, Color::Black))
+        );
 
         // New game should reset
         handler.handle_position(&["startpos"]);
-        assert_eq!(handler.board.to_fen(), "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(
+            handler.board.to_fen(),
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
     }
 
     #[test]
@@ -103,8 +118,13 @@ mod integration {
 
         // Load a complex position
         handler.handle_position(&[
-            "fen", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R",
-            "w", "KQkq", "-", "0", "1"
+            "fen",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R",
+            "w",
+            "KQkq",
+            "-",
+            "0",
+            "1",
         ]);
 
         let moves = handler.board.generate_legal_moves();
@@ -140,8 +160,11 @@ mod integration {
         let result = engine.search_depth(&mut board, 4);
 
         // The search score should be in a reasonable range for the starting position
-        assert!(result.score.abs() < 200,
-            "Starting position search score should be reasonable, got {}", result.score);
+        assert!(
+            result.score.abs() < 200,
+            "Starting position search score should be reasonable, got {}",
+            result.score
+        );
     }
 
     #[test]
@@ -153,8 +176,11 @@ mod integration {
         let mut engine = SearchEngine::new(2, 1);
         let result = engine.search_depth(&mut board, 4);
 
-        assert!(result.score > 1000,
-            "Massive material advantage should have high score, got {}", result.score);
+        assert!(
+            result.score > 1000,
+            "Massive material advantage should have high score, got {}",
+            result.score
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -165,16 +191,31 @@ mod integration {
     fn test_perft_extended_positions() {
         setup();
         let positions = [
-            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 3, 8902u64),
-            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 2, 2039),
+            (
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                3,
+                8902u64,
+            ),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                2,
+                2039,
+            ),
             ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 3, 2812),
-            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 2, 1486),
+            (
+                "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+                2,
+                1486,
+            ),
         ];
 
         for (fen, depth, expected) in positions {
             let mut board = Board::from_fen(fen).unwrap();
             let actual = board.perft(depth);
-            assert_eq!(actual, expected, "Perft({depth}) failed for {fen}: expected {expected}, got {actual}");
+            assert_eq!(
+                actual, expected,
+                "Perft({depth}) failed for {fen}: expected {expected}, got {actual}"
+            );
         }
     }
 
@@ -194,8 +235,10 @@ mod integration {
             board.make_move(*mv);
             board.unmake_move(*mv);
             let restored_eval = eval::evaluate(&board);
-            assert_eq!(restored_eval, original_eval,
-                "Eval changed after make/unmake of {mv}: original={original_eval}, restored={restored_eval}");
+            assert_eq!(
+                restored_eval, original_eval,
+                "Eval changed after make/unmake of {mv}: original={original_eval}, restored={restored_eval}"
+            );
         }
     }
 
@@ -210,6 +253,10 @@ mod integration {
         engine.search_depth(&mut board, 5);
 
         assert_eq!(board.to_fen(), original_fen, "Search modified the board");
-        assert_eq!(eval::evaluate(&board), original_eval, "Search modified eval");
+        assert_eq!(
+            eval::evaluate(&board),
+            original_eval,
+            "Search modified eval"
+        );
     }
 }

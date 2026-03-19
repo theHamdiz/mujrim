@@ -3,12 +3,12 @@
 //! Provides compatibility with XBoard, WinBoard, and other CECP-based GUIs.
 //! Implements the core protocol commands needed for tournament play.
 
-use std::io::{self, BufRead, Write};
-use std::time::Duration;
-use types::{Board, Move, Color};
 use search::SearchEngine;
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
+use std::io::{self, BufRead, Write};
+use std::time::Duration;
+use types::{Board, Color, Move};
 
 /// Immediately writes a line to stdout and flushes.
 #[inline]
@@ -218,7 +218,10 @@ impl XBoardHandler {
             if let Some(ref book) = self.book {
                 if let Some(book_move) = book.probe(&self.board) {
                     let legal = self.board.generate_legal_moves();
-                    if legal.iter().any(|m| m.from == book_move.from && m.to == book_move.to) {
+                    if legal
+                        .iter()
+                        .any(|m| m.from == book_move.from && m.to == book_move.to)
+                    {
                         xboard_println(&format!("move {}", book_move.to_uci()));
                         self.board.make_move(book_move);
                         return;
@@ -231,7 +234,9 @@ impl XBoardHandler {
         let time_ms = (self.time_remaining_cs * 10) / 30; // Use ~1/30th of remaining
         let time_limit = Duration::from_millis(time_ms.max(100));
 
-        let result = self.engine.search_time(&mut self.board, time_limit, self.max_depth);
+        let result = self
+            .engine
+            .search_time(&mut self.board, time_limit, self.max_depth);
         let mv = result.best_move;
 
         xboard_println(&format!("move {}", mv.to_uci()));

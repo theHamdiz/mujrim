@@ -2,7 +2,7 @@
 //! Uses lock-free reads/writes for Lazy SMP — benign data races are
 //! acceptable since hash verification catches corruption.
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use types::Move;
 use types::chess_move::NULL_MOVE;
 
@@ -279,7 +279,15 @@ impl TranspositionTable {
 
     /// Stores an entry in the TT with smart replacement.
     #[inline(always)]
-    pub fn store(&self, hash: u64, depth: i32, score: i32, node_type: NodeType, best_move: Move, was_pv: bool) {
+    pub fn store(
+        &self,
+        hash: u64,
+        depth: i32,
+        score: i32,
+        node_type: NodeType,
+        best_move: Move,
+        was_pv: bool,
+    ) {
         let idx = (hash as usize) & self.mask;
         let bucket = &self.buckets[idx];
         let current_gen = self.current_generation();
@@ -299,9 +307,19 @@ impl TranspositionTable {
         let mut replace_score = i32::MAX;
 
         for (i, entry) in bucket.entries.iter().enumerate() {
-            // Same position: always replace
-            if let Some(_existing) = entry.load(hash) {
-                bucket.entries[i].store(&new_entry);
+            // Same position: depth-preferred replacement.
+            if let Some(existing) = entry.load(hash) {
+                let should_replace = node_type == NodeType::Exact
+                    || depth + 2 >= existing.depth
+                    || existing.age != current_gen
+                    || (node_type == NodeType::LowerBound
+                        && existing.node_type == NodeType::UpperBound)
+                    || (node_type == NodeType::UpperBound
+                        && existing.node_type == NodeType::LowerBound
+                        && depth >= existing.depth);
+                if should_replace {
+                    bucket.entries[i].store(&new_entry);
+                }
                 return;
             }
 
@@ -389,21 +407,24 @@ mod tests {
 
         let tt = Arc::new(TranspositionTable::new(1));
 
-        let handles: Vec<_> = (0..4).map(|t| {
-            let tt = Arc::clone(&tt);
-            thread::spawn(move || {
-                let mv = Move::quiet(Square::E2, Square::E4);
-                for i in 0..1000u64 {
-                    let hash = t * 100000 + i;
-                    tt.store(hash, 5, i as i32, NodeType::Exact, mv, false);
-                }
+        let handles: Vec<_> = (0..4)
+            .map(|t| {
+                let tt = Arc::clone(&tt);
+                thread::spawn(move || {
+                    let mv = Move::quiet(Square::E2, Square::E4);
+                    for i in 0..1000u64 {
+                        let hash = t * 100000 + i;
+                        tt.store(hash, 5, i as i32, NodeType::Exact, mv, false);
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
 
         // Verify some entries are retrievable
-        let mv = Move::quiet(Square::E2, Square::E4);
         let mut found = 0;
         for t in 0..4u64 {
             for i in 0..1000u64 {
@@ -412,6 +433,32 @@ mod tests {
                 }
             }
         }
-        assert!(found > 0, "Should find at least some entries after concurrent writes");
+        assert!(
+            found > 0,
+            "Should find at least some entries after concurrent writes"
+        );
+    }
+
+    #[test]
+    fn test_tt_same_hash_prefers_deeper_non_exact() {
+        let tt = TranspositionTable::new(1);
+        let mv = Move::quiet(Square::E2, Square::E4);
+        tt.store(12345, 9, 100, NodeType::LowerBound, mv, false);
+        tt.store(12345, 2, 120, NodeType::UpperBound, mv, false);
+        let entry = tt.probe(12345).unwrap();
+        assert_eq!(entry.depth, 9);
+        assert_eq!(entry.score, 100);
+    }
+
+    #[test]
+    fn test_tt_same_hash_allows_exact_replacement() {
+        let tt = TranspositionTable::new(1);
+        let mv = Move::quiet(Square::E2, Square::E4);
+        tt.store(777, 9, 100, NodeType::LowerBound, mv, false);
+        tt.store(777, 2, 50, NodeType::Exact, mv, false);
+        let entry = tt.probe(777).unwrap();
+        assert_eq!(entry.depth, 2);
+        assert_eq!(entry.score, 50);
+        assert_eq!(entry.node_type, NodeType::Exact);
     }
 }

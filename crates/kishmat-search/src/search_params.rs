@@ -77,6 +77,14 @@ pub struct SearchParams {
     pub se_margin_mul: i32,
     /// Minimum depth to try singular extensions.
     pub se_depth_min: i32,
+    /// Maximum double extensions per path.
+    pub max_dbl_exts: i32,
+
+    // ── Null-move verification ─────────────────────────────────────
+    /// Minimum depth to trigger NMP verification search.
+    pub nmp_min_verif_depth: i32,
+    /// NMP verification fraction: `(depth - R) * frac / 16`.
+    pub nmp_verif_frac: i32,
 
     // ── Aspiration windows ─────────────────────────────────────────
     /// Initial aspiration window half-width (centipawns).
@@ -143,8 +151,13 @@ impl SearchParams {
             see_prune_depth_limit: 9,
 
             // Singular extensions
-            se_margin_mul: 3,
-            se_depth_min: 7,
+            se_margin_mul: 1,
+            se_depth_min: 8,
+            max_dbl_exts: 5,
+
+            // NMP verification
+            nmp_min_verif_depth: 17,
+            nmp_verif_frac: 12,
 
             // Aspiration
             aspiration_window: 10,
@@ -207,8 +220,13 @@ impl SearchParams {
             see_prune_depth_limit: 12,
 
             // Singular extensions — SF: singularBeta = ttValue - 58*depth/57
-            se_margin_mul: 3,
-            se_depth_min: 6,
+            se_margin_mul: 1,
+            se_depth_min: 8,
+            max_dbl_exts: 5,
+
+            // NMP verification
+            nmp_min_verif_depth: 17,
+            nmp_verif_frac: 12,
 
             // Aspiration — same as Akimbo
             aspiration_window: 10,
@@ -248,13 +266,23 @@ impl SearchParams {
     /// Reverse futility pruning margin: `mul * depth - improving_bonus`.
     #[inline(always)]
     pub fn rfp_margin(&self, depth: i32, improving: bool) -> i32 {
-        self.rfp_mul * depth - if improving { self.rfp_improving_bonus } else { 0 }
+        self.rfp_mul * depth
+            - if improving {
+                self.rfp_improving_bonus
+            } else {
+                0
+            }
     }
 
     /// Futility margin: `mul * depth - improving_bonus`.
     #[inline(always)]
     pub fn futility_margin(&self, depth: i32, improving: bool) -> i32 {
-        self.futility_mul * depth - if improving { self.futility_improving_bonus } else { 0 }
+        self.futility_mul * depth
+            - if improving {
+                self.futility_improving_bonus
+            } else {
+                0
+            }
     }
 
     /// Singular extension margin: `mul * depth`.
@@ -272,7 +300,8 @@ impl SearchParams {
     /// Null-move reduction: `base + depth/div + ((eval-beta)/eval_div).min(eval_max)`.
     #[inline(always)]
     pub fn null_move_r(&self, depth: i32, eval: i32, beta: i32) -> i32 {
-        self.nmp_base + depth / self.nmp_depth_div
+        self.nmp_base
+            + depth / self.nmp_depth_div
             + ((eval - beta) / self.nmp_eval_div).min(self.nmp_eval_max)
     }
 

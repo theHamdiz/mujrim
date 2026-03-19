@@ -5,13 +5,13 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
+use crate::config::DatagenConfig;
 use rand::Rng;
 use types::{Board, Color};
-use crate::config::DatagenConfig;
 
 /// A single training position recorded during self-play.
 #[derive(Debug, Clone)]
@@ -60,7 +60,9 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     let writer = Arc::new(std::sync::Mutex::new(BufWriter::new(file)));
 
     for _game_idx in 0..config.num_games {
-        if stopped.load(Ordering::Relaxed) { break; }
+        if stopped.load(Ordering::Relaxed) {
+            break;
+        }
 
         let result = play_one_game(config, &stopped);
 
@@ -89,17 +91,17 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     let total = total_positions.load(Ordering::Relaxed);
     let elapsed = start.elapsed();
     println!();
-    println!("Datagen complete: {total} positions in {:.1}s", elapsed.as_secs_f64());
+    println!(
+        "Datagen complete: {total} positions in {:.1}s",
+        elapsed.as_secs_f64()
+    );
     println!("Output: {}", config.output_path);
 
     Ok(total)
 }
 
 /// Play a single self-play game, recording positions.
-fn play_one_game(
-    config: &DatagenConfig,
-    stopped: &AtomicBool,
-) -> Option<GameResult> {
+fn play_one_game(config: &DatagenConfig, stopped: &AtomicBool) -> Option<GameResult> {
     let mut board = Board::new();
     let mut positions: Vec<TrainingPosition> = Vec::new();
     let mut ply = 0u32;
@@ -109,7 +111,9 @@ fn play_one_game(
     // Random opening: make random legal moves for the first N plies
     for _ in 0..config.random_plies {
         let moves = board.generate_legal_moves();
-        if moves.is_empty() { break; }
+        if moves.is_empty() {
+            break;
+        }
         let idx = rng.random_range(0..moves.len());
         board.make_move(moves[idx]);
         ply += 1;
@@ -117,7 +121,9 @@ fn play_one_game(
 
     // Play game using NNUE eval for move selection
     loop {
-        if stopped.load(Ordering::Relaxed) { return None; }
+        if stopped.load(Ordering::Relaxed) {
+            return None;
+        }
 
         let moves = board.generate_legal_moves();
         if moves.is_empty() {
@@ -129,7 +135,11 @@ fn play_one_game(
             for pos in &mut positions {
                 pos.wdl = 0.5;
             }
-            return Some(GameResult { positions, outcome: 0.5, plies: ply });
+            return Some(GameResult {
+                positions,
+                outcome: 0.5,
+                plies: ply,
+            });
         }
 
         // Evaluate position using NNUE
@@ -154,7 +164,11 @@ fn play_one_game(
                 for pos in &mut positions {
                     pos.wdl = 0.5;
                 }
-                return Some(GameResult { positions, outcome: 0.5, plies: ply });
+                return Some(GameResult {
+                    positions,
+                    outcome: 0.5,
+                    plies: ply,
+                });
             }
         } else {
             consecutive_low_eval = 0;
@@ -162,11 +176,19 @@ fn play_one_game(
 
         if eval_score.abs() > config.win_adjudication_cp {
             let stm_is_white = board.side_to_move == Color::White;
-            let outcome = if (eval_score > 0) == stm_is_white { 1.0 } else { 0.0 };
+            let outcome = if (eval_score > 0) == stm_is_white {
+                1.0
+            } else {
+                0.0
+            };
             for pos in &mut positions {
                 pos.wdl = outcome;
             }
-            return Some(GameResult { positions, outcome, plies: ply });
+            return Some(GameResult {
+                positions,
+                outcome,
+                plies: ply,
+            });
         }
 
         // Play the first move (in a proper datagen, use search `bestmove`)
@@ -178,14 +200,22 @@ fn play_one_game(
             for pos in &mut positions {
                 pos.wdl = 0.5;
             }
-            return Some(GameResult { positions, outcome: 0.5, plies: ply });
+            return Some(GameResult {
+                positions,
+                outcome: 0.5,
+                plies: ply,
+            });
         }
     }
 
     // Determine outcome from final position
     let outcome = if board.in_check() {
         // Checkmate — whoever is in check lost
-        if board.side_to_move == Color::White { 0.0 } else { 1.0 }
+        if board.side_to_move == Color::White {
+            0.0
+        } else {
+            1.0
+        }
     } else {
         0.5 // Stalemate
     };
@@ -195,7 +225,11 @@ fn play_one_game(
     }
 
     if positions.len() >= config.min_game_length as usize {
-        Some(GameResult { positions, outcome, plies: ply })
+        Some(GameResult {
+            positions,
+            outcome,
+            plies: ply,
+        })
     } else {
         None
     }

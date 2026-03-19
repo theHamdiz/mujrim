@@ -151,11 +151,13 @@ mod tests {
     #[test]
     fn test_network_size() {
         let expected = std::mem::size_of::<Network>();
-        let actual = std::fs::read(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/resources/net.bin")
-        ).unwrap().len();
-        assert_eq!(expected, actual,
-            "Network struct size ({expected}) != net.bin size ({actual})");
+        let actual = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/net.bin"))
+            .unwrap()
+            .len();
+        assert_eq!(
+            expected, actual,
+            "Network struct size ({expected}) != net.bin size ({actual})"
+        );
     }
 
     #[test]
@@ -180,10 +182,14 @@ mod tests {
                 for ksq in 0..64 {
                     let idx0 = get_base_index::<0>(side, pc, ksq);
                     let idx1 = get_base_index::<1>(side, pc, ksq);
-                    assert!(idx0 < 768 * NUM_BUCKETS * 2,
-                        "Base index {idx0} out of range (SIDE=0, side={side}, pc={pc}, ksq={ksq})");
-                    assert!(idx1 < 768 * NUM_BUCKETS * 2,
-                        "Base index {idx1} out of range (SIDE=1, side={side}, pc={pc}, ksq={ksq})");
+                    assert!(
+                        idx0 < 768 * NUM_BUCKETS * 2,
+                        "Base index {idx0} out of range (SIDE=0, side={side}, pc={pc}, ksq={ksq})"
+                    );
+                    assert!(
+                        idx1 < 768 * NUM_BUCKETS * 2,
+                        "Base index {idx1} out of range (SIDE=1, side={side}, pc={pc}, ksq={ksq})"
+                    );
                 }
             }
         }

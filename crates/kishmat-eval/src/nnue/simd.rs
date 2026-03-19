@@ -21,10 +21,14 @@ const QA: i16 = 255;
 #[inline(always)]
 pub fn flatten(acc: &[i16; HIDDEN], weights: &[i16; HIDDEN]) -> i32 {
     #[cfg(all(feature = "simd", target_feature = "avx2"))]
-    unsafe { return avx2::flatten(acc, weights); }
+    unsafe {
+        return avx2::flatten(acc, weights);
+    }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe { return neon::flatten(acc, weights); }
+    unsafe {
+        return neon::flatten(acc, weights);
+    }
 
     #[allow(unreachable_code)]
     scalar::flatten(acc, weights)
@@ -33,17 +37,16 @@ pub fn flatten(acc: &[i16; HIDDEN], weights: &[i16; HIDDEN]) -> i32 {
 /// Update accumulator in-place: for each add index, add the weight row;
 /// for each sub index, subtract the weight row.
 #[inline]
-pub fn vector_update(
-    acc: &mut [i16; HIDDEN],
-    all_weights: &[i16],
-    adds: &[usize],
-    subs: &[usize],
-) {
+pub fn vector_update(acc: &mut [i16; HIDDEN], all_weights: &[i16], adds: &[usize], subs: &[usize]) {
     #[cfg(all(feature = "simd", target_feature = "avx2"))]
-    unsafe { return avx2::vector_update(acc, all_weights, adds, subs); }
+    unsafe {
+        return avx2::vector_update(acc, all_weights, adds, subs);
+    }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe { return neon::vector_update(acc, all_weights, adds, subs); }
+    unsafe {
+        return neon::vector_update(acc, all_weights, adds, subs);
+    }
 
     #[allow(unreachable_code)]
     scalar::vector_update(acc, all_weights, adds, subs)
@@ -54,10 +57,14 @@ pub fn vector_update(
 #[inline]
 pub fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
     #[cfg(all(feature = "simd", target_feature = "avx2"))]
-    unsafe { return avx2::vector_add(dst, src); }
+    unsafe {
+        return avx2::vector_add(dst, src);
+    }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe { return neon::vector_add(dst, src); }
+    unsafe {
+        return neon::vector_add(dst, src);
+    }
 
     #[allow(unreachable_code)]
     scalar::vector_add(dst, src)
@@ -68,10 +75,14 @@ pub fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
 #[inline]
 pub fn vector_sub(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
     #[cfg(all(feature = "simd", target_feature = "avx2"))]
-    unsafe { return avx2::vector_sub(dst, src); }
+    unsafe {
+        return avx2::vector_sub(dst, src);
+    }
 
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
-    unsafe { return neon::vector_sub(dst, src); }
+    unsafe {
+        return neon::vector_sub(dst, src);
+    }
 
     #[allow(unreachable_code)]
     scalar::vector_sub(dst, src)
@@ -442,6 +453,9 @@ mod tests {
 
         let result = flatten(&acc, &weights);
         let expected = scalar::flatten(&acc, &weights);
-        assert_eq!(result, expected, "flatten dispatch should match scalar: {result} != {expected}");
+        assert_eq!(
+            result, expected,
+            "flatten dispatch should match scalar: {result} != {expected}"
+        );
     }
 }

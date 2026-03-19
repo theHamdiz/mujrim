@@ -1,7 +1,7 @@
-pub mod psqt;
 pub mod evaluation;
 #[cfg(feature = "nnue")]
 pub mod nnue;
+pub mod psqt;
 
 pub use evaluation::evaluate;
 #[cfg(feature = "nnue")]

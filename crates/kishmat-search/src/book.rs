@@ -8,8 +8,8 @@
 //! - Entries are sorted by key for binary search
 //! - The key is a Zobrist hash computed with polyglot's own hashing scheme
 
-use types::{Board, Move, Color, Piece, Square};
 use types::chess_move::MoveFlag;
+use types::{Board, Color, Move, Piece, Square};
 
 /// A single entry from a polyglot opening book.
 #[derive(Clone, Copy, Debug)]
@@ -36,14 +36,24 @@ impl OpeningBook {
         for i in 0..count {
             let offset = i * 16;
             let key = u64::from_be_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-                data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
             ]);
             let raw_move = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
             let weight = u16::from_be_bytes([data[offset + 10], data[offset + 11]]);
             // learn field at offset+12..16 is ignored
 
-            entries.push(BookEntry { key, raw_move, weight });
+            entries.push(BookEntry {
+                key,
+                raw_move,
+                weight,
+            });
         }
 
         Ok(Self { entries })
@@ -123,13 +133,19 @@ fn decode_polyglot_move(board: &Board, raw: u16) -> Option<Move> {
         if from_f == 4 && to_f == 7 {
             let castle_to = Square::from_file_rank(6, from_rank as u8);
             let legal = board_clone.generate_legal_moves();
-            return legal.iter().find(|m| m.from == from_sq && m.to == castle_to && m.flag == MoveFlag::KingCastle).copied();
+            return legal
+                .iter()
+                .find(|m| m.from == from_sq && m.to == castle_to && m.flag == MoveFlag::KingCastle)
+                .copied();
         }
         // Queenside castling
         if from_f == 4 && to_f == 0 {
             let castle_to = Square::from_file_rank(2, from_rank as u8);
             let legal = board_clone.generate_legal_moves();
-            return legal.iter().find(|m| m.from == from_sq && m.to == castle_to && m.flag == MoveFlag::QueenCastle).copied();
+            return legal
+                .iter()
+                .find(|m| m.from == from_sq && m.to == castle_to && m.flag == MoveFlag::QueenCastle)
+                .copied();
         }
     }
 
@@ -143,14 +159,18 @@ fn decode_polyglot_move(board: &Board, raw: u16) -> Option<Move> {
             _ => Piece::Queen,
         };
         let legal = board_clone.generate_legal_moves();
-        return legal.iter().find(|m| {
-            m.from == from_sq && m.to == to_sq && m.promotion == Some(promo_piece)
-        }).copied();
+        return legal
+            .iter()
+            .find(|m| m.from == from_sq && m.to == to_sq && m.promotion == Some(promo_piece))
+            .copied();
     }
 
     // Normal move — match against legal moves
     let legal = board_clone.generate_legal_moves();
-    legal.iter().find(|m| m.from == from_sq && m.to == to_sq).copied()
+    legal
+        .iter()
+        .find(|m| m.from == from_sq && m.to == to_sq)
+        .copied()
 }
 
 // ── Polyglot Zobrist hashing ────────────────────────────────────────────────
@@ -239,7 +259,9 @@ const POLY_RANDOM: [u64; 781] = include!("polyglot_keys.inc");
 mod tests {
     use super::*;
 
-    fn setup() { types::init(); }
+    fn setup() {
+        types::init();
+    }
 
     #[test]
     fn test_polyglot_hash_startpos() {
@@ -247,7 +269,10 @@ mod tests {
         let board = Board::new();
         let hash = polyglot_hash(&board);
         // Known polyglot hash for starting position
-        assert_eq!(hash, 0x463b96181691fc9c, "Polyglot hash mismatch for startpos");
+        assert_eq!(
+            hash, 0x463b96181691fc9c,
+            "Polyglot hash mismatch for startpos"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # KishMat → 3000+ Elo: Master Plan
 
-> Combining the best of **Stockfish 18**, **Viridithas 15**, and **Akimbo 1.0** to transform KishMat from ~1775 Elo into a 3000+ superhuman engine.
+> Combining the best of **Stockfish 18**, **Viridithas 15**, and **Akimbo 1.0** to transform KishMat from ~1963 Elo into a 3000+ superhuman engine.
 
 ---
 
@@ -11,9 +11,9 @@
 | **Stockfish 18** | C++ | ~3700+ | ~3800+ | SFNNv10 (HalfKAv2_hm + FullThreats) | Gold standard — deepest search, best NNUE, correction history |
 | **Viridithas 15** | Rust | 3572 | 3690 | Custom NNUE via `bullet` trainer | Strongest Rust engine — 5 correction histories, hindsight ext/red |
 | **Akimbo 1.0** | Rust | 3477 | 3579 | Custom NNUE via `bullet` trainer | Lean codebase — compact but deadly, node-based time management |
-| **KishMat 2.0** | Rust | ~1775* | — | Akimbo-compatible 768→1024×2→1 NNUE + Classical HCE | Fast NPS, comprehensive search, needs NNUE retraining & staged movegen |
+| **KishMat 2.0** | Rust | ~1963* | — | Akimbo-compatible 768→1024×2→1 NNUE + Classical HCE | Fast NPS, comprehensive search, needs NNUE retraining & staged movegen |
 
-*\*Estimated from Bratko-Kopec 10/24 (41.7%).*
+*\*Estimated from Bratko-Kopec 13/24 (54.2%) — depth 16, 120s/position.*
 
 ---
 
@@ -30,7 +30,7 @@ These were previously listed as gaps but are now implemented in KishMat 2.0:
 | Capture history | ✅ | `cap_hist[piece][to][captured]` |
 | IIR (Internal Iterative Reduction) | ✅ | `depth -= 1` when no TT move |
 | PV line tracking (triangular table) | ✅ | Full PV propagation |
-| Singular extensions (double + negative) | ✅ | With budget cap |
+| Singular extensions (double + negative) | ✅ | Per-path `dbl_exts < 5` counter (Akimbo-style) |
 | History pruning | ✅ | Low-depth quiet move pruning |
 | Stat_score-based LMR (7+ factors) | ✅ | PV/improving/killer/check/corr/cut/ttpv |
 | LMR for losing captures | ✅ | SEE < 0 captures get reduced |
@@ -40,14 +40,14 @@ These were previously listed as gaps but are now implemented in KishMat 2.0:
 | Node-based time management | ✅ | Best-move node fraction |
 | Score trend TM | ✅ | Drop → more time |
 | Best-move stability TM | ✅ | Changes → more time |
-| Do-deeper search | ✅ | TT-based depth increase |
 | Aspiration windows with eval/divisor | ✅ | Dynamic narrowing |
 | TT was_pv flag | ✅ | Used in pruning + LMR |
 | ProbCut with eval guard | ✅ | Captures only |
-| NMP with TT guards | ✅ | Multiple conditions |
+| NMP with anti-recursion | ✅ | `min_nmp_ply` guard (Akimbo-style) |
 | RFP with tt_was_pv and tt_capture guards | ✅ | Complex conditions |
 | TT-based static eval refinement | ✅ | Stockfish technique |
 | Capture history in qsearch ordering | ✅ | MVV-LVA + cap_hist |
+| Benchmarker crate | ✅ | Standalone `kishmat-benchmarker` with CLI + TUI |
 
 ---
 
@@ -144,7 +144,7 @@ These were previously listed as gaps but are now implemented in KishMat 2.0:
 | 6 | **Additional Refinements** | +30-50 | Low each |
 
 > **Total remaining gap: ~335-640 Elo** from code improvements.
-> With NNUE retraining: **+535-1040 Elo → target 2310-2815+ Elo**.
+> With NNUE retraining: **+535-1040 Elo → target 2500-3000+ Elo**.
 
 ---
 
@@ -163,6 +163,6 @@ These were previously listed as gaps but are now implemented in KishMat 2.0:
 
 ---
 
-*Plan updated: 2026-03-17. Based on source code analysis of all four engines.*
+*Plan updated: 2026-03-19. Based on source code analysis of all four engines.*
 
 *KishMat: كش مات — The Arabian chess engine that will reach 3000+.*

@@ -66,7 +66,8 @@ impl RecordingEngine {
             return;
         }
 
-        let timestamp_ms = inner.start_time
+        let timestamp_ms = inner
+            .start_time
             .map(|s| s.elapsed().as_millis() as u64)
             .unwrap_or(0);
 
@@ -142,7 +143,11 @@ fn has_ffmpeg() -> bool {
 }
 
 /// Save frames as video using ffmpeg.
-fn save_with_ffmpeg(frames: &[CapturedFrame], fps: u32, output_path: &PathBuf) -> Result<(), String> {
+fn save_with_ffmpeg(
+    frames: &[CapturedFrame],
+    fps: u32,
+    output_path: &PathBuf,
+) -> Result<(), String> {
     use std::io::Write;
 
     // Create a temp directory for frame images
@@ -152,7 +157,9 @@ fn save_with_ffmpeg(frames: &[CapturedFrame], fps: u32, output_path: &PathBuf) -
     // Save frames as individual PNGs
     for (i, frame) in frames.iter().enumerate() {
         let path = temp_dir.join(format!("frame_{:06}.png", i));
-        frame.image.save(&path)
+        frame
+            .image
+            .save(&path)
             .map_err(|e| format!("Failed to save frame {i}: {e}"))?;
     }
 
@@ -162,14 +169,20 @@ fn save_with_ffmpeg(frames: &[CapturedFrame], fps: u32, output_path: &PathBuf) -
 
     let status = std::process::Command::new("ffmpeg")
         .args([
-            "-y",                                    // overwrite
-            "-framerate", &fps.to_string(),          // input fps
-            "-i", &pattern.to_string_lossy(),        // input pattern
-            "-c:v", "libx264",                       // H.264 codec
-            "-pix_fmt", "yuv420p",                   // compatibility
-            "-crf", "18",                            // quality (lower = better)
-            "-preset", "fast",                       // encoding speed
-            &output_str,                             // output file
+            "-y", // overwrite
+            "-framerate",
+            &fps.to_string(), // input fps
+            "-i",
+            &pattern.to_string_lossy(), // input pattern
+            "-c:v",
+            "libx264", // H.264 codec
+            "-pix_fmt",
+            "yuv420p", // compatibility
+            "-crf",
+            "18", // quality (lower = better)
+            "-preset",
+            "fast",      // encoding speed
+            &output_str, // output file
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -199,22 +212,32 @@ fn save_as_gif(frames: &[CapturedFrame], output_path: &PathBuf) -> Result<(), St
     let height = first.image.height() as u16;
 
     // Scale down for reasonable GIF size
-    let scale = if width > 640 { 640.0 / width as f32 } else { 1.0 };
+    let scale = if width > 640 {
+        640.0 / width as f32
+    } else {
+        1.0
+    };
     let new_w = (width as f32 * scale) as u32;
     let new_h = (height as f32 * scale) as u32;
 
-    let file = std::fs::File::create(output_path)
-        .map_err(|e| format!("Failed to create file: {e}"))?;
+    let file =
+        std::fs::File::create(output_path).map_err(|e| format!("Failed to create file: {e}"))?;
 
     let mut encoder = gif::Encoder::new(file, new_w as u16, new_h as u16, &[])
         .map_err(|e| format!("GIF encoder error: {e}"))?;
 
-    encoder.set_repeat(gif::Repeat::Infinite)
+    encoder
+        .set_repeat(gif::Repeat::Infinite)
         .map_err(|e| format!("GIF repeat error: {e}"))?;
 
     for capture in frames {
         let resized = if scale < 1.0 {
-            image::imageops::resize(&capture.image, new_w, new_h, image::imageops::FilterType::Nearest)
+            image::imageops::resize(
+                &capture.image,
+                new_w,
+                new_h,
+                image::imageops::FilterType::Nearest,
+            )
         } else {
             capture.image.clone()
         };
@@ -229,7 +252,8 @@ fn save_as_gif(frames: &[CapturedFrame], output_path: &PathBuf) -> Result<(), St
         frame.palette = Some(palette);
         frame.buffer = std::borrow::Cow::Owned(indices);
 
-        encoder.write_frame(&frame)
+        encoder
+            .write_frame(&frame)
             .map_err(|e| format!("Failed to write GIF frame: {e}"))?;
     }
 

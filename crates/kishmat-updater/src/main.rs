@@ -50,14 +50,12 @@ fn main() {
         .about("Updates KishMat chess engine components from GitHub releases")
         .subcommand(Command::new("check").about("Check for available updates"))
         .subcommand(
-            Command::new("update")
-                .about("Update components")
-                .arg(
-                    Arg::new("component")
-                        .help("Component to update (or 'all')")
-                        .default_value("all")
-                        .index(1),
-                ),
+            Command::new("update").about("Update components").arg(
+                Arg::new("component")
+                    .help("Component to update (or 'all')")
+                    .default_value("all")
+                    .index(1),
+            ),
         )
         .subcommand(Command::new("list").about("List installed components"))
         .subcommand(
@@ -139,17 +137,20 @@ fn cmd_syzygy(pieces: &str, dir: &str) {
     println!("  Destination: {}", dest.display());
 
     let tables = table_names(piece_set);
-    println!("  Tables:      {} ({} files)", tables.len(), tables.len() * 2);
+    println!(
+        "  Tables:      {} ({} files)",
+        tables.len(),
+        tables.len() * 2
+    );
     println!();
 
-    let progress: Option<ProgressCallback> = Some(Box::new(|idx, total, name, status| {
-        match status {
+    let progress: Option<ProgressCallback> =
+        Some(Box::new(|idx, total, name, status| match status {
             DownloadStatus::Skipped => println!("  [{idx}/{total}] skip {name}"),
             DownloadStatus::Downloading => print!("  [{idx}/{total}] downloading {name} ..."),
             DownloadStatus::Done => println!(" done"),
             DownloadStatus::Failed(e) => println!(" FAILED: {e}"),
-        }
-    }));
+        }));
 
     match download_tables(&dest, piece_set, progress) {
         Ok(summary) => {
@@ -164,7 +165,10 @@ fn cmd_syzygy(pieces: &str, dir: &str) {
             println!("    Disk usage: {:.1} MB", usage_mb);
             println!("    Path:       {}", summary.target_dir.display());
             println!();
-            println!("  To use: setoption name SyzygyPath value {}", dest.display());
+            println!(
+                "  To use: setoption name SyzygyPath value {}",
+                dest.display()
+            );
         }
         Err(e) => {
             eprintln!("  ✗ Download failed: {e}");
@@ -189,8 +193,10 @@ fn cmd_nnue(network: &str, dir: &str) {
             let size_mb = net.approx_size as f64 / (1024.0 * 1024.0);
             let installed = dest.join(net.filename).exists();
             let marker = if installed { "✓" } else { " " };
-            println!("  {marker} [{i}] {:<20} ({:<30}  ~{:.1} MB)", 
-                     net.name, net.architecture, size_mb);
+            println!(
+                "  {marker} [{i}] {:<20} ({:<30}  ~{:.1} MB)",
+                net.name, net.architecture, size_mb
+            );
             println!("        Engine: {}  File: {}", net.engine, net.filename);
         }
         println!();
@@ -199,7 +205,12 @@ fn cmd_nnue(network: &str, dir: &str) {
         if !files.is_empty() {
             let usage = disk_usage(&dest);
             let usage_mb = usage as f64 / (1024.0 * 1024.0);
-            println!("  Installed in {}: {} files ({:.1} MB)", dest.display(), files.len(), usage_mb);
+            println!(
+                "  Installed in {}: {} files ({:.1} MB)",
+                dest.display(),
+                files.len(),
+                usage_mb
+            );
         } else {
             println!("  No networks installed in {}", dest.display());
         }
@@ -216,16 +227,14 @@ fn cmd_nnue(network: &str, dir: &str) {
         println!("  Downloading all {} networks...", NETWORKS.len());
         println!();
 
-        let progress: Option<ProgressCallback> = Some(Box::new(|name, status| {
-            match status {
-                DownloadStatus::Skipped => println!("  ⊘ {name} (already exists)"),
-                DownloadStatus::Downloading(size) => {
-                    let mb = size as f64 / (1024.0 * 1024.0);
-                    print!("  ↓ {name} (~{:.1} MB) ...", mb);
-                }
-                DownloadStatus::Done => println!(" ✓"),
-                DownloadStatus::Failed(e) => println!(" ✗ {e}"),
+        let progress: Option<ProgressCallback> = Some(Box::new(|name, status| match status {
+            DownloadStatus::Skipped => println!("  ⊘ {name} (already exists)"),
+            DownloadStatus::Downloading(size) => {
+                let mb = size as f64 / (1024.0 * 1024.0);
+                print!("  ↓ {name} (~{:.1} MB) ...", mb);
             }
+            DownloadStatus::Done => println!(" ✓"),
+            DownloadStatus::Failed(e) => println!(" ✗ {e}"),
         }));
 
         match download_all(&dest, progress) {
@@ -240,7 +249,10 @@ fn cmd_nnue(network: &str, dir: &str) {
                 println!("    Disk usage: {:.1} MB", usage_mb);
                 println!("    Path:       {}", summary.target_dir.display());
                 println!();
-                println!("  To use: setoption name EvalFile value {}/akimbo-1024.bin", dest.display());
+                println!(
+                    "  To use: setoption name EvalFile value {}/akimbo-1024.bin",
+                    dest.display()
+                );
             }
             Err(e) => {
                 eprintln!("  ✗ Download failed: {e}");
@@ -249,30 +261,36 @@ fn cmd_nnue(network: &str, dir: &str) {
     } else {
         // Find matching network by name (case-insensitive partial match)
         let net = NETWORKS.iter().find(|n| {
-            n.name.to_lowercase().contains(&network.to_lowercase()) ||
-            n.filename.to_lowercase().contains(&network.to_lowercase())
+            n.name.to_lowercase().contains(&network.to_lowercase())
+                || n.filename.to_lowercase().contains(&network.to_lowercase())
         });
 
         match net {
             Some(net_info) => {
                 let size_mb = net_info.approx_size as f64 / (1024.0 * 1024.0);
-                println!("  Network: {} ({}, ~{:.1} MB)", net_info.name, net_info.architecture, size_mb);
+                println!(
+                    "  Network: {} ({}, ~{:.1} MB)",
+                    net_info.name, net_info.architecture, size_mb
+                );
                 println!();
 
-                let progress: Option<ProgressCallback> = Some(Box::new(|name, status| {
-                    match status {
+                let progress: Option<ProgressCallback> =
+                    Some(Box::new(|name, status| match status {
                         DownloadStatus::Skipped => println!("  ⊘ {name} (already exists)"),
                         DownloadStatus::Downloading(_) => print!("  ↓ Downloading {name} ..."),
                         DownloadStatus::Done => println!(" ✓"),
                         DownloadStatus::Failed(e) => println!(" ✗ {e}"),
-                    }
-                }));
+                    }));
 
                 match download_network(net_info, &dest, progress.as_ref()) {
                     Ok(()) => {
                         println!();
                         println!("  ✓ Saved to: {}/{}", dest.display(), net_info.filename);
-                        println!("  To use: setoption name EvalFile value {}/{}", dest.display(), net_info.filename);
+                        println!(
+                            "  To use: setoption name EvalFile value {}/{}",
+                            dest.display(),
+                            net_info.filename
+                        );
                     }
                     Err(e) => {
                         eprintln!("  ✗ Download failed: {e}");
@@ -295,7 +313,10 @@ fn cmd_check() {
 
     match fetch_latest_release() {
         Ok(release) => {
-            println!("  Latest release: {} ({})", release.tag_name, release.published_at);
+            println!(
+                "  Latest release: {} ({})",
+                release.tag_name, release.published_at
+            );
             if let Some(ref name) = release.name {
                 println!("  Name: {name}");
             }
@@ -304,7 +325,9 @@ fn cmd_check() {
             let platform = current_platform_tag();
             println!("  Your platform: {platform}");
 
-            let matching: Vec<_> = release.assets.iter()
+            let matching: Vec<_> = release
+                .assets
+                .iter()
                 .filter(|a| a.name.contains(&platform) || a.name.contains("universal"))
                 .collect();
 
@@ -435,23 +458,25 @@ fn current_platform_tag() -> String {
 
 /// Fetch the latest release from GitHub API.
 fn fetch_latest_release() -> Result<Release, String> {
-    let url = format!(
-        "https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-    );
+    let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");
 
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("kishmat-updater/{VERSION}"))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let response = client.get(&url).send()
+    let response = client
+        .get(&url)
+        .send()
         .map_err(|e| format!("Request failed: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!("GitHub API error: {}", response.status()));
     }
 
-    response.json::<Release>().map_err(|e| format!("JSON parse error: {e}"))
+    response
+        .json::<Release>()
+        .map_err(|e| format!("JSON parse error: {e}"))
 }
 
 /// Update a single component from release assets.
@@ -459,12 +484,15 @@ fn update_component(release: &Release, component: &str, install_dir: &PathBuf) {
     let platform = current_platform_tag();
     let ext = if cfg!(windows) { ".exe" } else { "" };
 
-    let matches: Vec<&Asset> = release.assets.iter()
+    let matches: Vec<&Asset> = release
+        .assets
+        .iter()
         .filter(|a| {
             let name = a.name.to_lowercase();
-            name.contains(component) &&
-            (name.contains(&platform) || name.contains("universal")) &&
-            !name.ends_with(".tar.gz") && !name.ends_with(".zip")
+            name.contains(component)
+                && (name.contains(&platform) || name.contains("universal"))
+                && !name.ends_with(".tar.gz")
+                && !name.ends_with(".zip")
         })
         .collect();
 
@@ -526,7 +554,9 @@ fn download_to_file(asset: &Asset, dest: &PathBuf) -> Result<(), String> {
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let mut response = client.get(&asset.browser_download_url).send()
+    let mut response = client
+        .get(&asset.browser_download_url)
+        .send()
         .map_err(|e| format!("Download failed: {e}"))?;
 
     if !response.status().is_success() {
@@ -541,17 +571,21 @@ fn download_to_file(asset: &Asset, dest: &PathBuf) -> Result<(), String> {
             .progress_chars("█▓░"),
     );
 
-    let mut file = fs::File::create(dest)
-        .map_err(|e| format!("Failed to create file: {e}"))?;
+    let mut file = fs::File::create(dest).map_err(|e| format!("Failed to create file: {e}"))?;
 
     let mut hasher = Sha256::new();
     let mut downloaded = 0u64;
     let mut buffer = [0u8; 8192];
 
     loop {
-        let n = response.read(&mut buffer).map_err(|e| format!("Read error: {e}"))?;
-        if n == 0 { break; }
-        file.write_all(&buffer[..n]).map_err(|e| format!("Write error: {e}"))?;
+        let n = response
+            .read(&mut buffer)
+            .map_err(|e| format!("Read error: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])
+            .map_err(|e| format!("Write error: {e}"))?;
         hasher.update(&buffer[..n]);
         downloaded += n as u64;
         pb.set_position(downloaded);
@@ -565,7 +599,8 @@ fn download_to_file(asset: &Asset, dest: &PathBuf) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if !asset.name.ends_with(".tar.gz") && !asset.name.ends_with(".zip")
+        if !asset.name.ends_with(".tar.gz")
+            && !asset.name.ends_with(".zip")
             && !asset.name.ends_with(".tgz")
         {
             let _ = fs::set_permissions(dest, fs::Permissions::from_mode(0o755));
@@ -585,14 +620,18 @@ fn extract_tar_gz(archive: &PathBuf, dest: &PathBuf) -> Result<usize, String> {
 
     for entry in tar.entries().map_err(|e| format!("Tar error: {e}"))? {
         let mut entry = entry.map_err(|e| format!("Entry error: {e}"))?;
-        let path = entry.path().map_err(|e| format!("Path error: {e}"))?.into_owned();
+        let path = entry
+            .path()
+            .map_err(|e| format!("Path error: {e}"))?
+            .into_owned();
 
         // Only extract files (skip directories), flatten into dest
         if entry.header().entry_type().is_file() {
-            let file_name = path.file_name()
-                .ok_or_else(|| "No file name".to_string())?;
+            let file_name = path.file_name().ok_or_else(|| "No file name".to_string())?;
             let out_path = dest.join(file_name);
-            entry.unpack(&out_path).map_err(|e| format!("Unpack error: {e}"))?;
+            entry
+                .unpack(&out_path)
+                .map_err(|e| format!("Unpack error: {e}"))?;
 
             #[cfg(unix)]
             {
@@ -614,14 +653,20 @@ fn extract_zip(archive: &PathBuf, dest: &PathBuf) -> Result<usize, String> {
     let mut count = 0usize;
 
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| format!("Zip entry error: {e}"))?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("Zip entry error: {e}"))?;
         if entry.is_file() {
-            let file_name = entry.name().rsplit('/').next().unwrap_or(entry.name()).to_string();
+            let file_name = entry
+                .name()
+                .rsplit('/')
+                .next()
+                .unwrap_or(entry.name())
+                .to_string();
             let out_path = dest.join(&file_name);
-            let mut out_file = fs::File::create(&out_path)
-                .map_err(|e| format!("Create error: {e}"))?;
-            std::io::copy(&mut entry, &mut out_file)
-                .map_err(|e| format!("Copy error: {e}"))?;
+            let mut out_file =
+                fs::File::create(&out_path).map_err(|e| format!("Create error: {e}"))?;
+            std::io::copy(&mut entry, &mut out_file).map_err(|e| format!("Copy error: {e}"))?;
 
             #[cfg(unix)]
             {

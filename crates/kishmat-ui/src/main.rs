@@ -13,8 +13,7 @@ mod uci_process;
 use std::path::PathBuf;
 
 use iced::widget::{
-    button, column, container, mouse_area, pick_list, row, scrollable, slider, text, Image,
-    Space,
+    Image, Space, button, column, container, mouse_area, pick_list, row, scrollable, slider, text,
 };
 use iced::{Alignment, Color, Element, Font, Length, Subscription, Task, Theme};
 use std::time::{Duration, Instant};
@@ -46,15 +45,13 @@ const ACCENT_GOLD: Color = Color::from_rgb(0.706, 0.569, 0.235);
 #[allow(dead_code)]
 const BORDER_SUBTLE: Color = Color::from_rgb(0.16, 0.18, 0.28);
 
-fn theme_fn(_: &App) -> Theme { Theme::Dark }
+fn theme_fn(_: &App) -> Theme {
+    Theme::Dark
+}
 
 fn main() -> iced::Result {
-
     // Embed the logo for the window icon
-    let icon = iced::window::icon::from_file_data(
-        include_bytes!("../assets/logo.png"),
-        None,
-    ).ok();
+    let icon = iced::window::icon::from_file_data(include_bytes!("../assets/logo.png"), None).ok();
 
     let mut win_settings = iced::window::Settings {
         decorations: false,
@@ -122,8 +119,15 @@ struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { hash_mb: 64, threads: 1, max_depth: 64, time_per_move: 3,
-               ponder: false, use_book: true, use_nnue: true }
+        Self {
+            hash_mb: 64,
+            threads: 1,
+            max_depth: 64,
+            time_per_move: 3,
+            ponder: false,
+            use_book: true,
+            use_nnue: true,
+        }
     }
 }
 
@@ -361,19 +365,39 @@ impl std::fmt::Display for PlayerConfig {
 #[derive(Debug, Clone)]
 enum Msg {
     SelectMode(GameMode),
-    StartGame, LoadWhiteEngine, LoadBlackEngine,
-    WhiteEngineSelected(Option<String>), BlackEngineSelected(Option<String>),
+    StartGame,
+    LoadWhiteEngine,
+    LoadBlackEngine,
+    WhiteEngineSelected(Option<String>),
+    BlackEngineSelected(Option<String>),
     BoardClick(usize, usize),
     EngineMove(types::Move, String),
-    NewGame, FlipBoard, Resign, ExportPGN, ExportGIF, ExitApp,
-    #[allow(dead_code)] EngineInfo(String),
-    AnimTick(Instant), ToggleBGM, CoinFlip, CoinFlipTick(Instant),
-    ToggleRecording, RecordCaptureTick, TakeScreenshot, ScreenshotDone(String),
-    GifExportDone(String), RecordingSaved(String),
+    NewGame,
+    FlipBoard,
+    Resign,
+    ExportPGN,
+    ExportGIF,
+    ExitApp,
+    #[allow(dead_code)]
+    EngineInfo(String),
+    AnimTick(Instant),
+    ToggleBGM,
+    CoinFlip,
+    CoinFlipTick(Instant),
+    ToggleRecording,
+    RecordCaptureTick,
+    TakeScreenshot,
+    ScreenshotDone(String),
+    GifExportDone(String),
+    RecordingSaved(String),
     // Engine config
-    CfgHashChanged(i32), CfgThreadsChanged(i32),
-    CfgDepthChanged(i32), CfgTimeChanged(i32),
-    CfgTogglePonder, CfgToggleBook, CfgToggleNnue,
+    CfgHashChanged(i32),
+    CfgThreadsChanged(i32),
+    CfgDepthChanged(i32),
+    CfgTimeChanged(i32),
+    CfgTogglePonder,
+    CfgToggleBook,
+    CfgToggleNnue,
     // Options modal
     ToggleOptions,
     SetBoardTheme(board_view::BoardTheme),
@@ -419,9 +443,11 @@ impl Default for App {
             s.play_bgm(audio::BgmTrack::Menu);
         }
         Self {
-            screen: Screen::Menu, game: None,
+            screen: Screen::Menu,
+            game: None,
             selected_mode: GameMode::HumanVsHuman,
-            white_player: PlayerConfig::Human, black_player: PlayerConfig::Human,
+            white_player: PlayerConfig::Human,
+            black_player: PlayerConfig::Human,
             engine_cfg: EngineConfig::default(),
             settings: AppSettings::load(),
             show_options: false,
@@ -438,8 +464,11 @@ impl Default for App {
             ),
             #[cfg(feature = "book")]
             book: search::book::OpeningBook::load_embedded().ok(),
-            sound, animation: None, window_height: 850.0,
-            bgm_on: true, coin_flip: CoinFlipState::Idle,
+            sound,
+            animation: None,
+            window_height: 850.0,
+            bgm_on: true,
+            coin_flip: CoinFlipState::Idle,
             recorder: recording::RecordingEngine::new(),
             window_id: None,
             syzygy_status: String::new(),
@@ -462,9 +491,8 @@ impl App {
     /// Subscription: animate at ~60fps while a move animation is in progress,
     /// also tick for coin flip animation and recording capture.
     fn subscription(&self) -> Subscription<Msg> {
-        let mut subs: Vec<Subscription<Msg>> = vec![
-            iced::window::open_events().map(Msg::WindowOpened),
-        ];
+        let mut subs: Vec<Subscription<Msg>> =
+            vec![iced::window::open_events().map(Msg::WindowOpened)];
 
         if self.animation.is_some() {
             subs.push(iced::time::every(Duration::from_millis(16)).map(Msg::AnimTick));
@@ -476,7 +504,9 @@ impl App {
 
         if self.recorder.state() == recording::RecordState::Recording {
             // Capture at ~10fps
-            subs.push(iced::time::every(Duration::from_millis(100)).map(|_| Msg::RecordCaptureTick));
+            subs.push(
+                iced::time::every(Duration::from_millis(100)).map(|_| Msg::RecordCaptureTick),
+            );
         }
 
         if subs.is_empty() {
@@ -501,7 +531,11 @@ impl App {
             if let Some((piece, color)) = piece_info {
                 // Play sound
                 if let Some(ref sound) = self.sound {
-                    if is_capture { sound.play_capture(); } else { sound.play_move(); }
+                    if is_capture {
+                        sound.play_capture();
+                    } else {
+                        sound.play_move();
+                    }
                 }
 
                 // Capture animation duration depends on style
@@ -632,14 +666,12 @@ impl App {
                 self.coin_flip = CoinFlipState::Idle;
                 Task::none()
             }
-            Msg::LoadWhiteEngine => Task::perform(
-                async { pick_engine_file().await },
-                Msg::WhiteEngineSelected,
-            ),
-            Msg::LoadBlackEngine => Task::perform(
-                async { pick_engine_file().await },
-                Msg::BlackEngineSelected,
-            ),
+            Msg::LoadWhiteEngine => {
+                Task::perform(async { pick_engine_file().await }, Msg::WhiteEngineSelected)
+            }
+            Msg::LoadBlackEngine => {
+                Task::perform(async { pick_engine_file().await }, Msg::BlackEngineSelected)
+            }
             Msg::WhiteEngineSelected(path) => {
                 if let Some(p) = path {
                     self.white_player = PlayerConfig::External { path: p };
@@ -700,8 +732,11 @@ impl App {
                     if !is_human {
                         // Queue premove if enabled
                         if self.settings.premoves_enabled {
-                            let sq_index =
-                                if gs.flipped { row * 8 + col } else { (7 - row) * 8 + col };
+                            let sq_index = if gs.flipped {
+                                row * 8 + col
+                            } else {
+                                (7 - row) * 8 + col
+                            };
                             let clicked_sq = types::Square::from_index(sq_index);
                             if let Some(from) = gs.selected_square {
                                 // Queue the premove
@@ -719,19 +754,30 @@ impl App {
                         return Task::none();
                     }
 
-                    let sq_index =
-                        if gs.flipped { row * 8 + col } else { (7 - row) * 8 + col };
+                    let sq_index = if gs.flipped {
+                        row * 8 + col
+                    } else {
+                        (7 - row) * 8 + col
+                    };
                     let clicked_sq = types::Square::from_index(sq_index);
 
                     if gs.selected_square.is_some() {
                         // Check if this is a legal move destination
                         let from = gs.selected_square.unwrap();
                         let legal = gs.board.generate_legal_moves();
-                        if let Some(mv) = legal.iter().find(|m| m.from == from && m.to == clicked_sq).copied() {
+                        if let Some(mv) = legal
+                            .iter()
+                            .find(|m| m.from == from && m.to == clicked_sq)
+                            .copied()
+                        {
                             // Determine if engine plays next
                             let is_next_human = match gs.board.side_to_move {
-                                types::Color::White => matches!(self.black_player, PlayerConfig::Human),
-                                types::Color::Black => matches!(self.white_player, PlayerConfig::Human),
+                                types::Color::White => {
+                                    matches!(self.black_player, PlayerConfig::Human)
+                                }
+                                types::Color::Black => {
+                                    matches!(self.white_player, PlayerConfig::Human)
+                                }
                             };
                             gs.deselect();
                             // Start animation (don't apply move yet)
@@ -869,7 +915,9 @@ impl App {
                 }
 
                 // Strip check/checkmate notation suffixes for UCI parsing
-                let moves: Vec<String> = self.move_log.iter()
+                let moves: Vec<String> = self
+                    .move_log
+                    .iter()
                     .map(|m| m.trim_end_matches(['+', '#']).to_string())
                     .collect();
                 self.status = String::from("Exporting GIF...");
@@ -927,13 +975,34 @@ impl App {
                 Task::none()
             }
             // ── Engine config handlers ──
-            Msg::CfgHashChanged(v) => { self.engine_cfg.hash_mb = v; Task::none() }
-            Msg::CfgThreadsChanged(v) => { self.engine_cfg.threads = v; Task::none() }
-            Msg::CfgDepthChanged(v) => { self.engine_cfg.max_depth = v; Task::none() }
-            Msg::CfgTimeChanged(v) => { self.engine_cfg.time_per_move = v; Task::none() }
-            Msg::CfgTogglePonder => { self.engine_cfg.ponder = !self.engine_cfg.ponder; Task::none() }
-            Msg::CfgToggleBook => { self.engine_cfg.use_book = !self.engine_cfg.use_book; Task::none() }
-            Msg::CfgToggleNnue => { self.engine_cfg.use_nnue = !self.engine_cfg.use_nnue; Task::none() }
+            Msg::CfgHashChanged(v) => {
+                self.engine_cfg.hash_mb = v;
+                Task::none()
+            }
+            Msg::CfgThreadsChanged(v) => {
+                self.engine_cfg.threads = v;
+                Task::none()
+            }
+            Msg::CfgDepthChanged(v) => {
+                self.engine_cfg.max_depth = v;
+                Task::none()
+            }
+            Msg::CfgTimeChanged(v) => {
+                self.engine_cfg.time_per_move = v;
+                Task::none()
+            }
+            Msg::CfgTogglePonder => {
+                self.engine_cfg.ponder = !self.engine_cfg.ponder;
+                Task::none()
+            }
+            Msg::CfgToggleBook => {
+                self.engine_cfg.use_book = !self.engine_cfg.use_book;
+                Task::none()
+            }
+            Msg::CfgToggleNnue => {
+                self.engine_cfg.use_nnue = !self.engine_cfg.use_nnue;
+                Task::none()
+            }
             Msg::CoinFlip => {
                 // Start coin flip animation (1.5 seconds)
                 use rand::Rng;
@@ -981,12 +1050,15 @@ impl App {
                                 if let Some(file) = file {
                                     let path = file.path().to_path_buf();
                                     match recorder.stop_and_save(path.clone()) {
-                                        Ok(frames) => format!("Saved {} frames to {}", frames, path.display()),
+                                        Ok(frames) => {
+                                            format!("Saved {} frames to {}", frames, path.display())
+                                        }
                                         Err(e) => format!("Recording error: {e}"),
                                     }
                                 } else {
                                     // Cancel recording
-                                    let _ = recorder.stop_and_save(std::path::PathBuf::from("/dev/null"));
+                                    let _ = recorder
+                                        .stop_and_save(std::path::PathBuf::from("/dev/null"));
                                     String::from("Recording cancelled.")
                                 }
                             },
@@ -1024,7 +1096,12 @@ impl App {
                                 if let Some(file) = file {
                                     let path = file.path().to_path_buf();
                                     match img.save(&path) {
-                                        Ok(_) => return format!("Screenshot saved to {}", path.display()),
+                                        Ok(_) => {
+                                            return format!(
+                                                "Screenshot saved to {}",
+                                                path.display()
+                                            );
+                                        }
                                         Err(e) => return format!("Save error: {e}"),
                                     }
                                 }
@@ -1040,35 +1117,94 @@ impl App {
                 Task::none()
             }
             // ── Options modal & settings ──
-            Msg::ToggleOptions => { self.show_options = !self.show_options; Task::none() }
-            Msg::SetBoardTheme(t) => { self.settings.board_theme = t; self.settings.save(); Task::none() }
-            Msg::SetShowCoords(v) => { self.settings.show_coords = v; self.settings.save(); Task::none() }
-            Msg::SetAnimSpeed(v) => { self.settings.anim_speed = v; self.settings.save(); Task::none() }
-            Msg::SetSfx(v) => { self.settings.sfx_on = v; self.settings.save(); Task::none() }
+            Msg::ToggleOptions => {
+                self.show_options = !self.show_options;
+                Task::none()
+            }
+            Msg::SetBoardTheme(t) => {
+                self.settings.board_theme = t;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetShowCoords(v) => {
+                self.settings.show_coords = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetAnimSpeed(v) => {
+                self.settings.anim_speed = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetSfx(v) => {
+                self.settings.sfx_on = v;
+                self.settings.save();
+                Task::none()
+            }
             Msg::SetBgmVolume(v) => {
                 self.settings.bgm_volume = v;
-                if let Some(ref mut s) = self.sound { s.set_volume(v as f32 / 100.0); }
+                if let Some(ref mut s) = self.sound {
+                    s.set_volume(v as f32 / 100.0);
+                }
                 self.settings.save();
                 Task::none()
             }
             Msg::SetGameMood(m) => {
                 self.settings.game_mood = m;
-                if let Some(ref mut s) = self.sound { s.set_mood(m); }
+                if let Some(ref mut s) = self.sound {
+                    s.set_mood(m);
+                }
                 self.settings.save();
                 Task::none()
             }
-            Msg::SetAutoFlip(v) => { self.settings.auto_flip_black = v; self.settings.save(); Task::none() }
-            Msg::SetShowLegal(v) => { self.settings.show_legal_moves = v; self.settings.save(); Task::none() }
-            Msg::SetShowLastMove(v) => { self.settings.show_last_move = v; self.settings.save(); Task::none() }
-            Msg::SetPremoves(v) => { self.settings.premoves_enabled = v; self.settings.save(); Task::none() }
-            Msg::SetCaptureAnim(v) => { self.settings.capture_anim_style = v; self.settings.save(); Task::none() }
-            Msg::SetCoordPosition(v) => { self.settings.coord_position = v; self.settings.save(); Task::none() }
-            Msg::SetMultiPremoves(v) => { self.settings.multi_premoves = v; self.settings.save(); Task::none() }
-            Msg::SetDrawArrows(v) => { self.settings.draw_arrows = v; self.settings.save(); Task::none() }
+            Msg::SetAutoFlip(v) => {
+                self.settings.auto_flip_black = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetShowLegal(v) => {
+                self.settings.show_legal_moves = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetShowLastMove(v) => {
+                self.settings.show_last_move = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetPremoves(v) => {
+                self.settings.premoves_enabled = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetCaptureAnim(v) => {
+                self.settings.capture_anim_style = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetCoordPosition(v) => {
+                self.settings.coord_position = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetMultiPremoves(v) => {
+                self.settings.multi_premoves = v;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetDrawArrows(v) => {
+                self.settings.draw_arrows = v;
+                self.settings.save();
+                Task::none()
+            }
             Msg::BoardRightDown(row, col) => {
                 if self.settings.draw_arrows {
                     if let Some(ref mut gs) = self.game {
-                        let sq_index = if gs.flipped { row * 8 + col } else { (7 - row) * 8 + col };
+                        let sq_index = if gs.flipped {
+                            row * 8 + col
+                        } else {
+                            (7 - row) * 8 + col
+                        };
                         gs.arrow_start = Some(types::Square::from_index(sq_index));
                     }
                 }
@@ -1077,7 +1213,11 @@ impl App {
             Msg::BoardRightUp(row, col) => {
                 if self.settings.draw_arrows {
                     if let Some(ref mut gs) = self.game {
-                        let sq_index = if gs.flipped { row * 8 + col } else { (7 - row) * 8 + col };
+                        let sq_index = if gs.flipped {
+                            row * 8 + col
+                        } else {
+                            (7 - row) * 8 + col
+                        };
                         let to_sq = types::Square::from_index(sq_index);
                         if let Some(from_sq) = gs.arrow_start.take() {
                             if from_sq != to_sq {
@@ -1108,7 +1248,8 @@ impl App {
                     if wdl > 0 {
                         let usage = updater::syzygy::disk_usage(&syzygy_dir);
                         let mb = usage as f64 / (1024.0 * 1024.0);
-                        self.syzygy_status = format!("{} WDL + {} DTZ files ({:.1} MB)", wdl, dtz, mb);
+                        self.syzygy_status =
+                            format!("{} WDL + {} DTZ files ({:.1} MB)", wdl, dtz, mb);
                     } else {
                         self.syzygy_status = "Not installed".to_string();
                     }
@@ -1139,8 +1280,10 @@ impl App {
                             updater::syzygy::SyzygyPieceSet::Standard,
                             None,
                         ) {
-                            Ok(s) => format!("✓ {} downloaded, {} skipped, {} failed",
-                                s.downloaded, s.skipped, s.failed),
+                            Ok(s) => format!(
+                                "✓ {} downloaded, {} skipped, {} failed",
+                                s.downloaded, s.skipped, s.failed
+                            ),
                             Err(e) => format!("✗ {e}"),
                         }
                     },
@@ -1160,8 +1303,12 @@ impl App {
                 if self.nnue_installed_count > 0 {
                     let usage = updater::nnue::disk_usage(&nnue_dir);
                     let mb = usage as f64 / (1024.0 * 1024.0);
-                    self.nnue_status = format!("{}/{} networks ({:.1} MB)",
-                        self.nnue_installed_count, updater::nnue::NETWORKS.len(), mb);
+                    self.nnue_status = format!(
+                        "{}/{} networks ({:.1} MB)",
+                        self.nnue_installed_count,
+                        updater::nnue::NETWORKS.len(),
+                        mb
+                    );
                 } else {
                     self.nnue_status = "Not installed".to_string();
                 }
@@ -1173,8 +1320,7 @@ impl App {
                     async {
                         let dest = updater::nnue::default_nnue_path();
                         match updater::nnue::download_all(&dest, None) {
-                            Ok(s) => format!("✓ {} downloaded, {} failed",
-                                s.downloaded, s.failed),
+                            Ok(s) => format!("✓ {} downloaded, {} failed", s.downloaded, s.failed),
                             Err(e) => format!("✗ {e}"),
                         }
                     },
@@ -1231,7 +1377,10 @@ impl App {
                 if let Some(ref book) = self.book {
                     if let Some(book_move) = book.probe(&gs.board) {
                         let legal = gs.board.clone().generate_legal_moves();
-                        if legal.iter().any(|m| m.from == book_move.from && m.to == book_move.to) {
+                        if legal
+                            .iter()
+                            .any(|m| m.from == book_move.from && m.to == book_move.to)
+                        {
                             return Task::perform(
                                 async move { (book_move, String::from("Book move")) },
                                 |(mv, info)| Msg::EngineMove(mv, info),
@@ -1261,11 +1410,16 @@ impl App {
                                 std::time::Duration::from_secs(time_secs),
                                 max_depth,
                             );
-                            (result.best_move, format!(
-                                "depth {} | score {} cp | {} nodes | {:.0} nps",
-                                result.depth, result.score, result.nodes,
-                                result.nodes as f64 / result.elapsed.as_secs_f64().max(0.001),
-                            ))
+                            (
+                                result.best_move,
+                                format!(
+                                    "depth {} | score {} cp | {} nodes | {:.0} nps",
+                                    result.depth,
+                                    result.score,
+                                    result.nodes,
+                                    result.nodes as f64 / result.elapsed.as_secs_f64().max(0.001),
+                                ),
+                            )
                         })
                         .expect("Failed to spawn engine thread");
                     match handle.join() {
@@ -1309,7 +1463,8 @@ impl App {
                 container::Style {
                     background: Some(iced::Background::Color(pal.bg)),
                     border: iced::Border {
-                        radius: 12.0.into(), width: 1.5,
+                        radius: 12.0.into(),
+                        width: 1.5,
                         color: Color::from_rgba(pal.border.r, pal.border.g, pal.border.b, 0.7),
                     },
                     shadow: iced::Shadow {
@@ -1327,15 +1482,21 @@ impl App {
         let pal = self.settings.board_theme.gui_palette();
 
         // ── Left: Logo + two-line title ──
-        let logo_icon: Image<iced::widget::image::Handle> = Image::new(self.logo.clone())
-            .width(24).height(24);
+        let logo_icon: Image<iced::widget::image::Handle> =
+            Image::new(self.logo.clone()).width(24).height(24);
         let title_block = column![
             text("KishMat").size(14).color(pal.text_primary),
-            text("Chess Engine • v2.0").size(10).color(
-                Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.7)
-            ),
-        ].spacing(1);
-        let left = row![logo_icon, title_block].spacing(8).align_y(Alignment::Center);
+            text("Chess Engine • v2.0").size(10).color(Color::from_rgba(
+                pal.accent.r,
+                pal.accent.g,
+                pal.accent.b,
+                0.7
+            )),
+        ]
+        .spacing(1);
+        let left = row![logo_icon, title_block]
+            .spacing(8)
+            .align_y(Alignment::Center);
 
         // ── Center: Pill-shaped action buttons ──
         let mut actions = row![].spacing(3).align_y(Alignment::Center);
@@ -1354,58 +1515,73 @@ impl App {
                 recording::RecordState::Recording => ("⏹", "Stop"),
                 recording::RecordState::Saving => ("💾", "…"),
             };
-            actions = actions.push(pill_button(rec_icon, rec_label, pal, false, Msg::ToggleRecording));
+            actions = actions.push(pill_button(
+                rec_icon,
+                rec_label,
+                pal,
+                false,
+                Msg::ToggleRecording,
+            ));
         } else {
             // Menu screen: show Start Game button
             actions = actions.push(pill_button("▶", "Start", pal, false, Msg::StartGame));
         }
 
         // Wrap action buttons in a pill container
-        let action_pill = container(actions)
-            .padding([2, 6])
-            .style(move |_theme| container::Style {
-                background: Some(iced::Background::Color(
-                    Color::from_rgba(
-                        pal.bg.r * 0.8 + 0.04, pal.bg.g * 0.8 + 0.04,
-                        pal.bg.b * 0.8 + 0.04, 0.85,
-                    )
-                )),
-                border: iced::Border {
-                    radius: 999.0.into(), width: 1.0,
-                    color: Color::from_rgba(pal.border.r, pal.border.g, pal.border.b, 0.6),
-                },
-                ..Default::default()
-            });
+        let action_pill =
+            container(actions)
+                .padding([2, 6])
+                .style(move |_theme| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        pal.bg.r * 0.8 + 0.04,
+                        pal.bg.g * 0.8 + 0.04,
+                        pal.bg.b * 0.8 + 0.04,
+                        0.85,
+                    ))),
+                    border: iced::Border {
+                        radius: 999.0.into(),
+                        width: 1.0,
+                        color: Color::from_rgba(pal.border.r, pal.border.g, pal.border.b, 0.6),
+                    },
+                    ..Default::default()
+                });
 
         // ── Right: Status + Exit ──
         let right = row![
             text(&self.status).size(10).color(pal.text_secondary),
             pill_button("×", "Exit", pal, true, Msg::ExitApp),
-        ].spacing(10).align_y(Alignment::Center);
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
 
         // ── Assemble: Three-column layout ──
         let bar_content = row![
             container(left).width(Length::FillPortion(1)),
             container(action_pill).center_x(Length::FillPortion(2)),
-            container(right).width(Length::FillPortion(1))
+            container(right)
+                .width(Length::FillPortion(1))
                 .align_x(iced::alignment::Horizontal::Right),
-        ].spacing(8).align_y(Alignment::Center).padding([0, 14]);
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .padding([0, 14]);
 
         // Title bar with translucent gradient bg and bottom accent glow
         let accent_glow = Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.12);
         let title_bar_widget: Element<'_, Msg> = container(bar_content)
-            .width(Length::Fill).height(48).center_y(48)
+            .width(Length::Fill)
+            .height(48)
+            .center_y(48)
             .style(move |_theme| container::Style {
-                background: Some(iced::Background::Color(
-                    Color::from_rgba(
-                        pal.sidebar.r * 0.7 + pal.panel.r * 0.3,
-                        pal.sidebar.g * 0.7 + pal.panel.g * 0.3,
-                        pal.sidebar.b * 0.7 + pal.panel.b * 0.3,
-                        0.95,
-                    )
-                )),
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    pal.sidebar.r * 0.7 + pal.panel.r * 0.3,
+                    pal.sidebar.g * 0.7 + pal.panel.g * 0.3,
+                    pal.sidebar.b * 0.7 + pal.panel.b * 0.3,
+                    0.95,
+                ))),
                 border: iced::Border {
-                    radius: 0.0.into(), width: 0.0,
+                    radius: 0.0.into(),
+                    width: 0.0,
                     color: accent_glow,
                 },
                 shadow: iced::Shadow {
@@ -1429,33 +1605,56 @@ impl App {
     // ══════════════════════════════════════════════════════════
     fn view_menu(&self) -> Element<'_, Msg> {
         let pal = self.settings.board_theme.gui_palette();
-        let logo_img: Image<iced::widget::image::Handle> = Image::new(self.logo.clone())
-            .width(100).height(100);
+        let logo_img: Image<iced::widget::image::Handle> =
+            Image::new(self.logo.clone()).width(100).height(100);
 
-        let title = text("KishMat Chess").size(42).color(pal.text_primary).font(CURIOUS_FONT);
-        let subtitle = text("The First Arabian Chess Engine").size(16).color(pal.text_secondary);
+        let title = text("KishMat Chess")
+            .size(42)
+            .color(pal.text_primary)
+            .font(CURIOUS_FONT);
+        let subtitle = text("The First Arabian Chess Engine")
+            .size(16)
+            .color(pal.text_secondary);
 
         // ── Left column: Game Setup ──
         let mode_picker = pick_list(
-            vec![GameMode::HumanVsHuman, GameMode::HumanVsEngine, GameMode::EngineVsEngine],
-            Some(self.selected_mode), Msg::SelectMode,
-        ).width(280);
+            vec![
+                GameMode::HumanVsHuman,
+                GameMode::HumanVsEngine,
+                GameMode::EngineVsEngine,
+            ],
+            Some(self.selected_mode),
+            Msg::SelectMode,
+        )
+        .width(280);
 
         let badge_w = 40.0;
         let w_badge = container(text("W").size(16).color(Color::from_rgb(0.20, 0.15, 0.10)))
-            .center_x(badge_w).center_y(badge_w).width(badge_w).height(badge_w)
+            .center_x(badge_w)
+            .center_y(badge_w)
+            .width(badge_w)
+            .height(badge_w)
             .style(|_theme| container::Style {
                 background: Some(iced::Background::Color(Color::from_rgb(0.94, 0.88, 0.76))),
-                border: iced::Border { radius: 6.0.into(), width: 1.0,
-                    color: Color::from_rgb(0.80, 0.75, 0.60) },
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    width: 1.0,
+                    color: Color::from_rgb(0.80, 0.75, 0.60),
+                },
                 ..Default::default()
             });
         let b_badge = container(text("B").size(16).color(Color::from_rgb(0.80, 0.80, 0.85)))
-            .center_x(badge_w).center_y(badge_w).width(badge_w).height(badge_w)
+            .center_x(badge_w)
+            .center_y(badge_w)
+            .width(badge_w)
+            .height(badge_w)
             .style(|_theme| container::Style {
                 background: Some(iced::Background::Color(Color::from_rgb(0.14, 0.12, 0.16))),
-                border: iced::Border { radius: 6.0.into(), width: 1.0,
-                    color: Color::from_rgb(0.30, 0.30, 0.35) },
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    width: 1.0,
+                    color: Color::from_rgb(0.30, 0.30, 0.35),
+                },
                 ..Default::default()
             });
 
@@ -1465,18 +1664,35 @@ impl App {
             text("Mode").size(12).color(pal.text_secondary),
             mode_picker,
             Space::new().height(8),
-            row![w_badge, text(format!(" {}", self.white_player)).size(13).color(pal.text_primary)]
-                .spacing(8).align_y(Alignment::Center),
-        ].spacing(4).width(340);
+            row![
+                w_badge,
+                text(format!(" {}", self.white_player))
+                    .size(13)
+                    .color(pal.text_primary)
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(4)
+        .width(340);
 
         if matches!(self.selected_mode, GameMode::EngineVsEngine) {
             left_col = left_col.push(styled_button("Load White Engine", Msg::LoadWhiteEngine));
         }
         left_col = left_col.push(
-            row![b_badge, text(format!(" {}", self.black_player)).size(13).color(pal.text_primary)]
-                .spacing(8).align_y(Alignment::Center),
+            row![
+                b_badge,
+                text(format!(" {}", self.black_player))
+                    .size(13)
+                    .color(pal.text_primary)
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         );
-        if matches!(self.selected_mode, GameMode::HumanVsEngine | GameMode::EngineVsEngine) {
+        if matches!(
+            self.selected_mode,
+            GameMode::HumanVsEngine | GameMode::EngineVsEngine
+        ) {
             left_col = left_col.push(styled_button("Load Black Engine", Msg::LoadBlackEngine));
         }
 
@@ -1484,48 +1700,81 @@ impl App {
         if matches!(self.selected_mode, GameMode::HumanVsEngine) {
             left_col = left_col.push(Space::new().height(8));
             let flip_el: Element<'_, Msg> = match &self.coin_flip {
-                CoinFlipState::Idle => {
-                    button(
-                        container(row![text("🪙").size(18), text(" Flip Coin").size(13).color(Color::WHITE)]
-                            .spacing(6).align_y(Alignment::Center))
-                        .center_x(160).center_y(36).width(160).height(36),
-                    ).on_press(Msg::CoinFlip)
-                    .style(|_theme, status| {
-                        let bg = if matches!(status, button::Status::Hovered) {
-                            Color::from_rgb(0.55, 0.45, 0.20)
-                        } else { ACCENT_GOLD };
-                        button::Style {
-                            background: Some(iced::Background::Color(bg)),
-                            border: iced::Border { radius: 8.0.into(), ..Default::default() },
-                            text_color: Color::WHITE, ..Default::default()
-                        }
-                    }).into()
-                }
+                CoinFlipState::Idle => button(
+                    container(
+                        row![
+                            text("🪙").size(18),
+                            text(" Flip Coin").size(13).color(Color::WHITE)
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    )
+                    .center_x(160)
+                    .center_y(36)
+                    .width(160)
+                    .height(36),
+                )
+                .on_press(Msg::CoinFlip)
+                .style(|_theme, status| {
+                    let bg = if matches!(status, button::Status::Hovered) {
+                        Color::from_rgb(0.55, 0.45, 0.20)
+                    } else {
+                        ACCENT_GOLD
+                    };
+                    button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
+                        text_color: Color::WHITE,
+                        ..Default::default()
+                    }
+                })
+                .into(),
                 CoinFlipState::Flipping { start, .. } => {
-                    let sym = ["🪙","⬜","🪙","⬛","🪙","✨"][(start.elapsed().as_millis() / 100 % 6) as usize];
-                    row![text("Flipping...").size(13).color(ACCENT_GOLD), text(sym).size(24)].spacing(12)
-                        .align_y(Alignment::Center).into()
+                    let sym = ["🪙", "⬜", "🪙", "⬛", "🪙", "✨"]
+                        [(start.elapsed().as_millis() / 100 % 6) as usize];
+                    row![
+                        text("Flipping...").size(13).color(ACCENT_GOLD),
+                        text(sym).size(24)
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .into()
                 }
                 CoinFlipState::Done(heads) => {
                     let (icon, label, c) = if *heads {
                         ("⬜", "You play White!", ACCENT_TEAL)
-                    } else { ("⬛", "You play Black!", ACCENT) };
-                    row![text(icon).size(22), text(label).size(14).color(c)].spacing(8)
-                        .align_y(Alignment::Center).into()
+                    } else {
+                        ("⬛", "You play Black!", ACCENT)
+                    };
+                    row![text(icon).size(22), text(label).size(14).color(c)]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .into()
                 }
             };
             left_col = left_col.push(flip_el);
         }
 
         let left_card = container(glass_card(left_col.into()))
-            .width(340).height(Length::Fill);
+            .width(340)
+            .height(Length::Fill);
 
         // ── Right column: Engine Settings ──
         let cfg = &self.engine_cfg;
         let right_col = column![
             text("Engine Settings").size(14).color(ACCENT_TEAL),
             Space::new().height(8),
-            config_slider("Time / Move", cfg.time_per_move, "s", 1, 30, Msg::CfgTimeChanged),
+            config_slider(
+                "Time / Move",
+                cfg.time_per_move,
+                "s",
+                1,
+                30,
+                Msg::CfgTimeChanged
+            ),
             config_slider("Max Depth", cfg.max_depth, "", 1, 64, Msg::CfgDepthChanged),
             config_slider("Hash (MB)", cfg.hash_mb, "MB", 1, 4096, Msg::CfgHashChanged),
             config_slider("Threads", cfg.threads, "", 1, 32, Msg::CfgThreadsChanged),
@@ -1533,60 +1782,85 @@ impl App {
             config_toggle("Ponder", cfg.ponder, Msg::CfgTogglePonder),
             config_toggle("Opening Book", cfg.use_book, Msg::CfgToggleBook),
             config_toggle("NNUE Eval", cfg.use_nnue, Msg::CfgToggleNnue),
-        ].spacing(4).width(340);
+        ]
+        .spacing(4)
+        .width(340);
 
         let right_card = container(glass_card(right_col.into()))
-            .width(340).height(Length::Fill);
+            .width(340)
+            .height(Length::Fill);
 
         // ── Start button ──
         let start_btn = button(
             container(text("Start Game").size(16).color(Color::WHITE))
-                .center_x(200).center_y(48).width(200).height(48),
-        ).on_press(Msg::StartGame)
+                .center_x(200)
+                .center_y(48)
+                .width(200)
+                .height(48),
+        )
+        .on_press(Msg::StartGame)
         .style(|_theme, status| {
             let bg = if matches!(status, button::Status::Hovered) {
                 Color::from_rgb(0.30, 0.60, 1.0)
-            } else { ACCENT };
+            } else {
+                ACCENT
+            };
             button::Style {
                 background: Some(iced::Background::Color(bg)),
-                border: iced::Border { radius: 10.0.into(), ..Default::default() },
-                text_color: Color::WHITE, ..Default::default()
+                border: iced::Border {
+                    radius: 10.0.into(),
+                    ..Default::default()
+                },
+                text_color: Color::WHITE,
+                ..Default::default()
             }
         });
 
         // ── Two-column layout ──
-        let two_cols = row![left_card, Space::new().width(20), right_card]
-            .align_y(Alignment::Start);
+        let two_cols =
+            row![left_card, Space::new().width(20), right_card].align_y(Alignment::Start);
 
         let menu_content = column![
             Space::new().height(20),
             logo_img,
             Space::new().height(4),
-            title, subtitle,
+            title,
+            subtitle,
             Space::new().height(20),
             two_cols,
             Space::new().height(20),
             start_btn,
             Space::new().height(8),
             text("v2.0").size(11).color(pal.text_secondary),
-        ].spacing(4).align_x(Alignment::Center).width(Length::Fill);
+        ]
+        .spacing(4)
+        .align_x(Alignment::Center)
+        .width(Length::Fill);
 
         // chess_bg as blurred background behind menu
         let bg_img: Image<iced::widget::image::Handle> = Image::new(self.chess_bg.clone())
-            .width(Length::Fill).height(Length::Fill);
+            .width(Length::Fill)
+            .height(Length::Fill);
         let bg_layer = container(bg_img)
-            .width(Length::Fill).height(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
             .style(|_theme| container::Style {
-                background: None, ..Default::default()
+                background: None,
+                ..Default::default()
             });
         let menu_fg = container(
-            container(menu_content).center_x(Length::Fill).width(Length::Fill),
-        ).width(Length::Fill).height(Length::Fill);
+            container(menu_content)
+                .center_x(Length::Fill)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         column![
             self.view_title_bar(),
             iced::widget::stack![bg_layer, menu_fg],
-        ].into()
+        ]
+        .into()
     }
 
     // ══════════════════════════════════════════════════════════
@@ -1604,19 +1878,28 @@ impl App {
         let sq_size = (available_h * 0.90 / 8.0).min(120.0).max(40.0);
 
         let anim_info = self.animation.as_ref().map(|anim| {
-            let progress = (anim.start.elapsed().as_secs_f32()
-                / anim.duration.as_secs_f32()).min(1.0);
+            let progress =
+                (anim.start.elapsed().as_secs_f32() / anim.duration.as_secs_f32()).min(1.0);
             board_view::AnimInfo {
-                from_sq: anim.mv.from, to_sq: anim.mv.to,
-                _piece: anim._piece, _color: anim._color,
-                progress, captured: anim.captured, is_capture: anim.is_capture,
+                from_sq: anim.mv.from,
+                to_sq: anim.mv.to,
+                _piece: anim._piece,
+                _color: anim._color,
+                progress,
+                captured: anim.captured,
+                is_capture: anim.is_capture,
             }
         });
 
         let board_view = board_view::view_board(
-            gs, &self.assets, sq_size, anim_info,
-            self.settings.board_theme, self.settings.show_coords,
-            self.settings.coord_position, self.settings.capture_anim_style,
+            gs,
+            &self.assets,
+            sq_size,
+            anim_info,
+            self.settings.board_theme,
+            self.settings.show_coords,
+            self.settings.coord_position,
+            self.settings.capture_anim_style,
         );
         let board_total = sq_size * 8.0;
 
@@ -1624,11 +1907,17 @@ impl App {
         let pal = self.settings.board_theme.gui_palette();
 
         let moves_content: Element<'_, Msg> = if self.move_log.is_empty() {
-            text("No moves yet.").size(13).color(pal.text_secondary).into()
+            text("No moves yet.")
+                .size(13)
+                .color(pal.text_secondary)
+                .into()
         } else {
             let mut moves_col = column![].spacing(2).padding([4, 8]);
             for (i, pair) in self.move_log.chunks(2).enumerate() {
-                let num_text = text(format!("{}.", i + 1)).size(12).color(pal.text_secondary).width(32);
+                let num_text = text(format!("{}.", i + 1))
+                    .size(12)
+                    .color(pal.text_secondary)
+                    .width(32);
                 let white_move = text(&pair[0]).size(13).color(pal.text_primary).width(70);
                 let black_move = if let Some(b) = pair.get(1) {
                     text(b.as_str()).size(13).color(pal.text_primary).width(70)
@@ -1637,38 +1926,55 @@ impl App {
                 };
                 moves_col = moves_col.push(
                     row![num_text, white_move, black_move]
-                        .spacing(6).align_y(Alignment::Center)
+                        .spacing(6)
+                        .align_y(Alignment::Center),
                 );
             }
             moves_col.into()
         };
 
-        let moves_panel = container(
-            scrollable(moves_content).height(Length::Fill),
-        ).padding(8)
-        .style(move |_theme| container::Style {
-            background: Some(iced::Background::Color(pal.sidebar)),
-            border: iced::Border { radius: 6.0.into(), width: 1.0, color: pal.border },
-            ..Default::default()
-        });
+        let moves_panel = container(scrollable(moves_content).height(Length::Fill))
+            .padding(8)
+            .style(move |_theme| container::Style {
+                background: Some(iced::Background::Color(pal.sidebar)),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    width: 1.0,
+                    color: pal.border,
+                },
+                ..Default::default()
+            });
 
         let engine_panel = if self.engine_info.is_empty() {
             container(text("Engine idle").size(11).color(pal.text_secondary))
-                .padding(8).width(Length::Fill)
+                .padding(8)
+                .width(Length::Fill)
                 .style(move |_theme| container::Style {
                     background: Some(iced::Background::Color(pal.panel)),
-                    border: iced::Border { radius: 4.0.into(), width: 1.0, color: pal.border },
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        width: 1.0,
+                        color: pal.border,
+                    },
                     ..Default::default()
                 })
         } else {
-            container(column![
-                text("Engine Analysis").size(11).color(pal.accent_alt),
-                text(&self.engine_info).size(12).color(pal.text_primary),
-            ].spacing(4))
-            .padding(8).width(Length::Fill)
+            container(
+                column![
+                    text("Engine Analysis").size(11).color(pal.accent_alt),
+                    text(&self.engine_info).size(12).color(pal.text_primary),
+                ]
+                .spacing(4),
+            )
+            .padding(8)
+            .width(Length::Fill)
             .style(move |_theme| container::Style {
                 background: Some(iced::Background::Color(pal.panel)),
-                border: iced::Border { radius: 4.0.into(), width: 1.0, color: pal.accent_alt },
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    width: 1.0,
+                    color: pal.accent_alt,
+                },
                 ..Default::default()
             })
         };
@@ -1677,28 +1983,41 @@ impl App {
 
         let side_panel = container(
             column![
-            text("Moves").size(13).color(pal.text_secondary),
+                text("Moves").size(13).color(pal.text_secondary),
                 moves_panel,
                 Space::new().height(8),
                 text("Engine").size(13).color(pal.text_secondary),
                 engine_panel,
-            ].spacing(6).width(panel_w),
-        ).padding(12).height(board_total)
+            ]
+            .spacing(6)
+            .width(panel_w),
+        )
+        .padding(12)
+        .height(board_total)
         .style(move |_theme| container::Style {
             background: Some(iced::Background::Color(pal.panel)),
-            border: iced::Border { radius: 8.0.into(), width: 1.0, color: pal.border },
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: pal.border,
+            },
             ..Default::default()
         });
 
         let game_layout = row![board_view, side_panel]
-            .spacing(20).padding(20).align_y(Alignment::Start);
+            .spacing(20)
+            .padding(20)
+            .align_y(Alignment::Start);
 
         column![
             self.view_title_bar(),
             container(game_layout)
-                .center_x(Length::Fill).center_y(Length::Fill)
-                .width(Length::Fill).height(Length::Fill),
-        ].into()
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ]
+        .into()
     }
 
     // ══════════════════════════════════════════════════════════
@@ -1712,48 +2031,85 @@ impl App {
             board_view::BoardTheme::ALL.to_vec(),
             Some(s.board_theme),
             Msg::SetBoardTheme,
-        ).width(160);
+        )
+        .width(160);
 
         let anim_label = match s.anim_speed {
-            0 => "Fast", 2 => "Slow", _ => "Normal",
+            0 => "Fast",
+            2 => "Slow",
+            _ => "Normal",
         };
 
         let capture_anim_picker = pick_list(
             vec![CaptureAnimStyle::Explosion, CaptureAnimStyle::Instant],
             Some(s.capture_anim_style),
             Msg::SetCaptureAnim,
-        ).width(120);
+        )
+        .width(120);
 
         let coord_pos_picker = pick_list(
             vec![CoordPosition::Inside, CoordPosition::Outside],
             Some(s.coord_position),
             Msg::SetCoordPosition,
-        ).width(120);
+        )
+        .width(120);
 
         let display_section = column![
             text("Display").size(14).color(ACCENT_TEAL),
             Space::new().height(4),
-            row![text("Board Theme").size(12).color(TEXT_SECONDARY).width(130), theme_picker]
-                .spacing(8).align_y(Alignment::Center),
-            config_toggle("Show Coordinates", s.show_coords,
-                Msg::SetShowCoords(!s.show_coords)),
-            row![text("Coord Position").size(12).color(TEXT_SECONDARY).width(130), coord_pos_picker]
-                .spacing(8).align_y(Alignment::Center),
+            row![
+                text("Board Theme")
+                    .size(12)
+                    .color(TEXT_SECONDARY)
+                    .width(130),
+                theme_picker
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            config_toggle(
+                "Show Coordinates",
+                s.show_coords,
+                Msg::SetShowCoords(!s.show_coords)
+            ),
+            row![
+                text("Coord Position")
+                    .size(12)
+                    .color(TEXT_SECONDARY)
+                    .width(130),
+                coord_pos_picker
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
             row![
                 text("Animation").size(12).color(TEXT_SECONDARY).width(130),
                 slider(0..=2, s.anim_speed, Msg::SetAnimSpeed).width(100),
                 text(anim_label).size(12).color(TEXT_PRIMARY).width(60),
-            ].spacing(8).align_y(Alignment::Center),
-            row![text("Capture Effect").size(12).color(TEXT_SECONDARY).width(130), capture_anim_picker]
-                .spacing(8).align_y(Alignment::Center),
-        ].spacing(8);
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                text("Capture Effect")
+                    .size(12)
+                    .color(TEXT_SECONDARY)
+                    .width(130),
+                capture_anim_picker
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
 
         // Audio section
         let mood_picker = pick_list(
-            vec![audio::GameMood::Playful, audio::GameMood::Joyful, audio::GameMood::Mystique],
+            vec![
+                audio::GameMood::Playful,
+                audio::GameMood::Joyful,
+                audio::GameMood::Mystique,
+            ],
             Some(s.game_mood),
             Msg::SetGameMood,
-        ).width(120);
+        )
+        .width(120);
 
         let audio_section = column![
             text("Audio").size(14).color(ACCENT_TEAL),
@@ -1763,73 +2119,130 @@ impl App {
             row![
                 text("BGM Volume").size(12).color(TEXT_SECONDARY).width(130),
                 slider(0..=100, s.bgm_volume, Msg::SetBgmVolume).width(100),
-                text(format!("{}%", s.bgm_volume)).size(12).color(TEXT_PRIMARY).width(50),
-            ].spacing(8).align_y(Alignment::Center),
-            row![text("Game Mood").size(12).color(TEXT_SECONDARY).width(130), mood_picker]
-                .spacing(8).align_y(Alignment::Center),
-        ].spacing(8);
+                text(format!("{}%", s.bgm_volume))
+                    .size(12)
+                    .color(TEXT_PRIMARY)
+                    .width(50),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                text("Game Mood").size(12).color(TEXT_SECONDARY).width(130),
+                mood_picker
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
 
         // Game section
         let game_section = column![
             text("Game").size(14).color(ACCENT_TEAL),
             Space::new().height(4),
-            config_toggle("Auto-flip for Black", s.auto_flip_black,
-                Msg::SetAutoFlip(!s.auto_flip_black)),
-            config_toggle("Show Legal Moves", s.show_legal_moves,
-                Msg::SetShowLegal(!s.show_legal_moves)),
-            config_toggle("Show Last Move", s.show_last_move,
-                Msg::SetShowLastMove(!s.show_last_move)),
-            config_toggle("Premoves", s.premoves_enabled,
-                Msg::SetPremoves(!s.premoves_enabled)),
-            config_toggle("Multi-Premoves", s.multi_premoves,
-                Msg::SetMultiPremoves(!s.multi_premoves)),
-            config_toggle("Draw Arrows", s.draw_arrows,
-                Msg::SetDrawArrows(!s.draw_arrows)),
-        ].spacing(8);
+            config_toggle(
+                "Auto-flip for Black",
+                s.auto_flip_black,
+                Msg::SetAutoFlip(!s.auto_flip_black)
+            ),
+            config_toggle(
+                "Show Legal Moves",
+                s.show_legal_moves,
+                Msg::SetShowLegal(!s.show_legal_moves)
+            ),
+            config_toggle(
+                "Show Last Move",
+                s.show_last_move,
+                Msg::SetShowLastMove(!s.show_last_move)
+            ),
+            config_toggle(
+                "Premoves",
+                s.premoves_enabled,
+                Msg::SetPremoves(!s.premoves_enabled)
+            ),
+            config_toggle(
+                "Multi-Premoves",
+                s.multi_premoves,
+                Msg::SetMultiPremoves(!s.multi_premoves)
+            ),
+            config_toggle(
+                "Draw Arrows",
+                s.draw_arrows,
+                Msg::SetDrawArrows(!s.draw_arrows)
+            ),
+        ]
+        .spacing(8);
 
         let close_btn = button(
             container(text("✕ Close").size(14).color(Color::WHITE))
-                .center_x(100).center_y(36).width(100).height(36),
-        ).on_press(Msg::ToggleOptions)
+                .center_x(100)
+                .center_y(36)
+                .width(100)
+                .height(36),
+        )
+        .on_press(Msg::ToggleOptions)
         .style(|_theme, status| {
             let bg = if matches!(status, button::Status::Hovered) {
                 ACCENT
-            } else { Color::from_rgb(0.3, 0.2, 0.2) };
+            } else {
+                Color::from_rgb(0.3, 0.2, 0.2)
+            };
             button::Style {
                 background: Some(iced::Background::Color(bg)),
-                border: iced::Border { radius: 6.0.into(), ..Default::default() },
-                text_color: Color::WHITE, ..Default::default()
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                text_color: Color::WHITE,
+                ..Default::default()
             }
         });
 
         // Tab switcher
         let settings_tab_active = self.options_tab == OptionsTab::Settings;
         let tab_buttons = row![
-            button(text("⚙ Settings").size(13).color(
-                if settings_tab_active { Color::WHITE } else { TEXT_SECONDARY }
-            ))
+            button(text("⚙ Settings").size(13).color(if settings_tab_active {
+                Color::WHITE
+            } else {
+                TEXT_SECONDARY
+            }))
             .on_press(Msg::SwitchOptionsTab(OptionsTab::Settings))
             .padding([6, 16])
             .style(move |_theme, _status| button::Style {
-                background: Some(iced::Background::Color(
-                    if settings_tab_active { ACCENT } else { Color::TRANSPARENT }
-                )),
-                border: iced::Border { radius: 6.0.into(), ..Default::default() },
-                text_color: Color::WHITE, ..Default::default()
+                background: Some(iced::Background::Color(if settings_tab_active {
+                    ACCENT
+                } else {
+                    Color::TRANSPARENT
+                })),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                text_color: Color::WHITE,
+                ..Default::default()
             }),
-            button(text("🔧 Tools").size(13).color(
-                if !settings_tab_active { Color::WHITE } else { TEXT_SECONDARY }
-            ))
+            button(text("🔧 Tools").size(13).color(if !settings_tab_active {
+                Color::WHITE
+            } else {
+                TEXT_SECONDARY
+            }))
             .on_press(Msg::SwitchOptionsTab(OptionsTab::Tools))
             .padding([6, 16])
             .style(move |_theme, _status| button::Style {
-                background: Some(iced::Background::Color(
-                    if !settings_tab_active { ACCENT } else { Color::TRANSPARENT }
-                )),
-                border: iced::Border { radius: 6.0.into(), ..Default::default() },
-                text_color: Color::WHITE, ..Default::default()
+                background: Some(iced::Background::Color(if !settings_tab_active {
+                    ACCENT
+                } else {
+                    Color::TRANSPARENT
+                })),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                text_color: Color::WHITE,
+                ..Default::default()
             }),
-        ].spacing(4).align_y(Alignment::Center);
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
 
         // Build tab content
         let tab_content: Element<'_, Msg> = if settings_tab_active {
@@ -1837,23 +2250,32 @@ impl App {
                 column![
                     display_section,
                     Space::new().height(16),
-                    container(Space::new().height(1)).width(Length::Fill)
+                    container(Space::new().height(1))
+                        .width(Length::Fill)
                         .style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
+                            background: Some(iced::Background::Color(Color::from_rgba(
+                                1.0, 1.0, 1.0, 0.06
+                            ))),
                             ..Default::default()
                         }),
                     Space::new().height(16),
                     audio_section,
                     Space::new().height(16),
-                    container(Space::new().height(1)).width(Length::Fill)
+                    container(Space::new().height(1))
+                        .width(Length::Fill)
                         .style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.06))),
+                            background: Some(iced::Background::Color(Color::from_rgba(
+                                1.0, 1.0, 1.0, 0.06
+                            ))),
                             ..Default::default()
                         }),
                     Space::new().height(16),
                     game_section,
-                ].spacing(0)
-            ).height(450).into()
+                ]
+                .spacing(0),
+            )
+            .height(450)
+            .into()
         } else {
             // Tools tab
             let syzygy_section = column![
@@ -1862,14 +2284,19 @@ impl App {
                 row![
                     text("Status:").size(12).color(TEXT_SECONDARY).width(60),
                     text(&self.syzygy_status).size(12).color(TEXT_PRIMARY),
-                ].spacing(8).align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
                 row![
                     text("Path:").size(12).color(TEXT_SECONDARY).width(60),
                     text("./syzygy/").size(12).color(TEXT_PRIMARY),
-                ].spacing(8).align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
                 Space::new().height(4),
                 styled_button("⬇ Download 3-4-5 Piece Tables (~1 GB)", Msg::SyzygyDownload),
-            ].spacing(6);
+            ]
+            .spacing(6);
 
             let nnue_section = column![
                 text("NNUE Networks").size(14).color(ACCENT_TEAL),
@@ -1877,14 +2304,19 @@ impl App {
                 row![
                     text("Status:").size(12).color(TEXT_SECONDARY).width(60),
                     text(&self.nnue_status).size(12).color(TEXT_PRIMARY),
-                ].spacing(8).align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
                 row![
                     text("Path:").size(12).color(TEXT_SECONDARY).width(60),
                     text("./nnue/").size(12).color(TEXT_PRIMARY),
-                ].spacing(8).align_y(Alignment::Center),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
                 Space::new().height(4),
                 styled_button("⬇ Download All NNUE Networks", Msg::NnueDownload),
-            ].spacing(6);
+            ]
+            .spacing(6);
 
             let mut tuning_section = column![
                 text("Parameter Tuning").size(14).color(ACCENT_TEAL),
@@ -1892,8 +2324,11 @@ impl App {
                 row![
                     text("Status:").size(12).color(TEXT_SECONDARY).width(60),
                     text(&self.tuning_status).size(12).color(TEXT_PRIMARY),
-                ].spacing(8).align_y(Alignment::Center),
-            ].spacing(4);
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(4);
 
             if let Some(ref params) = self.tuning_params {
                 let flat = params.flat_list();
@@ -1901,9 +2336,8 @@ impl App {
                 for (section, name, param) in flat.into_iter().take(20) {
                     if section != last_section {
                         let sec_label = section.clone();
-                        tuning_section = tuning_section.push(
-                            text(sec_label).size(11).color(ACCENT_TEAL)
-                        );
+                        tuning_section =
+                            tuning_section.push(text(sec_label).size(11).color(ACCENT_TEAL));
                         last_section = section.clone();
                     }
                     let sec = section;
@@ -1915,11 +2349,19 @@ impl App {
                     tuning_section = tuning_section.push(
                         row![
                             text(name_label).size(11).color(TEXT_SECONDARY).width(120),
-                            slider(min_i..=max_i, val_i,
-                                move |v| Msg::TuneSetParam(sec.clone(), nm.clone(), v as f64)
-                            ).width(100),
-                            text(format!("{val_i}")).size(11).color(TEXT_PRIMARY).width(50),
-                        ].spacing(6).align_y(Alignment::Center)
+                            slider(min_i..=max_i, val_i, move |v| Msg::TuneSetParam(
+                                sec.clone(),
+                                nm.clone(),
+                                v as f64
+                            ))
+                            .width(100),
+                            text(format!("{val_i}"))
+                                .size(11)
+                                .color(TEXT_PRIMARY)
+                                .width(50),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
                     );
                 }
                 tuning_section = tuning_section.push(Space::new().height(4));
@@ -1927,19 +2369,20 @@ impl App {
                     row![
                         styled_button("Save params.toml", Msg::TuneSave),
                         styled_button("Reload", Msg::TuneLoad),
-                    ].spacing(8)
+                    ]
+                    .spacing(8),
                 );
             } else {
-                tuning_section = tuning_section.push(
-                    styled_button("Load params.toml", Msg::TuneLoad)
-                );
+                tuning_section =
+                    tuning_section.push(styled_button("Load params.toml", Msg::TuneLoad));
             }
 
             let updates_section = column![
                 text("Updates").size(14).color(ACCENT_TEAL),
                 Space::new().height(4),
                 styled_button("Check for Updates", Msg::CheckForUpdates),
-            ].spacing(6);
+            ]
+            .spacing(6);
 
             scrollable(
                 column![
@@ -1950,8 +2393,11 @@ impl App {
                     tuning_section,
                     Space::new().height(12),
                     updates_section,
-                ].spacing(0)
-            ).height(450).into()
+                ]
+                .spacing(0),
+            )
+            .height(450)
+            .into()
         };
 
         let modal_content = container(
@@ -1963,23 +2409,38 @@ impl App {
                 tab_content,
                 Space::new().height(16),
                 close_btn,
-            ].spacing(0).align_x(Alignment::Center).width(520),
-        ).padding(24)
+            ]
+            .spacing(0)
+            .align_x(Alignment::Center)
+            .width(520),
+        )
+        .padding(24)
         .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba(0.08, 0.08, 0.16, 0.96))),
-            border: iced::Border { radius: 12.0.into(), width: 1.0, color: BORDER_SUBTLE },
+            background: Some(iced::Background::Color(Color::from_rgba(
+                0.08, 0.08, 0.16, 0.96,
+            ))),
+            border: iced::Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: BORDER_SUBTLE,
+            },
             ..Default::default()
         });
 
         // Dark backdrop
         container(
             container(modal_content)
-                .center_x(Length::Fill).center_y(Length::Fill)
-                .width(Length::Fill).height(Length::Fill),
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .width(Length::Fill)
+                .height(Length::Fill),
         )
-        .width(Length::Fill).height(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.6))),
+            background: Some(iced::Background::Color(Color::from_rgba(
+                0.0, 0.0, 0.0, 0.6,
+            ))),
             ..Default::default()
         })
         .into()
@@ -1993,9 +2454,9 @@ fn glass_card(content: Element<'_, Msg>) -> Element<'_, Msg> {
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(
-                Color::from_rgba(0.086, 0.129, 0.243, 0.85),
-            )),
+            background: Some(iced::Background::Color(Color::from_rgba(
+                0.086, 0.129, 0.243, 0.85,
+            ))),
             border: iced::Border {
                 radius: 12.0.into(),
                 width: 1.0,
@@ -2039,13 +2500,15 @@ fn styled_button(label: &str, msg: Msg) -> Element<'_, Msg> {
 
 /// Pill-shaped title bar button with icon + label, accent hover glow.
 fn pill_button<'a>(
-    icon: &'a str, label: &'a str,
-    pal: board_view::GuiPalette, destructive: bool, msg: Msg,
+    icon: &'a str,
+    label: &'a str,
+    pal: board_view::GuiPalette,
+    destructive: bool,
+    msg: Msg,
 ) -> Element<'a, Msg> {
-    let content = row![
-        text(icon).size(12),
-        text(label).size(11),
-    ].spacing(3).align_y(Alignment::Center);
+    let content = row![text(icon).size(12), text(label).size(11),]
+        .spacing(3)
+        .align_y(Alignment::Center);
 
     button(content)
         .on_press(msg)
@@ -2054,24 +2517,37 @@ fn pill_button<'a>(
             let (bg, border_c) = match status {
                 button::Status::Hovered => {
                     if destructive {
-                        (Color::from_rgba(0.85, 0.20, 0.25, 0.30),
-                         Color::from_rgba(0.85, 0.20, 0.25, 0.50))
+                        (
+                            Color::from_rgba(0.85, 0.20, 0.25, 0.30),
+                            Color::from_rgba(0.85, 0.20, 0.25, 0.50),
+                        )
                     } else {
-                        (Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.18),
-                         Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.35))
+                        (
+                            Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.18),
+                            Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.35),
+                        )
                     }
                 }
-                button::Status::Pressed => {
-                    (Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.28),
-                     Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.50))
-                }
+                button::Status::Pressed => (
+                    Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.28),
+                    Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.50),
+                ),
                 _ => (Color::TRANSPARENT, Color::TRANSPARENT),
             };
             button::Style {
                 background: Some(iced::Background::Color(bg)),
-                border: iced::Border { radius: 999.0.into(), width: 1.0, color: border_c },
+                border: iced::Border {
+                    radius: 999.0.into(),
+                    width: 1.0,
+                    color: border_c,
+                },
                 text_color: if destructive {
-                    Color::from_rgba(pal.text_primary.r, pal.text_primary.g, pal.text_primary.b, 0.85)
+                    Color::from_rgba(
+                        pal.text_primary.r,
+                        pal.text_primary.g,
+                        pal.text_primary.b,
+                        0.85,
+                    )
                 } else {
                     pal.text_primary
                 },
@@ -2084,18 +2560,29 @@ fn pill_button<'a>(
 /// Subtle vertical separator between button groups in the pill bar.
 fn pill_sep<'a>(pal: board_view::GuiPalette) -> Element<'a, Msg> {
     container(Space::new().width(0))
-        .width(1).height(20)
+        .width(1)
+        .height(20)
         .style(move |_theme| container::Style {
-            background: Some(iced::Background::Color(
-                Color::from_rgba(pal.border.r, pal.border.g, pal.border.b, 0.5)
-            )),
+            background: Some(iced::Background::Color(Color::from_rgba(
+                pal.border.r,
+                pal.border.g,
+                pal.border.b,
+                0.5,
+            ))),
             ..Default::default()
         })
         .into()
 }
 
 /// Engine config slider row: "Label  [====]  Value Unit"
-fn config_slider<'a, F>(label: &'a str, value: i32, unit: &str, min: i32, max: i32, on_change: F) -> Element<'a, Msg>
+fn config_slider<'a, F>(
+    label: &'a str,
+    value: i32,
+    unit: &str,
+    min: i32,
+    max: i32,
+    on_change: F,
+) -> Element<'a, Msg>
 where
     F: 'a + Fn(i32) -> Msg,
 {

@@ -2,9 +2,9 @@
 //! of a capture chain on a single square using the swap algorithm.
 //! Used for capture ordering, pruning bad captures in quiescence, and LMR.
 
-use types::{Board, Move, Piece, Color};
 use types::bitboard::{Bitboard, get_lsb};
 use types::board::attack_tables::*;
+use types::{Board, Color, Move, Piece};
 
 /// Piece values for SEE (centipawns).
 const SEE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20000];
@@ -127,9 +127,13 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
 
     // Quick balance checks
     let mut balance = initial_value - threshold;
-    if balance < 0 { return false; }
+    if balance < 0 {
+        return false;
+    }
     balance -= SEE_VALUES[moving_piece.index()];
-    if balance >= 0 { return true; }
+    if balance >= 0 {
+        return true;
+    }
 
     // Full inline swap loop
     let mut white_pieces = [0u64; 6];
@@ -150,7 +154,9 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
         };
         let side_attackers = attackers & side_bb.iter().fold(0u64, |acc, &bb| acc | bb);
 
-        if side_attackers == 0 { break; }
+        if side_attackers == 0 {
+            break;
+        }
 
         // Find least valuable attacker
         let mut lva_piece = Piece::King;
@@ -181,7 +187,9 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
                 };
                 let opp_atk = all_attackers(to, occupancy, &white_pieces, &black_pieces)
                     & opp_bb.iter().fold(0u64, |acc, &bb| acc | bb);
-                if opp_atk != 0 { break; }
+                if opp_atk != 0 {
+                    break;
+                }
             }
             break;
         }
@@ -241,39 +249,34 @@ mod tests {
     fn test_see_simple_capture_winning() {
         setup();
         // Pawn captures a queen → should be very positive
-        let mut board = Board::from_fen("4k3/8/8/3q4/4P3/8/8/4K3 w - - 0 1").unwrap();
+        let board = Board::from_fen("4k3/8/8/3q4/4P3/8/8/4K3 w - - 0 1").unwrap();
         let mv = Move::capture(types::Square::E4, types::Square::D5);
         let score = see(&board, mv);
-        assert!(score > 0, "Pawn x Queen should be positive SEE, got {score}");
+        assert!(
+            score > 0,
+            "Pawn x Queen should be positive SEE, got {score}"
+        );
     }
 
     #[test]
     fn test_see_losing_capture() {
         setup();
-        // Queen captures defended pawn → should be negative
-        let mut board = Board::from_fen("4k3/8/3p4/2p5/8/8/1Q6/4K3 w - - 0 1").unwrap();
-        // If queen captures on c5 and it's defended by d6 pawn... 
-        // Actually let's do a clearer case: queen takes defended knight
-        let mut board = Board::from_fen("4k3/8/8/3n4/2n5/8/1Q6/4K3 w - - 0 1").unwrap();
+        // Queen captures defended knight.
+        let board = Board::from_fen("4k3/8/8/4p3/3n4/8/1Q6/4K3 w - - 0 1").unwrap();
         let mv = Move::capture(types::Square::B2, types::Square::D4);
-        // This is queen capturing an empty square, need a piece there
-        // Let's just verify it doesn't crash
-        let _score = see(&board, mv);
+        let score = see(&board, mv);
+        assert!(
+            score <= 0,
+            "Defended queen capture should not be winning, got {score}"
+        );
     }
 
     #[test]
     fn test_see_equal_exchange() {
         setup();
-        // Knight takes knight → should be ~0
-        let mut board = Board::from_fen("4k3/8/3n4/8/8/4N3/8/4K3 w - - 0 1").unwrap();
-        let mv = Move::capture(types::Square::E3, types::Square::D5);
-        // Hmm, E3 knight can't reach D5. Let's use a proper position
-        let mut board = Board::from_fen("4k3/8/5n2/8/3N4/8/8/4K3 w - - 0 1").unwrap();
-        let mv = Move::capture(types::Square::D4, types::Square::F5);
-        // D4 knight can't reach F5 either. Let me just use a direct case.
-        let mut board = Board::from_fen("4k3/8/8/3n4/4N3/8/8/4K3 w - - 0 1").unwrap();
+        // Knight takes knight in a simple position.
+        let board = Board::from_fen("4k3/8/3n4/8/4N3/8/8/4K3 w - - 0 1").unwrap();
         let mv = Move::capture(types::Square::E4, types::Square::D6);
-        // Knight moves in L-shape. E4->D6 is valid (1 file left, 2 ranks up)
-        let _score = see(&board, mv);
+        let _ = see(&board, mv);
     }
 }

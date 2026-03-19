@@ -20,6 +20,8 @@ members = [
     "crates/kishmat-updater",
     "crates/kishmat-gpu",
     "crates/kishmat-trainer",
+    "crates/kishmat-benchmarker",
+    "crates/kishmat-tooling",
 ]
 
 [features]

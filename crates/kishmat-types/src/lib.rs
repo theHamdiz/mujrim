@@ -1,16 +1,16 @@
-pub mod square;
-pub mod piece;
 pub mod bitboard;
-pub mod chess_move;
 pub mod board;
+pub mod chess_move;
+pub mod piece;
+pub mod square;
 
 // Re-export core types for ergonomic use.
-pub use square::Square;
-pub use piece::{Color, Piece};
 pub use bitboard::Bitboard;
-pub use chess_move::{Move, MoveList};
 pub use board::Board;
 pub use board::zobrist;
+pub use chess_move::{Move, MoveList};
+pub use piece::{Color, Piece};
+pub use square::Square;
 
 /// Initializes all static tables (attack tables, Zobrist keys).
 /// Must be called once at program startup before any Board operations.

@@ -47,9 +47,10 @@
 - **💾 Settings Persistence** — All GUI settings saved to TOML and auto-restored on launch
 - **🔧 Custom Title Bar** — Nova Editor-inspired title bar with pill-shaped action buttons, window dragging, 7px rounded window corners
 - **Batch Updater** — GitHub-release-based updater (`kishmat-updater`) with per-component updates, progress bars, and SHA256 verification
-- **NNUE Evaluation** — 768→1024×2→1 perspective network with SCReLU and king buckets (Akimbo-compatible ~6 MB net.bin, compiled into binary)
+- **NNUE Evaluation** — 768→1024×2→1 perspective network with SCReLU and king buckets (Akimbo-compatible ~6 MB net.bin, compiled into binary) — active in search via hybrid eval
 - **Classical Evaluation** — Tapered PeSTO PSQT, mobility, king safety, passed pawns, threats, space control
-- **Stockfish-Inspired Search** — Razoring, futility, LMR, LMP, null-move, and correction history calibrated against top engine research
+- **Stockfish/Akimbo-Inspired Search** — Razoring, futility, LMR, LMP, null-move with anti-recursion, per-path singular extensions, correction history
+- **Benchmarker Crate** — Standalone `kishmat-benchmarker` binary with CLI + TUI, internal + external UCI engine benchmarking
 - **XBoard/CECP Protocol** — Full support for WinBoard and XBoard GUIs
 - **Opening Book** — Embedded Polyglot gambit-focused opening book
 - **Cross-Platform Installer** — `just install` creates a macOS .app bundle, Linux .desktop entry, or Windows Start Menu shortcut
@@ -157,29 +158,11 @@ The GUI uses high-fidelity colored Staunton chess pieces. The piece set is CC-BY
 
 ## Features
 
-### Evaluation
+KishMat uses a **hybrid evaluation** that blends classical hand-crafted evaluation with NNUE neural network evaluation.
 
-KishMat uses a **classical evaluation** as its primary engine, with an NNUE module available in the eval crate.
+#### NNUE (Active in Search)
 
-#### Classical Evaluation (Active)
-
-| Feature | Description |
-|---|---|
-| **Tapered Eval** | Game-phase interpolation between middlegame and endgame scores |
-| **PeSTO PSQT** | Piece-square tables for all pieces across both game phases |
-| **Material** | Separate MG/EG piece values |
-| **Mobility** | Per-piece mobility bonuses/penalties |
-| **King Safety** | Pawn shield quality, pawn storm detection, attacker weights |
-| **Threats** | Hanging pieces, pieces attacked by lower-value pieces |
-| **Passed Pawns** | Rank-based scaling with king proximity bonuses |
-| **Bishop Pair** | +30/+50 MG/EG bonus |
-| **Rook on Open File** | Open/semi-open file bonuses |
-| **Space Control** | Central square control evaluation |
-| **Connected Rooks** | Bonus for connected rooks on rank or file |
-
-#### NNUE (Available, Not Yet Wired into Search)
-
-KishMat includes a fully implemented NNUE module in `kishmat-eval/src/nnue/`:
+The hybrid eval function uses NNUE as the primary evaluator with classical eval as a guard for special positions.
 
 | Component | Details |
 |---|---|
@@ -191,8 +174,6 @@ KishMat includes a fully implemented NNUE module in `kishmat-eval/src/nnue/`:
 | **SIMD** | AVX2-accelerated forward pass with scalar fallback |
 | **Accumulator** | Incremental updates with cache table |
 
-> **Note:** The NNUE module is fully implemented and tested but is not yet integrated into the search loop. The engine currently uses the classical evaluation exclusively. NNUE integration into the search is planned for a future release.
-
 ### Search
 
 | Technique | Description |
@@ -201,14 +182,14 @@ KishMat includes a fully implemented NNUE module in `kishmat-eval/src/nnue/`:
 | **Iterative Deepening** | Progressive depth with aspiration windows (10cp initial) |
 | **PVS** | Principal Variation Search with null-window re-search |
 | **Alpha-Beta** | Full-width with fail-soft |
-| **Null Move Pruning** | R = 5 + depth/5 + eval correction, verification at depth>12 |
+| **Null Move Pruning** | R = 5 + depth/5 + eval correction, `min_nmp_ply` anti-recursion |
 | **Late Move Reductions** | `0.77 + ln(d)·ln(m)/2.36` + history-based stat-score adjustments |
 | **Late Move Pruning** | `(3 + depth²) / (2 - improving)` threshold formula |
 | **Reverse Futility** | `77·depth - 74·improving` at depth ≤ 8 |
 | **Razoring** | Drops to qsearch when `eval ≤ α - 507 - 312·d²` |
 | **Futility Pruning** | `77·depth - 46·improving` at depth ≤ 6 |
-| **Singular Extensions** | TT move singularity with double/negative extensions |
-| **Check Extension** | +1 ply when in check |
+| **Singular Extensions** | TT move singularity with per-path double extensions (`dbl_exts < 5`) |
+| **Check Extension** | +1 ply when in check (budgeted at 2× nominal depth) |
 | **ProbCut** | Reduced-depth verification for positions way above beta |
 | **IIR** | Internal Iterative Reduction at PV nodes |
 | **SEE Pruning** | Prune losing captures and quiet moves by SEE score |
@@ -249,6 +230,7 @@ kishmat/                          # Workspace root + main engine binary
 │   ├── kishmat-search/           # Alpha-beta, Lazy SMP, TT, SEE, opening book
 │   ├── kishmat-comms/            # UCI + XBoard protocol handlers, time management
 │   ├── kishmat-tests/            # Integration tests across all engine crates
+│   ├── kishmat-benchmarker/      # Benchmark CLI + TUI (internal + external UCI)
 │   ├── kishmat-ui/               # Native GUI (iced 0.14) — chess board, game modes
 │   │   ├── src/
 │   │   │   ├── audio.rs          # Procedural BGM + move/capture sounds (3 moods)
@@ -271,21 +253,24 @@ kishmat/                          # Workspace root + main engine binary
 ### Bratko-Kopec Test (v2.0.0)
 
 ```
-╔══════════════════════════════════════════════════════════╗
-║                      RESULTS                            ║
-╠══════════════════════════════════════════════════════════╣
-║  Accuracy:    10/24 ( 41.7%)                            ║
-║  Est. ELO:    ~1775                                      ║
-║  NPS:         19.79M (depth 18, startpos)                ║
-║  Total nodes: 694.25M                                    ║
-║  Total time:  25007ms                                    ║
-╚══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════╗
+║                  RESULTS                    ║
+╠══════════════════════════════════════════════╣
+║  Accuracy:    13/24 ( 54.2%)                ║
+║  Est. ELO:    ~1963                          ║
+║  NPS:         23.73M (5s, startpos)          ║
+║  Total nodes: 2.71B                          ║
+║  Total time:  144034ms                       ║
+╚══════════════════════════════════════════════╝
 ```
 
 Run the benchmark:
 
 ```bash
-just bench
+just bench                    # Default (depth 16, 120s/position)
+just bench depth=18           # Custom depth
+just bench-uci ./stockfish    # Benchmark external UCI engine
+just engine-info              # Show NNUE + technique info
 ```
 
 ---
@@ -387,7 +372,9 @@ just install    # Install as native app
 | `just uninstall` | Remove all installed files |
 | `just run` | Run engine in UCI mode |
 | `just play` | Interactive terminal play |
-| `just bench` | Run ELO benchmark suite |
+| `just bench` | Run ELO benchmark suite (configurable depth/hash/time) |
+| `just bench-uci <engine>` | Benchmark external UCI engine binary |
+| `just engine-info` | Show NNUE, search techniques, hardware info |
 | `just nps` | Quick NPS benchmark (depth 16) |
 | `just pgo` | Profile-guided optimization build (nightly Rust) |
 | `just updater` | Build the updater binary |

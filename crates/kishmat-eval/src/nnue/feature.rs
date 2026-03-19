@@ -10,7 +10,7 @@
 //!
 //! This module provides utility functions for feature manipulation.
 
-use super::network::{NUM_BUCKETS, BUCKETS};
+use super::network::{BUCKETS, NUM_BUCKETS};
 
 /// Total effective buckets (including the mirrored king-side values 4-7).
 pub const TOTAL_BUCKETS: usize = NUM_BUCKETS * 2;
@@ -18,7 +18,11 @@ pub const TOTAL_BUCKETS: usize = NUM_BUCKETS * 2;
 /// Check if a king move changes the bucket (requires accumulator refresh).
 #[inline(always)]
 pub fn king_bucket_changed(perspective: usize, from_sq: usize, to_sq: usize) -> bool {
-    let from = if perspective == 1 { from_sq ^ 56 } else { from_sq };
+    let from = if perspective == 1 {
+        from_sq ^ 56
+    } else {
+        from_sq
+    };
     let to = if perspective == 1 { to_sq ^ 56 } else { to_sq };
     BUCKETS[from] != BUCKETS[to]
 }
@@ -49,8 +53,12 @@ mod tests {
     #[test]
     fn test_bucket_range() {
         for sq in 0..64 {
-            assert!(BUCKETS[sq] < TOTAL_BUCKETS,
-                "Bucket {} out of range for sq={}", BUCKETS[sq], sq);
+            assert!(
+                BUCKETS[sq] < TOTAL_BUCKETS,
+                "Bucket {} out of range for sq={}",
+                BUCKETS[sq],
+                sq
+            );
         }
     }
 

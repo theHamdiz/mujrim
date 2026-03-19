@@ -22,9 +22,7 @@ pub enum GpuBackend {
         vram_mb: u64,
     },
     /// AMD HIP/ROCm
-    Hip {
-        device_name: String,
-    },
+    Hip { device_name: String },
     /// CPU-only fallback (uses SIMD: AVX2/SSE/NEON)
     Cpu {
         cpu_name: String,
@@ -36,17 +34,39 @@ pub enum GpuBackend {
 impl fmt::Display for GpuBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GpuBackend::Metal { device_name, gpu_cores, metal_version } => {
-                write!(f, "Metal ({device_name}, {gpu_cores} GPU cores, {metal_version})")
+            GpuBackend::Metal {
+                device_name,
+                gpu_cores,
+                metal_version,
+            } => {
+                write!(
+                    f,
+                    "Metal ({device_name}, {gpu_cores} GPU cores, {metal_version})"
+                )
             }
-            GpuBackend::Cuda { device_name, compute_capability, vram_mb } => {
-                write!(f, "CUDA ({device_name}, SM {compute_capability}, {vram_mb}MB VRAM)")
+            GpuBackend::Cuda {
+                device_name,
+                compute_capability,
+                vram_mb,
+            } => {
+                write!(
+                    f,
+                    "CUDA ({device_name}, SM {compute_capability}, {vram_mb}MB VRAM)"
+                )
             }
             GpuBackend::Hip { device_name } => {
                 write!(f, "HIP/ROCm ({device_name})")
             }
-            GpuBackend::Cpu { cpu_name, cores, simd_features } => {
-                write!(f, "CPU ({cpu_name}, {cores} cores, SIMD: {})", simd_features.join(", "))
+            GpuBackend::Cpu {
+                cpu_name,
+                cores,
+                simd_features,
+            } => {
+                write!(
+                    f,
+                    "CPU ({cpu_name}, {cores} cores, SIMD: {})",
+                    simd_features.join(", ")
+                )
             }
         }
     }
@@ -139,19 +159,22 @@ fn detect_metal() -> Option<GpuBackend> {
     let text = String::from_utf8_lossy(&output.stdout);
 
     // Parse chipset model
-    let device_name = text.lines()
+    let device_name = text
+        .lines()
         .find(|l| l.contains("Chipset Model:"))
         .map(|l| l.split(':').nth(1).unwrap_or("Unknown").trim().to_string())
         .unwrap_or_else(|| "Apple GPU".to_string());
 
     // Parse GPU cores
-    let gpu_cores = text.lines()
+    let gpu_cores = text
+        .lines()
         .find(|l| l.contains("Total Number of Cores:"))
         .and_then(|l| l.split(':').nth(1)?.trim().parse::<u32>().ok())
         .unwrap_or(8);
 
     // Parse Metal version
-    let metal_version = text.lines()
+    let metal_version = text
+        .lines()
         .find(|l| l.contains("Metal Support:") || l.contains("Metal Family:"))
         .map(|l| l.split(':').nth(1).unwrap_or("Metal").trim().to_string())
         .unwrap_or_else(|| "Metal".to_string());
@@ -179,7 +202,9 @@ fn detect_cuda() -> Option<GpuBackend> {
         .output()
         .ok()?;
 
-    if !output.status.success() { return None; }
+    if !output.status.success() {
+        return None;
+    }
 
     let text = String::from_utf8_lossy(&output.stdout);
     let line = text.lines().next()?;
@@ -205,10 +230,13 @@ fn detect_hip() -> Option<GpuBackend> {
         .output()
         .ok()?;
 
-    if !output.status.success() { return None; }
+    if !output.status.success() {
+        return None;
+    }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    let device_name = text.lines()
+    let device_name = text
+        .lines()
         .find(|l| l.contains("Card series:") || l.contains("GPU"))
         .map(|l| l.trim().to_string())
         .unwrap_or_else(|| "AMD GPU".to_string());
@@ -228,11 +256,20 @@ fn detect_cpu() -> GpuBackend {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") { simd_features.push("AVX2".to_string()); }
-        else if is_x86_feature_detected!("sse4.2") { simd_features.push("SSE4.2".to_string()); }
-        if is_x86_feature_detected!("avx512f") { simd_features.push("AVX-512".to_string()); }
-        if is_x86_feature_detected!("bmi2") { simd_features.push("BMI2".to_string()); }
-        if is_x86_feature_detected!("popcnt") { simd_features.push("POPCNT".to_string()); }
+        if is_x86_feature_detected!("avx2") {
+            simd_features.push("AVX2".to_string());
+        } else if is_x86_feature_detected!("sse4.2") {
+            simd_features.push("SSE4.2".to_string());
+        }
+        if is_x86_feature_detected!("avx512f") {
+            simd_features.push("AVX-512".to_string());
+        }
+        if is_x86_feature_detected!("bmi2") {
+            simd_features.push("BMI2".to_string());
+        }
+        if is_x86_feature_detected!("popcnt") {
+            simd_features.push("POPCNT".to_string());
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -304,16 +341,16 @@ fn get_total_memory_mb() -> u64 {
             .and_then(|s| {
                 s.lines()
                     .find(|l| l.starts_with("MemTotal:"))
-                    .and_then(|l| {
-                        l.split_whitespace().nth(1)?.parse::<u64>().ok()
-                    })
+                    .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
             })
             .map(|kb| kb / 1024)
             .unwrap_or(0)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    { 0 }
+    {
+        0
+    }
 }
 
 #[cfg(test)]

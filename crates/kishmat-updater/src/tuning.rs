@@ -18,9 +18,15 @@ pub struct TunableParam {
 
 impl TunableParam {
     /// Value as integer (for display and setting).
-    pub fn value_i32(&self) -> i32 { self.value as i32 }
-    pub fn min_i32(&self) -> i32 { self.min as i32 }
-    pub fn max_i32(&self) -> i32 { self.max as i32 }
+    pub fn value_i32(&self) -> i32 {
+        self.value as i32
+    }
+    pub fn min_i32(&self) -> i32 {
+        self.min as i32
+    }
+    pub fn max_i32(&self) -> i32 {
+        self.max as i32
+    }
 }
 
 /// A group of tunable parameters (e.g., "null_move", "lmr").
@@ -60,8 +66,7 @@ impl TunableParams {
     pub fn load(path: &Path) -> Result<Self, String> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        toml::from_str(&contents)
-            .map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+        toml::from_str(&contents).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
     }
 
     /// Save to a TOML file.
@@ -70,8 +75,8 @@ impl TunableParams {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directory: {e}"))?;
         }
-        let toml_str = toml::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize: {e}"))?;
+        let toml_str =
+            toml::to_string_pretty(self).map_err(|e| format!("Failed to serialize: {e}"))?;
         std::fs::write(path, toml_str)
             .map_err(|e| format!("Failed to write {}: {e}", path.display()))
     }
@@ -138,15 +143,22 @@ mod tests {
     fn test_load_params() {
         // Try loading the actual params.toml if it exists
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap().parent().unwrap()
-            .join("sprt").join("params.toml");
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("sprt")
+            .join("params.toml");
         if path.exists() {
             let params = TunableParams::load(&path).expect("Failed to load params.toml");
             let flat = params.flat_list();
             assert!(!flat.is_empty(), "Should have parsed some parameters");
             // Check that we got search.null_move.base_r
-            assert!(flat.iter().any(|(s, n, _)| s == "search.null_move" && n == "base_r"),
-                "Should have search.null_move.base_r");
+            assert!(
+                flat.iter()
+                    .any(|(s, n, _)| s == "search.null_move" && n == "base_r"),
+                "Should have search.null_move.base_r"
+            );
         }
     }
 
@@ -154,9 +166,15 @@ mod tests {
     fn test_set_value() {
         let mut params = TunableParams::default();
         let mut group = ParamGroup::new();
-        group.insert("test_param".to_string(), TunableParam {
-            value: 10.0, min: 0.0, max: 100.0, step: 5.0,
-        });
+        group.insert(
+            "test_param".to_string(),
+            TunableParam {
+                value: 10.0,
+                min: 0.0,
+                max: 100.0,
+                step: 5.0,
+            },
+        );
         params.search.insert("test_group".to_string(), group);
 
         assert!(params.set_value("search.test_group", "test_param", 50.0));

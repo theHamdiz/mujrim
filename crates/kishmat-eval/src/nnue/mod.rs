@@ -16,11 +16,11 @@
 //! - `akimbo_format`: Akimbo-family network loader
 //! - `stockfish_format`: Stockfish .nnue file parser
 
-pub mod network;
 pub mod accumulator;
-pub mod simd;
-pub mod feature;
 pub mod adapter;
+pub mod feature;
+pub mod network;
+pub mod simd;
 
 #[cfg(feature = "akimbo-nnue")]
 pub mod akimbo_format;
@@ -28,7 +28,6 @@ pub mod akimbo_format;
 #[cfg(feature = "stockfish-nnue")]
 pub mod stockfish_format;
 
-pub use network::{Accumulator, Network, HIDDEN, NUM_BUCKETS, forward, net};
 pub use accumulator::NNUEState;
 pub use adapter::{ActiveNetwork, NetworkFormat, NnueNetworkInfo, load_network};
-
+pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, net};

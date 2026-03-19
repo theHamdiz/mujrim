@@ -9,7 +9,13 @@ use iced::widget::image::Handle;
 use rand::Rng;
 
 /// Generate a tileable noise texture image for background overlays.
-pub fn generate_noise_texture(size: u32, opacity: f32, base_r: u8, base_g: u8, base_b: u8) -> Handle {
+pub fn generate_noise_texture(
+    size: u32,
+    opacity: f32,
+    base_r: u8,
+    base_g: u8,
+    base_b: u8,
+) -> Handle {
     let mut rng = rand::rng();
     let mut pixels = Vec::with_capacity((size * size * 4) as usize);
 
@@ -79,46 +85,65 @@ pub fn pharaonic_pattern(size: u32) -> Handle {
             let diamond_r2 = cell * 3 / 8 + 2;
 
             if diamond_dist >= diamond_r1 && diamond_dist <= diamond_r2 {
-                r = gold.0; g = gold.1; b = gold.2;
+                r = gold.0;
+                g = gold.1;
+                b = gold.2;
             }
 
             let inner_r1 = cell / 5;
             let inner_r2 = cell / 5 + 1;
             if diamond_dist >= inner_r1 && diamond_dist <= inner_r2 {
-                r = dim_gold.0; g = dim_gold.1; b = dim_gold.2;
+                r = dim_gold.0;
+                g = dim_gold.1;
+                b = dim_gold.2;
             }
 
             if dx <= 1 && dy <= 1 && diamond_dist <= 2 {
-                r = gold.0; g = gold.1; b = gold.2;
+                r = gold.0;
+                g = gold.1;
+                b = gold.2;
             }
 
             let band_width = 1;
             let band_pos_1 = 0;
             let band_pos_2 = cell - 1;
-            if (ly == band_pos_1 || ly == band_pos_2
+            if (ly == band_pos_1
+                || ly == band_pos_2
                 || ly.abs_diff(band_pos_1) <= band_width
                 || ly.abs_diff(band_pos_2) <= band_width)
                 && (lx / 3) % 2 == 0
             {
-                r = dim_gold.0; g = dim_gold.1; b = dim_gold.2;
+                r = dim_gold.0;
+                g = dim_gold.1;
+                b = dim_gold.2;
             }
 
-            if (lx == band_pos_1 || lx == band_pos_2
+            if (lx == band_pos_1
+                || lx == band_pos_2
                 || lx.abs_diff(band_pos_1) <= band_width
                 || lx.abs_diff(band_pos_2) <= band_width)
                 && (ly / 3) % 2 == 0
             {
-                r = dim_gold.0; g = dim_gold.1; b = dim_gold.2;
+                r = dim_gold.0;
+                g = dim_gold.1;
+                b = dim_gold.2;
             }
 
-            let corners = [(0u32, 0u32), (0, cell - 1), (cell - 1, 0), (cell - 1, cell - 1)];
+            let corners = [
+                (0u32, 0u32),
+                (0, cell - 1),
+                (cell - 1, 0),
+                (cell - 1, cell - 1),
+            ];
             for &(corner_x, corner_y) in &corners {
-                let dist_sq = (lx as i32 - corner_x as i32).pow(2)
-                    + (ly as i32 - corner_y as i32).pow(2);
+                let dist_sq =
+                    (lx as i32 - corner_x as i32).pow(2) + (ly as i32 - corner_y as i32).pow(2);
                 let radius = cell / 6;
                 let dist = (dist_sq as f32).sqrt() as u32;
                 if dist >= radius && dist <= radius + 1 {
-                    r = teal.0; g = teal.1; b = teal.2;
+                    r = teal.0;
+                    g = teal.1;
+                    b = teal.2;
                 }
             }
 
@@ -132,7 +157,9 @@ pub fn pharaonic_pattern(size: u32) -> Handle {
                     cell + (cell / 2 - zigzag_x) / 2
                 };
                 if y.abs_diff(expected_y) <= 1 {
-                    r = dim_gold.0; g = dim_gold.1; b = dim_gold.2;
+                    r = dim_gold.0;
+                    g = dim_gold.1;
+                    b = dim_gold.2;
                 }
             }
 
@@ -187,7 +214,7 @@ pub fn chess_blur_background(w: u32, h: u32) -> Handle {
     }
 
     // Draw semi-transparent chess board pattern (8x8) in the center
-    let board_size = w.min(h) * 3 / 5;  // 60% of smaller dimension
+    let board_size = w.min(h) * 3 / 5; // 60% of smaller dimension
     let sq = board_size / 8;
     let ox = (w - board_size) / 2;
     let oy = (h - board_size) / 2;
@@ -224,7 +251,8 @@ pub fn chess_blur_background(w: u32, h: u32) -> Handle {
             let piece_r = sq * 3 / 8;
 
             // Place pieces on starting rows and some middle squares
-            let has_piece = row < 2 || row > 5 || ((row == 3 || row == 4) && (col == 3 || col == 4));
+            let has_piece =
+                row < 2 || row > 5 || ((row == 3 || row == 4) && (col == 3 || col == 4));
             if has_piece {
                 // Circular glow representing piece
                 for py in sy..(sy + sq).min(h) {

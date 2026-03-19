@@ -5,7 +5,7 @@
 //!
 //! Also exposes [`quantize_frame`] for use by the recording module.
 
-use image::{RgbaImage, Rgba, imageops};
+use image::{Rgba, RgbaImage, imageops};
 
 /// Board rendering size for GIF frames.
 const GIF_BOARD_SIZE: u32 = 480;
@@ -13,7 +13,7 @@ const GIF_SQ_SIZE: u32 = GIF_BOARD_SIZE / 8; // 60px per square
 
 // Square colors (matching board_view.rs)
 const SQ_LIGHT_RGBA: Rgba<u8> = Rgba([240, 217, 181, 255]); // #F0D9B5
-const SQ_DARK_RGBA: Rgba<u8> = Rgba([181, 136, 99, 255]);   // #B58863
+const SQ_DARK_RGBA: Rgba<u8> = Rgba([181, 136, 99, 255]); // #B58863
 
 /// Pre-decoded piece images for GIF rendering.
 struct GifPieceAssets {
@@ -92,7 +92,11 @@ fn render_board(board: &types::Board, assets: &GifPieceAssets) -> RgbaImage {
 
             // Square color
             let is_light = (rank + file) % 2 != 0;
-            let sq_color = if is_light { SQ_LIGHT_RGBA } else { SQ_DARK_RGBA };
+            let sq_color = if is_light {
+                SQ_LIGHT_RGBA
+            } else {
+                SQ_DARK_RGBA
+            };
 
             // Fill square
             for dy in 0..GIF_SQ_SIZE {
@@ -230,9 +234,12 @@ pub fn export_game_gif(move_log: &[String], delay_cs: u16) -> Vec<u8> {
             GIF_BOARD_SIZE as u16,
             GIF_BOARD_SIZE as u16,
             &[],
-        ).expect("Failed to create GIF encoder");
+        )
+        .expect("Failed to create GIF encoder");
 
-        encoder.set_repeat(gif::Repeat::Infinite).expect("Failed to set repeat");
+        encoder
+            .set_repeat(gif::Repeat::Infinite)
+            .expect("Failed to set repeat");
 
         for frame_img in &positions {
             let (palette, indices) = quantize_image(frame_img);
@@ -244,7 +251,9 @@ pub fn export_game_gif(move_log: &[String], delay_cs: u16) -> Vec<u8> {
             frame.palette = Some(palette);
             frame.buffer = std::borrow::Cow::Borrowed(&indices);
 
-            encoder.write_frame(&frame).expect("Failed to write GIF frame");
+            encoder
+                .write_frame(&frame)
+                .expect("Failed to write GIF frame");
         }
     }
 
@@ -270,7 +279,8 @@ fn parse_uci_move(uci: &str, legal: &types::MoveList) -> Option<types::Move> {
     let from_sq = types::Square::from_index(from_rank * 8 + from_file);
     let to_sq = types::Square::from_index(to_rank * 8 + to_file);
 
-    legal.iter()
+    legal
+        .iter()
         .find(|m| m.from == from_sq && m.to == to_sq)
         .copied()
 }

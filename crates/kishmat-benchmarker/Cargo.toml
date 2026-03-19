@@ -1,0 +1,33 @@
+[package]
+name = "kishmat-benchmarker"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Benchmark suite for KishMat and external UCI chess engines"
+license = "MIT"
+
+[lib]
+name = "kishmat_benchmarker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kishmat-benchmarker"
+path = "src/main.rs"
+
+[features]
+default = ["tui", "nnue", "simd", "akimbo-nnue", "stockfish-nnue"]
+tui = ["dep:ratatui", "dep:crossterm"]
+nnue = ["eval/nnue"]
+simd = ["eval/simd"]
+akimbo-nnue = ["eval/akimbo-nnue"]
+stockfish-nnue = ["eval/stockfish-nnue"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
+
+# Workspace crates
+types = { package = "kishmat-types", path = "../kishmat-types" }
+eval = { package = "kishmat-eval", path = "../kishmat-eval" }
+search = { package = "kishmat-search", path = "../kishmat-search" }

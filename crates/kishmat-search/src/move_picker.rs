@@ -13,9 +13,9 @@
 //! capture causes a beta cutoff, quiet moves are never scored — saving
 //! the expensive stat_score computation on ~40% of nodes.
 
-use types::{Board, Move, MoveList, Piece};
-use types::chess_move::NULL_MOVE;
 use crate::see;
+use types::chess_move::NULL_MOVE;
+use types::{Board, Move, MoveList, Piece};
 
 /// Maximum number of moves we track scores for.
 const MAX_SCORED: usize = 256;
@@ -64,15 +64,12 @@ pub struct MovePicker {
     killer0_yielded: bool,
     killer1_yielded: bool,
     cm_yielded: bool,
+    skip_quiets: bool,
 }
 
 impl MovePicker {
     /// Create a new MovePicker for the main search.
-    pub fn new(
-        tt_move: Option<Move>,
-        killers: [Move; 2],
-        countermove: Move,
-    ) -> Self {
+    pub fn new(tt_move: Option<Move>, killers: [Move; 2], countermove: Move) -> Self {
         Self {
             stage: Stage::TtMove,
             tt_move,
@@ -93,6 +90,7 @@ impl MovePicker {
             killer0_yielded: false,
             killer1_yielded: false,
             cm_yielded: false,
+            skip_quiets: false,
         }
     }
 
@@ -118,7 +116,14 @@ impl MovePicker {
             killer0_yielded: false,
             killer1_yielded: false,
             cm_yielded: false,
+            skip_quiets: false,
         }
+    }
+
+    /// Skip all quiet move stages from now on.
+    #[inline]
+    pub fn skip_quiets(&mut self) {
+        self.skip_quiets = true;
     }
 
     /// Returns the total number of legal moves.
@@ -141,7 +146,7 @@ impl MovePicker {
     #[inline]
     fn is_tt_move(&self, mv: Move) -> bool {
         if let Some(ttm) = self.tt_move {
-            mv.from == ttm.from && mv.to == ttm.to && mv.promotion == ttm.promotion
+            same_move_key(mv, ttm)
         } else {
             false
         }
@@ -153,9 +158,9 @@ impl MovePicker {
         let k0 = self.killers[0];
         let k1 = self.killers[1];
         let cm = self.countermove;
-        (k0 != NULL_MOVE && mv.from == k0.from && mv.to == k0.to)
-        || (k1 != NULL_MOVE && mv.from == k1.from && mv.to == k1.to)
-        || (cm != NULL_MOVE && mv.from == cm.from && mv.to == cm.to)
+        (k0 != NULL_MOVE && same_move_key(mv, k0))
+            || (k1 != NULL_MOVE && same_move_key(mv, k1))
+            || (cm != NULL_MOVE && same_move_key(mv, cm))
     }
 
     /// Get the next move in priority order.
@@ -183,11 +188,8 @@ impl MovePicker {
                     self.stage = Stage::GenerateCaptures;
                     if let Some(ttm) = self.tt_move {
                         self.ensure_legal_moves(board);
-                        let found = (0..self.legal_moves.len()).find(|&i| {
-                            self.legal_moves[i].from == ttm.from
-                                && self.legal_moves[i].to == ttm.to
-                                && self.legal_moves[i].promotion == ttm.promotion
-                        });
+                        let found = (0..self.legal_moves.len())
+                            .find(|&i| same_move_key(self.legal_moves[i], ttm));
                         if let Some(idx) = found {
                             self.tt_yielded = true;
                             return Some(self.legal_moves[idx]);
@@ -206,12 +208,17 @@ impl MovePicker {
                     for i in 0..self.legal_moves.len() {
                         let mv = self.legal_moves[i];
                         let is_capture = mv.is_capture();
-                        let is_queen_promo = mv.is_promotion() && mv.promotion == Some(Piece::Queen);
+                        let is_queen_promo =
+                            mv.is_promotion() && mv.promotion == Some(Piece::Queen);
 
-                        if !is_capture && !is_queen_promo { continue; }
+                        if !is_capture && !is_queen_promo {
+                            continue;
+                        }
 
                         // Skip TT move (already yielded)
-                        if self.tt_yielded && self.is_tt_move(mv) { continue; }
+                        if self.tt_yielded && self.is_tt_move(mv) {
+                            continue;
+                        }
 
                         let score = if is_capture {
                             score_capture(board, mv)
@@ -258,14 +265,21 @@ impl MovePicker {
 
                 // ── Stage 4: Killer moves ──
                 Stage::Killers => {
+                    if self.skip_quiets {
+                        self.stage = Stage::BadCaptures;
+                        continue;
+                    }
                     if !self.killer0_yielded {
                         self.killer0_yielded = true;
                         let k = self.killers[0];
-                        if k != NULL_MOVE && !self.is_tt_move(k) && !k.is_capture() {
+                        if k != NULL_MOVE
+                            && !self.is_tt_move(k)
+                            && !k.is_capture()
+                            && !k.is_promotion()
+                        {
                             // Find the matching legal move (with correct flags)
-                            let legal = (0..self.legal_moves.len()).find(|&i| {
-                                self.legal_moves[i].from == k.from && self.legal_moves[i].to == k.to
-                            });
+                            let legal = (0..self.legal_moves.len())
+                                .find(|&i| same_move_key(self.legal_moves[i], k));
                             if let Some(idx) = legal {
                                 return Some(self.legal_moves[idx]);
                             }
@@ -274,10 +288,13 @@ impl MovePicker {
                     if !self.killer1_yielded {
                         self.killer1_yielded = true;
                         let k = self.killers[1];
-                        if k != NULL_MOVE && !self.is_tt_move(k) && !k.is_capture() {
-                            let legal = (0..self.legal_moves.len()).find(|&i| {
-                                self.legal_moves[i].from == k.from && self.legal_moves[i].to == k.to
-                            });
+                        if k != NULL_MOVE
+                            && !self.is_tt_move(k)
+                            && !k.is_capture()
+                            && !k.is_promotion()
+                        {
+                            let legal = (0..self.legal_moves.len())
+                                .find(|&i| same_move_key(self.legal_moves[i], k));
                             if let Some(idx) = legal {
                                 return Some(self.legal_moves[idx]);
                             }
@@ -288,6 +305,10 @@ impl MovePicker {
 
                 // ── Stage 5: Countermove ──
                 Stage::Countermove => {
+                    if self.skip_quiets {
+                        self.stage = Stage::BadCaptures;
+                        continue;
+                    }
                     self.stage = Stage::GenerateQuiets;
                     if !self.cm_yielded {
                         self.cm_yielded = true;
@@ -295,11 +316,12 @@ impl MovePicker {
                         if cm != NULL_MOVE
                             && !self.is_tt_move(cm)
                             && !cm.is_capture()
-                            && cm != self.killers[0] && cm != self.killers[1]
+                            && !cm.is_promotion()
+                            && !same_move_key(cm, self.killers[0])
+                            && !same_move_key(cm, self.killers[1])
                         {
-                            let legal = (0..self.legal_moves.len()).find(|&i| {
-                                self.legal_moves[i].from == cm.from && self.legal_moves[i].to == cm.to
-                            });
+                            let legal = (0..self.legal_moves.len())
+                                .find(|&i| same_move_key(self.legal_moves[i], cm));
                             if let Some(idx) = legal {
                                 return Some(self.legal_moves[idx]);
                             }
@@ -311,18 +333,30 @@ impl MovePicker {
                 // This is the key optimization: quiet scoring only happens
                 // if we didn't cut off on captures, TT, or killers.
                 Stage::GenerateQuiets => {
+                    if self.skip_quiets {
+                        self.stage = Stage::BadCaptures;
+                        continue;
+                    }
                     self.stage = Stage::Quiets;
                     let mut quiet_count = 0usize;
 
                     for i in 0..self.legal_moves.len() {
                         let mv = self.legal_moves[i];
                         // Skip captures and queen promotions (already handled)
-                        if mv.is_capture() { continue; }
-                        if mv.is_promotion() && mv.promotion == Some(Piece::Queen) { continue; }
+                        if mv.is_capture() {
+                            continue;
+                        }
+                        if mv.is_promotion() && mv.promotion == Some(Piece::Queen) {
+                            continue;
+                        }
 
                         // Skip already-yielded moves
-                        if self.tt_yielded && self.is_tt_move(mv) { continue; }
-                        if self.is_killer_or_cm(mv) { continue; }
+                        if self.tt_yielded && self.is_tt_move(mv) {
+                            continue;
+                        }
+                        if self.is_killer_or_cm(mv) {
+                            continue;
+                        }
 
                         if quiet_count < MAX_SCORED {
                             let score = score_quiet(board, mv);
@@ -335,6 +369,10 @@ impl MovePicker {
 
                 // ── Stage 7: Yield quiets in score order ──
                 Stage::Quiets => {
+                    if self.skip_quiets {
+                        self.stage = Stage::BadCaptures;
+                        continue;
+                    }
                     if self.quiet_idx < self.quiets.len() {
                         let mut best = self.quiet_idx;
                         for j in (self.quiet_idx + 1)..self.quiets.len() {
@@ -375,6 +413,11 @@ impl MovePicker {
     }
 }
 
+#[inline(always)]
+fn same_move_key(a: Move, b: Move) -> bool {
+    a.from == b.from && a.to == b.to && a.promotion == b.promotion
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,8 +441,13 @@ mod tests {
         }
 
         let legal = board.generate_legal_moves();
-        assert_eq!(moves.len(), legal.len(),
-            "Picker yielded {} moves but {} legal moves exist", moves.len(), legal.len());
+        assert_eq!(
+            moves.len(),
+            legal.len(),
+            "Picker yielded {} moves but {} legal moves exist",
+            moves.len(),
+            legal.len()
+        );
     }
 
     #[test]
@@ -433,7 +481,12 @@ mod tests {
 
         let mut moves = Vec::new();
         while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
-            let count = moves.iter().filter(|m: &&Move| m.from == mv.from && m.to == mv.to && m.promotion == mv.promotion).count();
+            let count = moves
+                .iter()
+                .filter(|m: &&Move| {
+                    m.from == mv.from && m.to == mv.to && m.promotion == mv.promotion
+                })
+                .count();
             assert_eq!(count, 0, "Duplicate move: {mv}");
             moves.push(mv);
         }
@@ -442,7 +495,9 @@ mod tests {
     #[test]
     fn test_picker_complex_position() {
         setup();
-        let mut board = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
+        let mut board =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .unwrap();
         let mut picker = MovePicker::new(None, [NULL_MOVE; 2], NULL_MOVE);
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
@@ -453,7 +508,33 @@ mod tests {
         }
 
         let legal = board.generate_legal_moves();
-        assert_eq!(moves.len(), legal.len(),
-            "KiwiPete: picker={} vs legal={}", moves.len(), legal.len());
+        assert_eq!(
+            moves.len(),
+            legal.len(),
+            "KiwiPete: picker={} vs legal={}",
+            moves.len(),
+            legal.len()
+        );
+    }
+
+    #[test]
+    fn test_picker_keeps_underpromotions_when_killer_exists() {
+        setup();
+        let mut board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let killer = Move::promotion(types::Square::A7, types::Square::A8, Piece::Queen);
+        let mut picker = MovePicker::new(None, [killer, NULL_MOVE], NULL_MOVE);
+        let score_cap = |_: &Board, _: Move| -> i32 { 0 };
+        let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
+
+        let mut moves = Vec::new();
+        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+            moves.push(mv);
+        }
+
+        let legal = board.generate_legal_moves();
+        assert_eq!(moves.len(), legal.len());
+        assert!(moves.iter().any(|m| m.to_uci() == "a7a8n"));
+        assert!(moves.iter().any(|m| m.to_uci() == "a7a8b"));
+        assert!(moves.iter().any(|m| m.to_uci() == "a7a8r"));
     }
 }

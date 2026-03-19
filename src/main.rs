@@ -26,13 +26,10 @@ fn main() {
         .version("2.0.0")
         .author("Ahmad Hamdi <contact@hamdiz.me>")
         .about("A high-performance chess engine with NNUE-enhanced evaluation")
-        .subcommand(
-            Command::new("uci")
-                .about("Run in UCI protocol mode (for chess GUIs)")
-        )
+        .subcommand(Command::new("uci").about("Run in UCI protocol mode (for chess GUIs)"))
         .subcommand(
             Command::new("xboard")
-                .about("Run in XBoard/CECP protocol mode (for WinBoard and XBoard GUIs)")
+                .about("Run in XBoard/CECP protocol mode (for WinBoard and XBoard GUIs)"),
         )
         .subcommand(
             Command::new("play")
@@ -93,7 +90,7 @@ fn main() {
                         .short('d')
                         .long("depth")
                         .value_name("DEPTH")
-                        .default_value("18")
+                        .default_value("16")
                         .help("Search depth for benchmark"),
                 )
                 .arg(
@@ -117,27 +114,30 @@ fn main() {
             eprintln!("XBoard protocol support disabled (compile with --features xboard)");
         }
         Some(("play", sub)) => {
-            let depth: i32 = sub.get_one::<String>("depth")
-                .unwrap().parse().unwrap_or(5);
+            let depth: i32 = sub.get_one::<String>("depth").unwrap().parse().unwrap_or(5);
             commands::run_play(depth);
         }
         Some(("analyze", sub)) => {
             let fen = sub.get_one::<String>("fen").unwrap();
-            let depth: i32 = sub.get_one::<String>("depth")
-                .unwrap().parse().unwrap_or(10);
+            let depth: i32 = sub
+                .get_one::<String>("depth")
+                .unwrap()
+                .parse()
+                .unwrap_or(10);
             commands::run_analyze(fen, depth);
         }
         Some(("perft", sub)) => {
-            let depth: u32 = sub.get_one::<String>("depth")
-                .unwrap().parse().unwrap_or(5);
+            let depth: u32 = sub.get_one::<String>("depth").unwrap().parse().unwrap_or(5);
             let fen = sub.get_one::<String>("fen").map(|s| s.as_str());
             commands::run_perft(depth, fen);
         }
         Some(("bench", sub)) => {
-            let depth: i32 = sub.get_one::<String>("depth")
-                .unwrap().parse().unwrap_or(10);
-            let time_ms: Option<u64> = sub.get_one::<String>("time")
-                .and_then(|s| s.parse().ok());
+            let depth: i32 = sub
+                .get_one::<String>("depth")
+                .unwrap()
+                .parse()
+                .unwrap_or(10);
+            let time_ms: Option<u64> = sub.get_one::<String>("time").and_then(|s| s.parse().ok());
             commands::run_bench(depth, time_ms);
         }
         _ => {
