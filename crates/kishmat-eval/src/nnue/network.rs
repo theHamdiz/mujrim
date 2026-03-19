@@ -138,10 +138,16 @@ pub fn get_base_index<const SIDE: usize>(side: usize, pc: usize, mut ksq: usize)
 /// Returns centipawn score from the "boys" (side-to-move) perspective.
 #[inline]
 pub fn forward(boys: &Accumulator, opps: &Accumulator) -> i32 {
-    let weights = &NNUE.output_weights;
+    forward_with_network(net(), boys, opps)
+}
+
+/// Forward pass using an explicit network instance.
+#[inline]
+pub fn forward_with_network(network: &Network, boys: &Accumulator, opps: &Accumulator) -> i32 {
+    let weights = &network.output_weights;
     let sum = super::simd::flatten(&boys.vals, &weights[0].vals)
         + super::simd::flatten(&opps.vals, &weights[1].vals);
-    (sum / QA + i32::from(NNUE.output_bias)) * SCALE / QAB
+    (sum / QA + i32::from(network.output_bias)) * SCALE / QAB
 }
 
 #[cfg(test)]

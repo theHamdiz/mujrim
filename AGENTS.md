@@ -1,0 +1,3 @@
+finally I want you to download high quality piece sets like the one already in the ui project, separate each in a folder ( name current one default ) and allow the user to change between them from the settings just like they do with board theming ( but download actual high quality ones, at least 3 other ones if not 6 ). then change all the icons of the entire UI to stop using emojis, they feel cheap, I want something professional preferably like the lucide svg icon set used in the web space but I have no idea how to achieve that in iced.
+
+turn anything that isn't modular in this project to a modular trait based system without loosing any runtime performance. literally everything that could be implemented as a trait based system implement it that way. no exceptions.

@@ -299,7 +299,8 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     );
 
     // SIMD features (compile-time detection via target-cpu=native)
-    let mut simd_features = Vec::new();
+    #[allow(unused_mut)] // mutability depends on compile-time target features
+    let mut simd_features: Vec<&str> = Vec::new();
     #[cfg(target_arch = "aarch64")]
     {
         simd_features.push("NEON");

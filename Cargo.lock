@@ -2879,6 +2879,7 @@ dependencies = [
  "clap",
  "crossterm",
  "kishmat-eval",
+ "kishmat-protocols",
  "kishmat-search",
  "kishmat-types",
  "ratatui",
@@ -2907,6 +2908,10 @@ dependencies = [
  "metal 0.31.0",
  "objc2 0.6.4",
 ]
+
+[[package]]
+name = "kishmat-protocols"
+version = "2.0.0"
 
 [[package]]
 name = "kishmat-search"
@@ -2962,6 +2967,7 @@ dependencies = [
  "iced",
  "image",
  "kishmat-eval",
+ "kishmat-protocols",
  "kishmat-search",
  "kishmat-types",
  "kishmat-updater",

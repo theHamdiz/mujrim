@@ -19,6 +19,7 @@ use iced::{Alignment, Color, Element, Font, Length, Subscription, Task, Theme};
 use std::time::{Duration, Instant};
 
 use pieces::PieceAssets;
+use uci_process::ExternalEngineProtocol;
 
 /// Custom display font embedded from assets.
 #[allow(dead_code)]
@@ -115,6 +116,7 @@ struct EngineConfig {
     ponder: bool,
     use_book: bool,
     use_nnue: bool,
+    eval_file: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -127,6 +129,7 @@ impl Default for EngineConfig {
             ponder: false,
             use_book: true,
             use_nnue: true,
+            eval_file: None,
         }
     }
 }
@@ -246,10 +249,10 @@ struct App {
     status: String,
     engine_info: String,
     assets: PieceAssets,
-    bg_pattern: iced::widget::image::Handle,
+    _bg_pattern: iced::widget::image::Handle,
     chess_bg: iced::widget::image::Handle,
     /// Subtle noise grain overlay for material-textured feel.
-    panel_grain: iced::widget::image::Handle,
+    _panel_grain: iced::widget::image::Handle,
     logo: iced::widget::image::Handle,
     #[cfg(feature = "book")]
     book: Option<search::book::OpeningBook>,
@@ -342,8 +345,13 @@ impl std::fmt::Display for GameMode {
 #[derive(Debug, Clone)]
 enum PlayerConfig {
     Human,
-    BuiltIn { depth: i32 },
-    External { path: String },
+    BuiltIn {
+        depth: i32,
+    },
+    External {
+        path: String,
+        protocol: ExternalEngineProtocol,
+    },
 }
 
 impl std::fmt::Display for PlayerConfig {
@@ -351,12 +359,12 @@ impl std::fmt::Display for PlayerConfig {
         match self {
             Self::Human => write!(f, "Human"),
             Self::BuiltIn { depth } => write!(f, "KishMat (depth {depth})"),
-            Self::External { path } => {
+            Self::External { path, protocol } => {
                 let name = std::path::Path::new(path)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.clone());
-                write!(f, "UCI: {name}")
+                write!(f, "{protocol}: {name}")
             }
         }
     }
@@ -366,10 +374,12 @@ impl std::fmt::Display for PlayerConfig {
 enum Msg {
     SelectMode(GameMode),
     StartGame,
-    LoadWhiteEngine,
-    LoadBlackEngine,
-    WhiteEngineSelected(Option<String>),
-    BlackEngineSelected(Option<String>),
+    LoadWhiteUciEngine,
+    LoadWhiteXboardEngine,
+    LoadBlackUciEngine,
+    LoadBlackXboardEngine,
+    WhiteEngineSelected(Option<String>, ExternalEngineProtocol),
+    BlackEngineSelected(Option<String>, ExternalEngineProtocol),
     BoardClick(usize, usize),
     EngineMove(types::Move, String),
     NewGame,
@@ -398,6 +408,9 @@ enum Msg {
     CfgTogglePonder,
     CfgToggleBook,
     CfgToggleNnue,
+    LoadBuiltinEvalFile,
+    BuiltinEvalFileSelected(Option<String>),
+    ClearBuiltinEvalFile,
     // Options modal
     ToggleOptions,
     SetBoardTheme(board_view::BoardTheme),
@@ -456,9 +469,9 @@ impl Default for App {
             status: String::from("Welcome to KishMat!"),
             engine_info: String::new(),
             assets: PieceAssets::load(),
-            bg_pattern: noise::pharaonic_pattern(256),
+            _bg_pattern: noise::pharaonic_pattern(256),
             chess_bg: noise::chess_blur_background(512, 384),
-            panel_grain: noise::macos_grain_panel(),
+            _panel_grain: noise::macos_grain_panel(),
             logo: iced::widget::image::Handle::from_bytes(
                 include_bytes!("../assets/logo.png").as_slice(),
             ),
@@ -666,21 +679,27 @@ impl App {
                 self.coin_flip = CoinFlipState::Idle;
                 Task::none()
             }
-            Msg::LoadWhiteEngine => {
-                Task::perform(async { pick_engine_file().await }, Msg::WhiteEngineSelected)
-            }
-            Msg::LoadBlackEngine => {
-                Task::perform(async { pick_engine_file().await }, Msg::BlackEngineSelected)
-            }
-            Msg::WhiteEngineSelected(path) => {
+            Msg::LoadWhiteUciEngine => Task::perform(async { pick_engine_file().await }, |p| {
+                Msg::WhiteEngineSelected(p, ExternalEngineProtocol::Uci)
+            }),
+            Msg::LoadWhiteXboardEngine => Task::perform(async { pick_engine_file().await }, |p| {
+                Msg::WhiteEngineSelected(p, ExternalEngineProtocol::Xboard)
+            }),
+            Msg::LoadBlackUciEngine => Task::perform(async { pick_engine_file().await }, |p| {
+                Msg::BlackEngineSelected(p, ExternalEngineProtocol::Uci)
+            }),
+            Msg::LoadBlackXboardEngine => Task::perform(async { pick_engine_file().await }, |p| {
+                Msg::BlackEngineSelected(p, ExternalEngineProtocol::Xboard)
+            }),
+            Msg::WhiteEngineSelected(path, protocol) => {
                 if let Some(p) = path {
-                    self.white_player = PlayerConfig::External { path: p };
+                    self.white_player = PlayerConfig::External { path: p, protocol };
                 }
                 Task::none()
             }
-            Msg::BlackEngineSelected(path) => {
+            Msg::BlackEngineSelected(path, protocol) => {
                 if let Some(p) = path {
-                    self.black_player = PlayerConfig::External { path: p };
+                    self.black_player = PlayerConfig::External { path: p, protocol };
                 }
                 Task::none()
             }
@@ -1001,6 +1020,18 @@ impl App {
             }
             Msg::CfgToggleNnue => {
                 self.engine_cfg.use_nnue = !self.engine_cfg.use_nnue;
+                Task::none()
+            }
+            Msg::LoadBuiltinEvalFile => Task::perform(
+                async { pick_nnue_file().await },
+                Msg::BuiltinEvalFileSelected,
+            ),
+            Msg::BuiltinEvalFileSelected(path) => {
+                self.engine_cfg.eval_file = path;
+                Task::none()
+            }
+            Msg::ClearBuiltinEvalFile => {
+                self.engine_cfg.eval_file = None;
                 Task::none()
             }
             Msg::CoinFlip => {
@@ -1370,74 +1401,154 @@ impl App {
     }
 
     fn trigger_engine_move(&self) -> Task<Msg> {
-        if let Some(ref gs) = self.game {
-            // ── Try opening book first (instant response) ─────────────
-            #[cfg(feature = "book")]
-            if self.engine_cfg.use_book {
-                if let Some(ref book) = self.book {
-                    if let Some(book_move) = book.probe(&gs.board) {
-                        let legal = gs.board.clone().generate_legal_moves();
-                        if legal
-                            .iter()
-                            .any(|m| m.from == book_move.from && m.to == book_move.to)
-                        {
-                            return Task::perform(
-                                async move { (book_move, String::from("Book move")) },
-                                |(mv, info)| Msg::EngineMove(mv, info),
-                            );
-                        }
+        let Some(ref gs) = self.game else {
+            return Task::none();
+        };
+
+        let side_player = match gs.board.side_to_move {
+            types::Color::White => self.white_player.clone(),
+            types::Color::Black => self.black_player.clone(),
+        };
+
+        // ── Try opening book first (instant response) ─────────────
+        #[cfg(feature = "book")]
+        if self.engine_cfg.use_book {
+            if let Some(ref book) = self.book {
+                if let Some(book_move) = book.probe(&gs.board) {
+                    let legal = gs.board.clone().generate_legal_moves();
+                    if legal
+                        .iter()
+                        .any(|m| m.from == book_move.from && m.to == book_move.to)
+                    {
+                        return Task::perform(
+                            async move { (book_move, String::from("Book move")) },
+                            |(mv, info)| Msg::EngineMove(mv, info),
+                        );
                     }
                 }
             }
-
-            // ── Fall back to time-limited search ─────────────────────
-            let mut board_clone = gs.board.clone();
-            let fallback_board_clone = gs.board.clone();
-            let time_secs = self.engine_cfg.time_per_move as u64;
-            let hash_mb = self.engine_cfg.hash_mb as usize;
-            let threads = self.engine_cfg.threads as usize;
-            let max_depth = self.engine_cfg.max_depth;
-
-            Task::perform(
-                async move {
-                    let handle = std::thread::Builder::new()
-                        .stack_size(8 * 1024 * 1024)
-                        .spawn(move || {
-                            types::init();
-                            let mut engine = search::SearchEngine::new(hash_mb, threads);
-                            let result = engine.search_time(
-                                &mut board_clone,
-                                std::time::Duration::from_secs(time_secs),
-                                max_depth,
-                            );
-                            (
-                                result.best_move,
-                                format!(
-                                    "depth {} | score {} cp | {} nodes | {:.0} nps",
-                                    result.depth,
-                                    result.score,
-                                    result.nodes,
-                                    result.nodes as f64 / result.elapsed.as_secs_f64().max(0.001),
-                                ),
-                            )
-                        })
-                        .expect("Failed to spawn engine thread");
-                    match handle.join() {
-                        Ok(result) => result,
-                        Err(_) => {
-                            let mut fb = fallback_board_clone;
-                            types::init();
-                            let moves = fb.generate_legal_moves();
-                            let mv = *moves.iter().next().expect("No legal moves in fallback");
-                            (mv, String::from("Engine error - fallback move"))
-                        }
-                    }
-                },
-                |(mv, info)| Msg::EngineMove(mv, info),
-            )
-        } else {
-            Task::none()
         }
+
+        let mut board_clone = gs.board.clone();
+        let fallback_board_clone = gs.board.clone();
+        let time_secs = self.engine_cfg.time_per_move as u64;
+        let hash_mb = self.engine_cfg.hash_mb as usize;
+        let threads = self.engine_cfg.threads as usize;
+        let max_depth = self.engine_cfg.max_depth;
+        let use_nnue = self.engine_cfg.use_nnue;
+        let eval_file = self.engine_cfg.eval_file.clone();
+
+        Task::perform(
+            async move {
+                let handle = std::thread::Builder::new()
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(move || {
+                        types::init();
+                        match side_player {
+                            PlayerConfig::Human => {
+                                let legal = board_clone.generate_legal_moves();
+                                let mv = *legal.iter().next().expect("No legal moves");
+                                (mv, String::from("No engine selected"))
+                            }
+                            PlayerConfig::BuiltIn { .. } => {
+                                let mut engine = search::SearchEngine::new(hash_mb, threads);
+                                engine.set_use_nnue(use_nnue);
+                                let mut note = String::new();
+                                if let Some(path) = eval_file.as_ref() {
+                                    match eval::nnue::load_network(std::path::Path::new(path)) {
+                                        Ok(net) => {
+                                            engine.set_nnue_network(net);
+                                            let preset = engine.nnue_preset_hint();
+                                            engine.set_params_for_preset(preset);
+                                            note = format!(" | net {}", engine.nnue_info().name);
+                                        }
+                                        Err(err) => {
+                                            note = format!(" | EvalFile error: {err}");
+                                        }
+                                    }
+                                }
+                                let result = engine.search_time(
+                                    &mut board_clone,
+                                    std::time::Duration::from_secs(time_secs),
+                                    max_depth,
+                                );
+                                (
+                                    result.best_move,
+                                    format!(
+                                        "depth {} | score {} cp | {} nodes | {:.0} nps{}",
+                                        result.depth,
+                                        result.score,
+                                        result.nodes,
+                                        result.nodes as f64
+                                            / result.elapsed.as_secs_f64().max(0.001),
+                                        note,
+                                    ),
+                                )
+                            }
+                            PlayerConfig::External { path, protocol } => {
+                                let fen = board_clone.to_fen();
+                                let legal = board_clone.generate_legal_moves();
+                                match uci_process::query_best_move(
+                                    &path,
+                                    protocol,
+                                    &fen,
+                                    max_depth,
+                                    std::time::Duration::from_secs(time_secs),
+                                    hash_mb,
+                                    threads,
+                                ) {
+                                    Ok(info) => {
+                                        if let Some(mv) = legal
+                                            .iter()
+                                            .find(|m| m.to_uci() == info.best_move)
+                                            .copied()
+                                        {
+                                            (
+                                                mv,
+                                                format!(
+                                                    "{protocol} depth {} | score {} cp | {} nodes | {} nps",
+                                                    info.depth, info.score, info.nodes, info.nps
+                                                ),
+                                            )
+                                        } else {
+                                            let mv = *legal
+                                                .iter()
+                                                .next()
+                                                .expect("No legal moves in external fallback");
+                                            (
+                                                mv,
+                                                format!(
+                                                    "{protocol} returned illegal move '{}' - fallback",
+                                                    info.best_move
+                                                ),
+                                            )
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let mv = *legal
+                                            .iter()
+                                            .next()
+                                            .expect("No legal moves in external error fallback");
+                                        (mv, format!("{protocol} error: {e} - fallback move"))
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .expect("Failed to spawn engine thread");
+                match handle.join() {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let mut fb = fallback_board_clone;
+                        types::init();
+                        let moves = fb.generate_legal_moves();
+                        let mv = *moves.iter().next().expect("No legal moves in fallback");
+                        (mv, String::from("Engine error - fallback move"))
+                    }
+                }
+            },
+            |(mv, info)| Msg::EngineMove(mv, info),
+        )
     }
 
     fn view(&self) -> Element<'_, Msg> {
@@ -1677,7 +1788,12 @@ impl App {
         .width(340);
 
         if matches!(self.selected_mode, GameMode::EngineVsEngine) {
-            left_col = left_col.push(styled_button("Load White Engine", Msg::LoadWhiteEngine));
+            left_col = left_col
+                .push(styled_button("Load White UCI", Msg::LoadWhiteUciEngine))
+                .push(styled_button(
+                    "Load White XBoard",
+                    Msg::LoadWhiteXboardEngine,
+                ));
         }
         left_col = left_col.push(
             row![
@@ -1693,7 +1809,12 @@ impl App {
             self.selected_mode,
             GameMode::HumanVsEngine | GameMode::EngineVsEngine
         ) {
-            left_col = left_col.push(styled_button("Load Black Engine", Msg::LoadBlackEngine));
+            left_col = left_col
+                .push(styled_button("Load Black UCI", Msg::LoadBlackUciEngine))
+                .push(styled_button(
+                    "Load Black XBoard",
+                    Msg::LoadBlackXboardEngine,
+                ));
         }
 
         // Coin flip (HumanVsEngine)
@@ -1764,6 +1885,12 @@ impl App {
 
         // ── Right column: Engine Settings ──
         let cfg = &self.engine_cfg;
+        let eval_file_label = cfg
+            .eval_file
+            .as_ref()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Embedded".to_string());
         let right_col = column![
             text("Engine Settings").size(14).color(ACCENT_TEAL),
             Space::new().height(8),
@@ -1782,6 +1909,18 @@ impl App {
             config_toggle("Ponder", cfg.ponder, Msg::CfgTogglePonder),
             config_toggle("Opening Book", cfg.use_book, Msg::CfgToggleBook),
             config_toggle("NNUE Eval", cfg.use_nnue, Msg::CfgToggleNnue),
+            Space::new().height(4),
+            row![
+                text("Eval Net").size(12).color(TEXT_SECONDARY).width(75),
+                text(eval_file_label).size(12).color(TEXT_PRIMARY),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                styled_button("Load NNUE File", Msg::LoadBuiltinEvalFile),
+                styled_button("Use Embedded", Msg::ClearBuiltinEvalFile),
+            ]
+            .spacing(8),
         ]
         .spacing(4)
         .width(340);
@@ -2645,4 +2784,25 @@ async fn pick_engine_file() -> Option<String> {
         .pick_file()
         .await?;
     Some(file.path().to_string_lossy().to_string())
+}
+
+async fn pick_nnue_file() -> Option<String> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Select NNUE Network")
+        .add_filter("NNUE", &["bin", "nnue"])
+        .pick_file()
+        .await?;
+    Some(file.path().to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EngineConfig;
+
+    #[test]
+    fn test_engine_config_defaults_to_embedded_eval() {
+        let cfg = EngineConfig::default();
+        assert!(cfg.eval_file.is_none());
+        assert!(cfg.use_nnue);
+    }
 }

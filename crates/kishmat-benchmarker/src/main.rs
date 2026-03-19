@@ -26,6 +26,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use eval::nnue::load_network;
+use kishmat_protocols::ProtocolKind;
 
 use kishmat_benchmarker::{
     engine_info::{self, NnueInfo},
@@ -38,7 +40,7 @@ use kishmat_benchmarker::{
 #[derive(Parser)]
 #[command(
     name = "kishmat-benchmarker",
-    about = "Benchmark suite for KishMat and external UCI chess engines",
+    about = "Benchmark suite for KishMat and external UCI/XBoard chess engines",
     version
 )]
 struct Cli {
@@ -73,12 +75,58 @@ enum Commands {
         /// Enable TUI mode with live progress display.
         #[arg(long)]
         tui: bool,
+
+        /// Runtime NNUE preset (`auto`, `akimbo`, `stockfish`).
+        #[arg(
+            long,
+            default_value = "auto",
+            value_parser = ["auto", "akimbo", "stockfish"]
+        )]
+        eval_preset: String,
+
+        /// Optional runtime network file path (same semantics as UCI EvalFile).
+        #[arg(long)]
+        eval_file: Option<PathBuf>,
     },
 
     /// Benchmark an external UCI engine binary.
     Uci {
         /// Path to the UCI engine binary.
         engine: PathBuf,
+
+        /// Extra CLI arg passed to the engine process (repeatable).
+        #[arg(long = "arg")]
+        engine_args: Vec<String>,
+
+        /// Search depth.
+        #[arg(short, long, default_value_t = 16)]
+        depth: i32,
+
+        /// Hash table size in MB.
+        #[arg(long, default_value_t = 128)]
+        hash: usize,
+
+        /// Number of engine threads.
+        #[arg(short = 't', long, default_value_t = 1)]
+        threads: usize,
+
+        /// Per-position time limit in seconds.
+        #[arg(long, default_value_t = 120)]
+        time: u64,
+
+        /// Path to a custom FEN file (default: built-in BK suite).
+        #[arg(short, long)]
+        positions: Option<PathBuf>,
+    },
+
+    /// Benchmark an external XBoard/CECP engine binary.
+    Xboard {
+        /// Path to the XBoard engine binary.
+        engine: PathBuf,
+
+        /// Extra CLI arg passed to the engine process (repeatable).
+        #[arg(long = "arg")]
+        engine_args: Vec<String>,
 
         /// Search depth.
         #[arg(short, long, default_value_t = 16)]
@@ -116,15 +164,54 @@ fn main() {
             time,
             positions,
             tui,
-        } => run_bench(depth, threads, hash, time, positions, tui),
+            eval_preset,
+            eval_file,
+        } => run_bench(
+            depth,
+            threads,
+            hash,
+            time,
+            positions,
+            tui,
+            eval_preset,
+            eval_file,
+        ),
         Commands::Uci {
             engine,
+            engine_args,
             depth,
             hash,
             threads,
             time,
             positions,
-        } => run_uci(engine, depth, hash, threads, time, positions),
+        } => run_external(
+            engine,
+            engine_args,
+            ProtocolKind::Uci,
+            depth,
+            hash,
+            threads,
+            time,
+            positions,
+        ),
+        Commands::Xboard {
+            engine,
+            engine_args,
+            depth,
+            hash,
+            threads,
+            time,
+            positions,
+        } => run_external(
+            engine,
+            engine_args,
+            ProtocolKind::Xboard,
+            depth,
+            hash,
+            threads,
+            time,
+            positions,
+        ),
         Commands::Info => run_info(),
     }
 }
@@ -161,9 +248,24 @@ fn run_bench(
     time: u64,
     positions: Option<PathBuf>,
     _tui: bool,
+    eval_preset: String,
+    eval_file: Option<PathBuf>,
 ) {
     let hw = HardwareInfo::detect();
-    let nnue = NnueInfo::detect();
+    let nnue = if let Some(path) = &eval_file {
+        match load_network(path) {
+            Ok(network) => NnueInfo::from_runtime(network.info()),
+            Err(e) => {
+                eprintln!(
+                    "info string EvalFile load failed for '{}': {e} (showing embedded info)",
+                    path.display()
+                );
+                NnueInfo::detect()
+            }
+        }
+    } else {
+        NnueInfo::detect()
+    };
     let params = search::search_params::SearchParams::default();
 
     let thread_count = threads.unwrap_or(hw.bench_threads());
@@ -188,6 +290,10 @@ fn run_bench(
     println!("    Threads:    {thread_count}");
     println!("    Hash:       {hash} MB");
     println!("    Time/pos:   {time}s");
+    println!("    EvalPreset: {eval_preset}");
+    if let Some(path) = &eval_file {
+        println!("    EvalFile:   {}", path.display());
+    }
     println!();
 
     // Load positions
@@ -221,6 +327,8 @@ fn run_bench(
         hash_mb: hash,
         time_per_position: Duration::from_secs(time),
         suite_name: "BK".into(),
+        eval_preset: eval_preset.clone(),
+        eval_file: eval_file.clone(),
     };
 
     #[cfg(feature = "tui")]
@@ -254,13 +362,15 @@ fn run_bench(
     println!();
 
     // Print NPS from startpos
-    let nps_5s = measure_nps(thread_count, hash);
+    let nps_5s = measure_nps(thread_count, hash, &eval_preset, eval_file.as_deref());
     println!("{summary}");
     println!("  NPS (5s startpos): {}", format_nps(nps_5s));
 }
 
-fn run_uci(
+fn run_external(
     engine: PathBuf,
+    engine_args: Vec<String>,
+    protocol: ProtocolKind,
     depth: i32,
     hash: usize,
     threads: usize,
@@ -279,12 +389,17 @@ fn run_uci(
         suite::bk_suite()
     };
 
-    println!("Benchmarking UCI engine: {}", engine.display());
+    println!("Benchmarking {} engine: {}", protocol, engine.display());
+    if !engine_args.is_empty() {
+        println!("Engine args: {}", engine_args.join(" "));
+    }
     println!("Depth: {depth}  Hash: {hash}MB  Threads: {threads}  Time/pos: {time}s");
     println!();
 
     let config = ExternalBenchConfig {
         engine_path: engine,
+        engine_args,
+        protocol,
         depth,
         hash_mb: hash,
         threads,
@@ -304,11 +419,27 @@ fn run_uci(
 }
 
 /// Measure NPS from startpos in 5 seconds.
-fn measure_nps(threads: usize, hash_mb: usize) -> u64 {
+fn measure_nps(
+    threads: usize,
+    hash_mb: usize,
+    eval_preset: &str,
+    eval_file: Option<&std::path::Path>,
+) -> u64 {
     use search::engine::SearchEngine;
     use types::Board;
 
     let mut engine = SearchEngine::new(hash_mb, threads);
+    if let Some(path) = eval_file {
+        if let Ok(network) = load_network(path) {
+            engine.set_nnue_network(network);
+        }
+    }
+    let preset = match eval_preset {
+        "akimbo" => "akimbo",
+        "stockfish" => "stockfish",
+        _ => engine.nnue_preset_hint(),
+    };
+    engine.set_params_for_preset(preset);
     let mut board = Board::new();
     let result = engine.search_time(&mut board, Duration::from_secs(5), 64);
     if result.elapsed.as_millis() > 0 {

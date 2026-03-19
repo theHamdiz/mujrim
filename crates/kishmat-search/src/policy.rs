@@ -90,6 +90,31 @@ impl RootSelectionPolicy for DepthScoreVoteRootSelection {
     }
 }
 
+/// Prefer the main thread result when available.
+///
+/// This matches strong-engine Lazy SMP practice: helpers are primarily for TT
+/// enrichment, while the principal thread drives root move stability.
+#[derive(Default)]
+pub struct MainThreadPreferredRootSelection;
+
+impl RootSelectionPolicy for MainThreadPreferredRootSelection {
+    fn select(&self, outcomes: &[ThreadOutcome]) -> usize {
+        if outcomes.is_empty() {
+            return 0;
+        }
+
+        if let Some((idx, _)) = outcomes
+            .iter()
+            .enumerate()
+            .find(|(_, o)| o.is_main && o.best_move != NULL_MOVE)
+        {
+            return idx;
+        }
+
+        DepthScoreVoteRootSelection.select(outcomes)
+    }
+}
+
 /// Inputs for LMR policy adjustment.
 #[derive(Clone, Copy, Debug)]
 pub struct LmrContext {
@@ -219,6 +244,31 @@ mod tests {
         ];
         let idx = policy.select(&outcomes);
         assert_eq!(outcomes[idx].best_move, m1);
+    }
+
+    #[test]
+    fn main_thread_policy_prefers_main_when_valid() {
+        let policy = MainThreadPreferredRootSelection;
+        let m1 = Move::quiet(Square::E2, Square::E4);
+        let m2 = Move::quiet(Square::D2, Square::D4);
+        let outcomes = vec![
+            ThreadOutcome {
+                best_move: m1,
+                score: 10,
+                depth: 10,
+                nodes: 100,
+                is_main: true,
+            },
+            ThreadOutcome {
+                best_move: m2,
+                score: 200,
+                depth: 12,
+                nodes: 100,
+                is_main: false,
+            },
+        ];
+        let idx = policy.select(&outcomes);
+        assert_eq!(idx, 0);
     }
 
     #[test]

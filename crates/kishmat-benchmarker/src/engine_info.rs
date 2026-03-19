@@ -40,6 +40,28 @@ impl NnueInfo {
         }
     }
 
+    /// Build display info from a runtime-loaded network descriptor.
+    pub fn from_runtime(info: eval::nnue::NnueNetworkInfo) -> Self {
+        let file_size = if info.file_size == 0 {
+            format!(
+                "{:.1} MB",
+                std::mem::size_of::<eval::nnue::Network>() as f64 / 1_048_576.0
+            )
+        } else {
+            format!("{:.1} MB", info.file_size as f64 / 1_048_576.0)
+        };
+
+        Self {
+            name: info.name,
+            format: info.format.to_string(),
+            architecture: info.architecture,
+            hidden_size: info.hidden_size,
+            num_buckets: info.num_buckets,
+            quantization: "Engine-native quantization".into(),
+            file_size,
+        }
+    }
+
     /// Format as display lines for the benchmark header.
     pub fn display_lines(&self) -> Vec<String> {
         vec![
@@ -225,6 +247,7 @@ pub fn format_techniques(params: &SearchParams) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eval::nnue::{NetworkFormat, NnueNetworkInfo};
 
     #[test]
     fn test_nnue_info_detect() {
@@ -232,6 +255,22 @@ mod tests {
         assert!(info.hidden_size > 0);
         assert!(info.num_buckets > 0);
         assert!(info.name.contains("Akimbo"));
+    }
+
+    #[test]
+    fn test_from_runtime_uses_metadata_fields() {
+        let info = NnueNetworkInfo {
+            name: "External Test Net".into(),
+            format: NetworkFormat::Akimbo,
+            architecture: "768→1024×2→1 SCReLU".into(),
+            hidden_size: 1024,
+            num_buckets: 4,
+            file_size: 6_291_458,
+        };
+        let display = NnueInfo::from_runtime(info);
+        assert_eq!(display.name, "External Test Net");
+        assert_eq!(display.format, "Akimbo");
+        assert!(display.file_size.contains("MB"));
     }
 
     #[test]

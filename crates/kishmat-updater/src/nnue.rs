@@ -1,10 +1,7 @@
 //! NNUE network download manager.
 //!
-//! Downloads neural network weights from various chess engine projects:
-//! - **Akimbo**: net.bin (768→1024×2→1, ~6 MB)
-//! - **Stockfish**: nn-*.nnue (HalfKAv2_hm, ~100 MB)
-//! - **Viridithas**: net.bin (768→768×2→1, ~4.5 MB)
-//! - **Alexandria**: net.bin (768→1536×2→1, ~9 MB)
+//! Downloads neural network weights that are known to be compatible with
+//! KishMat's currently supported runtime loader.
 //!
 //! Default download path: `./nnue/` relative to the engine working directory.
 
@@ -31,6 +28,13 @@ pub enum DownloadStatus {
     Failed(String),
 }
 
+/// Outcome for downloading one network file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadOutcome {
+    Downloaded,
+    Skipped,
+}
+
 /// A downloadable NNUE network definition.
 #[derive(Debug, Clone)]
 pub struct NnueNetwork {
@@ -52,44 +56,15 @@ pub struct NnueNetwork {
 }
 
 /// All available NNUE networks.
-pub const NETWORKS: &[NnueNetwork] = &[
-    NnueNetwork {
-        name: "Akimbo 1024",
-        engine: "Akimbo",
-        architecture: "768→1024×2→1 SCReLU",
-        url: "https://github.com/jw1912/akimbo/raw/main/resources/net.bin",
-        filename: "akimbo-1024.bin",
-        approx_size: 6_297_664,
-        search_preset: "akimbo",
-    },
-    NnueNetwork {
-        name: "Stockfish 18 Big (SFNNv10)",
-        engine: "Stockfish",
-        architecture: "HalfKAv2_hm+Threats →1024×2",
-        url: "https://tests.stockfishchess.org/api/nn/nn-c288c895ea92.nnue",
-        filename: "nn-c288c895ea92.nnue",
-        approx_size: 108_000_000,
-        search_preset: "stockfish",
-    },
-    NnueNetwork {
-        name: "Stockfish 18 Small",
-        engine: "Stockfish",
-        architecture: "HalfKAv2_hm →512×2",
-        url: "https://tests.stockfishchess.org/api/nn/nn-37f18f62d772.nnue",
-        filename: "nn-37f18f62d772.nnue",
-        approx_size: 3_500_000,
-        search_preset: "stockfish",
-    },
-    NnueNetwork {
-        name: "Viridithas 768",
-        engine: "Viridithas",
-        architecture: "768→768×2→1 SCReLU",
-        url: "https://github.com/cosmobobak/viridithas/raw/master/resources/net.bin",
-        filename: "viridithas-768.bin",
-        approx_size: 4_721_666,
-        search_preset: "akimbo", // same arch family as Akimbo
-    },
-];
+pub const NETWORKS: &[NnueNetwork] = &[NnueNetwork {
+    name: "Akimbo 1024",
+    engine: "Akimbo",
+    architecture: "768→1024×2→1 SCReLU",
+    url: "https://github.com/jw1912/akimbo/raw/main/resources/net.bin",
+    filename: "akimbo-1024.bin",
+    approx_size: 6_297_664,
+    search_preset: "akimbo",
+}];
 
 /// Find a network definition by filename or name (case-insensitive partial match).
 pub fn find_network(query: &str) -> Option<&'static NnueNetwork> {
@@ -136,7 +111,7 @@ pub fn download_network(
     network: &NnueNetwork,
     dest_dir: &Path,
     progress: Option<&ProgressCallback>,
-) -> Result<(), String> {
+) -> Result<DownloadOutcome, String> {
     fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Failed to create directory {}: {e}", dest_dir.display()))?;
 
@@ -146,7 +121,7 @@ pub fn download_network(
         if let Some(cb) = progress {
             cb(network.filename, DownloadStatus::Skipped);
         }
-        return Ok(());
+        return Ok(DownloadOutcome::Skipped);
     }
 
     if let Some(cb) = progress {
@@ -170,7 +145,7 @@ pub fn download_network(
         cb(network.filename, DownloadStatus::Done);
     }
 
-    Ok(())
+    Ok(DownloadOutcome::Downloaded)
 }
 
 /// Download all networks.
@@ -182,17 +157,16 @@ pub fn download_all(
         .map_err(|e| format!("Failed to create directory {}: {e}", dest_dir.display()))?;
 
     let mut downloaded = 0usize;
-    let skipped = 0usize;
+    let mut skipped = 0usize;
     let mut failed = 0usize;
 
     for network in NETWORKS {
         match download_network(network, dest_dir, progress.as_ref()) {
-            Ok(()) => {
-                let dest_path = dest_dir.join(network.filename);
-                if dest_path.exists() {
-                    // Check if it was skipped (already existed) or freshly downloaded
-                    downloaded += 1; // Simplified — both count as success
-                }
+            Ok(DownloadOutcome::Downloaded) => {
+                downloaded += 1;
+            }
+            Ok(DownloadOutcome::Skipped) => {
+                skipped += 1;
             }
             Err(e) => {
                 failed += 1;
@@ -325,5 +299,20 @@ mod tests {
     fn test_list_network_files_empty() {
         let files = list_network_files(Path::new("/nonexistent/path"));
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_download_network_returns_skipped_for_existing_file() {
+        let temp_dir = std::env::temp_dir().join("kishmat-nnue-skip-test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let net = &NETWORKS[0];
+        let existing = temp_dir.join(net.filename);
+        fs::write(&existing, b"already here").unwrap();
+
+        let outcome = download_network(net, &temp_dir, None).unwrap();
+        assert_eq!(outcome, DownloadOutcome::Skipped);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

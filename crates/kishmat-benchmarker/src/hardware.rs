@@ -61,6 +61,7 @@ impl HardwareInfo {
 
 /// Detect SIMD features enabled at compile time.
 fn detect_simd_features() -> Vec<String> {
+    #[allow(unused_mut)] // mutability depends on compile-time target features
     let mut features = Vec::new();
 
     #[cfg(target_arch = "aarch64")]

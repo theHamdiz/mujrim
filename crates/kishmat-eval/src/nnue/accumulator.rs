@@ -10,7 +10,11 @@
 //! board state. With typical moves changing 2-4 piece bitboard entries,
 //! this is ~10x faster than full recompute.
 
-use super::network::{Accumulator, NUM_BUCKETS, forward, get_base_index, get_bucket, net};
+use super::adapter::{ActiveNetwork, NnueNetworkInfo, NnueNetworkSource};
+use super::network::{
+    Accumulator, NUM_BUCKETS, Network, forward_with_network, get_base_index, get_bucket,
+};
+use std::sync::Arc;
 use types::{Board, Color, Piece};
 
 /// Number of bitboards we track for cache comparison.
@@ -51,13 +55,23 @@ impl Default for EvalTable {
 /// NNUE state for use in the search.
 pub struct NNUEState {
     pub table: EvalTable,
+    source: Arc<dyn NnueNetworkSource + Send + Sync>,
 }
 
 impl NNUEState {
     pub fn new() -> Self {
+        Self::with_network(Arc::new(ActiveNetwork::Embedded))
+    }
+
+    pub fn with_network(source: Arc<dyn NnueNetworkSource + Send + Sync>) -> Self {
         Self {
             table: EvalTable::default(),
+            source,
         }
+    }
+
+    pub fn network_info(&self) -> NnueNetworkInfo {
+        self.source.info()
     }
 
     /// Snapshot the board's piece bitboards: [white_pawn..white_king, black_pawn..black_king].
@@ -102,6 +116,7 @@ impl NNUEState {
 
     /// Evaluate the position using NNUE with incremental accumulator updates.
     pub fn evaluate(&mut self, board: &Board) -> i32 {
+        let net = self.source.network();
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();
 
@@ -115,11 +130,11 @@ impl NNUEState {
         let is_fresh = entry.bbs.iter().all(|&b| b == 0);
         if is_fresh {
             // Fresh entry — full compute
-            Self::compute_entry(entry, board, w_king, b_king);
+            Self::compute_entry(entry, net, board, w_king, b_king);
             entry.bbs = current_bbs;
         } else if entry.bbs != current_bbs {
             // Diff-based incremental update
-            Self::update_entry_diff(entry, &current_bbs, w_king, b_king);
+            Self::update_entry_diff(entry, net, &current_bbs, w_king, b_king);
             entry.bbs = current_bbs;
         }
 
@@ -128,7 +143,7 @@ impl NNUEState {
             Color::White => (&entry.white, &entry.black),
             Color::Black => (&entry.black, &entry.white),
         };
-        let raw = forward(boys, opps);
+        let raw = forward_with_network(net, boys, opps);
 
         // Material scaling (Akimbo: eval * (700 + mat/32) / 1024)
         let scale = Self::material_scale(board);
@@ -138,12 +153,12 @@ impl NNUEState {
     /// Incremental diff-based update: find bitboard differences and add/sub features.
     fn update_entry_diff(
         entry: &mut EvalEntry,
+        net: &Network,
         new_bbs: &[u64; NUM_BBS],
         w_king: usize,
         b_king: usize,
     ) {
         let old_bbs = entry.bbs;
-        let net = net();
 
         let wflip: usize = if w_king % 8 > 3 { 7 } else { 0 };
         let bflip: usize = if b_king % 8 > 3 { 7 } else { 0 } ^ 56;
@@ -207,21 +222,26 @@ impl NNUEState {
 
     /// Fully recompute the accumulators from a board position.
     pub fn reinit_from(&mut self, board: &Board) {
+        let net = self.source.network();
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();
         let wb = get_bucket::<0>(w_king);
         let bb = get_bucket::<1>(b_king);
         let entry = &mut self.table.table[wb][bb];
-        Self::compute_entry(entry, board, w_king, b_king);
+        Self::compute_entry(entry, net, board, w_king, b_king);
         entry.bbs = Self::snapshot_bbs(board);
     }
 
     /// Compute accumulators from scratch (the actual work).
-    fn compute_entry(entry: &mut EvalEntry, board: &Board, w_king: usize, b_king: usize) {
-        entry.white = Accumulator::default();
-        entry.black = Accumulator::default();
-
-        let net = net();
+    fn compute_entry(
+        entry: &mut EvalEntry,
+        net: &Network,
+        board: &Board,
+        w_king: usize,
+        b_king: usize,
+    ) {
+        entry.white = net.feature_bias;
+        entry.black = net.feature_bias;
         let wflip: usize = if w_king % 8 > 3 { 7 } else { 0 };
         let bflip: usize = if b_king % 8 > 3 { 7 } else { 0 } ^ 56;
 

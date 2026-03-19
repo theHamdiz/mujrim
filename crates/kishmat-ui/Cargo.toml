@@ -31,6 +31,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 updater = { package = "kishmat-updater", path = "../kishmat-updater" }
+kishmat-protocols = { path = "../kishmat-protocols" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

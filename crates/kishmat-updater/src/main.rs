@@ -283,7 +283,7 @@ fn cmd_nnue(network: &str, dir: &str) {
                     }));
 
                 match download_network(net_info, &dest, progress.as_ref()) {
-                    Ok(()) => {
+                    Ok(_) => {
                         println!();
                         println!("  ✓ Saved to: {}/{}", dest.display(), net_info.filename);
                         println!(

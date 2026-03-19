@@ -1,125 +1,83 @@
-//! UCI process management — spawn and communicate with external UCI engines.
+//! External engine process helpers for GUI play.
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::time::Duration;
 
-/// A running UCI engine process.
-#[allow(dead_code)]
-pub struct UciProcess {
-    child: Child,
-    stdin: std::process::ChildStdin,
-    reader: BufReader<std::process::ChildStdout>,
+use kishmat_protocols::{EngineOptions, ProtocolKind, SearchRequest, analyze_once};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalEngineProtocol {
+    Uci,
+    Xboard,
 }
 
-#[allow(dead_code)]
-impl UciProcess {
-    /// Spawns a new UCI engine process.
-    pub fn new(engine_path: &str) -> Result<Self, String> {
-        let mut child = Command::new(engine_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("Failed to start engine: {e}"))?;
-
-        let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
-        let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
-        let reader = BufReader::new(stdout);
-
-        let mut proc = Self {
-            child,
-            stdin,
-            reader,
-        };
-
-        // Initialize UCI handshake
-        proc.send("uci")?;
-        proc.wait_for("uciok")?;
-        proc.send("isready")?;
-        proc.wait_for("readyok")?;
-
-        Ok(proc)
-    }
-
-    /// Sends a command to the engine.
-    pub fn send(&mut self, cmd: &str) -> Result<(), String> {
-        writeln!(self.stdin, "{cmd}").map_err(|e| format!("Failed to write to engine: {e}"))?;
-        self.stdin
-            .flush()
-            .map_err(|e| format!("Failed to flush: {e}"))?;
-        Ok(())
-    }
-
-    /// Reads lines until one starts with the expected prefix.
-    pub fn wait_for(&mut self, prefix: &str) -> Result<String, String> {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match self.reader.read_line(&mut line) {
-                Ok(0) => return Err("Engine closed stdout".to_string()),
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with(prefix) {
-                        return Ok(trimmed.to_string());
-                    }
-                }
-                Err(e) => return Err(format!("Read error: {e}")),
-            }
+impl ExternalEngineProtocol {
+    pub fn as_protocol_kind(self) -> ProtocolKind {
+        match self {
+            Self::Uci => ProtocolKind::Uci,
+            Self::Xboard => ProtocolKind::Xboard,
         }
-    }
-
-    /// Sends a position and go command, waits for bestmove.
-    pub fn go_position(&mut self, fen: &str, depth: i32) -> Result<String, String> {
-        self.send(&format!("position fen {fen}"))?;
-        self.send(&format!("go depth {depth}"))?;
-
-        let bestmove_line = self.wait_for("bestmove")?;
-
-        // Parse "bestmove e2e4 ponder e7e5" -> "e2e4"
-        let parts: Vec<&str> = bestmove_line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            Ok(parts[1].to_string())
-        } else {
-            Err("Invalid bestmove response".to_string())
-        }
-    }
-
-    /// Switch the NNUE network via UCI `setoption`.
-    /// `path` should be an absolute or relative path to a .nnue or .bin file.
-    pub fn set_network(&mut self, path: &str) -> Result<(), String> {
-        self.send(&format!("setoption name EvalFile value {path}"))?;
-        self.send("isready")?;
-        self.wait_for("readyok")?;
-        Ok(())
-    }
-
-    /// Set a UCI option (generic).
-    pub fn set_option(&mut self, name: &str, value: &str) -> Result<(), String> {
-        self.send(&format!("setoption name {name} value {value}"))?;
-        self.send("isready")?;
-        self.wait_for("readyok")?;
-        Ok(())
-    }
-
-    /// Set the number of search threads.
-    pub fn set_threads(&mut self, threads: usize) -> Result<(), String> {
-        self.set_option("Threads", &threads.to_string())
-    }
-
-    /// Set the hash table size in MB.
-    pub fn set_hash(&mut self, mb: usize) -> Result<(), String> {
-        self.set_option("Hash", &mb.to_string())
-    }
-
-    /// Sends the quit command and kills the process.
-    pub fn quit(&mut self) {
-        let _ = self.send("quit");
-        let _ = self.child.wait();
     }
 }
 
-impl Drop for UciProcess {
-    fn drop(&mut self) {
-        self.quit();
+impl std::fmt::Display for ExternalEngineProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Uci => write!(f, "UCI"),
+            Self::Xboard => write!(f, "XBoard"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalMoveResult {
+    pub best_move: String,
+    pub depth: i32,
+    pub score: i32,
+    pub nodes: u64,
+    pub nps: u64,
+}
+
+pub fn query_best_move(
+    engine_path: &str,
+    protocol: ExternalEngineProtocol,
+    fen: &str,
+    depth: i32,
+    movetime: Duration,
+    hash_mb: usize,
+    threads: usize,
+) -> Result<ExternalMoveResult, String> {
+    let info = analyze_once(
+        Path::new(engine_path),
+        protocol.as_protocol_kind(),
+        &EngineOptions {
+            hash_mb: Some(hash_mb),
+            threads: Some(threads),
+        },
+        &SearchRequest {
+            fen: fen.to_string(),
+            depth,
+            movetime: Some(movetime),
+            node_limit: None,
+        },
+    )?;
+
+    Ok(ExternalMoveResult {
+        best_move: info.best_move,
+        depth: info.depth,
+        score: info.score,
+        nodes: info.nodes,
+        nps: info.nps,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_protocol_display() {
+        assert_eq!(ExternalEngineProtocol::Uci.to_string(), "UCI");
+        assert_eq!(ExternalEngineProtocol::Xboard.to_string(), "XBoard");
     }
 }

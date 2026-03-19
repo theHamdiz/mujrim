@@ -16,7 +16,7 @@ pub enum NnueCommand {
     },
     /// Download all networks for one engine family.
     Engine {
-        #[arg(value_parser = ["stockfish", "akimbo", "viridithas"])]
+        #[arg(value_parser = ["akimbo"])]
         engine: String,
         #[arg(long, default_value = "crates/kishmat-eval/resources")]
         dir: PathBuf,

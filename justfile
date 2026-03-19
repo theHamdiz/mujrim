@@ -57,6 +57,11 @@ bench-uci engine depth="16" hash="128" threads="1" time="120":
     @echo "Benchmarking external engine: {{engine}}"
     RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- uci {{engine}} -d {{depth}} --hash {{hash}} -t {{threads}} --time {{time}}
 
+# Benchmark an external XBoard engine binary
+bench-xboard engine depth="16" hash="128" threads="1" time="120":
+    @echo "Benchmarking external XBoard engine: {{engine}}"
+    RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- xboard {{engine}} -d {{depth}} --hash {{hash}} -t {{threads}} --time {{time}}
+
 # Show engine info (NNUE, techniques, hardware)
 engine-info:
     RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- info
@@ -155,27 +160,18 @@ nets:
     cargo run --release -p kishmat-tooling -- nnue all --dir "{{nets_dir}}"
     cargo run --release -p kishmat-tooling -- nnue status --dir "{{nets_dir}}"
 
-# Download latest Stockfish NNUE networks (big + small)
-net-stockfish:
-    cargo run --release -p kishmat-tooling -- nnue engine stockfish --dir "{{nets_dir}}"
-
 # Download latest Akimbo NNUE network
 net-akimbo:
     cargo run --release -p kishmat-tooling -- nnue engine akimbo --dir "{{nets_dir}}"
-
-# Download latest Viridithas NNUE network
-net-viridithas:
-    cargo run --release -p kishmat-tooling -- nnue engine viridithas --dir "{{nets_dir}}"
 
 # Show all downloaded NNUE networks
 net-status:
     cargo run --release -p kishmat-tooling -- nnue status --dir "{{nets_dir}}"
 
 # Benchmark with a specific external network file
-bench-net net_path depth="16":
-    @echo "bench-net currently requires an engine build wired to that network path."
-    @echo "Use: just bench-uci <engine-binary> -d {{depth}}"
-    @echo "Provided network argument: {{net_path}}"
+bench-net net_path depth="16" hash="128" time="120":
+    @echo "Benchmarking KishMat with runtime NNUE file: {{net_path}}"
+    RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}} --eval-file "{{net_path}}" --eval-preset auto
 
 # ──────────────────────────────────────────────────────────────
 # Install KishMat — bundles everything into a single package

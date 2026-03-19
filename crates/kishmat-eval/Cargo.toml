@@ -7,7 +7,7 @@ description = "Evaluation functions for the Kishmat engine"
 license = "MIT"
 
 [features]
-default = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue"]
+default = ["nnue", "simd", "akimbo-nnue"]
 nnue = []
 simd = []
 akimbo-nnue = ["nnue"]

@@ -15,7 +15,7 @@
 
 use crate::see;
 use types::chess_move::NULL_MOVE;
-use types::{Board, Move, MoveList, Piece};
+use types::{Board, Move, MoveList};
 
 /// Maximum number of moves we track scores for.
 const MAX_SCORED: usize = 256;
@@ -64,6 +64,9 @@ pub struct MovePicker {
     killer0_yielded: bool,
     killer1_yielded: bool,
     cm_yielded: bool,
+    killer0_emitted: bool,
+    killer1_emitted: bool,
+    cm_emitted: bool,
     skip_quiets: bool,
 }
 
@@ -90,6 +93,9 @@ impl MovePicker {
             killer0_yielded: false,
             killer1_yielded: false,
             cm_yielded: false,
+            killer0_emitted: false,
+            killer1_emitted: false,
+            cm_emitted: false,
             skip_quiets: false,
         }
     }
@@ -116,6 +122,9 @@ impl MovePicker {
             killer0_yielded: false,
             killer1_yielded: false,
             cm_yielded: false,
+            killer0_emitted: false,
+            killer1_emitted: false,
+            cm_emitted: false,
             skip_quiets: false,
         }
     }
@@ -150,17 +159,6 @@ impl MovePicker {
         } else {
             false
         }
-    }
-
-    /// Check if a move matches any killer or countermove.
-    #[inline]
-    fn is_killer_or_cm(&self, mv: Move) -> bool {
-        let k0 = self.killers[0];
-        let k1 = self.killers[1];
-        let cm = self.countermove;
-        (k0 != NULL_MOVE && same_move_key(mv, k0))
-            || (k1 != NULL_MOVE && same_move_key(mv, k1))
-            || (cm != NULL_MOVE && same_move_key(mv, cm))
     }
 
     /// Get the next move in priority order.
@@ -208,10 +206,9 @@ impl MovePicker {
                     for i in 0..self.legal_moves.len() {
                         let mv = self.legal_moves[i];
                         let is_capture = mv.is_capture();
-                        let is_queen_promo =
-                            mv.is_promotion() && mv.promotion == Some(Piece::Queen);
+                        let is_promotion = mv.is_promotion();
 
-                        if !is_capture && !is_queen_promo {
+                        if !is_capture && !is_promotion {
                             continue;
                         }
 
@@ -223,11 +220,11 @@ impl MovePicker {
                         let score = if is_capture {
                             score_capture(board, mv)
                         } else {
-                            900_000 // Queen promotion bonus
+                            900_000 // Promotions are tactical and should be searched early.
                         };
 
                         if !is_capture || see::see_ge(board, mv, 0) {
-                            // Good capture or queen promotion
+                            // Good capture or promotion
                             if good_count < MAX_SCORED {
                                 self.captures.push(mv);
                                 self.capture_scores[good_count] = score;
@@ -281,6 +278,7 @@ impl MovePicker {
                             let legal = (0..self.legal_moves.len())
                                 .find(|&i| same_move_key(self.legal_moves[i], k));
                             if let Some(idx) = legal {
+                                self.killer0_emitted = true;
                                 return Some(self.legal_moves[idx]);
                             }
                         }
@@ -296,6 +294,7 @@ impl MovePicker {
                             let legal = (0..self.legal_moves.len())
                                 .find(|&i| same_move_key(self.legal_moves[i], k));
                             if let Some(idx) = legal {
+                                self.killer1_emitted = true;
                                 return Some(self.legal_moves[idx]);
                             }
                         }
@@ -323,6 +322,7 @@ impl MovePicker {
                             let legal = (0..self.legal_moves.len())
                                 .find(|&i| same_move_key(self.legal_moves[i], cm));
                             if let Some(idx) = legal {
+                                self.cm_emitted = true;
                                 return Some(self.legal_moves[idx]);
                             }
                         }
@@ -342,11 +342,11 @@ impl MovePicker {
 
                     for i in 0..self.legal_moves.len() {
                         let mv = self.legal_moves[i];
-                        // Skip captures and queen promotions (already handled)
+                        // Skip captures and all promotions (already handled)
                         if mv.is_capture() {
                             continue;
                         }
-                        if mv.is_promotion() && mv.promotion == Some(Piece::Queen) {
+                        if mv.is_promotion() {
                             continue;
                         }
 
@@ -354,7 +354,13 @@ impl MovePicker {
                         if self.tt_yielded && self.is_tt_move(mv) {
                             continue;
                         }
-                        if self.is_killer_or_cm(mv) {
+                        if self.killer0_emitted && same_move_key(mv, self.killers[0]) {
+                            continue;
+                        }
+                        if self.killer1_emitted && same_move_key(mv, self.killers[1]) {
+                            continue;
+                        }
+                        if self.cm_emitted && same_move_key(mv, self.countermove) {
                             continue;
                         }
 
@@ -421,7 +427,7 @@ fn same_move_key(a: Move, b: Move) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::Board;
+    use types::{Board, Piece};
 
     fn setup() {
         types::init();
@@ -536,5 +542,45 @@ mod tests {
         assert!(moves.iter().any(|m| m.to_uci() == "a7a8n"));
         assert!(moves.iter().any(|m| m.to_uci() == "a7a8b"));
         assert!(moves.iter().any(|m| m.to_uci() == "a7a8r"));
+    }
+
+    #[test]
+    fn test_picker_keeps_underpromotion_when_killer_is_same_underpromo() {
+        setup();
+        let mut board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let underpromo = Move::promotion(types::Square::A7, types::Square::A8, Piece::Knight);
+        let mut picker = MovePicker::new(None, [underpromo, NULL_MOVE], NULL_MOVE);
+        let score_cap = |_: &Board, _: Move| -> i32 { 0 };
+        let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
+
+        let mut moves = Vec::new();
+        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+            moves.push(mv);
+        }
+
+        assert!(
+            moves.iter().any(|m| m.to_uci() == "a7a8n"),
+            "underpromotion must not be dropped by killer filtering"
+        );
+    }
+
+    #[test]
+    fn test_underpromotions_survive_skip_quiets() {
+        setup();
+        let mut board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let mut picker = MovePicker::new(None, [NULL_MOVE; 2], NULL_MOVE);
+        picker.skip_quiets();
+        let score_cap = |_: &Board, _: Move| -> i32 { 0 };
+        let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
+
+        let mut seen = Vec::new();
+        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+            seen.push(mv.to_uci());
+        }
+
+        assert!(seen.iter().any(|m| m == "a7a8n"));
+        assert!(seen.iter().any(|m| m == "a7a8b"));
+        assert!(seen.iter().any(|m| m == "a7a8r"));
+        assert!(seen.iter().any(|m| m == "a7a8q"));
     }
 }

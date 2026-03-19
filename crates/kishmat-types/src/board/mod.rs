@@ -655,6 +655,14 @@ impl Board {
         total_major <= 2
     }
 
+    /// Whether `color` has any piece other than pawns and king.
+    #[inline]
+    pub fn has_non_pawn_material(&self, color: Color) -> bool {
+        let side_occ = self.color_occupancy(color);
+        let pawn_king = self.piece_bb(Piece::Pawn, color) | self.piece_bb(Piece::King, color);
+        (side_occ & !pawn_king) != 0
+    }
+
     /// Material count (positive = White advantage).
     pub fn material_count(&self) -> i32 {
         const VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20000];
@@ -1160,6 +1168,23 @@ mod tests {
         setup();
         let board = Board::new();
         assert_eq!(board.material_count(), 0);
+    }
+
+    #[test]
+    fn test_has_non_pawn_material() {
+        setup();
+
+        let start = Board::new();
+        assert!(start.has_non_pawn_material(Color::White));
+        assert!(start.has_non_pawn_material(Color::Black));
+
+        let kp_only = Board::from_fen("8/8/4k3/8/8/8/4p3/4K3 w - - 0 1").unwrap();
+        assert!(!kp_only.has_non_pawn_material(Color::White));
+        assert!(!kp_only.has_non_pawn_material(Color::Black));
+
+        let kq = Board::from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1").unwrap();
+        assert!(kq.has_non_pawn_material(Color::White));
+        assert!(!kq.has_non_pawn_material(Color::Black));
     }
 
     #[test]

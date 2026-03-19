@@ -7,8 +7,8 @@
 
 use crate::move_picker::MovePicker;
 use crate::policy::{
-    DepthScoreVoteRootSelection, LmrContext, LmrPolicy, RootSelectionPolicy, StockLikeLmrPolicy,
-    ThreadOutcome,
+    LmrContext, LmrPolicy, MainThreadPreferredRootSelection, RootSelectionPolicy,
+    StockLikeLmrPolicy, ThreadOutcome,
 };
 use crate::search_params::SearchParams;
 use crate::see;
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use types::chess_move::NULL_MOVE;
 use types::{Board, Move, MoveList, Piece};
 
-use eval::nnue::NNUEState;
+use eval::nnue::{ActiveNetwork, NNUEState, NnueNetworkInfo, NnueNetworkSource};
 
 /// Infinity score sentinel.
 const INF: i32 = 30_000;
@@ -27,10 +27,6 @@ const INF: i32 = 30_000;
 const MATE_SCORE: i32 = 29_000;
 /// Maximum search ply depth.
 const MAX_PLY: usize = 128;
-/// Delta pruning margin in quiescence — standard queen value.
-const DELTA_MARGIN: i32 = 400;
-/// Maximum quiescence search depth to prevent explosion in tactical chaos.
-const MAX_QS_PLY: i32 = 8;
 /// Threshold for TT mate score normalization.
 const MATE_TT_THRESHOLD: i32 = MATE_SCORE - MAX_PLY as i32;
 /// Maximum history score (Stockfish uses 16384).
@@ -49,24 +45,6 @@ const MINOR_CORR_WEIGHT: i32 = 1292;
 const CORR_WEIGHT_SUM: i32 = PAWN_CORR_WEIGHT + MATERIAL_CORR_WEIGHT + MINOR_CORR_WEIGHT;
 /// Max correction entry magnitude.
 const MAX_CORR_ENTRY: i32 = 512;
-
-/// Precomputed LMR reduction table — Stockfish formula.
-static LMR_TABLE: std::sync::OnceLock<[[i32; 128]; 128]> = std::sync::OnceLock::new();
-
-#[inline(always)]
-fn lmr_table() -> &'static [[i32; 128]; 128] {
-    LMR_TABLE.get_or_init(|| {
-        let mut table = [[0i32; 128]; 128];
-        for depth in 1..128 {
-            for moves in 1..128 {
-                // Stockfish formula: 0.77 + ln(depth) * ln(moveCount) / 2.36
-                table[depth][moves] =
-                    (0.77 + (depth as f64).ln() * (moves as f64).ln() / 2.36) as i32;
-            }
-        }
-        table
-    })
-}
 
 /// Update history with gravity — Stockfish formula:
 /// `entry += bonus - entry * |bonus| / MAX_HISTORY`
@@ -104,14 +82,26 @@ fn score_from_tt(score: i32, ply: i32) -> i32 {
 /// board's piece bitboards haven't changed since the last eval in the
 /// same king-bucket pair.
 #[inline(always)]
-fn hybrid_eval(board: &Board, nnue_state: &mut NNUEState) -> i32 {
-    nnue_state.evaluate(board)
+fn hybrid_eval(board: &Board, nnue_state: &mut NNUEState, use_nnue: bool) -> i32 {
+    if use_nnue {
+        nnue_state.evaluate(board)
+    } else {
+        eval::evaluate(board)
+    }
 }
 
 /// Get the piece index of the piece on `sq`. Returns 0 (pawn) if no piece.
 #[inline(always)]
 fn piece_index_on(board: &Board, sq: types::Square) -> usize {
     board.piece_on(sq).map_or(0, |(p, _)| p.index())
+}
+
+#[inline(always)]
+fn captured_piece_index(board: &Board, mv: Move) -> Option<usize> {
+    if mv.flag == types::chess_move::MoveFlag::EnPassant {
+        return Some(Piece::Pawn.index());
+    }
+    board.piece_on(mv.to).map(|(p, _)| p.index())
 }
 
 /// Search result returned to the caller.
@@ -131,7 +121,9 @@ pub struct SearchResult {
 pub struct SearchLimits {
     pub max_depth: i32,
     pub time_limit: Option<Duration>,
+    pub node_limit: Option<u64>,
     pub stopped: bool,
+    pub use_soft_time: bool,
 }
 
 impl Default for SearchLimits {
@@ -139,7 +131,9 @@ impl Default for SearchLimits {
         Self {
             max_depth: 64,
             time_limit: None,
+            node_limit: None,
             stopped: false,
+            use_soft_time: true,
         }
     }
 }
@@ -194,9 +188,9 @@ struct ThreadState {
     /// Piece type of the move at each ply (for continuation history indexing).
     prev_piece: [usize; MAX_PLY],
     /// Correction history tables (search_score - static_eval differences).
-    pawn_corr: Box<[i32; CORR_HIST_SIZE]>,
-    material_corr: Box<[i32; CORR_HIST_SIZE]>,
-    minor_corr: Box<[i32; CORR_HIST_SIZE]>,
+    pawn_corr: Box<[[i32; CORR_HIST_SIZE]; 2]>,
+    material_corr: Box<[[i32; CORR_HIST_SIZE]; 2]>,
+    minor_corr: Box<[[i32; CORR_HIST_SIZE]; 2]>,
     /// Double extension count per path (Akimbo anti-explosion).
     dbl_exts: [i32; MAX_PLY],
     /// Minimum ply before NMP is allowed again (Akimbo anti-recursion).
@@ -204,7 +198,7 @@ struct ThreadState {
 }
 
 impl ThreadState {
-    fn new() -> Self {
+    fn new(nnue_network: Arc<dyn NnueNetworkSource + Send + Sync>) -> Self {
         // Use helper to allocate large arrays DIRECTLY on the heap.
         // `Box::new([val; N])` creates the array on the stack first — for arrays
         // >100KB this overflows. These helpers avoid that.
@@ -217,7 +211,7 @@ impl ThreadState {
             cap_hist: boxed_zeroed(),
             countermoves: boxed_zeroed(),
             static_evals: [0; MAX_PLY],
-            nnue_state: NNUEState::new(),
+            nnue_state: NNUEState::with_network(nnue_network),
             pv: boxed_zeroed(),
             pv_len: [0; MAX_PLY],
             prev_move: [NULL_MOVE; MAX_PLY],
@@ -284,12 +278,13 @@ impl ThreadState {
     /// Compute the combined correction for a position.
     #[inline(always)]
     fn correction(&self, board: &Board) -> i32 {
+        let us = board.side_to_move.index();
         let ph = pawn_hash(board) & CORR_HIST_MASK;
         let mh = material_hash(board) & CORR_HIST_MASK;
         let nh = minor_hash(board) & CORR_HIST_MASK;
-        let raw = self.pawn_corr[ph] as i64 * PAWN_CORR_WEIGHT as i64
-            + self.material_corr[mh] as i64 * MATERIAL_CORR_WEIGHT as i64
-            + self.minor_corr[nh] as i64 * MINOR_CORR_WEIGHT as i64;
+        let raw = self.pawn_corr[us][ph] as i64 * PAWN_CORR_WEIGHT as i64
+            + self.material_corr[us][mh] as i64 * MATERIAL_CORR_WEIGHT as i64
+            + self.minor_corr[us][nh] as i64 * MINOR_CORR_WEIGHT as i64;
         (raw / CORR_WEIGHT_SUM as i64) as i32
     }
 
@@ -307,22 +302,24 @@ impl ThreadState {
         }
         let error = search_score - static_eval;
         let weight = (depth as i32).min(16);
+        let us = board.side_to_move.index();
         let ph = pawn_hash(board) & CORR_HIST_MASK;
         let mh = material_hash(board) & CORR_HIST_MASK;
         let nh = minor_hash(board) & CORR_HIST_MASK;
         // Exponential moving average update
-        self.pawn_corr[ph] = ((self.pawn_corr[ph] as i64 * (256 - weight as i64)
+        self.pawn_corr[us][ph] = ((self.pawn_corr[us][ph] as i64 * (256 - weight as i64)
             + error as i64 * weight as i64)
             / 256) as i32;
-        self.pawn_corr[ph] = self.pawn_corr[ph].clamp(-MAX_CORR_ENTRY, MAX_CORR_ENTRY);
-        self.material_corr[mh] = ((self.material_corr[mh] as i64 * (256 - weight as i64)
+        self.pawn_corr[us][ph] = self.pawn_corr[us][ph].clamp(-MAX_CORR_ENTRY, MAX_CORR_ENTRY);
+        self.material_corr[us][mh] = ((self.material_corr[us][mh] as i64 * (256 - weight as i64)
             + error as i64 * weight as i64)
             / 256) as i32;
-        self.material_corr[mh] = self.material_corr[mh].clamp(-MAX_CORR_ENTRY, MAX_CORR_ENTRY);
-        self.minor_corr[nh] = ((self.minor_corr[nh] as i64 * (256 - weight as i64)
+        self.material_corr[us][mh] =
+            self.material_corr[us][mh].clamp(-MAX_CORR_ENTRY, MAX_CORR_ENTRY);
+        self.minor_corr[us][nh] = ((self.minor_corr[us][nh] as i64 * (256 - weight as i64)
             + error as i64 * weight as i64)
             / 256) as i32;
-        self.minor_corr[nh] = self.minor_corr[nh].clamp(-MAX_CORR_ENTRY, MAX_CORR_ENTRY);
+        self.minor_corr[us][nh] = self.minor_corr[us][nh].clamp(-MAX_CORR_ENTRY, MAX_CORR_ENTRY);
     }
 
     /// Compute stat_score for a quiet move: main history + continuation histories.
@@ -356,8 +353,11 @@ pub struct SearchEngine {
     pub tt: Arc<TranspositionTable>,
     pub num_threads: usize,
     stopped: Arc<AtomicBool>,
+    nnue_network: Arc<dyn NnueNetworkSource + Send + Sync>,
     /// Per-network search parameters (swapped when NNUE net changes).
     pub params: SearchParams,
+    use_nnue: bool,
+    lmr_table: Arc<[[i32; 128]; 128]>,
     lmr_policy: Arc<dyn LmrPolicy + Send + Sync>,
     root_selection_policy: Arc<dyn RootSelectionPolicy + Send + Sync>,
 }
@@ -371,26 +371,60 @@ impl Default for SearchEngine {
 impl SearchEngine {
     /// Creates a new search engine with the given TT size and thread count.
     pub fn new(tt_size_mb: usize, num_threads: usize) -> Self {
-        let _ = lmr_table();
+        let params = SearchParams::default();
         // NNUE is always available (embedded trained net)
         Self {
             tt: Arc::new(TranspositionTable::new(tt_size_mb)),
             num_threads: num_threads.max(1),
             stopped: Arc::new(AtomicBool::new(false)),
-            params: SearchParams::default(),
+            nnue_network: Arc::new(ActiveNetwork::Embedded),
+            lmr_table: Arc::new(params.build_lmr_table()),
+            params,
+            use_nnue: true,
             lmr_policy: Arc::new(StockLikeLmrPolicy),
-            root_selection_policy: Arc::new(DepthScoreVoteRootSelection),
+            root_selection_policy: Arc::new(MainThreadPreferredRootSelection),
         }
     }
 
     /// Set the search parameters (e.g. when switching NNUE networks).
     pub fn set_params(&mut self, params: SearchParams) {
+        self.lmr_table = Arc::new(params.build_lmr_table());
         self.params = params;
     }
 
     /// Configure search params for a given network preset name.
     pub fn set_params_for_preset(&mut self, preset: &str) {
-        self.params = SearchParams::for_preset(preset);
+        self.set_params(SearchParams::for_preset(preset));
+    }
+
+    /// Set the active NNUE network source.
+    pub fn set_nnue_network_source(&mut self, network: Arc<dyn NnueNetworkSource + Send + Sync>) {
+        self.nnue_network = network;
+    }
+
+    /// Set the active NNUE network from a concrete adapter handle.
+    pub fn set_nnue_network(&mut self, network: ActiveNetwork) {
+        self.nnue_network = Arc::new(network);
+    }
+
+    /// Enable or disable NNUE evaluation (fallback to classical eval when disabled).
+    pub fn set_use_nnue(&mut self, enabled: bool) {
+        self.use_nnue = enabled;
+    }
+
+    /// Returns whether NNUE evaluation is enabled.
+    pub fn use_nnue(&self) -> bool {
+        self.use_nnue
+    }
+
+    /// Returns metadata for the currently active NNUE network.
+    pub fn nnue_info(&self) -> NnueNetworkInfo {
+        self.nnue_network.info()
+    }
+
+    /// Returns the recommended search preset for the active NNUE network.
+    pub fn nnue_preset_hint(&self) -> &'static str {
+        self.nnue_network.preset_hint()
     }
 
     /// Set a custom LMR policy implementation.
@@ -406,44 +440,47 @@ impl SearchEngine {
         self.root_selection_policy = policy;
     }
 
+    #[cfg(test)]
+    fn lmr_reduction_for(&self, depth: usize, moves: usize) -> i32 {
+        self.lmr_table[depth.min(127)][moves.min(127)]
+    }
+
     /// Performs search with Lazy SMP.
     pub fn search(&mut self, board: &mut Board, limits: SearchLimits) -> SearchResult {
         self.stopped.store(false, Ordering::SeqCst);
         self.tt.new_generation();
 
         let start_time = Instant::now();
+        let use_helpers = limits.node_limit.is_none();
+        let helper_threads = if use_helpers { self.num_threads } else { 1 };
 
         // Spawn helper threads for Lazy SMP (threads > 1)
         let mut handles = Vec::new();
-        for thread_id in 1..self.num_threads {
+        for _thread_id in 1..helper_threads {
             let tt = Arc::clone(&self.tt);
             let stopped = Arc::clone(&self.stopped);
             let mut board_clone = board.clone();
             let max_depth = limits.max_depth;
             let time_limit = limits.time_limit;
+            let node_limit = limits.node_limit;
             let start = start_time;
             let params_clone = self.params.clone();
+            let lmr_table_clone = Arc::clone(&self.lmr_table);
+            let use_nnue_clone = self.use_nnue;
             let lmr_policy_clone = Arc::clone(&self.lmr_policy);
+            let nnue_network = Arc::clone(&self.nnue_network);
 
             handles.push(
                 std::thread::Builder::new()
                     .stack_size(16 * 1024 * 1024)
                     .spawn(move || {
-                        let mut state = ThreadState::new();
-                        // Helper threads search with depth offsets for diversity
-                        let depth_offset = match thread_id % 4 {
-                            1 => 1,
-                            2 => -1i32,
-                            3 => 2,
-                            _ => 0,
-                        };
-
+                        let mut state = ThreadState::new(nnue_network);
                         let mut best_score = -INF;
                         let mut best_move = NULL_MOVE;
                         let mut completed_depth = 0i32;
 
                         for depth in 1..=max_depth {
-                            let actual_depth = (depth as i32 + depth_offset).max(1).min(max_depth);
+                            let actual_depth = depth;
 
                             // Check time/stop
                             if stopped.load(Ordering::Relaxed) {
@@ -451,6 +488,11 @@ impl SearchEngine {
                             }
                             if let Some(tl) = time_limit {
                                 if start.elapsed() >= tl {
+                                    break;
+                                }
+                            }
+                            if let Some(nl) = node_limit {
+                                if state.nodes >= nl {
                                     break;
                                 }
                             }
@@ -466,19 +508,22 @@ impl SearchEngine {
                                 0,
                                 true,
                                 time_limit,
+                                node_limit,
                                 start,
                                 true,
                                 None,
                                 0,
                                 actual_depth,
                                 &params_clone,
+                                lmr_table_clone.as_ref(),
+                                use_nnue_clone,
                                 lmr_policy_clone.as_ref(),
                             );
                             if !stopped.load(Ordering::Relaxed) {
                                 best_score = s;
                                 completed_depth = actual_depth;
-                                if let Some(entry) = tt.probe(board_clone.hash) {
-                                    best_move = entry.best_move;
+                                if let Some(pv0) = state.get_pv().first().copied() {
+                                    best_move = pv0;
                                 }
                             }
                         }
@@ -490,10 +535,9 @@ impl SearchEngine {
         }
 
         // Main thread search with reporting
-        let mut state = ThreadState::new();
+        let mut state = ThreadState::new(Arc::clone(&self.nnue_network));
         let mut best_move = NULL_MOVE;
         let mut best_score = -INF;
-        let mut prev_best_move = NULL_MOVE;
         let mut best_pv = Vec::new();
         let mut main_completed_depth = 0i32;
 
@@ -508,6 +552,11 @@ impl SearchEngine {
         for depth in 1..=limits.max_depth {
             if self.stopped.load(Ordering::Relaxed) {
                 break;
+            }
+            if let Some(nl) = limits.node_limit {
+                if state.nodes >= nl {
+                    break;
+                }
             }
 
             let nodes_before = state.nodes;
@@ -531,12 +580,15 @@ impl SearchEngine {
                         0,
                         true,
                         limits.time_limit,
+                        limits.node_limit,
                         start_time,
                         true,
                         None,
                         0,
                         depth,
                         &self.params,
+                        self.lmr_table.as_ref(),
+                        self.use_nnue,
                         self.lmr_policy.as_ref(),
                     );
                     if self.stopped.load(Ordering::Relaxed) {
@@ -577,12 +629,15 @@ impl SearchEngine {
                     0,
                     true,
                     limits.time_limit,
+                    limits.node_limit,
                     start_time,
                     true,
                     None,
                     0,
                     depth,
                     &self.params,
+                    self.lmr_table.as_ref(),
+                    self.use_nnue,
                     self.lmr_policy.as_ref(),
                 );
                 if self.stopped.load(Ordering::Relaxed) {
@@ -591,10 +646,10 @@ impl SearchEngine {
                 best_score = s;
             }
 
-            // Get best move from TT
-            if let Some(entry) = self.tt.probe(board.hash) {
-                prev_best_move = best_move;
-                best_move = entry.best_move;
+            // Use the main thread PV for stable root move selection.
+            let old_best_move = best_move;
+            if let Some(pv0) = state.get_pv().first().copied() {
+                best_move = pv0;
             }
             main_completed_depth = depth;
 
@@ -604,8 +659,8 @@ impl SearchEngine {
             *root_node_counts.entry(key).or_insert(0) += nodes_this_iter;
 
             // 5.2: Best-move stability
-            if best_move != NULL_MOVE && prev_best_move != NULL_MOVE {
-                if best_move.from == prev_best_move.from && best_move.to == prev_best_move.to {
+            if best_move != NULL_MOVE && old_best_move != NULL_MOVE {
+                if best_move.from == old_best_move.from && best_move.to == old_best_move.to {
                     stability = (stability + 1).min(10);
                 } else {
                     stability = 0;
@@ -658,52 +713,55 @@ impl SearchEngine {
             }
 
             // ── Smart time management ──
-            if let Some(tl) = limits.time_limit {
-                let elapsed_now = start_time.elapsed();
+            if limits.use_soft_time {
+                if let Some(tl) = limits.time_limit {
+                    let elapsed_now = start_time.elapsed();
 
-                // Base soft time: 50% of hard limit
-                let mut soft_mul = 0.50f64;
+                    // Base soft time: 50% of hard limit
+                    let mut soft_mul = 0.50f64;
 
-                // Stability adjustment — stable best move → resolve faster
-                // stability 0 = just changed → 1.0x, stability 10 = very stable → 0.65x
-                let stability_factor = 1.0 - (stability as f64 * 0.035);
-                soft_mul *= stability_factor;
+                    // Stability adjustment — stable best move → resolve faster
+                    // stability 0 = just changed → 1.0x, stability 10 = very stable → 0.65x
+                    let stability_factor = 1.0 - (stability as f64 * 0.035);
+                    soft_mul *= stability_factor;
 
-                // Node-based TM — if best move got most nodes, we're confident
-                if depth > 8 && state.nodes > 0 {
-                    let best_nodes = root_node_counts.get(&key).copied().unwrap_or(0);
-                    let frac = best_nodes as f64 / state.nodes as f64;
-                    // Akimbo: (1.5 - frac) * 1.35
-                    let node_mul = ((1.5 - frac) * 1.35).clamp(0.7, 1.8);
-                    soft_mul *= node_mul;
-                }
-
-                // Score trend — increase time on significant score drops
-                if depth >= 3 {
-                    let score_drop = prev_prev_score - best_score;
-                    if score_drop > 20 {
-                        // Score dropped — spend proportionally more time
-                        soft_mul *= 1.0 + (score_drop as f64 / 150.0).min(0.6);
-                    } else if score_drop < -20 {
-                        // Score improved — resolve faster
-                        soft_mul *= 0.85;
+                    // Node-based TM — if best move got most nodes, we're confident
+                    if depth > 8 && state.nodes > 0 {
+                        let best_nodes = root_node_counts.get(&key).copied().unwrap_or(0);
+                        let frac = best_nodes as f64 / state.nodes as f64;
+                        // Akimbo: (1.5 - frac) * 1.35
+                        let node_mul = ((1.5 - frac) * 1.35).clamp(0.7, 1.8);
+                        soft_mul *= node_mul;
                     }
-                }
 
-                // Fail-low emergency: if best move changed this iteration, extend time
-                if depth >= 6
-                    && prev_best_move != NULL_MOVE
-                    && best_move != NULL_MOVE
-                    && (best_move.from != prev_best_move.from || best_move.to != prev_best_move.to)
-                {
-                    soft_mul *= 1.3; // give 30% more time when best move changes at depth >= 6
-                }
+                    // Score trend — increase time on significant score drops
+                    if depth >= 3 {
+                        let score_drop = prev_prev_score - best_score;
+                        if score_drop > 20 {
+                            // Score dropped — spend proportionally more time
+                            soft_mul *= 1.0 + (score_drop as f64 / 150.0).min(0.6);
+                        } else if score_drop < -20 {
+                            // Score improved — resolve faster
+                            soft_mul *= 0.85;
+                        }
+                    }
 
-                let soft_limit = tl.mul_f64(soft_mul.clamp(0.25, 1.5));
+                    // Fail-low emergency: if best move changed this iteration, extend time
+                    if depth >= 6
+                        && old_best_move != NULL_MOVE
+                        && best_move != NULL_MOVE
+                        && (best_move.from != old_best_move.from
+                            || best_move.to != old_best_move.to)
+                    {
+                        soft_mul *= 1.3; // give 30% more time when best move changes at depth >= 6
+                    }
 
-                if elapsed_now >= soft_limit {
-                    self.stopped.store(true, Ordering::SeqCst);
-                    break;
+                    let soft_limit = tl.mul_f64(soft_mul.clamp(0.25, 1.5));
+
+                    if elapsed_now >= soft_limit {
+                        self.stopped.store(true, Ordering::SeqCst);
+                        break;
+                    }
                 }
             }
 
@@ -764,7 +822,9 @@ impl SearchEngine {
             SearchLimits {
                 max_depth: depth,
                 time_limit: None,
+                node_limit: None,
                 stopped: false,
+                use_soft_time: true,
             },
         )
     }
@@ -781,14 +841,55 @@ impl SearchEngine {
             SearchLimits {
                 max_depth,
                 time_limit: Some(time),
+                node_limit: None,
                 stopped: false,
+                use_soft_time: true,
+            },
+        )
+    }
+
+    /// Convenience: search with a hard time limit (no early soft stop).
+    pub fn search_time_hard(
+        &mut self,
+        board: &mut Board,
+        time: Duration,
+        max_depth: i32,
+    ) -> SearchResult {
+        self.search(
+            board,
+            SearchLimits {
+                max_depth,
+                time_limit: Some(time),
+                node_limit: None,
+                stopped: false,
+                use_soft_time: false,
+            },
+        )
+    }
+
+    /// Convenience: search with a hard node limit.
+    pub fn search_nodes(&mut self, board: &mut Board, nodes: u64, max_depth: i32) -> SearchResult {
+        self.search(
+            board,
+            SearchLimits {
+                max_depth,
+                time_limit: None,
+                node_limit: Some(nodes.max(1)),
+                stopped: false,
+                use_soft_time: false,
             },
         )
     }
 
     /// Externally stop the search.
-    pub fn stop(&mut self) {
+    pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    /// Clone the internal stop flag so external controllers can request stop
+    /// without holding a mutable engine reference.
+    pub fn stop_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stopped)
     }
 
     /// Clears TT (for new game).
@@ -813,18 +914,27 @@ fn search_ab(
     ply: i32,
     is_pv: bool,
     time_limit: Option<Duration>,
+    node_limit: Option<u64>,
     start_time: Instant,
     is_root: bool,
     excluded_move: Option<Move>,
     total_extensions: i32,
     nominal_depth: i32,
     params: &SearchParams,
+    lmr_table: &[[i32; 128]; 128],
+    use_nnue: bool,
     lmr_policy: &dyn LmrPolicy,
 ) -> i32 {
     // Check stop periodically
     if state.nodes & 2047 == 0 {
         if stopped.load(Ordering::Relaxed) {
             return 0;
+        }
+        if let Some(nl) = node_limit {
+            if state.nodes >= nl {
+                stopped.store(true, Ordering::Relaxed);
+                return 0;
+            }
         }
         if let Some(tl) = time_limit {
             if start_time.elapsed() >= tl {
@@ -853,7 +963,7 @@ fn search_ab(
         return if in_check {
             0
         } else {
-            hybrid_eval(board, &mut state.nnue_state)
+            hybrid_eval(board, &mut state.nnue_state, use_nnue)
         };
     }
 
@@ -885,11 +995,13 @@ fn search_ab(
     let mut tt_score = None;
     let mut tt_depth = -1;
     let mut tt_node_type = NodeType::Exact;
+    let mut tt_hit = false;
 
     let mut tt_was_pv = is_pv; // 7.2: Track if this position was ever a PV node
 
     if excluded_move.is_none() {
         if let Some(entry) = tt.probe(board.hash) {
+            tt_hit = true;
             let probed_score = score_from_tt(entry.score, ply);
             tt_move = Some(entry.best_move);
             tt_score = Some(probed_score);
@@ -918,7 +1030,8 @@ fn search_ab(
     // Leaf → quiescence
     if depth <= 0 {
         return quiescence(
-            board, tt, stopped, state, alpha, beta, ply, 0, time_limit, start_time,
+            board, tt, stopped, state, alpha, beta, ply, 0, time_limit, node_limit, start_time,
+            params, use_nnue,
         );
     }
 
@@ -926,7 +1039,7 @@ fn search_ab(
     let us = board.side_to_move;
 
     // Static eval — NNUE + correction history
-    let raw_eval = hybrid_eval(board, &mut state.nnue_state);
+    let raw_eval = hybrid_eval(board, &mut state.nnue_state, use_nnue);
     // Apply correction history adjustment
     let corr = state.correction(board);
     let mut static_eval = raw_eval + corr;
@@ -959,7 +1072,7 @@ fn search_ab(
         // 4.4: Reverse Futility Pruning with TT guards
         // Skip when TT was a PV node or TT move is a capture
         let tt_move_is_capture = tt_move.map_or(false, |m| m.is_capture());
-        let rfp_tt_was_pv = tt_was_pv || (tt_node_type == NodeType::Exact);
+        let rfp_tt_was_pv = rfp_tt_guard(tt_hit, tt_was_pv, tt_node_type);
         if depth <= 8 && !rfp_tt_was_pv && !tt_move_is_capture {
             let margin = params.rfp_margin(depth, improving);
             if static_eval - margin >= beta {
@@ -971,7 +1084,8 @@ fn search_ab(
         // Razoring — quadratic margin
         if depth <= 3 && static_eval <= alpha - params.razoring_margin(depth) {
             return quiescence(
-                board, tt, stopped, state, alpha, beta, ply, 0, time_limit, start_time,
+                board, tt, stopped, state, alpha, beta, ply, 0, time_limit, node_limit, start_time,
+                params, use_nnue,
             );
         }
 
@@ -979,7 +1093,7 @@ fn search_ab(
         // Don't NMP if TT says position is bad (fail-low at beta)
         let nmp_tt_ok = !tt_score.is_some_and(|s| tt_node_type == NodeType::UpperBound && s < beta);
         if depth >= 4
-            && !board.is_endgame()
+            && nmp_material_ok(board, us)
             && static_eval >= beta
             && nmp_tt_ok
             && ply_usize >= state.min_nmp_ply
@@ -1002,12 +1116,15 @@ fn search_ab(
                 ply + 1,
                 false,
                 time_limit,
+                node_limit,
                 start_time,
                 false,
                 None,
                 total_extensions,
                 nominal_depth,
                 params,
+                lmr_table,
+                use_nnue,
                 lmr_policy,
             );
             board.unmake_null_move();
@@ -1039,12 +1156,15 @@ fn search_ab(
                     ply,
                     false,
                     time_limit,
+                    node_limit,
                     start_time,
                     false,
                     None,
                     total_extensions,
                     nominal_depth,
                     params,
+                    lmr_table,
+                    use_nnue,
                     lmr_policy,
                 );
                 state.min_nmp_ply = 0;
@@ -1099,12 +1219,15 @@ fn search_ab(
                     ply + 1,
                     false,
                     time_limit,
+                    node_limit,
                     start_time,
                     false,
                     None,
                     total_extensions,
                     nominal_depth,
                     params,
+                    lmr_table,
+                    use_nnue,
                     lmr_policy,
                 );
                 board.unmake_move(mv);
@@ -1206,11 +1329,12 @@ fn search_ab(
     let mut best_score = -INF;
     let mut node_type = NodeType::UpperBound;
     let mut moves_searched = 0;
+    let is_cut_node = !is_pv && beta == alpha + 1;
 
     // Track searched quiet moves for history malus (Stockfish-style)
     let mut searched_quiets: Vec<Move> = Vec::with_capacity(32);
     // Track searched captures for capture history malus
-    let mut searched_captures: Vec<Move> = Vec::with_capacity(16);
+    let mut searched_captures: Vec<(usize, types::Square, usize)> = Vec::with_capacity(16);
 
     // Singular extension data
     let can_do_singular = excluded_move.is_none()
@@ -1233,7 +1357,7 @@ fn search_ab(
         let mut extension = 0;
         if can_do_singular {
             if let Some(ttm) = tt_move {
-                if mv.from == ttm.from && mv.to == ttm.to {
+                if same_move_key(mv, ttm) {
                     if let Some(tt_sc) = tt_score {
                         let se_beta = tt_sc - params.se_margin(depth);
                         let se_score = search_ab(
@@ -1247,12 +1371,15 @@ fn search_ab(
                             ply,
                             false,
                             time_limit,
+                            node_limit,
                             start_time,
                             false,
                             Some(mv),
                             total_extensions,
                             nominal_depth,
                             params,
+                            lmr_table,
+                            use_nnue,
                             lmr_policy,
                         );
                         if stopped.load(Ordering::Relaxed) {
@@ -1347,7 +1474,7 @@ fn search_ab(
         }
 
         let captured_piece_idx = if mv.is_capture() {
-            board.piece_on(mv.to).map(|(p, _)| p.index())
+            captured_piece_index(board, mv)
         } else {
             None
         };
@@ -1382,12 +1509,15 @@ fn search_ab(
                 ply + 1,
                 is_pv,
                 time_limit,
+                node_limit,
                 start_time,
                 false,
                 None,
                 new_total_extensions,
                 nominal_depth,
                 params,
+                lmr_table,
+                use_nnue,
                 lmr_policy,
             );
         } else {
@@ -1400,7 +1530,7 @@ fn search_ab(
             {
                 let d = (depth as usize).min(127);
                 let m = moves_searched.min(127);
-                let base = lmr_table()[d][m];
+                let base = lmr_table[d][m];
                 let cap_hist_score = captured_piece_idx
                     .map(|idx| state.cap_hist[moved_piece][mv.to.index()][idx])
                     .unwrap_or(0);
@@ -1414,7 +1544,7 @@ fn search_ab(
                     mv_stat_score,
                     cap_hist_score,
                     corr_abs: corr.abs(),
-                    is_cut_node: !is_pv && node_type == NodeType::UpperBound,
+                    is_cut_node,
                     tt_was_pv,
                     hist_lmr_div: params.hist_lmr_div,
                     lmr_corr_mul: params.lmr_corr_mul,
@@ -1436,12 +1566,15 @@ fn search_ab(
                 ply + 1,
                 false,
                 time_limit,
+                node_limit,
                 start_time,
                 false,
                 None,
                 new_total_extensions,
                 nominal_depth,
                 params,
+                lmr_table,
+                use_nnue,
                 lmr_policy,
             );
 
@@ -1458,12 +1591,15 @@ fn search_ab(
                     ply + 1,
                     false,
                     time_limit,
+                    node_limit,
                     start_time,
                     false,
                     None,
                     new_total_extensions,
                     nominal_depth,
                     params,
+                    lmr_table,
+                    use_nnue,
                     lmr_policy,
                 );
             }
@@ -1480,12 +1616,15 @@ fn search_ab(
                     ply + 1,
                     true,
                     time_limit,
+                    node_limit,
                     start_time,
                     false,
                     None,
                     new_total_extensions,
                     nominal_depth,
                     params,
+                    lmr_table,
+                    use_nnue,
                     lmr_policy,
                 );
             }
@@ -1517,10 +1656,7 @@ fn search_ab(
                 state.pv_len[ply_usize] = child_len + 1;
 
                 if score >= beta {
-                    // Stockfish-style linear bonus: 300 * depth - 300
-                    // Better scaling than quadratic — prevents all deep nodes
-                    // from getting the same capped bonus.
-                    let bonus = (300 * depth - 300).clamp(0, 2000);
+                    let bonus = params.history_bonus(depth).clamp(0, 2000);
                     let ci = us.index();
 
                     if !mv.is_capture() {
@@ -1581,22 +1717,19 @@ fn search_ab(
                         }
                     } else {
                         // Capture history update for captures causing cutoff
-                        if let Some((cap_piece, _)) = board.piece_on(mv.to) {
+                        if let Some(cap_idx) = captured_piece_idx {
                             update_history(
-                                &mut state.cap_hist[moved_piece][mv.to.index()][cap_piece.index()],
+                                &mut state.cap_hist[moved_piece][mv.to.index()][cap_idx],
                                 bonus,
                             );
                         }
                         // Capture history malus: penalize captures that were searched before the cutoff capture
-                        for prev_cap in &searched_captures {
-                            let prev_piece_idx = piece_index_on(board, prev_cap.from);
-                            if let Some((prev_cap_piece, _)) = board.piece_on(prev_cap.to) {
-                                update_history(
-                                    &mut state.cap_hist[prev_piece_idx][prev_cap.to.index()]
-                                        [prev_cap_piece.index()],
-                                    -bonus,
-                                );
-                            }
+                        for (prev_piece_idx, prev_to, prev_cap_idx) in &searched_captures {
+                            update_history(
+                                &mut state.cap_hist[*prev_piece_idx][prev_to.index()]
+                                    [*prev_cap_idx],
+                                -bonus,
+                            );
                         }
                     }
                     if excluded_move.is_none() {
@@ -1620,7 +1753,9 @@ fn search_ab(
         }
         // Track searched captures for capture history malus
         if mv.is_capture() {
-            searched_captures.push(mv);
+            if let Some(cap_idx) = captured_piece_idx {
+                searched_captures.push((moved_piece, mv.to, cap_idx));
+            }
         }
     }
 
@@ -1665,11 +1800,20 @@ fn quiescence(
     ply: i32,
     qs_ply: i32,
     time_limit: Option<Duration>,
+    node_limit: Option<u64>,
     start_time: Instant,
+    params: &SearchParams,
+    use_nnue: bool,
 ) -> i32 {
     if state.nodes & 2047 == 0 {
         if stopped.load(Ordering::Relaxed) {
             return 0;
+        }
+        if let Some(nl) = node_limit {
+            if state.nodes >= nl {
+                stopped.store(true, Ordering::Relaxed);
+                return 0;
+            }
         }
         if let Some(tl) = time_limit {
             if start_time.elapsed() >= tl {
@@ -1685,10 +1829,17 @@ fn quiescence(
     // Hard depth limit — prevents stack overflow and infinite check chains.
     // This MUST apply even when in check (check evasions can chain indefinitely).
     if ply >= MAX_PLY as i32 - 1 {
-        return hybrid_eval(board, &mut state.nnue_state);
+        if in_check {
+            return if board.generate_legal_moves().is_empty() {
+                -MATE_SCORE + ply
+            } else {
+                0
+            };
+        }
+        return hybrid_eval(board, &mut state.nnue_state, use_nnue);
     }
-    if qs_ply >= MAX_QS_PLY {
-        return hybrid_eval(board, &mut state.nnue_state);
+    if qs_ply >= params.max_qs_ply && !in_check {
+        return hybrid_eval(board, &mut state.nnue_state, use_nnue);
     }
 
     // TT probe in qsearch (important for stability!)
@@ -1777,7 +1928,10 @@ fn quiescence(
                 ply + 1,
                 qs_ply + 1,
                 time_limit,
+                node_limit,
                 start_time,
+                params,
+                use_nnue,
             );
             board.unmake_move(mv);
             if stopped.load(Ordering::Relaxed) {
@@ -1819,7 +1973,7 @@ fn quiescence(
     }
 
     // ── Fail-soft stand-pat using hybrid eval + correction history ──
-    let raw_eval = hybrid_eval(board, &mut state.nnue_state);
+    let raw_eval = hybrid_eval(board, &mut state.nnue_state, use_nnue);
     let corr = state.correction(board);
     let mut stand_pat = raw_eval + corr;
 
@@ -1849,7 +2003,7 @@ fn quiescence(
     }
 
     // Big delta pruning: if we're hopelessly behind, give up
-    if stand_pat + DELTA_MARGIN + 1100 < alpha {
+    if stand_pat + params.delta_margin + 1100 < alpha {
         return best_score;
     }
     if stand_pat > alpha {
@@ -1876,7 +2030,7 @@ fn quiescence(
         // Per-capture delta pruning (skip for promotions)
         if mv.is_capture() {
             let cv = estimate_capture_value(board, mv);
-            if stand_pat + cv + DELTA_MARGIN < alpha {
+            if stand_pat + cv + params.delta_margin < alpha {
                 continue;
             }
 
@@ -1897,7 +2051,10 @@ fn quiescence(
             ply + 1,
             qs_ply + 1,
             time_limit,
+            node_limit,
             start_time,
+            params,
+            use_nnue,
         );
         board.unmake_move(mv);
 
@@ -1955,6 +2112,21 @@ fn estimate_capture_value(board: &Board, mv: Move) -> i32 {
     } else {
         0
     }
+}
+
+#[inline(always)]
+fn same_move_key(a: Move, b: Move) -> bool {
+    a.from == b.from && a.to == b.to && a.promotion == b.promotion
+}
+
+#[inline(always)]
+fn rfp_tt_guard(tt_hit: bool, tt_was_pv: bool, tt_node_type: NodeType) -> bool {
+    tt_was_pv || (tt_hit && tt_node_type == NodeType::Exact)
+}
+
+#[inline(always)]
+fn nmp_material_ok(board: &Board, us: types::Color) -> bool {
+    board.has_non_pawn_material(us)
 }
 
 /// Order captures by MVV-LVA + capture history (for qsearch).
@@ -2113,6 +2285,9 @@ fn minor_hash(board: &Board) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn setup() {
         types::init();
@@ -2207,6 +2382,52 @@ mod tests {
                 let result = engine.search_time(&mut board, Duration::from_millis(100), 64);
                 assert!(result.nodes > 0);
                 assert!(result.elapsed <= Duration::from_millis(500));
+            })
+            .expect("Failed to spawn test thread");
+        handle.join().expect("Test thread panicked");
+    }
+
+    #[test]
+    fn test_hard_time_mode_not_less_work_than_soft_time() {
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                setup();
+                let mut soft_board = Board::new();
+                let mut hard_board = Board::new();
+                let mut engine = SearchEngine::new(8, 1);
+                let soft = engine.search_time(&mut soft_board, Duration::from_millis(200), 64);
+                let hard = engine.search_time_hard(&mut hard_board, Duration::from_millis(200), 64);
+                assert!(
+                    hard.nodes >= soft.nodes || hard.elapsed >= soft.elapsed,
+                    "hard mode should not do less work: soft nodes={} elapsed={:?}, hard nodes={} elapsed={:?}",
+                    soft.nodes,
+                    soft.elapsed,
+                    hard.nodes,
+                    hard.elapsed
+                );
+            })
+            .expect("Failed to spawn test thread");
+        handle.join().expect("Test thread panicked");
+    }
+
+    #[test]
+    fn test_search_nodes_stops_near_limit() {
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                setup();
+                let mut board = Board::new();
+                let mut engine = SearchEngine::new(8, 4);
+                let limit = 10_000u64;
+                let result = engine.search_nodes(&mut board, limit, 64);
+                assert!(result.nodes > 0);
+                assert!(
+                    result.nodes <= limit + 4096,
+                    "nodes {} exceeded expected cap {}",
+                    result.nodes,
+                    limit + 4096
+                );
             })
             .expect("Failed to spawn test thread");
         handle.join().expect("Test thread panicked");
@@ -2370,5 +2591,128 @@ mod tests {
         let stored_neg = score_to_tt(mated_score, ply);
         let restored_neg = score_from_tt(stored_neg, ply);
         assert_eq!(restored_neg, mated_score);
+    }
+
+    #[test]
+    fn test_same_move_key_checks_promotion_piece() {
+        let q = Move::promotion(types::Square::A7, types::Square::A8, Piece::Queen);
+        let n = Move::promotion(types::Square::A7, types::Square::A8, Piece::Knight);
+        assert!(!same_move_key(q, n));
+        assert!(same_move_key(q, q));
+    }
+
+    #[test]
+    fn test_rfp_tt_guard_needs_tt_hit_for_exact_bound() {
+        assert!(!rfp_tt_guard(false, false, NodeType::Exact));
+        assert!(rfp_tt_guard(true, false, NodeType::Exact));
+        assert!(rfp_tt_guard(false, true, NodeType::UpperBound));
+    }
+
+    #[test]
+    fn test_nmp_material_ok_requires_non_pawn_material() {
+        setup();
+        let start = Board::new();
+        assert!(nmp_material_ok(&start, types::Color::White));
+        assert!(nmp_material_ok(&start, types::Color::Black));
+
+        let kp_only = Board::from_fen("8/8/4k3/8/8/8/4p3/4K3 w - - 0 1").unwrap();
+        assert!(!nmp_material_ok(&kp_only, types::Color::White));
+        assert!(!nmp_material_ok(&kp_only, types::Color::Black));
+    }
+
+    #[test]
+    fn test_qsearch_in_check_at_qs_cap_still_reports_mate() {
+        setup();
+        let mut board = Board::from_fen("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1").unwrap();
+        let tt = TranspositionTable::new(1);
+        let stopped = AtomicBool::new(false);
+        let mut state = ThreadState::new(Arc::new(ActiveNetwork::Embedded));
+        let params = SearchParams::default();
+        let score = quiescence(
+            &mut board,
+            &tt,
+            &stopped,
+            &mut state,
+            -INF,
+            INF,
+            0,
+            params.max_qs_ply,
+            None,
+            None,
+            Instant::now(),
+            &params,
+            true,
+        );
+        assert_eq!(score, -MATE_SCORE);
+    }
+
+    #[test]
+    fn test_set_nnue_network_updates_engine_info() {
+        let mut engine = SearchEngine::new(1, 1);
+        assert_eq!(engine.nnue_preset_hint(), "akimbo");
+
+        if !eval::nnue::enabled_network_formats().contains(&eval::nnue::NetworkFormat::Akimbo) {
+            return;
+        }
+
+        let net_path = format!(
+            "{}/../kishmat-eval/resources/net.bin",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let loaded = eval::nnue::load_network(Path::new(&net_path)).expect("load net.bin");
+        engine.set_nnue_network(loaded);
+        assert_eq!(engine.nnue_info().format, eval::nnue::NetworkFormat::Akimbo);
+    }
+
+    #[test]
+    fn test_set_params_rebuilds_lmr_table() {
+        let mut engine = SearchEngine::new(1, 1);
+        let before = engine.lmr_reduction_for(24, 24);
+        let mut tuned = engine.params.clone();
+        tuned.lmr_divisor = 1.25;
+        engine.set_params(tuned);
+        let after = engine.lmr_reduction_for(24, 24);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn test_set_use_nnue_toggles_engine_mode() {
+        let mut engine = SearchEngine::new(1, 1);
+        assert!(engine.use_nnue());
+        engine.set_use_nnue(false);
+        assert!(!engine.use_nnue());
+    }
+
+    #[test]
+    fn test_captured_piece_index_handles_en_passant() {
+        setup();
+        let mut board = Board::from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1").unwrap();
+        let ep = board
+            .generate_legal_moves()
+            .iter()
+            .find(|m| m.to_uci() == "e5d6")
+            .copied()
+            .expect("en passant move must be legal");
+        assert_eq!(captured_piece_index(&board, ep), Some(Piece::Pawn.index()));
+    }
+
+    #[test]
+    fn test_correction_history_is_side_to_move_scoped() {
+        setup();
+        let mut state = ThreadState::new(Arc::new(ActiveNetwork::Embedded));
+        let white = Board::new();
+        let black =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").unwrap();
+
+        assert_eq!(state.correction(&white), 0);
+        assert_eq!(state.correction(&black), 0);
+
+        state.update_correction(&white, 12, 180, 40);
+        assert_ne!(state.correction(&white), 0);
+        assert_eq!(
+            state.correction(&black),
+            0,
+            "white correction updates must not leak into black side-to-move bucket"
+        );
     }
 }

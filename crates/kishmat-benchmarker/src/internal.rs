@@ -3,8 +3,10 @@
 //! Uses the `SearchEngine` from `kishmat-search` directly, with
 //! shared TT and Lazy SMP threads. This is the "dog-fooding" benchmark.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use eval::nnue::load_network;
 use search::engine::SearchEngine;
 use types::Board;
 
@@ -18,6 +20,10 @@ pub struct InternalBenchConfig {
     pub hash_mb: usize,
     pub time_per_position: Duration,
     pub suite_name: String,
+    /// Runtime NNUE preset (`auto`, `akimbo`, `stockfish`).
+    pub eval_preset: String,
+    /// Optional runtime network file path.
+    pub eval_file: Option<PathBuf>,
 }
 
 impl Default for InternalBenchConfig {
@@ -30,6 +36,8 @@ impl Default for InternalBenchConfig {
             hash_mb: 128,
             time_per_position: Duration::from_secs(120),
             suite_name: "Bratko-Kopec".to_string(),
+            eval_preset: "auto".to_string(),
+            eval_file: None,
         }
     }
 }
@@ -47,6 +55,25 @@ pub fn run_internal_bench(
     on_progress: Option<ProgressCallback>,
 ) -> BenchSummary {
     let mut engine = SearchEngine::new(config.hash_mb, config.threads);
+    if let Some(path) = &config.eval_file {
+        match load_network(path) {
+            Ok(network) => {
+                engine.set_nnue_network(network);
+            }
+            Err(e) => {
+                eprintln!(
+                    "info string EvalFile load failed for '{}': {e} (using embedded net)",
+                    path.display()
+                );
+            }
+        }
+    }
+    let preset = match config.eval_preset.as_str() {
+        "akimbo" => "akimbo",
+        "stockfish" => "stockfish",
+        _ => engine.nnue_preset_hint(),
+    };
+    engine.set_params_for_preset(preset);
 
     let mut results = Vec::with_capacity(positions.len());
 
@@ -64,7 +91,7 @@ pub fn run_internal_bench(
         engine.clear();
 
         let start = Instant::now();
-        let result = engine.search_time(&mut board, config.time_per_position, config.depth);
+        let result = engine.search_time_hard(&mut board, config.time_per_position, config.depth);
         let elapsed = start.elapsed();
 
         let found_move = result.best_move.to_uci();
@@ -135,9 +162,27 @@ mod tests {
             hash_mb: 4,
             time_per_position: Duration::from_secs(5),
             suite_name: "Test".into(),
+            eval_preset: "auto".into(),
+            eval_file: None,
         };
         let summary = run_internal_bench(&positions, &config, None);
         assert_eq!(summary.total, 1);
         assert!(summary.total_nodes > 0);
+    }
+
+    #[test]
+    fn test_internal_bench_invalid_eval_file_falls_back_to_embedded() {
+        let positions = vec![bk_suite()[0].clone()];
+        let config = InternalBenchConfig {
+            depth: 3,
+            threads: 1,
+            hash_mb: 4,
+            time_per_position: Duration::from_secs(2),
+            suite_name: "Test".into(),
+            eval_preset: "auto".into(),
+            eval_file: Some(PathBuf::from("/nonexistent/kishmat/net.bin")),
+        };
+        let summary = run_internal_bench(&positions, &config, None);
+        assert_eq!(summary.total, 1);
     }
 }
