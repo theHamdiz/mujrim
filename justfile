@@ -164,6 +164,18 @@ nets:
 net-akimbo:
     cargo run --release -p kishmat-tooling -- nnue engine akimbo --dir "{{nets_dir}}"
 
+# Download latest Stockfish NNUE networks (big + small)
+net-stockfish:
+    cargo run --release -p kishmat-tooling -- nnue engine stockfish --dir "{{nets_dir}}"
+
+# Download latest Viridithas NNUE network
+net-viridithas:
+    cargo run --release -p kishmat-tooling -- nnue engine viridithas --dir "{{nets_dir}}"
+
+# Download latest Alexandria NNUE network
+net-alexandria:
+    cargo run --release -p kishmat-tooling -- nnue engine alexandria --dir "{{nets_dir}}"
+
 # Show all downloaded NNUE networks
 net-status:
     cargo run --release -p kishmat-tooling -- nnue status --dir "{{nets_dir}}"

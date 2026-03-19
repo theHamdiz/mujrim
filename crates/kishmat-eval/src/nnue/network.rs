@@ -80,7 +80,7 @@ pub struct Network {
 /// Embedded trained network weights (Akimbo-compatible).
 /// This is a 6.0 MB binary file loaded at compile time.
 static NNUE: Network =
-    unsafe { std::mem::transmute(*include_bytes!(concat!("../../resources/net.bin"))) };
+    unsafe { std::mem::transmute(*include_bytes!(concat!("../../resources/ak_default.bin"))) };
 
 // ═══════════════════════════════════════════════════════════════════
 // Public API
@@ -157,12 +157,12 @@ mod tests {
     #[test]
     fn test_network_size() {
         let expected = std::mem::size_of::<Network>();
-        let actual = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/net.bin"))
+        let actual = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ak_default.bin"))
             .unwrap()
             .len();
         assert_eq!(
             expected, actual,
-            "Network struct size ({expected}) != net.bin size ({actual})"
+            "Network struct size ({expected}) != ak_default.bin size ({actual})"
         );
     }
 

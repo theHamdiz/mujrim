@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use eval::nnue::load_network;
+use eval::nnue::{NnueNetworkSource, load_network};
 use kishmat_protocols::ProtocolKind;
 
 use kishmat_benchmarker::{
@@ -430,16 +430,23 @@ fn measure_nps(
 
     let mut engine = SearchEngine::new(hash_mb, threads);
     if let Some(path) = eval_file {
+        // Explicit --eval-file: load that specific file.
         if let Ok(network) = load_network(path) {
             engine.set_nnue_network(network);
         }
+    } else {
+        // No --eval-file: auto-detect the strongest available net.
+        let nnue_dir = std::path::Path::new("nnue");
+        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
+        if let Some(net) = auto_net {
+            eprintln!("{msg}");
+            engine.set_nnue_network(net);
+        }
     }
-    let preset = match eval_preset {
-        "akimbo" => "akimbo",
-        "stockfish" => "stockfish",
-        _ => engine.nnue_preset_hint(),
-    };
-    engine.set_params_for_preset(preset);
+    // If the user explicitly requested a different preset, override the auto-applied one.
+    if eval_preset != "auto" {
+        engine.set_params_for_preset(eval_preset);
+    }
     let mut board = Board::new();
     let result = engine.search_time(&mut board, Duration::from_secs(5), 64);
     if result.elapsed.as_millis() > 0 {

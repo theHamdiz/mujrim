@@ -56,6 +56,7 @@ pub fn run_internal_bench(
 ) -> BenchSummary {
     let mut engine = SearchEngine::new(config.hash_mb, config.threads);
     if let Some(path) = &config.eval_file {
+        // Explicit --eval-file: load that specific network.
         match load_network(path) {
             Ok(network) => {
                 engine.set_nnue_network(network);
@@ -67,13 +68,19 @@ pub fn run_internal_bench(
                 );
             }
         }
+    } else {
+        // No --eval-file: auto-detect the strongest available net.
+        let nnue_dir = std::path::Path::new("nnue");
+        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
+        if let Some(net) = auto_net {
+            eprintln!("{msg}");
+            engine.set_nnue_network(net);
+        }
     }
-    let preset = match config.eval_preset.as_str() {
-        "akimbo" => "akimbo",
-        "stockfish" => "stockfish",
-        _ => engine.nnue_preset_hint(),
-    };
-    engine.set_params_for_preset(preset);
+    // If the user explicitly requested a preset, override the auto-applied one.
+    if config.eval_preset != "auto" {
+        engine.set_params_for_preset(&config.eval_preset);
+    }
 
     let mut results = Vec::with_capacity(positions.len());
 

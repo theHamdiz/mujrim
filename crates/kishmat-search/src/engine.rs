@@ -403,8 +403,14 @@ impl SearchEngine {
     }
 
     /// Set the active NNUE network from a concrete adapter handle.
+    ///
+    /// Automatically applies the network's recommended search parameters
+    /// via `preset_hint()`. This means callers do NOT need to manually call
+    /// `set_params_for_preset()` after this method.
     pub fn set_nnue_network(&mut self, network: ActiveNetwork) {
+        let preset = network.preset_hint();
         self.nnue_network = Arc::new(network);
+        self.set_params_for_preset(preset);
     }
 
     /// Enable or disable NNUE evaluation (fallback to classical eval when disabled).
@@ -2656,12 +2662,15 @@ mod tests {
         }
 
         let net_path = format!(
-            "{}/../kishmat-eval/resources/net.bin",
+            "{}/../kishmat-eval/resources/ak_default.bin",
             env!("CARGO_MANIFEST_DIR")
         );
-        let loaded = eval::nnue::load_network(Path::new(&net_path)).expect("load net.bin");
+        let loaded = eval::nnue::load_network(Path::new(&net_path)).expect("load ak_default.bin");
         engine.set_nnue_network(loaded);
         assert_eq!(engine.nnue_info().format, eval::nnue::NetworkFormat::Akimbo);
+        // Verify auto-preset was applied
+        assert_eq!(engine.nnue_preset_hint(), "akimbo");
+        assert_eq!(engine.params.nmp_base, 5); // Akimbo NMP base
     }
 
     #[test]

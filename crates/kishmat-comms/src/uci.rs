@@ -115,11 +115,26 @@ impl UciHandler {
         let has_book = book.is_some();
         #[cfg(not(feature = "book"))]
         let has_book = false;
-        let eval_network: Arc<dyn NnueNetworkSource + Send + Sync> =
-            Arc::new(ActiveNetwork::Embedded);
+
+        // Try auto-detecting a single available network file.
+        // Check `nnue/` (updater download dir) and `crates/kishmat-eval/resources/`.
+        let nnue_dir = std::path::Path::new("nnue");
+        let (auto_net, auto_msg) = eval::nnue::auto_detect_network(nnue_dir);
+
+        let eval_network: Arc<dyn NnueNetworkSource + Send + Sync> = if let Some(net) = auto_net {
+            eprintln!("info string {auto_msg}");
+            Arc::new(net)
+        } else {
+            if !auto_msg.contains("No network files found") {
+                eprintln!("info string {auto_msg}");
+            }
+            Arc::new(ActiveNetwork::Embedded)
+        };
+
+        let preset = eval_network.preset_hint();
         let mut engine = SearchEngine::new(DEFAULT_HASH_MB, default_threads());
         engine.set_nnue_network_source(Arc::clone(&eval_network));
-        engine.set_params_for_preset("akimbo");
+        engine.set_params_for_preset(preset);
         engine.set_use_nnue(true);
         Self {
             board: Board::new(),
@@ -1113,7 +1128,7 @@ mod tests {
     fn test_setoption_evalfile_invalid_keeps_current_network() {
         let mut handler = UciHandler::new();
         let before = handler.eval_network.info().name;
-        handler.handle_setoption(&["name", "EvalFile", "value", "/nonexistent/kishmat/net.bin"]);
+        handler.handle_setoption(&["name", "EvalFile", "value", "/nonexistent/kishmat/ak_default.bin"]);
         assert_eq!(handler.eval_network.info().name, before);
         assert!(handler.eval_file.is_none());
     }
@@ -1125,7 +1140,7 @@ mod tests {
             return;
         }
         let net_path = format!(
-            "{}/../kishmat-eval/resources/net.bin",
+            "{}/../kishmat-eval/resources/ak_default.bin",
             env!("CARGO_MANIFEST_DIR")
         );
         let args = vec!["name", "EvalFile", "value", net_path.as_str()];

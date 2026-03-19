@@ -1,0 +1,42 @@
+{
+  "sf_big": {
+    "id": "sf_big",
+    "url": "https://tests.stockfishchess.org/api/nn/nn-c288c895ea92.nnue",
+    "upstream_name": "nn-c288c895ea92.nnue",
+    "filename": "sf_big.nnue",
+    "downloaded_at": "epoch:1773936243",
+    "file_size": 108919594
+  },
+  "alex_default": {
+    "id": "alex_default",
+    "url": "https://github.com/PGG106/Alexandria-networks/releases/latest/download/nn.net",
+    "upstream_name": "nn.net",
+    "filename": "alex_default.net",
+    "downloaded_at": "epoch:1773936249",
+    "file_size": 37983776
+  },
+  "ak_default": {
+    "id": "ak_default",
+    "url": "https://github.com/jw1912/akimbo/raw/main/resources/net.bin",
+    "upstream_name": "net.bin",
+    "filename": "ak_default.bin",
+    "downloaded_at": "epoch:1773936233",
+    "file_size": 6297664
+  },
+  "sf_sm": {
+    "id": "sf_sm",
+    "url": "https://tests.stockfishchess.org/api/nn/nn-37f18f62d772.nnue",
+    "upstream_name": "nn-37f18f62d772.nnue",
+    "filename": "sf_sm.nnue",
+    "downloaded_at": "epoch:1773936245",
+    "file_size": 3519630
+  },
+  "viri_default": {
+    "id": "viri_default",
+    "url": "https://github.com/cosmobobak/viridithas-networks/releases/download/v104.1/velarised-2-b800.nnue.zst",
+    "upstream_name": "velarised-2-b800.nnue.zst",
+    "filename": "viri_default.nnue.zst",
+    "downloaded_at": "epoch:1773937035",
+    "file_size": 29564785
+  }
+}

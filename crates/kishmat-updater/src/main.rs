@@ -250,7 +250,7 @@ fn cmd_nnue(network: &str, dir: &str) {
                 println!("    Path:       {}", summary.target_dir.display());
                 println!();
                 println!(
-                    "  To use: setoption name EvalFile value {}/akimbo-1024.bin",
+                    "  To use: setoption name EvalFile value {}/ak_default.bin",
                     dest.display()
                 );
             }

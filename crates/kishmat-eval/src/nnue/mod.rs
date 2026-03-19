@@ -30,7 +30,8 @@ pub mod stockfish_format;
 
 pub use accumulator::NNUEState;
 pub use adapter::{
-    ActiveNetwork, NetworkFormat, NnueNetworkInfo, NnueNetworkSource, enabled_network_formats,
-    load_network,
+    ActiveNetwork, NetworkFormat, NnueNetworkInfo, NnueNetworkSource, auto_detect_network,
+    enabled_network_formats, load_network, load_network_str, network_strength,
+    scan_network_files,
 };
 pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, forward_with_network, net};
