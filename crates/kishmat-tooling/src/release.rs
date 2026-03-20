@@ -110,16 +110,10 @@ impl ToolAction for ReleaseAction {
                 println!("║                  Summary                    ║");
                 println!("╠══════════════════════════════════════════════╣");
                 if !succeeded.is_empty() {
-                    println!(
-                        "║  ✅ Built:   {:32} ║",
-                        succeeded.join(", ")
-                    );
+                    println!("║  ✅ Built:   {:32} ║", succeeded.join(", "));
                 }
                 if !skipped.is_empty() {
-                    println!(
-                        "║  ⚠️  Skipped: {:32} ║",
-                        skipped.join(", ")
-                    );
+                    println!("║  ⚠️  Skipped: {:32} ║", skipped.join(", "));
                 }
                 println!("╚══════════════════════════════════════════════╝");
                 println!();
@@ -203,7 +197,11 @@ fn build_darwin() -> Result<(), String> {
         }
     }
 
-    if any_ok { Ok(()) } else { Err("all macOS builds failed".into()) }
+    if any_ok {
+        Ok(())
+    } else {
+        Err("all macOS builds failed".into())
+    }
 }
 
 fn build_linux() -> Result<(), String> {
@@ -228,8 +226,11 @@ fn build_linux() -> Result<(), String> {
         let is_native = cfg!(target_arch = "x86_64") && cfg!(target_os = "linux");
         let args = if is_native {
             vec![
-                "build".into(), "--release".into(), "--workspace".into(),
-                "--target".into(), "x86_64-unknown-linux-gnu".into(),
+                "build".into(),
+                "--release".into(),
+                "--workspace".into(),
+                "--target".into(),
+                "x86_64-unknown-linux-gnu".into(),
             ]
         } else {
             cross_cargo_args("x86_64-unknown-linux-gnu", CROSS_EXCLUDE_LINUX)
@@ -277,7 +278,11 @@ fn build_linux() -> Result<(), String> {
         }
     }
 
-    if any_ok { Ok(()) } else { Err("all Linux builds failed".into()) }
+    if any_ok {
+        Ok(())
+    } else {
+        Err("all Linux builds failed".into())
+    }
 }
 
 fn build_windows() -> Result<(), String> {
@@ -371,16 +376,17 @@ fn ensure_system_tools(tools: &[(&str, &str, &str)], description: &str) {
         println!("  📥 Installing {description} ({})...", pkgs.join(", "));
         let mut args: Vec<&str> = vec!["-S", "--noconfirm", "--needed"];
         args.extend(pkgs.iter());
-        if let Err(e) = run("sudo", &{
-            let mut full = vec!["pacman"];
-            full.extend(args);
-            full
-        }, &[]) {
+        if let Err(e) = run(
+            "sudo",
+            &{
+                let mut full = vec!["pacman"];
+                full.extend(args);
+                full
+            },
+            &[],
+        ) {
             eprintln!("    ⚠️  Auto-install failed: {e}");
-            eprintln!(
-                "    💡 Install manually: sudo pacman -S {}",
-                pkgs.join(" ")
-            );
+            eprintln!("    💡 Install manually: sudo pacman -S {}", pkgs.join(" "));
         }
     } else if has_tool("apt-get") {
         let apt_pkgs: Vec<&str> = tools
@@ -409,7 +415,11 @@ fn ensure_system_tools(tools: &[(&str, &str, &str)], description: &str) {
         eprintln!("  ⚠️  Cannot auto-install {description} — no supported package manager found.");
         eprintln!(
             "    💡 Install these tools manually: {}",
-            tools.iter().map(|(b, _, _)| *b).collect::<Vec<_>>().join(", ")
+            tools
+                .iter()
+                .map(|(b, _, _)| *b)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 }
@@ -469,10 +479,7 @@ fn print_dist_tree() {
             };
             if path.is_dir() {
                 // Check if directory has any files
-                let file_count = fs::read_dir(&path)
-                    .into_iter()
-                    .flatten()
-                    .count();
+                let file_count = fs::read_dir(&path).into_iter().flatten().count();
                 if file_count == 0 {
                     println!("{prefix}{connector}{}/ (empty)", name.to_string_lossy());
                 } else {
@@ -483,11 +490,7 @@ fn print_dist_tree() {
                 let size = fs::metadata(&path)
                     .map(|m| human_size(m.len()))
                     .unwrap_or_default();
-                println!(
-                    "{prefix}{connector}{} {}",
-                    name.to_string_lossy(),
-                    size
-                );
+                println!("{prefix}{connector}{} {}", name.to_string_lossy(), size);
             }
         }
     }
@@ -554,7 +557,11 @@ mod tests {
     fn bins_are_sorted() {
         let mut sorted = BINS.to_vec();
         sorted.sort();
-        assert_eq!(BINS, sorted.as_slice(), "BINS should be sorted alphabetically");
+        assert_eq!(
+            BINS,
+            sorted.as_slice(),
+            "BINS should be sorted alphabetically"
+        );
     }
 
     #[test]
@@ -565,8 +572,8 @@ mod tests {
     }
 
     #[test]
-    fn cross_exclude_matches_host_only() {
-        for pkg in CROSS_EXCLUDE {
+    fn cross_excludes_are_non_empty() {
+        for pkg in CROSS_EXCLUDE_LINUX.iter().chain(CROSS_EXCLUDE_OTHER.iter()) {
             assert!(!pkg.is_empty());
         }
     }
@@ -584,7 +591,7 @@ mod tests {
     #[test]
     fn human_size_formats() {
         assert_eq!(human_size(500), "(500 B)");
-        assert_eq!(human_size(12_000), "(12000 KB)");
+        assert_eq!(human_size(12_000), "(12 KB)");
         assert!(human_size(17_000_000).contains("MB"));
     }
 

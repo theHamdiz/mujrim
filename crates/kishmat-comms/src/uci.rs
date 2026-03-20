@@ -7,16 +7,16 @@
 //! - setoption support (Hash, MoveOverhead)
 //! - Advanced time management
 
-use eval::nnue::{enabled_network_formats, load_network, ActiveNetwork, NnueNetworkSource};
+use eval::nnue::{ActiveNetwork, NnueNetworkSource, enabled_network_formats, load_network};
+use search::SearchEngine;
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
 use search::engine::{SearchLimits, SearchResult};
-use search::SearchEngine;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use types::chess_move::NULL_MOVE;
@@ -1128,7 +1128,12 @@ mod tests {
     fn test_setoption_evalfile_invalid_keeps_current_network() {
         let mut handler = UciHandler::new();
         let before = handler.eval_network.info().name;
-        handler.handle_setoption(&["name", "EvalFile", "value", "/nonexistent/kishmat/ak_default.bin"]);
+        handler.handle_setoption(&[
+            "name",
+            "EvalFile",
+            "value",
+            "/nonexistent/kishmat/ak_default.bin",
+        ]);
         assert_eq!(handler.eval_network.info().name, before);
         assert!(handler.eval_file.is_none());
     }

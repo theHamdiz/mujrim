@@ -27,14 +27,18 @@ pub struct SearchParams {
     pub rfp_improving_bonus: i32,
 
     // ── Futility pruning (move loop) ───────────────────────────────
-    /// Futility margin per depth: `futility_mul * depth - futility_improving_bonus`.
+    /// Futility base constant.
+    pub futility_base: i32,
+    /// Futility margin per depth²: `futility_base + futility_mul * depth²`.
     pub futility_mul: i32,
-    /// Futility bonus when improving.
+    /// Futility bonus when improving (not used in quadratic formula).
     pub futility_improving_bonus: i32,
     /// Maximum depth to apply futility pruning.
     pub futility_depth_limit: i32,
 
     // ── Null-move pruning ──────────────────────────────────────────
+    /// Minimum depth to attempt null-move pruning (Akimbo=2, Stockfish=3).
+    pub nmp_depth_min: i32,
     /// NMP base reduction: `nmp_base + depth / nmp_depth_div`.
     pub nmp_base: i32,
     /// NMP depth divisor.
@@ -96,11 +100,19 @@ pub struct SearchParams {
     /// Maximum QS depth to prevent explosion.
     pub max_qs_ply: i32,
 
-    // ── History bonus ──────────────────────────────────────────────
-    /// History bonus formula: `bonus_mul * depth - bonus_sub`.
+    // ── History bonus / malus ──────────────────────────────────────
+    /// History bonus formula: `min(bonus_max, bonus_mul * depth - bonus_sub)`.
     pub history_bonus_mul: i32,
     /// History bonus subtracted constant.
     pub history_bonus_sub: i32,
+    /// Maximum history bonus.
+    pub history_bonus_max: i32,
+    /// History malus formula: `min(malus_max, malus_mul * depth - malus_sub)`.
+    pub history_malus_mul: i32,
+    /// History malus subtracted constant.
+    pub history_malus_sub: i32,
+    /// Maximum history malus.
+    pub history_malus_max: i32,
 
     // ── Correction history ─────────────────────────────────────────
     /// LMR correction multiplier.
@@ -121,20 +133,22 @@ impl SearchParams {
             rfp_mul: 77,
             rfp_improving_bonus: 74,
 
-            // Futility pruning (move loop)
-            futility_mul: 77,
-            futility_improving_bonus: 46,
-            futility_depth_limit: 8,
+            // Futility pruning (move loop) — quadratic (Akimbo: fp_base + fp_margin * d²)
+            futility_base: 188,
+            futility_mul: 35,
+            futility_improving_bonus: 0,
+            futility_depth_limit: 6,
 
             // Null-move pruning
+            nmp_depth_min: 2,
             nmp_base: 5,
             nmp_depth_div: 5,
-            nmp_eval_div: 200,
-            nmp_eval_max: 3,
+            nmp_eval_div: 198,
+            nmp_eval_max: 6,
 
             // LMR
-            lmr_base: 0.77,
-            lmr_divisor: 2.36,
+            lmr_base: 0.48,
+            lmr_divisor: 2.48,
             lmr_cut_node_bonus: 2,
 
             // LMP
@@ -142,13 +156,13 @@ impl SearchParams {
 
             // History pruning
             hist_prune_margin: -1682,
-            hist_prune_depth_limit: 8,
-            hist_lmr_div: 4096,
+            hist_prune_depth_limit: 6,
+            hist_lmr_div: 8192,
 
             // SEE pruning
-            see_capture_margin: -90,
-            see_quiet_margin: -60,
-            see_prune_depth_limit: 9,
+            see_capture_margin: -148,
+            see_quiet_margin: -64,
+            see_prune_depth_limit: 7,
 
             // Singular extensions
             se_margin_mul: 1,
@@ -160,15 +174,19 @@ impl SearchParams {
             nmp_verif_frac: 12,
 
             // Aspiration
-            aspiration_window: 10,
+            aspiration_window: 16,
 
             // Quiescence
             delta_margin: 400,
             max_qs_ply: 8,
 
-            // History bonus
-            history_bonus_mul: 300,
-            history_bonus_sub: 300,
+            // History bonus / malus — Akimbo tuned values
+            history_bonus_mul: 375,
+            history_bonus_sub: 141,
+            history_bonus_max: 1827,
+            history_malus_mul: 396,
+            history_malus_sub: 8,
+            history_malus_max: 1192,
 
             // Correction history
             lmr_corr_mul: 448,
@@ -189,12 +207,14 @@ impl SearchParams {
             rfp_mul: 77,
             rfp_improving_bonus: 74,
 
-            // Futility — SF applies at depth < 16 (much deeper than Akimbo's 8)
+            // Futility — SF applies at depth < 16 (much deeper than Akimbo's 6)
+            futility_base: 188,
             futility_mul: 77,
             futility_improving_bonus: 46,
             futility_depth_limit: 13,
 
             // Null-move pruning — SF: R = 7 + depth/3
+            nmp_depth_min: 3,
             nmp_base: 7,
             nmp_depth_div: 3,
             nmp_eval_div: 200,
@@ -228,8 +248,8 @@ impl SearchParams {
             nmp_min_verif_depth: 17,
             nmp_verif_frac: 12,
 
-            // Aspiration — same as Akimbo
-            aspiration_window: 10,
+            // Aspiration
+            aspiration_window: 16,
 
             // Quiescence
             delta_margin: 400,
@@ -238,6 +258,10 @@ impl SearchParams {
             // History bonus — SF: 121*depth - 75 (capped at 932)
             history_bonus_mul: 121,
             history_bonus_sub: 75,
+            history_bonus_max: 932,
+            history_malus_mul: 121,
+            history_malus_sub: 75,
+            history_malus_max: 932,
 
             // Correction history
             lmr_corr_mul: 448,
@@ -274,15 +298,10 @@ impl SearchParams {
             }
     }
 
-    /// Futility margin: `mul * depth - improving_bonus`.
+    /// Futility margin: `base + mul * depth²`.
     #[inline(always)]
-    pub fn futility_margin(&self, depth: i32, improving: bool) -> i32 {
-        self.futility_mul * depth
-            - if improving {
-                self.futility_improving_bonus
-            } else {
-                0
-            }
+    pub fn futility_margin(&self, depth: i32, _improving: bool) -> i32 {
+        self.futility_base + self.futility_mul * depth * depth
     }
 
     /// Singular extension margin: `mul * depth`.
@@ -305,10 +324,18 @@ impl SearchParams {
             + ((eval - beta) / self.nmp_eval_div).min(self.nmp_eval_max)
     }
 
-    /// History bonus: `mul * depth - sub`.
+    /// History bonus: `min(bonus_max, mul * depth - sub)`.
     #[inline(always)]
     pub fn history_bonus(&self, depth: i32) -> i32 {
-        self.history_bonus_mul * depth - self.history_bonus_sub
+        self.history_bonus_max
+            .min(self.history_bonus_mul * depth - self.history_bonus_sub)
+    }
+
+    /// History malus: `min(malus_max, malus_mul * depth - malus_sub)`.
+    #[inline(always)]
+    pub fn history_malus(&self, depth: i32) -> i32 {
+        self.history_malus_max
+            .min(self.history_malus_mul * depth - self.history_malus_sub)
     }
 
     /// Build the LMR reduction table from `lmr_base` and `lmr_divisor`.
@@ -372,9 +399,9 @@ mod tests {
     fn test_lmr_table() {
         let p = SearchParams::akimbo();
         let table = p.build_lmr_table();
-        // LMR[10][10] = floor(0.77 + ln(10)*ln(10)/2.36) = floor(0.77 + 2.25) = 3
-        assert_eq!(table[10][10], 3);
-        // LMR[1][1] = floor(0.77 + 0) = 0
+        // LMR[10][10] = floor(0.48 + ln(10)*ln(10)/2.48) = floor(0.48 + 2.14) = 2
+        assert_eq!(table[10][10], 2);
+        // LMR[1][1] = floor(0.48 + 0) = 0
         assert_eq!(table[1][1], 0);
     }
 }

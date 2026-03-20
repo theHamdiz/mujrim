@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use eval::nnue::{NnueNetworkSource, load_network};
+use eval::nnue::load_network;
 use kishmat_protocols::ProtocolKind;
 
 use kishmat_benchmarker::{
@@ -53,7 +53,7 @@ enum Commands {
     /// Run internal BK benchmark using KishMat's search engine.
     Bench {
         /// Search depth.
-        #[arg(short, long, default_value_t = 16)]
+        #[arg(short, long, default_value_t = 20)]
         depth: i32,
 
         /// Number of search threads.

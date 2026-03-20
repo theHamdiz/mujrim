@@ -2936,7 +2936,12 @@ name = "kishmat-tooling"
 version = "2.0.0"
 dependencies = [
  "clap",
+ "dirs",
+ "kishmat-search",
+ "kishmat-types",
  "kishmat-updater",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,4 +1,6 @@
 mod action;
+mod agent;
+mod agent_tools;
 mod build_variant;
 mod install;
 mod nnue;
@@ -9,6 +11,7 @@ mod uninstall;
 use clap::{Parser, Subcommand};
 
 use crate::action::ToolAction;
+use crate::agent::{AgentAction, AgentCommand};
 use crate::build_variant::{BuildVariant, BuildVariantAction};
 use crate::install::InstallAction;
 use crate::nnue::{NnueAction, NnueCommand};
@@ -43,6 +46,11 @@ enum Command {
         #[command(subcommand)]
         command: NnueCommand,
     },
+    /// Structured tools for AI agents.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Install built binaries locally.
     Install,
     /// Remove local KishMat installation artifacts.
@@ -56,6 +64,7 @@ fn main() {
         Command::Release { target } => ReleaseAction { target }.run(),
         Command::BuildVariant { variant } => BuildVariantAction { variant }.run(),
         Command::Nnue { command } => NnueAction { command }.run(),
+        Command::Agent { command } => AgentAction { command }.run(),
         Command::Install => InstallAction.run(),
         Command::Uninstall => UninstallAction.run(),
     };

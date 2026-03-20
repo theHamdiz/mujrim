@@ -145,7 +145,10 @@ fn print_status(dir: &Path) {
     }
 
     let usage_mb = disk_usage(dir) as f64 / (1024.0 * 1024.0);
-    println!("\n  Total disk usage: {usage_mb:.1} MB in {}", dir.display());
+    println!(
+        "\n  Total disk usage: {usage_mb:.1} MB in {}",
+        dir.display()
+    );
 }
 
 fn check_updates(dir: &Path) {

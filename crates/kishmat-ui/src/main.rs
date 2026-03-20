@@ -1330,7 +1330,10 @@ impl App {
                 // Also refresh NNUE status
                 let nnue_dir = updater::nnue::default_nnue_path();
                 let installed = updater::nnue::check_installed(&nnue_dir);
-                self.nnue_installed_count = installed.iter().filter(|(_, s)| *s != updater::nnue::NetStatus::Missing).count();
+                self.nnue_installed_count = installed
+                    .iter()
+                    .filter(|(_, s)| *s != updater::nnue::NetStatus::Missing)
+                    .count();
                 if self.nnue_installed_count > 0 {
                     let usage = updater::nnue::disk_usage(&nnue_dir);
                     let mb = usage as f64 / (1024.0 * 1024.0);
@@ -1362,7 +1365,10 @@ impl App {
                 self.nnue_status = result;
                 let nnue_dir = updater::nnue::default_nnue_path();
                 let installed = updater::nnue::check_installed(&nnue_dir);
-                self.nnue_installed_count = installed.iter().filter(|(_, s)| *s != updater::nnue::NetStatus::Missing).count();
+                self.nnue_installed_count = installed
+                    .iter()
+                    .filter(|(_, s)| *s != updater::nnue::NetStatus::Missing)
+                    .count();
                 Task::none()
             }
             Msg::TuneLoad => {

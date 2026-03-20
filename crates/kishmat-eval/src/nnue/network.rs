@@ -157,9 +157,12 @@ mod tests {
     #[test]
     fn test_network_size() {
         let expected = std::mem::size_of::<Network>();
-        let actual = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/ak_default.bin"))
-            .unwrap()
-            .len();
+        let actual = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/resources/ak_default.bin"
+        ))
+        .unwrap()
+        .len();
         assert_eq!(
             expected, actual,
             "Network struct size ({expected}) != ak_default.bin size ({actual})"

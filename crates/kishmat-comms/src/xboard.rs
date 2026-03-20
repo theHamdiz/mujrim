@@ -4,8 +4,8 @@ use search::SearchEngine;
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use types::{Board, Color, Move};

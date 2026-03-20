@@ -265,9 +265,6 @@ mod tests {
             architecture: "768→1024×2→1 SCReLU".into(),
             hidden_size: 1024,
             num_buckets: 4,
-            scale: 400,
-            qa: 255,
-            qb: 64,
             file_size: 6_291_458,
         };
         let display = NnueInfo::from_runtime(info);

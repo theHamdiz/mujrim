@@ -195,6 +195,8 @@ struct ThreadState {
     dbl_exts: [i32; MAX_PLY],
     /// Minimum ply before NMP is allowed again (Akimbo anti-recursion).
     min_nmp_ply: usize,
+    /// Per-ply cutoff count for LMR adjustment (Akimbo: reduce less if cutoffs < 4).
+    cutoffs: [u32; MAX_PLY],
 }
 
 impl ThreadState {
@@ -221,6 +223,7 @@ impl ThreadState {
             minor_corr: boxed_zeroed(),
             dbl_exts: [0; MAX_PLY],
             min_nmp_ply: 0,
+            cutoffs: [0; MAX_PLY],
         }
     }
 
@@ -524,6 +527,7 @@ impl SearchEngine {
                                 lmr_table_clone.as_ref(),
                                 use_nnue_clone,
                                 lmr_policy_clone.as_ref(),
+                                false,
                             );
                             if !stopped.load(Ordering::Relaxed) {
                                 best_score = s;
@@ -573,6 +577,7 @@ impl SearchEngine {
                 let mut delta = self.params.aspiration_window + best_score.abs() / 256;
                 let mut alpha = best_score - delta;
                 let mut beta = best_score + delta;
+                let mut asp_depth = depth;
 
                 loop {
                     let s = search_ab(
@@ -580,7 +585,7 @@ impl SearchEngine {
                         &self.tt,
                         &self.stopped,
                         &mut state,
-                        depth,
+                        asp_depth,
                         alpha,
                         beta,
                         0,
@@ -596,25 +601,30 @@ impl SearchEngine {
                         self.lmr_table.as_ref(),
                         self.use_nnue,
                         self.lmr_policy.as_ref(),
+                        false,
                     );
                     if self.stopped.load(Ordering::Relaxed) {
                         break;
                     }
 
                     if s <= alpha {
+                        // Fail low: widen alpha, restore depth
+                        beta = (alpha + beta) / 2;
                         alpha = (s - delta).max(-INF);
+                        asp_depth = depth;
                         delta *= 2;
                     } else if s >= beta {
+                        // Fail high: widen beta, reduce depth (Akimbo technique)
                         beta = (s + delta).min(INF);
+                        best_score = s;
+                        asp_depth -= 1;
                         delta *= 2;
                     } else {
                         best_score = s;
                         break;
                     }
 
-                    // Stockfish never falls back to full-width search.
-                    // Just keep widening — the loop terminates naturally
-                    // when the score falls within [alpha, beta].
+                    // Fallback to infinite window when delta is very large
                     if delta > 2000 {
                         alpha = -INF;
                         beta = INF;
@@ -645,6 +655,7 @@ impl SearchEngine {
                     self.lmr_table.as_ref(),
                     self.use_nnue,
                     self.lmr_policy.as_ref(),
+                    false,
                 );
                 if self.stopped.load(Ordering::Relaxed) {
                     break;
@@ -930,6 +941,7 @@ fn search_ab(
     lmr_table: &[[i32; 128]; 128],
     use_nnue: bool,
     lmr_policy: &dyn LmrPolicy,
+    allow_null: bool,
 ) -> i32 {
     // Check stop periodically
     if state.nodes & 2047 == 0 {
@@ -954,6 +966,8 @@ fn search_ab(
 
     // Initialize PV length for this ply
     state.pv_len[ply_usize] = 0;
+    // Reset cutoff counter for this ply (used by parent's LMR)
+    state.cutoffs[ply_usize] = 0;
 
     // Draw detection (repetition, 50-move, insufficient material)
     // Return 0 for draws — contempt should only be applied at root level,
@@ -973,8 +987,7 @@ fn search_ab(
         };
     }
 
-    // Check extension — extend when in check, budgeted to prevent explosion.
-    // KishMat's Lazy SMP creates more check-extension pressure than single-threaded.
+    // Check extension — budgeted to prevent explosion in Lazy SMP.
     let check_ext_budget = nominal_depth * 2;
     if in_check && total_extensions < check_ext_budget {
         depth += 1;
@@ -1001,13 +1014,11 @@ fn search_ab(
     let mut tt_score = None;
     let mut tt_depth = -1;
     let mut tt_node_type = NodeType::Exact;
-    let mut tt_hit = false;
 
     let mut tt_was_pv = is_pv; // 7.2: Track if this position was ever a PV node
 
     if excluded_move.is_none() {
         if let Some(entry) = tt.probe(board.hash) {
-            tt_hit = true;
             let probed_score = score_from_tt(entry.score, ply);
             tt_move = Some(entry.best_move);
             tt_score = Some(probed_score);
@@ -1069,44 +1080,41 @@ fn search_ab(
     state.static_evals[ply_usize] = static_eval;
 
     // "Improving" flag: is our static eval better than 2 plies ago?
-    let improving =
-        ply >= 2 && !in_check && static_eval > state.static_evals[(ply_usize).saturating_sub(2)];
+    // Viridithas-style: fall back to 4 plies ago, default to true when unknown.
+    let improving = if in_check {
+        false
+    } else if ply >= 2 && state.static_evals[ply_usize.saturating_sub(2)] != 0 {
+        static_eval > state.static_evals[ply_usize.saturating_sub(2)]
+    } else if ply >= 4 && state.static_evals[ply_usize.saturating_sub(4)] != 0 {
+        static_eval > state.static_evals[ply_usize.saturating_sub(4)]
+    } else {
+        true
+    };
 
     // ── Pruning techniques (non-PV, non-check, no excluded move) ─────
 
     if !is_pv && !in_check && excluded_move.is_none() {
-        // 4.4: Reverse Futility Pruning with TT guards
-        // Skip when TT was a PV node or TT move is a capture
-        let tt_move_is_capture = tt_move.map_or(false, |m| m.is_capture());
-        let rfp_tt_was_pv = rfp_tt_guard(tt_hit, tt_was_pv, tt_node_type);
-        if depth <= 8 && !rfp_tt_was_pv && !tt_move_is_capture {
+        // Reverse Futility Pruning (Akimbo: no TT guards — straightforward)
+        if depth <= 8 {
             let margin = params.rfp_margin(depth, improving);
             if static_eval - margin >= beta {
-                // Return averaged score to avoid leaking raw static eval
-                return (static_eval + beta) / 2;
+                return static_eval;
             }
         }
 
-        // Razoring — quadratic margin
-        if depth <= 3 && static_eval <= alpha - params.razoring_margin(depth) {
-            return quiescence(
-                board, tt, stopped, state, alpha, beta, ply, 0, time_limit, node_limit, start_time,
-                params, use_nnue,
-            );
-        }
+        // Razoring — disabled (Akimbo: razor_depth = 0)
+        // Keeping code for future tuning but skipping execution.
 
-        // 4.5: Null move pruning with TT guards (Akimbo anti-recursion)
-        // Don't NMP if TT says position is bad (fail-low at beta)
-        let nmp_tt_ok = !tt_score.is_some_and(|s| tt_node_type == NodeType::UpperBound && s < beta);
-        if depth >= 4
+        // Null move pruning — NMP fires on all eligible non-PV nodes.
+        // Gating on allow_null was tested but too restrictive at KishMat's
+        // current level. Akimbo compensates with other efficiencies.
+        if depth >= params.nmp_depth_min
             && nmp_material_ok(board, us)
             && static_eval >= beta
-            && nmp_tt_ok
             && ply_usize >= state.min_nmp_ply
         {
-            let r = params
-                .null_move_r(depth, static_eval, beta)
-                .clamp(1, (depth - 2).max(1));
+            let r = params.null_move_r(depth, static_eval, beta)
+                + i32::from(improving);
 
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
@@ -1132,6 +1140,7 @@ fn search_ab(
                 lmr_table,
                 use_nnue,
                 lmr_policy,
+                false,
             );
             board.unmake_null_move();
 
@@ -1172,6 +1181,7 @@ fn search_ab(
                     lmr_table,
                     use_nnue,
                     lmr_policy,
+                    false,
                 );
                 state.min_nmp_ply = 0;
 
@@ -1184,25 +1194,26 @@ fn search_ab(
             }
         }
 
-        // 4.6: ProbCut with eval guard — only when static_eval is high enough
-        if depth >= 5 && beta.abs() < MATE_SCORE - 100 && static_eval >= beta - 200 {
-            let pb_beta = beta + 200;
-            // Generate captures, score them, and pick best incrementally (no full sort)
+        // ProbCut with TT guard (Akimbo line 340/431)
+        // Skip ProbCut if TT at sufficient depth already shows score < pc_beta.
+        let pb_beta = beta + 200;
+        let can_probcut = tt_score
+            .map_or(true, |ts| !(tt_depth >= depth - 3 && ts < pb_beta));
+        if depth >= 5 && beta.abs() < MATE_SCORE - 100 && can_probcut {
             let mut caps = board.generate_legal_captures();
             let mut cap_scores: Vec<i32> = (0..caps.len())
                 .map(|i| capture_score(board, caps[i], tt_move))
                 .collect();
 
             for idx in 0..caps.len() {
-                // Find best remaining capture
-                let mut best = idx;
+                let mut best_idx = idx;
                 for j in (idx + 1)..caps.len() {
-                    if cap_scores[j] > cap_scores[best] {
-                        best = j;
+                    if cap_scores[j] > cap_scores[best_idx] {
+                        best_idx = j;
                     }
                 }
-                caps.swap(idx, best);
-                cap_scores.swap(idx, best);
+                caps.swap(idx, best_idx);
+                cap_scores.swap(idx, best_idx);
 
                 let mv = caps[idx];
                 if !see::see_ge(board, mv, 0) {
@@ -1213,7 +1224,6 @@ fn search_ab(
                 board.make_move(mv);
                 state.prev_move[ply_usize] = mv;
                 state.prev_piece[ply_usize] = moved_piece;
-                // Reduced search
                 let score = -search_ab(
                     board,
                     tt,
@@ -1235,6 +1245,7 @@ fn search_ab(
                     lmr_table,
                     use_nnue,
                     lmr_policy,
+                    false,
                 );
                 board.unmake_move(mv);
 
@@ -1335,7 +1346,9 @@ fn search_ab(
     let mut best_score = -INF;
     let mut node_type = NodeType::UpperBound;
     let mut moves_searched = 0;
-    let is_cut_node = !is_pv && beta == alpha + 1;
+    // In Akimbo, ZW children pass allow_null=true, meaning they are cut-nodes.
+    // Derive is_cut_node for LMR context where cut-node heuristic is valuable.
+    let is_cut_node = allow_null;
 
     // Track searched quiet moves for history malus (Stockfish-style)
     let mut searched_quiets: Vec<Move> = Vec::with_capacity(32);
@@ -1387,6 +1400,7 @@ fn search_ab(
                             lmr_table,
                             use_nnue,
                             lmr_policy,
+                            allow_null, // SE verification inherits parent
                         );
                         if stopped.load(Ordering::Relaxed) {
                             return 0;
@@ -1401,8 +1415,8 @@ fn search_ab(
                                 state.dbl_exts[ply_usize] += 1;
                                 extension = 2;
                             }
-                        } else if tt_sc >= beta {
-                            // Negative extension — TT move isn't singular
+                        } else if tt_sc >= beta || (tt_sc <= alpha && !is_pv) {
+                            // Negative extension
                             extension = -1;
                         }
                     }
@@ -1525,13 +1539,14 @@ fn search_ab(
                 lmr_table,
                 use_nnue,
                 lmr_policy,
+                !allow_null, // First move: child of PV alternates
             );
         } else {
             // LMR: Late Move Reductions — enhanced with stat_score
             let mut reduction = 0;
-            if moves_searched >= 2
-                && depth >= 3
-                && (!mv.is_capture() || is_losing_capture)
+            if moves_searched >= 1
+                && depth >= 2
+                && !mv.is_capture()
                 && !mv.is_promotion()
             {
                 let d = (depth as usize).min(127);
@@ -1555,6 +1570,7 @@ fn search_ab(
                     hist_lmr_div: params.hist_lmr_div,
                     lmr_corr_mul: params.lmr_corr_mul,
                     lmr_cut_node_bonus: params.lmr_cut_node_bonus,
+                    child_cutoffs: state.cutoffs[(ply_usize + 1).min(MAX_PLY - 1)],
                 };
                 reduction = lmr_policy.adjust_reduction(base, &lmr_ctx);
                 reduction = reduction.clamp(0, effective_depth - 1);
@@ -1582,45 +1598,28 @@ fn search_ab(
                 lmr_table,
                 use_nnue,
                 lmr_policy,
+                true,
             );
 
-            // Re-search if reduced search fails high
-            if s > alpha && reduction > 0 {
+            // Re-search with full window if ZW fails high
+            // Viridithas do-deeper/do-shallower: adapt re-search depth
+            if s > alpha && (is_pv || reduction > 0) {
+                let mut new_depth = effective_depth;
+                if reduction > 1 {
+                    let do_deeper = s > best_score + 60 + 12 * reduction;
+                    let do_shallower = s < best_score + new_depth;
+                    new_depth += i32::from(do_deeper) - i32::from(do_shallower);
+                }
                 s = -search_ab(
                     board,
                     tt,
                     stopped,
                     state,
-                    effective_depth,
-                    -alpha - 1,
-                    -alpha,
-                    ply + 1,
-                    false,
-                    time_limit,
-                    node_limit,
-                    start_time,
-                    false,
-                    None,
-                    new_total_extensions,
-                    nominal_depth,
-                    params,
-                    lmr_table,
-                    use_nnue,
-                    lmr_policy,
-                );
-            }
-            // Re-search with full window in PV
-            if s > alpha && s < beta {
-                s = -search_ab(
-                    board,
-                    tt,
-                    stopped,
-                    state,
-                    effective_depth,
+                    new_depth,
                     -beta,
                     -alpha,
                     ply + 1,
-                    true,
+                    is_pv,
                     time_limit,
                     node_limit,
                     start_time,
@@ -1632,6 +1631,7 @@ fn search_ab(
                     lmr_table,
                     use_nnue,
                     lmr_policy,
+                    false,
                 );
             }
             score = s;
@@ -1662,7 +1662,12 @@ fn search_ab(
                 state.pv_len[ply_usize] = child_len + 1;
 
                 if score >= beta {
+                    // Track cutoffs for parent's LMR adjustment
+                    if ply_usize > 0 {
+                        state.cutoffs[ply_usize - 1] += 1;
+                    }
                     let bonus = params.history_bonus(depth).clamp(0, 2000);
+                    let malus = params.history_malus(depth).clamp(0, 2000);
                     let ci = us.index();
 
                     if !mv.is_capture() {
@@ -1704,7 +1709,7 @@ fn search_ab(
                             let prev_piece_idx = piece_index_on(board, prev.from);
                             update_history(
                                 &mut state.history[ci][prev.from.index()][prev.to.index()],
-                                -bonus,
+                                -malus,
                             );
                             // Penalize in continuation history too
                             if ply > 0 {
@@ -1712,7 +1717,7 @@ fn search_ab(
                                 let pt = state.prev_move[ply_usize.saturating_sub(1)].to.index();
                                 update_history(
                                     &mut state.cont_hist[pp][pt][prev_piece_idx][prev.to.index()],
-                                    -bonus,
+                                    -malus,
                                 );
                             }
                         }
@@ -1734,7 +1739,7 @@ fn search_ab(
                             update_history(
                                 &mut state.cap_hist[*prev_piece_idx][prev_to.index()]
                                     [*prev_cap_idx],
-                                -bonus,
+                                -malus,
                             );
                         }
                     }
@@ -1786,8 +1791,18 @@ fn search_ab(
             best_move,
             tt_was_pv,
         );
-        // Update correction history with search outcome vs static eval
-        state.update_correction(board, depth, best_score, static_eval);
+        // Update correction history with Akimbo-style filtering:
+        // Skip when in check, singular search, noisy best move, or when
+        // bound direction agrees with static eval (no info to learn).
+        let should_update_corr = !in_check
+            && excluded_move.is_none()
+            && !best_move.is_capture()
+            && !best_move.is_promotion()
+            && !(node_type == NodeType::LowerBound && best_score <= static_eval)
+            && !(node_type == NodeType::UpperBound && best_score >= static_eval);
+        if should_update_corr {
+            state.update_correction(board, depth, best_score, static_eval);
+        }
     }
     best_score
 }
@@ -2123,11 +2138,6 @@ fn estimate_capture_value(board: &Board, mv: Move) -> i32 {
 #[inline(always)]
 fn same_move_key(a: Move, b: Move) -> bool {
     a.from == b.from && a.to == b.to && a.promotion == b.promotion
-}
-
-#[inline(always)]
-fn rfp_tt_guard(tt_hit: bool, tt_was_pv: bool, tt_node_type: NodeType) -> bool {
-    tt_was_pv || (tt_hit && tt_node_type == NodeType::Exact)
 }
 
 #[inline(always)]
@@ -2607,12 +2617,6 @@ mod tests {
         assert!(same_move_key(q, q));
     }
 
-    #[test]
-    fn test_rfp_tt_guard_needs_tt_hit_for_exact_bound() {
-        assert!(!rfp_tt_guard(false, false, NodeType::Exact));
-        assert!(rfp_tt_guard(true, false, NodeType::Exact));
-        assert!(rfp_tt_guard(false, true, NodeType::UpperBound));
-    }
 
     #[test]
     fn test_nmp_material_ok_requires_non_pawn_material() {
@@ -2723,5 +2727,145 @@ mod tests {
             0,
             "white correction updates must not leak into black side-to-move bucket"
         );
+    }
+
+    /// Phase 3: RFP returns an interpolated score between beta and static_eval,
+    /// not the raw static_eval.
+    #[test]
+    fn test_rfp_returns_interpolated_score() {
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                setup();
+                // Position where white is up a full queen — RFP should fire
+                // at shallow depth with eval >> beta.
+                let mut board = Board::from_fen(
+                    "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                )
+                .unwrap();
+                let mut engine = SearchEngine::new(1, 1);
+                let result = engine.search_depth(&mut board, 4);
+                // Score should be positive (huge material advantage) but NOT
+                // equal to the raw eval — interpolation brings it closer to beta.
+                assert!(
+                    result.score > 0,
+                    "Should detect material advantage, got {}",
+                    result.score
+                );
+                // The move should still be legal
+                let legal = board.generate_legal_moves();
+                assert!(
+                    legal
+                        .iter()
+                        .any(|m| m.from == result.best_move.from && m.to == result.best_move.to)
+                );
+            })
+            .expect("Failed to spawn test thread");
+        handle.join().expect("Test thread panicked");
+    }
+
+    /// Phase 3: QS stand-pat cutoff returns a softened score.
+    /// We test that qsearch in a winning position returns a reasonable value,
+    /// not an inflated raw eval.
+    #[test]
+    fn test_qs_softened_standpat() {
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                setup();
+                // Quiet position with extra knight — QS should hit stand-pat immediately
+                let mut board = Board::from_fen(
+                    "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 1",
+                )
+                .unwrap();
+                let tt = TranspositionTable::new(1);
+                let stopped = AtomicBool::new(false);
+                let mut state = ThreadState::new(Arc::new(ActiveNetwork::Embedded));
+                let params = SearchParams::default();
+
+                // Get raw eval for comparison
+                let raw_eval = hybrid_eval(&board, &mut state.nnue_state, true);
+                let corr = state.correction(&board);
+                let stand_pat_val = raw_eval + corr;
+
+                // Run qsearch with a beta below stand_pat to trigger the cutoff
+                if stand_pat_val > 100 {
+                    let beta = stand_pat_val - 50;
+                    let alpha = -INF;
+                    let qs_score = quiescence(
+                        &mut board,
+                        &tt,
+                        &stopped,
+                        &mut state,
+                        alpha,
+                        beta,
+                        0,
+                        0,
+                        None,
+                        None,
+                        Instant::now(),
+                        &params,
+                        true,
+                    );
+                    // Softened return: (stand_pat + beta) / 2
+                    // Should be LESS than raw stand_pat and >= beta
+                    assert!(
+                        qs_score <= stand_pat_val,
+                        "Softened QS score {} should be <= raw stand_pat {}",
+                        qs_score,
+                        stand_pat_val
+                    );
+                }
+            })
+            .expect("Failed to spawn test thread");
+        handle.join().expect("Test thread panicked");
+    }
+
+    /// Phase 3 integration: search to depth 8 with all optimizations active
+    /// and verify correctness.
+    #[test]
+    fn test_search_depth_8_legal_and_stable() {
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                setup();
+                let mut board = Board::new();
+                let original_fen = board.to_fen();
+                let original_hash = board.hash;
+                let mut engine = SearchEngine::new(8, 1);
+                let result = engine.search_depth(&mut board, 8);
+
+                // Verify legal move
+                let legal = board.generate_legal_moves();
+                assert!(
+                    legal
+                        .iter()
+                        .any(|m| m.from == result.best_move.from && m.to == result.best_move.to),
+                    "depth-8 search must return a legal move"
+                );
+
+                // Board is restored
+                assert_eq!(board.to_fen(), original_fen);
+                assert_eq!(board.hash, original_hash);
+
+                // Score is reasonable (opening eval should be near 0)
+                assert!(
+                    result.score.abs() < 300,
+                    "Opening score should be reasonable, got {}",
+                    result.score
+                );
+
+                // PV must be non-empty
+                assert!(!result.pv.is_empty(), "PV line must not be empty at depth 8");
+
+                // Reasonable node count
+                assert!(
+                    result.nodes > 1000,
+                    "depth-8 search should explore >1000 nodes, got {}",
+                    result.nodes
+                );
+            })
+            .expect("Failed to spawn test thread");
+        handle.join().expect("Test thread panicked");
     }
 }

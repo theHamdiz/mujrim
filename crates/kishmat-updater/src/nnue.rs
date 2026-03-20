@@ -223,8 +223,8 @@ pub fn load_manifest(dir: &Path) -> Manifest {
 /// Save the manifest to a directory.
 pub fn save_manifest(dir: &Path, manifest: &Manifest) -> Result<(), String> {
     let path = dir.join(MANIFEST_FILE);
-    let json = serde_json::to_string_pretty(manifest)
-        .map_err(|e| format!("JSON serialize error: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(manifest).map_err(|e| format!("JSON serialize error: {e}"))?;
     fs::write(&path, json).map_err(|e| format!("Write manifest: {e}"))?;
     Ok(())
 }
@@ -237,9 +237,7 @@ pub fn save_manifest(dir: &Path, manifest: &Manifest) -> Result<(), String> {
 pub fn needs_update(network: &NnueNetwork, manifest: &Manifest) -> bool {
     match manifest.get(network.id) {
         None => true, // not installed via manifest
-        Some(entry) => {
-            entry.url != network.url || entry.upstream_name != network.upstream_name
-        }
+        Some(entry) => entry.url != network.url || entry.upstream_name != network.upstream_name,
     }
 }
 
@@ -728,10 +726,7 @@ mod tests {
 
         // Write a matching manifest entry so it sees no update needed
         let mut manifest = Manifest::new();
-        manifest.insert(
-            net.id.to_string(),
-            make_manifest_entry(net, 12),
-        );
+        manifest.insert(net.id.to_string(), make_manifest_entry(net, 12));
         save_manifest(&temp_dir, &manifest).unwrap();
 
         let outcome = download_network(net, &temp_dir, None).unwrap();

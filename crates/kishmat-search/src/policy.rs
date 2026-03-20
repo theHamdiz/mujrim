@@ -132,6 +132,8 @@ pub struct LmrContext {
     pub hist_lmr_div: i32,
     pub lmr_corr_mul: i32,
     pub lmr_cut_node_bonus: i32,
+    /// Cutoff count at the next ply — reduce less when child had few cutoffs.
+    pub child_cutoffs: u32,
 }
 
 /// Pluggable LMR adjustment policy.
@@ -177,6 +179,11 @@ impl LmrPolicy for StockLikeLmrPolicy {
             reduction += ctx.lmr_cut_node_bonus;
         }
         if ctx.tt_was_pv {
+            reduction -= 1;
+        }
+
+        // Reduce less if the next ply had few fail-highs (Akimbo)
+        if ctx.child_cutoffs < 4 {
             reduction -= 1;
         }
 
@@ -290,6 +297,7 @@ mod tests {
             hist_lmr_div: 4096,
             lmr_corr_mul: 448,
             lmr_cut_node_bonus: 2,
+            child_cutoffs: 10,
         };
         let good = LmrContext {
             mv_stat_score: 20_000,
