@@ -1,0 +1,18 @@
+[package]
+name = "kishmat-game"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Full-featured Bevy chess game for KishMat"
+license = "MIT"
+
+[[bin]]
+name = "kishmat-game"
+path = "src/main.rs"
+
+[dependencies]
+bevy = { version = "0.18", features = ["wav", "mp3"] }
+types  = { package = "kishmat-types",  path = "../kishmat-types" }
+search = { package = "kishmat-search", path = "../kishmat-search" }
+eval   = { package = "kishmat-eval",   path = "../kishmat-eval" }
+rand = "0.9"

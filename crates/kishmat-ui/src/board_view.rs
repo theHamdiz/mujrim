@@ -9,8 +9,8 @@
 //! - Drawing arrows overlay
 //! - Move animation overlay with capture effects (instant or explosion)
 
-use iced::widget::{Image, button, column, container, mouse_area, row, text};
-use iced::{Alignment, Color, Element};
+use iced::widget::{Image, button, column, container, mouse_area, row, stack, text};
+use iced::{Alignment, Color, Element, Length};
 
 use crate::game::GameState;
 use crate::pieces::PieceAssets;
@@ -260,6 +260,7 @@ pub fn view_board<'a>(
     show_coords: bool,
     coord_position: CoordPosition,
     capture_anim_style: CaptureAnimStyle,
+    arrows: &[(types::Square, types::Square)],
 ) -> Element<'a, Msg> {
     let colors = theme.colors();
     let dot_size = sq_size * 0.28;
@@ -267,11 +268,16 @@ pub fn view_board<'a>(
     let piece_sz_normal = sq_size * 0.88;
     let piece_sz_pawn = sq_size * 0.70;
 
-    // Premoved squares for highlighting
-    let premove_sqs: Vec<types::Square> = gs
+    // Premoved squares for highlighting — separate from and to for chess.com-style distinction
+    let premove_from_sqs: Vec<types::Square> = gs
         .premove_queue
         .iter()
-        .flat_map(|(from, to)| vec![*from, *to])
+        .map(|(from, _)| *from)
+        .collect();
+    let premove_to_sqs: Vec<types::Square> = gs
+        .premove_queue
+        .iter()
+        .map(|(_, to)| *to)
         .collect();
 
     // Only show coords inside the board if position is Inside
@@ -306,35 +312,64 @@ pub fn view_board<'a>(
             let is_selected = gs.selected_square == Some(sq);
             let is_highlight = gs.legal_highlights.contains(&sq);
             let is_last_move = gs.last_move_squares.contains(&sq);
-            let is_premove = premove_sqs.contains(&sq);
+            let is_premove_from = premove_from_sqs.contains(&sq);
+            let is_premove_to = premove_to_sqs.contains(&sq);
 
-            // Capture flash effect
-            let capture_flash = if capture_anim_style == CaptureAnimStyle::Explosion {
-                anim.and_then(|a| {
-                    if a.is_capture && a.to_sq == sq && a.progress < 0.3 {
-                        Some(1.0 - (a.progress / 0.3))
+            // Capture flash effect — vivid orange/red for Explosion, warm glow for Fire
+            let capture_flash = match capture_anim_style {
+                CaptureAnimStyle::Explosion => anim.and_then(|a| {
+                    if a.is_capture && a.to_sq == sq && a.progress < 0.5 {
+                        Some(1.0 - (a.progress / 0.5))
                     } else {
                         None
                     }
-                })
-            } else {
-                None
+                }),
+                CaptureAnimStyle::Fire => anim.and_then(|a| {
+                    if a.is_capture && a.to_sq == sq && a.progress < 0.6 {
+                        Some((1.0 - (a.progress / 0.6)) * 0.7)
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
             };
 
             let bg_color = if let Some(flash) = capture_flash {
                 let base = if is_light { colors.light } else { colors.dark };
-                Color::from_rgb(
-                    (base.r + flash * 0.6).min(1.0),
-                    (base.g + flash * 0.6).min(1.0),
-                    (base.b + flash * 0.4).min(1.0),
-                )
-            } else if is_premove {
-                // Blue-ish tint for premoved squares
+                match capture_anim_style {
+                    CaptureAnimStyle::Explosion => {
+                        // Vivid orange-red explosion flash
+                        Color::from_rgb(
+                            (base.r + flash * 0.9).min(1.0),
+                            (base.g + flash * 0.3).min(1.0),
+                            base.b * (1.0 - flash * 0.5),
+                        )
+                    }
+                    CaptureAnimStyle::Fire => {
+                        // Warm amber glow
+                        Color::from_rgb(
+                            (base.r + flash * 0.7).min(1.0),
+                            (base.g + flash * 0.25).min(1.0),
+                            base.b * (1.0 - flash * 0.6),
+                        )
+                    }
+                    _ => base,
+                }
+            } else if is_premove_to {
+                // Destination squares: strong blue highlight (chess.com style)
                 let base = if is_light { colors.light } else { colors.dark };
                 Color::from_rgb(
-                    (base.r * 0.6 + 0.15).min(1.0),
-                    (base.g * 0.6 + 0.20).min(1.0),
-                    (base.b * 0.6 + 0.45).min(1.0),
+                    (base.r * 0.45 + 0.08).min(1.0),
+                    (base.g * 0.45 + 0.15).min(1.0),
+                    (base.b * 0.45 + 0.55).min(1.0),
+                )
+            } else if is_premove_from {
+                // Source squares: subtler teal tint
+                let base = if is_light { colors.light } else { colors.dark };
+                Color::from_rgb(
+                    (base.r * 0.55 + 0.05).min(1.0),
+                    (base.g * 0.55 + 0.25).min(1.0),
+                    (base.b * 0.55 + 0.40).min(1.0),
                 )
             } else if is_selected {
                 colors.selected
@@ -371,7 +406,6 @@ pub fn view_board<'a>(
                 if let Some((fade_piece, fade_color, progress)) = fading_capture {
                     match capture_anim_style {
                         CaptureAnimStyle::Instant => {
-                            // Don't render the captured piece at all — it disappears instantly
                             text("").into()
                         }
                         CaptureAnimStyle::Explosion => {
@@ -383,12 +417,35 @@ pub fn view_board<'a>(
                             };
                             // Explosion: burst outward then fade away
                             let scale = if progress < 0.15 {
-                                1.0 + (progress / 0.15) * 0.5
+                                1.0 + (progress / 0.15) * 0.8
                             } else {
-                                (1.5 * (1.0 - (progress - 0.15) / 0.85)).max(0.0)
+                                (1.8 * (1.0 - (progress - 0.15) / 0.85)).max(0.0)
                             };
                             let piece_sz = base_sz * scale;
                             let opacity = (1.0 - progress * 1.5).max(0.0);
+
+                            container(
+                                Image::new(handle.clone())
+                                    .width(piece_sz)
+                                    .height(piece_sz)
+                                    .opacity(opacity),
+                            )
+                            .center_x(sq_size)
+                            .center_y(sq_size)
+                            .into()
+                        }
+                        CaptureAnimStyle::Fire => {
+                            let handle = assets.get(fade_piece, fade_color);
+                            let base_sz = if fade_piece == types::Piece::Pawn {
+                                piece_sz_pawn
+                            } else {
+                                piece_sz_normal
+                            };
+                            // Fire: piece shrinks and burns away
+                            let shrink = (1.0 - progress * 0.6).max(0.3);
+                            let piece_sz = base_sz * shrink;
+                            // Fade opacity with an ease-out curve
+                            let opacity = (1.0 - progress * progress).max(0.0);
 
                             container(
                                 Image::new(handle.clone())
@@ -593,13 +650,16 @@ pub fn view_board<'a>(
         ]
         .spacing(0)
         .into()
+    } else if !arrows.is_empty() {
+        let board_px = sq_size * 8.0;
+        stack![
+            board_elem,
+            crate::arrows::arrow_canvas(arrows, sq_size, gs.flipped),
+        ]
+        .width(Length::Fixed(board_px))
+        .height(Length::Fixed(board_px))
+        .into()
     } else {
-        // Arrow overlay hint (arrows drawn as colored text markers on endpoints)
-        // Note: Full arrow rendering would need canvas; we mark endpoints for now
-        if !gs.arrows.is_empty() {
-            // Arrows are stored but iced's widget system can't easily overlay SVG arrows
-            // They're tracked in state for future canvas rendering
-        }
         board_elem
     }
 }

@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
+iced_fonts = { version = "0.3", features = ["lucide"] }
 types = { package = "kishmat-types", path = "../kishmat-types" }
 search = { package = "kishmat-search", path = "../kishmat-search" }
 eval = { package = "kishmat-eval", path = "../kishmat-eval" }

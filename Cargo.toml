@@ -23,6 +23,8 @@ members = [
     "crates/kishmat-trainer",
     "crates/kishmat-benchmarker",
     "crates/kishmat-tooling",
+    "crates/kishmat-game",
+    "crates/kishmat-installer",
 ]
 
 [features]
@@ -55,3 +57,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Optimize dependencies in dev mode so Bevy/GPU runs at usable speed
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,6 +1,7 @@
 #![allow(unexpected_cfgs)]
 //! KishMat GUI — premium chess interface.
 
+mod arrows;
 mod audio;
 mod board_view;
 mod game;
@@ -14,6 +15,7 @@ use std::path::PathBuf;
 
 use iced::widget::{
     Image, Space, button, column, container, mouse_area, pick_list, row, scrollable, slider, text,
+    toggler,
 };
 use iced::{Alignment, Color, Element, Font, Length, Subscription, Task, Theme};
 use std::time::{Duration, Instant};
@@ -139,6 +141,7 @@ impl Default for EngineConfig {
 pub enum CaptureAnimStyle {
     Instant,
     Explosion,
+    Fire,
 }
 
 impl std::fmt::Display for CaptureAnimStyle {
@@ -146,6 +149,7 @@ impl std::fmt::Display for CaptureAnimStyle {
         match self {
             Self::Instant => write!(f, "Instant"),
             Self::Explosion => write!(f, "Explosion"),
+            Self::Fire => write!(f, "Fire"),
         }
     }
 }
@@ -498,7 +502,8 @@ impl Default for App {
 impl App {
     /// Boot function for iced 0.14 — returns (State, Task).
     fn boot() -> (Self, Task<Msg>) {
-        (Self::default(), Task::none())
+        let load_lucide = iced::font::load(iced_fonts::LUCIDE_FONT_BYTES).map(|_| Msg::FontLoaded);
+        (Self::default(), load_lucide)
     }
 
     /// Subscription: animate at ~60fps while a move animation is in progress,
@@ -556,6 +561,7 @@ impl App {
                     match self.settings.capture_anim_style {
                         CaptureAnimStyle::Instant => Duration::from_millis(50),
                         CaptureAnimStyle::Explosion => Duration::from_millis(350),
+                        CaptureAnimStyle::Fire => Duration::from_millis(400),
                     }
                 } else {
                     Duration::from_millis(150)
@@ -717,6 +723,16 @@ impl App {
                 types::init();
                 let board = types::Board::new();
                 self.game = Some(game::GameState::new(board));
+
+                // Auto-flip board when playing Black
+                if let CoinFlipState::Done(heads) = self.coin_flip {
+                    if !heads {
+                        if let Some(ref mut gs) = self.game {
+                            gs.flipped = true;
+                        }
+                    }
+                }
+
                 self.move_log.clear();
                 self.engine_info.clear();
                 self.status = String::from("Game started — White to move");
@@ -739,6 +755,10 @@ impl App {
                 // Ignore clicks during animation
                 if self.animation.is_some() {
                     return Task::none();
+                }
+                // Left-click clears all drawn arrows
+                if let Some(ref mut gs) = self.game {
+                    gs.arrows.clear();
                 }
                 if let Some(ref mut gs) = self.game {
                     if gs.game_over {
@@ -1050,9 +1070,9 @@ impl App {
                         self.coin_flip = CoinFlipState::Done(result);
                         if matches!(self.selected_mode, GameMode::HumanVsEngine) {
                             self.status = if result {
-                                String::from("🪙 Heads! You play White.")
+                                String::from("Heads! You play White.")
                             } else {
-                                String::from("🪙 Tails! You play Black.")
+                                String::from("Tails! You play Black.")
                             };
                         }
                     }
@@ -1615,20 +1635,20 @@ impl App {
 
         // ── Center: Pill-shaped action buttons ──
         let mut actions = row![].spacing(3).align_y(Alignment::Center);
-        actions = actions.push(pill_button("⚙", "Options", pal, false, Msg::ToggleOptions));
+        actions = actions.push(pill_button(lucide_icon(iced_fonts::lucide::settings), "Options", pal, false, Msg::ToggleOptions));
         if matches!(self.screen, Screen::Playing) {
             actions = actions
-                .push(pill_button("📷", "Shot", pal, false, Msg::TakeScreenshot))
-                .push(pill_button("♟", "New", pal, false, Msg::NewGame))
-                .push(pill_button("↕", "Flip", pal, false, Msg::FlipBoard))
-                .push(pill_button("⚑", "Resign", pal, true, Msg::Resign))
+                .push(pill_button(lucide_icon(iced_fonts::lucide::camera), "Shot", pal, false, Msg::TakeScreenshot))
+                .push(pill_button(lucide_icon(iced_fonts::lucide::plus), "New", pal, false, Msg::NewGame))
+                .push(pill_button(lucide_icon(iced_fonts::lucide::arrow_up_down), "Flip", pal, false, Msg::FlipBoard))
+                .push(pill_button(lucide_icon(iced_fonts::lucide::flag), "Resign", pal, true, Msg::Resign))
                 .push(pill_sep(pal))
-                .push(pill_button("📋", "PGN", pal, false, Msg::ExportPGN))
-                .push(pill_button("🖼", "GIF", pal, false, Msg::ExportGIF));
-            let (rec_icon, rec_label) = match self.recorder.state() {
-                recording::RecordState::Idle => ("⏺", "Rec"),
-                recording::RecordState::Recording => ("⏹", "Stop"),
-                recording::RecordState::Saving => ("💾", "…"),
+                .push(pill_button(lucide_icon(iced_fonts::lucide::clipboard_copy), "PGN", pal, false, Msg::ExportPGN))
+                .push(pill_button(lucide_icon(iced_fonts::lucide::film), "GIF", pal, false, Msg::ExportGIF));
+            let (rec_icon, rec_label): (Element<'_, Msg>, &str) = match self.recorder.state() {
+                recording::RecordState::Idle => (lucide_icon(iced_fonts::lucide::circle), "Rec"),
+                recording::RecordState::Recording => (lucide_icon(iced_fonts::lucide::circle_stop), "Stop"),
+                recording::RecordState::Saving => (lucide_icon(iced_fonts::lucide::save), "…"),
             };
             actions = actions.push(pill_button(
                 rec_icon,
@@ -1639,7 +1659,7 @@ impl App {
             ));
         } else {
             // Menu screen: show Start Game button
-            actions = actions.push(pill_button("▶", "Start", pal, false, Msg::StartGame));
+            actions = actions.push(pill_button(lucide_icon(iced_fonts::lucide::play), "Start", pal, false, Msg::StartGame));
         }
 
         // Wrap action buttons in a pill container
@@ -1664,7 +1684,7 @@ impl App {
         // ── Right: Status + Exit ──
         let right = row![
             text(&self.status).size(10).color(pal.text_secondary),
-            pill_button("×", "Exit", pal, true, Msg::ExitApp),
+            pill_button(lucide_icon(iced_fonts::lucide::x), "Exit", pal, true, Msg::ExitApp),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -1828,7 +1848,7 @@ impl App {
                 CoinFlipState::Idle => button(
                     container(
                         row![
-                            text("🪙").size(18),
+                            iced_fonts::lucide::coins().size(18),
                             text(" Flip Coin").size(13).color(Color::WHITE)
                         ]
                         .spacing(6)
@@ -1858,7 +1878,7 @@ impl App {
                 })
                 .into(),
                 CoinFlipState::Flipping { start, .. } => {
-                    let sym = ["🪙", "⬜", "🪙", "⬛", "🪙", "✨"]
+                    let sym = ["◉", "○", "◉", "●", "◉", "◇"]
                         [(start.elapsed().as_millis() / 100 % 6) as usize];
                     row![
                         text("Flipping...").size(13).color(ACCENT_GOLD),
@@ -1870,9 +1890,9 @@ impl App {
                 }
                 CoinFlipState::Done(heads) => {
                     let (icon, label, c) = if *heads {
-                        ("⬜", "You play White!", ACCENT_TEAL)
+                        ("○", "You play White!", ACCENT_TEAL)
                     } else {
-                        ("⬛", "You play Black!", ACCENT)
+                        ("●", "You play Black!", ACCENT)
                     };
                     row![text(icon).size(22), text(label).size(14).color(c)]
                         .spacing(8)
@@ -1910,9 +1930,9 @@ impl App {
             config_slider("Hash (MB)", cfg.hash_mb, "MB", 1, 4096, Msg::CfgHashChanged),
             config_slider("Threads", cfg.threads, "", 1, 32, Msg::CfgThreadsChanged),
             Space::new().height(4),
-            config_toggle("Ponder", cfg.ponder, Msg::CfgTogglePonder),
-            config_toggle("Opening Book", cfg.use_book, Msg::CfgToggleBook),
-            config_toggle("NNUE Eval", cfg.use_nnue, Msg::CfgToggleNnue),
+            settings_row("Ponder", toggler(cfg.ponder).on_toggle(|_| Msg::CfgTogglePonder).size(18).into()),
+            settings_row("Opening Book", toggler(cfg.use_book).on_toggle(|_| Msg::CfgToggleBook).size(18).into()),
+            settings_row("NNUE Eval", toggler(cfg.use_nnue).on_toggle(|_| Msg::CfgToggleNnue).size(18).into()),
             Space::new().height(4),
             row![
                 text("Eval Net").size(12).color(TEXT_SECONDARY).width(75),
@@ -2043,6 +2063,7 @@ impl App {
             self.settings.show_coords,
             self.settings.coord_position,
             self.settings.capture_anim_style,
+            &gs.arrows,
         );
         let board_total = sq_size * 8.0;
 
@@ -2184,7 +2205,7 @@ impl App {
         };
 
         let capture_anim_picker = pick_list(
-            vec![CaptureAnimStyle::Explosion, CaptureAnimStyle::Instant],
+            vec![CaptureAnimStyle::Explosion, CaptureAnimStyle::Fire, CaptureAnimStyle::Instant],
             Some(s.capture_anim_style),
             Msg::SetCaptureAnim,
         )
@@ -2197,50 +2218,43 @@ impl App {
         )
         .width(120);
 
-        let display_section = column![
-            text("Display").size(14).color(ACCENT_TEAL),
-            Space::new().height(4),
-            row![
-                text("Board Theme")
-                    .size(12)
-                    .color(TEXT_SECONDARY)
-                    .width(130),
-                theme_picker
+        let display_section = settings_card(
+            iced_fonts::lucide::monitor,
+            "Display",
+            column![
+                settings_row(
+                    "Board Theme",
+                    theme_picker.into(),
+                ),
+                settings_row(
+                    "Show Coordinates",
+                    toggler(s.show_coords)
+                        .on_toggle(Msg::SetShowCoords)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Coord Position",
+                    coord_pos_picker.into(),
+                ),
+                settings_row(
+                    "Animation",
+                    row![
+                        slider(0..=2, s.anim_speed, Msg::SetAnimSpeed).width(100),
+                        text(anim_label).size(12).color(TEXT_PRIMARY).width(60),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into(),
+                ),
+                settings_row(
+                    "Capture Effect",
+                    capture_anim_picker.into(),
+                ),
             ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            config_toggle(
-                "Show Coordinates",
-                s.show_coords,
-                Msg::SetShowCoords(!s.show_coords)
-            ),
-            row![
-                text("Coord Position")
-                    .size(12)
-                    .color(TEXT_SECONDARY)
-                    .width(130),
-                coord_pos_picker
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Animation").size(12).color(TEXT_SECONDARY).width(130),
-                slider(0..=2, s.anim_speed, Msg::SetAnimSpeed).width(100),
-                text(anim_label).size(12).color(TEXT_PRIMARY).width(60),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Capture Effect")
-                    .size(12)
-                    .color(TEXT_SECONDARY)
-                    .width(130),
-                capture_anim_picker
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(8);
+            .spacing(2)
+            .into(),
+        );
 
         // Audio section
         let mood_picker = pick_list(
@@ -2254,73 +2268,111 @@ impl App {
         )
         .width(120);
 
-        let audio_section = column![
-            text("Audio").size(14).color(ACCENT_TEAL),
-            Space::new().height(4),
-            config_toggle("Background Music", self.bgm_on, Msg::ToggleBGM),
-            config_toggle("Sound Effects", s.sfx_on, Msg::SetSfx(!s.sfx_on)),
-            row![
-                text("BGM Volume").size(12).color(TEXT_SECONDARY).width(130),
-                slider(0..=100, s.bgm_volume, Msg::SetBgmVolume).width(100),
-                text(format!("{}%", s.bgm_volume))
-                    .size(12)
-                    .color(TEXT_PRIMARY)
-                    .width(50),
+        let audio_section = settings_card(
+            iced_fonts::lucide::volume,
+            "Audio",
+            column![
+                settings_row(
+                    "Background Music",
+                    toggler(self.bgm_on)
+                        .on_toggle(|_| Msg::ToggleBGM)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Sound Effects",
+                    toggler(s.sfx_on)
+                        .on_toggle(Msg::SetSfx)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "BGM Volume",
+                    row![
+                        slider(0..=100, s.bgm_volume, Msg::SetBgmVolume).width(100),
+                        text(format!("{}%", s.bgm_volume))
+                            .size(12)
+                            .color(TEXT_PRIMARY)
+                            .width(50),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into(),
+                ),
+                settings_row(
+                    "Game Mood",
+                    mood_picker.into(),
+                ),
             ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Game Mood").size(12).color(TEXT_SECONDARY).width(130),
-                mood_picker
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(8);
+            .spacing(2)
+            .into(),
+        );
 
         // Game section
-        let game_section = column![
-            text("Game").size(14).color(ACCENT_TEAL),
-            Space::new().height(4),
-            config_toggle(
-                "Auto-flip for Black",
-                s.auto_flip_black,
-                Msg::SetAutoFlip(!s.auto_flip_black)
-            ),
-            config_toggle(
-                "Show Legal Moves",
-                s.show_legal_moves,
-                Msg::SetShowLegal(!s.show_legal_moves)
-            ),
-            config_toggle(
-                "Show Last Move",
-                s.show_last_move,
-                Msg::SetShowLastMove(!s.show_last_move)
-            ),
-            config_toggle(
-                "Premoves",
-                s.premoves_enabled,
-                Msg::SetPremoves(!s.premoves_enabled)
-            ),
-            config_toggle(
-                "Multi-Premoves",
-                s.multi_premoves,
-                Msg::SetMultiPremoves(!s.multi_premoves)
-            ),
-            config_toggle(
-                "Draw Arrows",
-                s.draw_arrows,
-                Msg::SetDrawArrows(!s.draw_arrows)
-            ),
-        ]
-        .spacing(8);
+        let game_section = settings_card(
+            iced_fonts::lucide::gamepad,
+            "Game",
+            column![
+                settings_row(
+                    "Auto-flip for Black",
+                    toggler(s.auto_flip_black)
+                        .on_toggle(Msg::SetAutoFlip)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Show Legal Moves",
+                    toggler(s.show_legal_moves)
+                        .on_toggle(Msg::SetShowLegal)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Show Last Move",
+                    toggler(s.show_last_move)
+                        .on_toggle(Msg::SetShowLastMove)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Premoves",
+                    toggler(s.premoves_enabled)
+                        .on_toggle(Msg::SetPremoves)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Multi-Premoves",
+                    toggler(s.multi_premoves)
+                        .on_toggle(Msg::SetMultiPremoves)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Draw Arrows",
+                    toggler(s.draw_arrows)
+                        .on_toggle(Msg::SetDrawArrows)
+                        .size(18)
+                        .into(),
+                ),
+            ]
+            .spacing(2)
+            .into(),
+        );
 
         let close_btn = button(
-            container(text("✕ Close").size(14).color(Color::WHITE))
-                .center_x(100)
-                .center_y(36)
-                .width(100)
-                .height(36),
+            container(
+                row![
+                    iced_fonts::lucide::x().size(14),
+                    text("Close").size(14).color(Color::WHITE),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .center_x(100)
+            .center_y(36)
+            .width(100)
+            .height(36),
         )
         .on_press(Msg::ToggleOptions)
         .style(|_theme, status| {
@@ -2342,12 +2394,10 @@ impl App {
 
         // Tab switcher
         let settings_tab_active = self.options_tab == OptionsTab::Settings;
+        let settings_color = if settings_tab_active { Color::WHITE } else { TEXT_SECONDARY };
+        let tools_color = if !settings_tab_active { Color::WHITE } else { TEXT_SECONDARY };
         let tab_buttons = row![
-            button(text("⚙ Settings").size(13).color(if settings_tab_active {
-                Color::WHITE
-            } else {
-                TEXT_SECONDARY
-            }))
+            button(row![iced_fonts::lucide::settings().size(13).color(settings_color), text(" Settings").size(13).color(settings_color)].spacing(4).align_y(Alignment::Center))
             .on_press(Msg::SwitchOptionsTab(OptionsTab::Settings))
             .padding([6, 16])
             .style(move |_theme, _status| button::Style {
@@ -2363,11 +2413,7 @@ impl App {
                 text_color: Color::WHITE,
                 ..Default::default()
             }),
-            button(text("🔧 Tools").size(13).color(if !settings_tab_active {
-                Color::WHITE
-            } else {
-                TEXT_SECONDARY
-            }))
+            button(row![iced_fonts::lucide::wrench().size(13).color(tools_color), text(" Tools").size(13).color(tools_color)].spacing(4).align_y(Alignment::Center))
             .on_press(Msg::SwitchOptionsTab(OptionsTab::Tools))
             .padding([6, 16])
             .style(move |_theme, _status| button::Style {
@@ -2392,86 +2438,45 @@ impl App {
             scrollable(
                 column![
                     display_section,
-                    Space::new().height(16),
-                    container(Space::new().height(1))
-                        .width(Length::Fill)
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgba(
-                                1.0, 1.0, 1.0, 0.06
-                            ))),
-                            ..Default::default()
-                        }),
-                    Space::new().height(16),
                     audio_section,
-                    Space::new().height(16),
-                    container(Space::new().height(1))
-                        .width(Length::Fill)
-                        .style(|_| container::Style {
-                            background: Some(iced::Background::Color(Color::from_rgba(
-                                1.0, 1.0, 1.0, 0.06
-                            ))),
-                            ..Default::default()
-                        }),
-                    Space::new().height(16),
                     game_section,
                 ]
-                .spacing(0),
+                .spacing(12),
             )
             .height(450)
             .into()
         } else {
             // Tools tab
-            let syzygy_section = column![
-                text("Syzygy Tablebases").size(14).color(ACCENT_TEAL),
-                Space::new().height(4),
-                row![
-                    text("Status:").size(12).color(TEXT_SECONDARY).width(60),
-                    text(&self.syzygy_status).size(12).color(TEXT_PRIMARY),
+            let syzygy_section = settings_card(
+                iced_fonts::lucide::database,
+                "Syzygy Tablebases",
+                column![
+                    settings_row("Status", text(&self.syzygy_status).size(12).color(TEXT_PRIMARY).into()),
+                    settings_row("Path", text("./syzygy/").size(12).color(TEXT_PRIMARY).into()),
+                    Space::new().height(4),
+                    styled_button_with_icon(iced_fonts::lucide::download, "Download 3-4-5 Piece Tables (~1 GB)", Msg::SyzygyDownload),
                 ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                row![
-                    text("Path:").size(12).color(TEXT_SECONDARY).width(60),
-                    text("./syzygy/").size(12).color(TEXT_PRIMARY),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                Space::new().height(4),
-                styled_button("⬇ Download 3-4-5 Piece Tables (~1 GB)", Msg::SyzygyDownload),
-            ]
-            .spacing(6);
+                .spacing(2)
+                .into(),
+            );
 
-            let nnue_section = column![
-                text("NNUE Networks").size(14).color(ACCENT_TEAL),
-                Space::new().height(4),
-                row![
-                    text("Status:").size(12).color(TEXT_SECONDARY).width(60),
-                    text(&self.nnue_status).size(12).color(TEXT_PRIMARY),
+            let nnue_section = settings_card(
+                iced_fonts::lucide::brain,
+                "NNUE Networks",
+                column![
+                    settings_row("Status", text(&self.nnue_status).size(12).color(TEXT_PRIMARY).into()),
+                    settings_row("Path", text("./nnue/").size(12).color(TEXT_PRIMARY).into()),
+                    Space::new().height(4),
+                    styled_button_with_icon(iced_fonts::lucide::download, "Download All NNUE Networks", Msg::NnueDownload),
                 ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                row![
-                    text("Path:").size(12).color(TEXT_SECONDARY).width(60),
-                    text("./nnue/").size(12).color(TEXT_PRIMARY),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                Space::new().height(4),
-                styled_button("⬇ Download All NNUE Networks", Msg::NnueDownload),
-            ]
-            .spacing(6);
+                .spacing(2)
+                .into(),
+            );
 
-            let mut tuning_section = column![
-                text("Parameter Tuning").size(14).color(ACCENT_TEAL),
-                Space::new().height(4),
-                row![
-                    text("Status:").size(12).color(TEXT_SECONDARY).width(60),
-                    text(&self.tuning_status).size(12).color(TEXT_PRIMARY),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
+            let mut tuning_content = column![
+                settings_row("Status", text(&self.tuning_status).size(12).color(TEXT_PRIMARY).into()),
             ]
-            .spacing(4);
+            .spacing(2);
 
             if let Some(ref params) = self.tuning_params {
                 let flat = params.flat_list();
@@ -2479,8 +2484,8 @@ impl App {
                 for (section, name, param) in flat.into_iter().take(20) {
                     if section != last_section {
                         let sec_label = section.clone();
-                        tuning_section =
-                            tuning_section.push(text(sec_label).size(11).color(ACCENT_TEAL));
+                        tuning_content =
+                            tuning_content.push(text(sec_label).size(11).color(ACCENT_TEAL));
                         last_section = section.clone();
                     }
                     let sec = section;
@@ -2489,26 +2494,29 @@ impl App {
                     let min_i = param.min_i32();
                     let max_i = param.max_i32();
                     let val_i = param.value_i32();
-                    tuning_section = tuning_section.push(
-                        row![
-                            text(name_label).size(11).color(TEXT_SECONDARY).width(120),
-                            slider(min_i..=max_i, val_i, move |v| Msg::TuneSetParam(
-                                sec.clone(),
-                                nm.clone(),
-                                v as f64
-                            ))
-                            .width(100),
-                            text(format!("{val_i}"))
-                                .size(11)
-                                .color(TEXT_PRIMARY)
-                                .width(50),
-                        ]
-                        .spacing(6)
-                        .align_y(Alignment::Center),
+                    tuning_content = tuning_content.push(
+                        settings_row(
+                            &name_label,
+                            row![
+                                slider(min_i..=max_i, val_i, move |v| Msg::TuneSetParam(
+                                    sec.clone(),
+                                    nm.clone(),
+                                    v as f64
+                                ))
+                                .width(100),
+                                text(format!("{val_i}"))
+                                    .size(11)
+                                    .color(TEXT_PRIMARY)
+                                    .width(50),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center)
+                            .into(),
+                        ),
                     );
                 }
-                tuning_section = tuning_section.push(Space::new().height(4));
-                tuning_section = tuning_section.push(
+                tuning_content = tuning_content.push(Space::new().height(4));
+                tuning_content = tuning_content.push(
                     row![
                         styled_button("Save params.toml", Msg::TuneSave),
                         styled_button("Reload", Msg::TuneLoad),
@@ -2516,28 +2524,34 @@ impl App {
                     .spacing(8),
                 );
             } else {
-                tuning_section =
-                    tuning_section.push(styled_button("Load params.toml", Msg::TuneLoad));
+                tuning_content =
+                    tuning_content.push(styled_button("Load params.toml", Msg::TuneLoad));
             }
 
-            let updates_section = column![
-                text("Updates").size(14).color(ACCENT_TEAL),
-                Space::new().height(4),
-                styled_button("Check for Updates", Msg::CheckForUpdates),
-            ]
-            .spacing(6);
+            let tuning_section = settings_card(
+                iced_fonts::lucide::sliders_horizontal,
+                "Parameter Tuning",
+                tuning_content.into(),
+            );
+
+            let updates_section = settings_card(
+                iced_fonts::lucide::refresh_cw,
+                "Updates",
+                column![
+                    styled_button("Check for Updates", Msg::CheckForUpdates),
+                ]
+                .spacing(4)
+                .into(),
+            );
 
             scrollable(
                 column![
                     syzygy_section,
-                    Space::new().height(12),
                     nnue_section,
-                    Space::new().height(12),
                     tuning_section,
-                    Space::new().height(12),
                     updates_section,
                 ]
-                .spacing(0),
+                .spacing(12),
             )
             .height(450)
             .into()
@@ -2641,16 +2655,62 @@ fn styled_button(label: &str, msg: Msg) -> Element<'_, Msg> {
     .into()
 }
 
+/// Creates a Lucide icon Element at a standard pill-button size.
+fn lucide_icon<'a>(
+    icon_fn: fn() -> iced::widget::Text<'a, iced::Theme, iced::Renderer>,
+) -> Element<'a, Msg> {
+    icon_fn().size(14).into()
+}
+
+/// Styled secondary button with a Lucide icon prefix.
+fn styled_button_with_icon<'a>(
+    icon_fn: fn() -> iced::widget::Text<'a, iced::Theme, iced::Renderer>,
+    label: &str,
+    msg: Msg,
+) -> Element<'a, Msg> {
+    let label_text = label.to_string();
+    button(
+        container(
+            row![icon_fn().size(12), text(label_text).size(12).color(TEXT_PRIMARY)]
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .center_x(Length::Shrink)
+        .center_y(30)
+        .height(30)
+        .padding([0, 12]),
+    )
+    .on_press(msg)
+    .style(|_theme, status| {
+        let bg = if matches!(status, button::Status::Hovered) {
+            Color::from_rgb(0.28, 0.28, 0.30)
+        } else {
+            BG_PANEL
+        };
+        button::Style {
+            background: Some(iced::Background::Color(bg)),
+            border: iced::Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: BORDER_SUBTLE,
+            },
+            text_color: TEXT_PRIMARY,
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
 /// Pill-shaped title bar button with icon + label, accent hover glow.
 fn pill_button<'a>(
-    icon: &'a str,
+    icon: Element<'a, Msg>,
     label: &'a str,
     pal: board_view::GuiPalette,
     destructive: bool,
     msg: Msg,
 ) -> Element<'a, Msg> {
-    let content = row![text(icon).size(12), text(label).size(11),]
-        .spacing(3)
+    let content = row![icon, text(label).size(11),]
+        .spacing(4)
         .align_y(Alignment::Center);
 
     button(content)
@@ -2744,40 +2804,58 @@ where
     .into()
 }
 
-/// Engine config toggle row: "Label  [ON/OFF]"
-fn config_toggle(label: &str, enabled: bool, msg: Msg) -> Element<'_, Msg> {
-    let (icon, color) = if enabled {
-        ("● ON", ACCENT_TEAL)
-    } else {
-        ("○ OFF", TEXT_SECONDARY)
-    };
+/// A settings row with a label and a control widget, consistently aligned.
+fn settings_row<'a>(label: &str, control: Element<'a, Msg>) -> Element<'a, Msg> {
     let label_owned = label.to_string();
-    button(
+    container(
         row![
-            text(label_owned).size(12).color(TEXT_PRIMARY).width(130),
-            text(icon).size(12).color(color),
+            text(label_owned).size(12).color(TEXT_SECONDARY).width(180),
+            control,
         ]
-        .spacing(8)
+        .spacing(12)
         .align_y(Alignment::Center),
     )
-    .on_press(msg)
-    .padding([4, 8])
-    .style(|_theme, status| {
-        let bg = if matches!(status, button::Status::Hovered) {
-            Color::from_rgb(0.15, 0.18, 0.30)
-        } else {
-            Color::TRANSPARENT
-        };
-        button::Style {
-            background: Some(iced::Background::Color(bg)),
-            border: iced::Border {
-                radius: 4.0.into(),
-                width: 0.0,
-                color: Color::TRANSPARENT,
-            },
-            text_color: TEXT_PRIMARY,
-            ..Default::default()
-        }
+    .padding([6, 8])
+    .width(Length::Fill)
+    .style(|_theme| container::Style {
+        background: None,
+        ..Default::default()
+    })
+    .into()
+}
+
+/// A glass-card section with a Lucide icon header and inner content.
+fn settings_card<'a>(
+    icon_fn: fn() -> iced::widget::Text<'a, iced::Theme, iced::Renderer>,
+    title: &str,
+    content: Element<'a, Msg>,
+) -> Element<'a, Msg> {
+    let title_owned = title.to_string();
+    container(
+        column![
+            row![
+                icon_fn().size(14).color(ACCENT_TEAL),
+                text(title_owned).size(14).color(ACCENT_TEAL),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            Space::new().height(6),
+            content,
+        ]
+        .spacing(0),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(|_theme| container::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(
+            1.0, 1.0, 1.0, 0.04,
+        ))),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.06),
+        },
+        ..Default::default()
     })
     .into()
 }

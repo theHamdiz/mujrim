@@ -78,6 +78,11 @@ ui:
     @echo "Launching KishMat Chess GUI..."
     cargo run --release -p kishmat-ui
 
+# Build and run the Bevy chess game (always release)
+game:
+    @echo "Building KishMat Bevy Game..."
+    cargo run --release -p kishmat-game
+
 # Build the updater
 updater:
     cargo build --release -p kishmat-updater
@@ -198,3 +203,18 @@ install:
 # Uninstall KishMat from all platforms
 uninstall:
     cargo run --release -p kishmat-tooling -- uninstall
+
+# ──────────────────────────────────────────────────────────────
+# Installer — single binary that bundles all release artifacts
+# ──────────────────────────────────────────────────────────────
+
+# Build the installer (builds workspace first, then embeds binaries)
+installer:
+    @echo "Building workspace in release mode..."
+    cargo build --release --workspace --exclude kishmat-installer
+    @echo "Building installer with embedded binaries..."
+    cargo build --release -p kishmat-installer --features embed
+
+# Run the installer GUI
+run-installer:
+    cargo run --release -p kishmat-installer --features embed

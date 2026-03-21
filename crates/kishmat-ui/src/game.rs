@@ -230,4 +230,54 @@ mod tests {
         assert_eq!(gs.board.side_to_move, types::Color::Black);
         assert!(!gs.game_over);
     }
+
+    #[test]
+    fn test_arrows_initial_state() {
+        let gs = setup();
+        assert!(gs.arrows.is_empty());
+        assert!(gs.arrow_start.is_none());
+    }
+
+    #[test]
+    fn test_arrows_toggle() {
+        let mut gs = setup();
+        let e2 = Square::from_index(12);
+        let e4 = Square::from_index(28);
+        let arrow = (e2, e4);
+
+        // Add an arrow
+        gs.arrows.push(arrow);
+        assert_eq!(gs.arrows.len(), 1);
+
+        // Toggle off: remove if exists
+        if let Some(idx) = gs.arrows.iter().position(|a| *a == arrow) {
+            gs.arrows.remove(idx);
+        }
+        assert!(gs.arrows.is_empty());
+    }
+
+    #[test]
+    fn test_arrows_clear_all() {
+        let mut gs = setup();
+        gs.arrows.push((Square::from_index(0), Square::from_index(16)));
+        gs.arrows.push((Square::from_index(6), Square::from_index(21)));
+        assert_eq!(gs.arrows.len(), 2);
+
+        gs.arrows.clear();
+        assert!(gs.arrows.is_empty());
+    }
+
+    #[test]
+    fn test_arrow_start_set_and_take() {
+        let mut gs = setup();
+        assert!(gs.arrow_start.is_none());
+
+        gs.arrow_start = Some(Square::from_index(12));
+        assert!(gs.arrow_start.is_some());
+
+        let taken = gs.arrow_start.take();
+        assert_eq!(taken, Some(Square::from_index(12)));
+        assert!(gs.arrow_start.is_none());
+    }
 }
+
