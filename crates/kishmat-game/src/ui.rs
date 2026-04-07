@@ -118,11 +118,11 @@ pub fn despawn_menu(mut commands: Commands, menu: Query<Entity, With<MenuRoot>>)
 }
 
 pub fn menu_button_system(
-    interaction_q: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<MenuPlayButton>)>,
+    mut interaction_q: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<MenuPlayButton>)>,
     mut app_state: ResMut<NextState<AppState>>,
     mut audio_messages: MessageWriter<crate::audio::SoundMessage>,
 ) {
-    for (interaction, mut bg) in interaction_q.iter() {
+    for (interaction, mut bg) in interaction_q.iter_mut() {
         match *interaction {
             Interaction::Pressed => {
                 audio_messages.write(crate::audio::SoundMessage::Click);

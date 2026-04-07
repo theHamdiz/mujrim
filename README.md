@@ -191,7 +191,7 @@ The hybrid eval function uses NNUE as the primary evaluator with classical eval 
 | **Singular Extensions** | TT move singularity with per-path double extensions (`dbl_exts < 5`) |
 | **Check Extension** | +1 ply when in check (budgeted at 2× nominal depth) |
 | **ProbCut** | Reduced-depth verification for positions way above beta |
-| **IIR** | Internal Iterative Reduction at PV nodes |
+| **IIR** | Internal Iterative Reduction on cut nodes without a TT move (not PV / in check / SE) |
 | **SEE Pruning** | Prune losing captures and quiet moves by SEE score |
 | **History Gravity** | `bonus - entry·|bonus|/16384` (capped at ±16384) |
 | **Continuation History** | 1-ply and 2-ply back move-piece tracking |

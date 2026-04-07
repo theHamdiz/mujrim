@@ -918,6 +918,26 @@ impl SearchEngine {
     }
 }
 
+/// When to apply IIR (internal iterative reduction): depth -= 1 with no TT move.
+///
+/// Skips PV nodes (need full depth for the principal variation), in-check nodes
+/// (small tree, reduction hurts), singular-extension verification (`excluded_move`),
+/// and shallow nodes (depth below 4).
+#[inline]
+fn should_apply_iir(
+    tt_move: Option<Move>,
+    depth: i32,
+    is_pv: bool,
+    in_check: bool,
+    excluded_move: Option<Move>,
+) -> bool {
+    tt_move.is_none()
+        && depth >= 4
+        && !is_pv
+        && !in_check
+        && excluded_move.is_none()
+}
+
 /// Alpha-beta search (free function so it can be called from any thread).
 ///
 /// `excluded_move`: if Some, this move is skipped during the move loop.
@@ -1262,9 +1282,8 @@ fn search_ab(
         }
     }
 
-    // ── IIR ────────
-    if tt_move.is_none() && depth >= 4 {
-        // Internal Iterative Reduction
+    // ── IIR (Internal Iterative Reduction) ────────
+    if should_apply_iir(tt_move, depth, is_pv, in_check, excluded_move) {
         depth -= 1;
     }
 
@@ -2641,6 +2660,18 @@ mod tests {
         let kp_only = Board::from_fen("8/8/4k3/8/8/8/4p3/4K3 w - - 0 1").unwrap();
         assert!(!nmp_material_ok(&kp_only, types::Color::White));
         assert!(!nmp_material_ok(&kp_only, types::Color::Black));
+    }
+
+    #[test]
+    fn iir_predicate_matches_stockfish_style_gates() {
+        setup();
+        let m = Move::from_uci("e2e4").unwrap();
+        assert!(!should_apply_iir(None, 3, false, false, None));
+        assert!(should_apply_iir(None, 4, false, false, None));
+        assert!(!should_apply_iir(None, 4, true, false, None));
+        assert!(!should_apply_iir(None, 4, false, true, None));
+        assert!(!should_apply_iir(None, 4, false, false, Some(m)));
+        assert!(!should_apply_iir(Some(m), 4, false, false, None));
     }
 
     #[test]
