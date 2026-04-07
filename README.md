@@ -267,7 +267,7 @@ kishmat/                          # Workspace root + main engine binary
 Run the benchmark:
 
 ```bash
-just bench                    # Default (depth 20, 30s/position)
+just bench                    # Default (depth 20, 30s/position, 256MB hash)
 just bench depth=18           # Custom depth
 just bench-uci ./stockfish    # Benchmark external UCI engine
 just engine-info              # Show NNUE + technique info

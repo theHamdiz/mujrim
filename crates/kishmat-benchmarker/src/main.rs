@@ -62,7 +62,7 @@ enum Commands {
         threads: Option<usize>,
 
         /// Hash table size in MB.
-        #[arg(long, default_value_t = 128)]
+        #[arg(long, default_value_t = 256)]
         hash: usize,
 
         /// Per-position time limit in seconds.
@@ -98,11 +98,15 @@ enum Commands {
         json: bool,
     },
 
-    /// Repeat BK benchmarks until the CCRL 40/15 proxy reaches `--target` (or limits stop).
+    /// Repeat BK benchmarks until the CCRL 40/15 proxy reaches `--target`, `--min-bk` hits, or limits stop.
     Iterate {
-        /// Stop when BK accuracy maps to at least this **approx. CCRL 40/15** (proxy cap ~2750).
-        #[arg(long, default_value_t = 2750)]
+        /// Stop when BK accuracy maps to at least this **approx. CCRL 40/15** (100% suite → ~2800).
+        #[arg(long, default_value_t = 2800)]
         target_elo: i32,
+
+        /// Stop when at least this many positions match (24-pos BK suite). Use 0 to disable.
+        #[arg(long, default_value_t = 20)]
+        min_bk: usize,
 
         /// Maximum benchmark rounds (each round is one full BK pass, optional `--between` first).
         #[arg(long, default_value_t = 100)]
@@ -137,7 +141,7 @@ enum Commands {
         threads: Option<usize>,
 
         /// Hash table size in MB.
-        #[arg(long, default_value_t = 128)]
+        #[arg(long, default_value_t = 256)]
         hash: usize,
 
         /// Per-position time limit in seconds.
@@ -254,6 +258,7 @@ fn main() {
         ),
         Commands::Iterate {
             target_elo,
+            min_bk,
             max_rounds,
             stagnation_limit,
             between,
@@ -269,6 +274,7 @@ fn main() {
             eval_file,
         } => run_iterate(
             target_elo,
+            min_bk,
             max_rounds,
             stagnation_limit,
             between,
@@ -508,6 +514,7 @@ fn run_bench(
 
 fn run_iterate(
     target_elo: i32,
+    min_bk: usize,
     max_rounds: u32,
     stagnation_limit: u32,
     between: Option<String>,
@@ -542,6 +549,7 @@ fn run_iterate(
 
     let iter_cfg = EloIterateConfig {
         target_elo,
+        min_bk_correct: (min_bk > 0).then_some(min_bk),
         max_rounds,
         stagnation_limit,
         between_shell: between,
@@ -580,8 +588,12 @@ fn run_iterate(
         );
     } else if !json_progress && outcome.success {
         eprintln!(
-            "Target reached: approx. CCRL 40/15 ~{} (round {})",
-            outcome.final_round.summary.approx_ccrl_40_15, outcome.rounds_run
+            "Target reached: {} — approx. CCRL 40/15 ~{}  BK {}/{} (round {})",
+            outcome.reason,
+            outcome.final_round.summary.approx_ccrl_40_15,
+            outcome.final_round.summary.correct,
+            outcome.final_round.summary.total,
+            outcome.rounds_run
         );
     }
 

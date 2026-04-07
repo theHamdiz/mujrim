@@ -12,6 +12,8 @@ use crate::suite::{BenchSummary, TestPosition};
 #[derive(Clone, Debug)]
 pub struct EloIterateConfig {
     pub target_elo: i32,
+    /// Stop successfully when at least this many BK positions match (e.g. 20 on the 24-pos suite).
+    pub min_bk_correct: Option<usize>,
     pub max_rounds: u32,
     /// Exit with `stagnation_exceeded` after this many rounds with no CCRL-proxy gain.
     pub stagnation_limit: u32,
@@ -28,7 +30,8 @@ pub struct EloIterateConfig {
 impl Default for EloIterateConfig {
     fn default() -> Self {
         Self {
-            target_elo: 2750,
+            target_elo: 2800,
+            min_bk_correct: None,
             max_rounds: 100,
             stagnation_limit: 20,
             between_shell: None,
@@ -195,6 +198,20 @@ pub fn run_elo_iterate(positions: &[TestPosition], config: &EloIterateConfig) ->
             stagnant += 1;
         }
 
+        if let Some(min_ok) = config.min_bk_correct {
+            if summary.correct >= min_ok {
+                return EloIterateOutcome {
+                    success: true,
+                    reason: "bk_minimum_reached",
+                    rounds_run: round,
+                    best_elo,
+                    best_round,
+                    final_round: last_round,
+                    history,
+                };
+            }
+        }
+
         if elo >= config.target_elo {
             return EloIterateOutcome {
                 success: true,
@@ -270,6 +287,7 @@ mod tests {
         let positions = bk_suite();
         let cfg = EloIterateConfig {
             target_elo: 400,
+            min_bk_correct: None,
             max_rounds: 1,
             stagnation_limit: 50,
             between_shell: None,

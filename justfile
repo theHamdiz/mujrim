@@ -48,7 +48,7 @@ perft depth="6":
     cargo run --release -- perft -d {{depth}}
 
 # Run the ELO benchmark suite — auto-detects all hardware
-bench depth="20" threads="" hash="128" time="30":
+bench depth="20" threads="" hash="256" time="30":
     @echo "Running KishMat Benchmark Suite..."
     RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}}
 

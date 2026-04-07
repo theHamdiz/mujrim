@@ -35,7 +35,7 @@ impl Default for InternalBenchConfig {
             threads: std::thread::available_parallelism()
                 .map(|n| n.get().saturating_sub(2).max(1))
                 .unwrap_or(1),
-            hash_mb: 128,
+            hash_mb: 256,
             time_per_position: Duration::from_secs(30),
             suite_name: "Bratko-Kopec".to_string(),
             eval_preset: "auto".to_string(),

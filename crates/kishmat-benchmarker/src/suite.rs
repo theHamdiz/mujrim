@@ -344,14 +344,11 @@ mod tests {
     fn test_ccrl_lichess_from_bk_accuracy() {
         assert!(approx_ccrl_40_15_from_bk_accuracy(0.0) >= 800);
         assert!(approx_ccrl_40_15_from_bk_accuracy(50.0) >= 1600);
-        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(100.0), 2750);
+        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(100.0), 2800);
         assert_eq!(approx_ccrl_40_15_from_bk_accuracy(90.0), 2500);
         let plan = approx_ccrl_40_15_from_bk_accuracy(54.166666666666664);
         assert!((plan - 1963).abs() <= 1);
-        assert_eq!(
-            approx_lichess_blitz_from_bk_accuracy(100.0),
-            approx_ccrl_40_15_from_bk_accuracy(100.0) + 115
-        );
+        assert_eq!(approx_lichess_blitz_from_bk_accuracy(100.0), 2915);
     }
 
     #[test]

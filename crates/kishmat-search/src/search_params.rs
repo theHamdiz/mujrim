@@ -137,7 +137,7 @@ impl SearchParams {
             futility_base: 188,
             futility_mul: 35,
             futility_improving_bonus: 0,
-            futility_depth_limit: 6,
+            futility_depth_limit: 5,
 
             // Null-move pruning
             nmp_depth_min: 2,
@@ -146,27 +146,27 @@ impl SearchParams {
             nmp_eval_div: 198,
             nmp_eval_max: 6,
 
-            // LMR
-            lmr_base: 0.48,
+            // LMR — slightly less aggressive for tactical positions (BK / short time).
+            lmr_base: 0.45,
             lmr_divisor: 2.48,
             lmr_cut_node_bonus: 2,
 
-            // LMP
-            lmp_depth_limit: 9,
+            // LMP — trim quiet pruning at higher depths.
+            lmp_depth_limit: 7,
 
             // History pruning
             hist_prune_margin: -1682,
-            hist_prune_depth_limit: 6,
+            hist_prune_depth_limit: 5,
             hist_lmr_div: 8192,
 
-            // SEE pruning
+            // SEE pruning — narrow band where SEE-based quiet/capture pruning applies.
             see_capture_margin: -148,
             see_quiet_margin: -64,
-            see_prune_depth_limit: 7,
+            see_prune_depth_limit: 5,
 
-            // Singular extensions
+            // Singular extensions — start earlier for deep tactics.
             se_margin_mul: 1,
-            se_depth_min: 8,
+            se_depth_min: 6,
             max_dbl_exts: 5,
 
             // NMP verification
@@ -176,9 +176,9 @@ impl SearchParams {
             // Aspiration
             aspiration_window: 16,
 
-            // Quiescence
+            // Quiescence — a bit deeper for mating/tactical sequences.
             delta_margin: 400,
-            max_qs_ply: 8,
+            max_qs_ply: 10,
 
             // History bonus / malus — Akimbo tuned values
             history_bonus_mul: 375,
@@ -399,9 +399,8 @@ mod tests {
     fn test_lmr_table() {
         let p = SearchParams::akimbo();
         let table = p.build_lmr_table();
-        // LMR[10][10] = floor(0.48 + ln(10)*ln(10)/2.48) = floor(0.48 + 2.14) = 2
+        // LMR[10][10] = floor(0.45 + ln(10)² / 2.48)
         assert_eq!(table[10][10], 2);
-        // LMR[1][1] = floor(0.48 + 0) = 0
         assert_eq!(table[1][1], 0);
     }
 }
