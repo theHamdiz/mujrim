@@ -107,24 +107,17 @@ impl Board {
         legal
     }
 
-    /// Legal non-capture moves (quiet pushes, castling, quiet promotions; excludes EP and captures).
+    /// Legal non-capture moves (quiet pushes, castling; excludes EP, captures, promotions).
     ///
     /// Paired with [`Self::generate_legal_captures`], this partitions the legal move set:
     /// captures ∩ quiets = ∅, captures ∪ quiets = legal moves.
     pub fn generate_legal_quiets(&mut self) -> MoveList {
-        let pseudo = self.generate_pseudo_legal_moves(self.side_to_move);
+        let pseudo = self.generate_pseudo_legal_quiets(self.side_to_move);
         let mut legal = MoveList::new();
         let us = self.side_to_move;
 
         for i in 0..pseudo.len() {
             let mv = pseudo[i];
-            if mv.is_capture() {
-                continue;
-            }
-            // Promotions (incl. underpromotion) live in `generate_legal_captures` with captures.
-            if mv.is_promotion() {
-                continue;
-            }
             self.make_move(mv);
             if !self.is_in_check(us) {
                 legal.push(mv);
@@ -132,6 +125,19 @@ impl Board {
             self.unmake_move(mv);
         }
         legal
+    }
+
+    /// Pseudo-legal quiet moves only (empty destination squares); no captures, EP, or promotions.
+    pub fn generate_pseudo_legal_quiets(&self, color: Color) -> MoveList {
+        let mut moves = MoveList::new();
+        self.gen_pawn_quiets(color, &mut moves);
+        self.gen_knight_quiets(color, &mut moves);
+        self.gen_bishop_quiets(color, &mut moves);
+        self.gen_rook_quiets(color, &mut moves);
+        self.gen_queen_quiets(color, &mut moves);
+        self.gen_king_quiets(color, &mut moves);
+        self.gen_castling_moves(color, &mut moves);
+        moves
     }
 
     /// Returns true if `mv` is legal for the side to move (full make/unmake check).
@@ -211,6 +217,39 @@ impl Board {
         }
     }
 
+    fn gen_pawn_quiets(&self, color: Color, moves: &mut MoveList) {
+        let pawns = self.piece_bb(Piece::Pawn, color);
+        let occ = self.all_occupancy();
+        let promo_rank = color.promotion_rank();
+        let dir = color.pawn_direction();
+        let start_rank = color.pawn_start_rank();
+
+        for from_idx in iter_bits(pawns) {
+            let from = Square::from_index(from_idx);
+            let from_rank = from.rank();
+
+            let to_idx = (from_idx as i32 + dir) as usize;
+            if to_idx < 64 {
+                let to = Square::from_index(to_idx);
+                if occ & to.bitboard() == 0 {
+                    if to.rank() == promo_rank {
+                        continue;
+                    }
+                    moves.push(Move::quiet(from, to));
+                    if from_rank == start_rank {
+                        let double_idx = (from_idx as i32 + 2 * dir) as usize;
+                        if double_idx < 64 {
+                            let double_to = Square::from_index(double_idx);
+                            if occ & double_to.bitboard() == 0 {
+                                moves.push(Move::double_pawn(from, double_to));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── Knight moves ────────────────────────────────────────────────────────
 
     fn gen_knight_moves(&self, color: Color, moves: &mut MoveList) {
@@ -229,6 +268,20 @@ impl Board {
                 } else {
                     moves.push(Move::quiet(from, to));
                 }
+            }
+        }
+    }
+
+    fn gen_knight_quiets(&self, color: Color, moves: &mut MoveList) {
+        let knights = self.piece_bb(Piece::Knight, color);
+        let not_occupied_by_us = !self.color_occupancy(color);
+        let enemies = self.color_occupancy(color.opponent());
+
+        for from_idx in iter_bits(knights) {
+            let from = Square::from_index(from_idx);
+            let attacks = knight_attacks(from_idx) & not_occupied_by_us & !enemies;
+            for to_idx in iter_bits(attacks) {
+                moves.push(Move::quiet(from, Square::from_index(to_idx)));
             }
         }
     }
@@ -256,6 +309,21 @@ impl Board {
         }
     }
 
+    fn gen_bishop_quiets(&self, color: Color, moves: &mut MoveList) {
+        let bishops = self.piece_bb(Piece::Bishop, color);
+        let not_occupied_by_us = !self.color_occupancy(color);
+        let enemies = self.color_occupancy(color.opponent());
+        let occ = self.all_occupancy();
+
+        for from_idx in iter_bits(bishops) {
+            let from = Square::from_index(from_idx);
+            let attacks = bishop_attacks(from_idx, occ) & not_occupied_by_us & !enemies;
+            for to_idx in iter_bits(attacks) {
+                moves.push(Move::quiet(from, Square::from_index(to_idx)));
+            }
+        }
+    }
+
     // ── Rook moves ──────────────────────────────────────────────────────────
 
     fn gen_rook_moves(&self, color: Color, moves: &mut MoveList) {
@@ -275,6 +343,21 @@ impl Board {
                 } else {
                     moves.push(Move::quiet(from, to));
                 }
+            }
+        }
+    }
+
+    fn gen_rook_quiets(&self, color: Color, moves: &mut MoveList) {
+        let rooks = self.piece_bb(Piece::Rook, color);
+        let not_occupied_by_us = !self.color_occupancy(color);
+        let enemies = self.color_occupancy(color.opponent());
+        let occ = self.all_occupancy();
+
+        for from_idx in iter_bits(rooks) {
+            let from = Square::from_index(from_idx);
+            let attacks = rook_attacks(from_idx, occ) & not_occupied_by_us & !enemies;
+            for to_idx in iter_bits(attacks) {
+                moves.push(Move::quiet(from, Square::from_index(to_idx)));
             }
         }
     }
@@ -302,6 +385,21 @@ impl Board {
         }
     }
 
+    fn gen_queen_quiets(&self, color: Color, moves: &mut MoveList) {
+        let queens = self.piece_bb(Piece::Queen, color);
+        let not_occupied_by_us = !self.color_occupancy(color);
+        let enemies = self.color_occupancy(color.opponent());
+        let occ = self.all_occupancy();
+
+        for from_idx in iter_bits(queens) {
+            let from = Square::from_index(from_idx);
+            let attacks = queen_attacks(from_idx, occ) & not_occupied_by_us & !enemies;
+            for to_idx in iter_bits(attacks) {
+                moves.push(Move::quiet(from, Square::from_index(to_idx)));
+            }
+        }
+    }
+
     // ── King moves ──────────────────────────────────────────────────────────
 
     fn gen_king_moves(&self, color: Color, moves: &mut MoveList) {
@@ -323,6 +421,21 @@ impl Board {
             } else {
                 moves.push(Move::quiet(from, to));
             }
+        }
+    }
+
+    fn gen_king_quiets(&self, color: Color, moves: &mut MoveList) {
+        let king_bb = self.piece_bb(Piece::King, color);
+        if king_bb == 0 {
+            return;
+        }
+        let from_idx = get_lsb(king_bb);
+        let from = Square::from_index(from_idx);
+        let not_occupied_by_us = !self.color_occupancy(color);
+        let enemies = self.color_occupancy(color.opponent());
+        let attacks = king_attacks(from_idx) & not_occupied_by_us & !enemies;
+        for to_idx in iter_bits(attacks) {
+            moves.push(Move::quiet(from, Square::from_index(to_idx)));
         }
     }
 
@@ -576,6 +689,27 @@ mod tests {
         for m in legal.as_slice() {
             assert!(board.is_legal_move(*m), "{m}");
         }
+    }
+
+    #[test]
+    fn test_pseudo_legal_quiets_exclude_captures_and_promotions() {
+        setup();
+        let board =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .unwrap();
+        let color = board.side_to_move;
+        let pq = board.generate_pseudo_legal_quiets(color);
+        for m in pq.as_slice() {
+            assert!(
+                !m.is_capture() && !m.is_promotion(),
+                "quiet pseudo contained tactical move {m}"
+            );
+        }
+        let full = board.generate_pseudo_legal_moves(color);
+        assert!(
+            pq.len() <= full.len(),
+            "quiet pseudos should not outnumber full pseudo"
+        );
     }
 
     // ── Perft suite (gold standard for correctness) ─────────────────────────
