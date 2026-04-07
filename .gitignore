@@ -1,6 +1,7 @@
 # Build artifacts
 /target
 **/target
+rust_out
 
 # IDE / editor
 .idea/
