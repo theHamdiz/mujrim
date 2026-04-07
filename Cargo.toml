@@ -11,6 +11,7 @@ readme = "README.md"
 
 [workspace]
 members = [
+    "crates/kishmat-bench-ratings",
     "crates/kishmat-types",
     "crates/kishmat-eval",
     "crates/kishmat-search",
@@ -41,6 +42,7 @@ stockfish-nnue = ["eval/stockfish-nnue"]
 
 [dependencies]
 clap = "4.6"
+kishmat-bench-ratings = { path = "crates/kishmat-bench-ratings" }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # Workspace crates — `package` rename lets source code keep short `use` names

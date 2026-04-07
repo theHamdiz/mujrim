@@ -8,4 +8,5 @@ pub mod see;
 pub mod tt;
 
 pub use engine::SearchEngine;
+pub use move_picker::PickerTerminal;
 pub use search_params::SearchParams;

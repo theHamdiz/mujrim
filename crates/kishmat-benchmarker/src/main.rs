@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use eval::nnue::{load_network, NnueNetworkSource};
+use eval::nnue::load_network;
 use kishmat_protocols::ProtocolKind;
 
 use kishmat_benchmarker::{
@@ -34,6 +34,7 @@ use kishmat_benchmarker::{
     external::{self, ExternalBenchConfig},
     hardware::HardwareInfo,
     internal::{self, InternalBenchConfig},
+    iterate::{self, EloIterateConfig},
     suite::{self, format_nps},
 };
 
@@ -65,7 +66,7 @@ enum Commands {
         hash: usize,
 
         /// Per-position time limit in seconds.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 30)]
         time: u64,
 
         /// Path to a custom FEN file (default: built-in BK suite).
@@ -75,6 +76,77 @@ enum Commands {
         /// Enable TUI mode with live progress display.
         #[arg(long)]
         tui: bool,
+
+        /// Runtime NNUE preset (`auto`, `akimbo`, `stockfish`).
+        #[arg(
+            long,
+            default_value = "auto",
+            value_parser = ["auto", "akimbo", "stockfish"]
+        )]
+        eval_preset: String,
+
+        /// Optional runtime network file path (same semantics as UCI EvalFile).
+        #[arg(long)]
+        eval_file: Option<PathBuf>,
+
+        /// Suppress per-position lines and auto-detect stderr (machine-friendly).
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
+
+        /// Print one JSON object with summary + NPS (implies `--quiet` for the bench run).
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Repeat BK benchmarks until the CCRL 40/15 proxy reaches `--target` (or limits stop).
+    Iterate {
+        /// Stop when BK accuracy maps to at least this **approx. CCRL 40/15** (proxy cap ~2750).
+        #[arg(long, default_value_t = 2750)]
+        target_elo: i32,
+
+        /// Maximum benchmark rounds (each round is one full BK pass, optional `--between` first).
+        #[arg(long, default_value_t = 100)]
+        max_rounds: u32,
+
+        /// Exit after this many rounds with no improvement in the CCRL proxy.
+        #[arg(long, default_value_t = 20)]
+        stagnation_limit: u32,
+
+        /// Shell command run before each round (e.g. `cargo build --release -p foo`); skipped before round 1.
+        #[arg(long)]
+        between: Option<String>,
+
+        /// Print one JSON line per round; final line is the outcome object when not using `--json-progress-only`.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Only NDJSON round rows + stagnation/exit events (no final wrapper object).
+        #[arg(long, default_value_t = false)]
+        json_progress_only: bool,
+
+        /// Skip the extra 5s startpos NPS sample each round.
+        #[arg(long, default_value_t = false)]
+        no_nps: bool,
+
+        /// Search depth.
+        #[arg(short, long, default_value_t = 20)]
+        depth: i32,
+
+        /// Number of search threads.
+        #[arg(short = 't', long)]
+        threads: Option<usize>,
+
+        /// Hash table size in MB.
+        #[arg(long, default_value_t = 128)]
+        hash: usize,
+
+        /// Per-position time limit in seconds.
+        #[arg(long, default_value_t = 30)]
+        time: u64,
+
+        /// Path to a custom FEN file (default: built-in BK suite).
+        #[arg(short, long)]
+        positions: Option<PathBuf>,
 
         /// Runtime NNUE preset (`auto`, `akimbo`, `stockfish`).
         #[arg(
@@ -111,7 +183,7 @@ enum Commands {
         threads: usize,
 
         /// Per-position time limit in seconds.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 30)]
         time: u64,
 
         /// Path to a custom FEN file (default: built-in BK suite).
@@ -141,7 +213,7 @@ enum Commands {
         threads: usize,
 
         /// Per-position time limit in seconds.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 30)]
         time: u64,
 
         /// Path to a custom FEN file (default: built-in BK suite).
@@ -166,6 +238,8 @@ fn main() {
             tui,
             eval_preset,
             eval_file,
+            quiet,
+            json,
         } => run_bench(
             depth,
             threads,
@@ -173,6 +247,39 @@ fn main() {
             time,
             positions,
             tui,
+            eval_preset,
+            eval_file,
+            quiet,
+            json,
+        ),
+        Commands::Iterate {
+            target_elo,
+            max_rounds,
+            stagnation_limit,
+            between,
+            json,
+            json_progress_only,
+            no_nps,
+            depth,
+            threads,
+            hash,
+            time,
+            positions,
+            eval_preset,
+            eval_file,
+        } => run_iterate(
+            target_elo,
+            max_rounds,
+            stagnation_limit,
+            between,
+            json,
+            json_progress_only,
+            no_nps,
+            depth,
+            threads,
+            hash,
+            time,
+            positions,
             eval_preset,
             eval_file,
         ),
@@ -250,7 +357,10 @@ fn run_bench(
     _tui: bool,
     eval_preset: String,
     eval_file: Option<PathBuf>,
+    quiet: bool,
+    json_output: bool,
 ) {
+    let bench_quiet = quiet || json_output;
     let hw = HardwareInfo::detect();
     let nnue = if let Some(path) = &eval_file {
         match load_network(path) {
@@ -270,37 +380,41 @@ fn run_bench(
 
     let thread_count = threads.unwrap_or(hw.bench_threads());
 
-    // Print header
-    println!("╔══════════════════════════════════════════════╗");
-    println!("║           KISHMAT BENCHMARKER               ║");
-    println!("╠══════════════════════════════════════════════╣");
-    println!();
-    println!("  ── NNUE ──");
-    for line in nnue.display_lines() {
-        println!("{line}");
+    if !bench_quiet {
+        // Print header
+        println!("╔══════════════════════════════════════════════╗");
+        println!("║           KISHMAT BENCHMARKER               ║");
+        println!("╠══════════════════════════════════════════════╣");
+        println!();
+        println!("  ── NNUE ──");
+        for line in nnue.display_lines() {
+            println!("{line}");
+        }
+        println!();
+        println!("  ── Hardware ──");
+        for line in hw.display_lines() {
+            println!("{line}");
+        }
+        println!();
+        println!("  ── Config ──");
+        println!("    Depth:      {depth}");
+        println!("    Threads:    {thread_count}");
+        println!("    Hash:       {hash} MB");
+        println!("    Time/pos:   {time}s");
+        println!("    EvalPreset: {eval_preset}");
+        if let Some(path) = &eval_file {
+            println!("    EvalFile:   {}", path.display());
+        }
+        println!();
     }
-    println!();
-    println!("  ── Hardware ──");
-    for line in hw.display_lines() {
-        println!("{line}");
-    }
-    println!();
-    println!("  ── Config ──");
-    println!("    Depth:      {depth}");
-    println!("    Threads:    {thread_count}");
-    println!("    Hash:       {hash} MB");
-    println!("    Time/pos:   {time}s");
-    println!("    EvalPreset: {eval_preset}");
-    if let Some(path) = &eval_file {
-        println!("    EvalFile:   {}", path.display());
-    }
-    println!();
 
     // Load positions
     let suite = if let Some(path) = positions {
         match suite::load_custom_positions(&path) {
             Ok(s) => {
-                println!("  Loaded {} positions from {}", s.len(), path.display());
+                if !bench_quiet {
+                    println!("  Loaded {} positions from {}", s.len(), path.display());
+                }
                 s
             }
             Err(e) => {
@@ -309,16 +423,20 @@ fn run_bench(
             }
         }
     } else {
-        println!("  Using Bratko-Kopec test suite (24 positions)");
+        if !bench_quiet {
+            println!("  Using Bratko-Kopec test suite (24 positions)");
+        }
         suite::bk_suite()
     };
-    println!();
+    if !bench_quiet {
+        println!();
 
-    // Show enabled techniques summary
-    let techs = engine_info::detect_techniques(&params);
-    let enabled_count = techs.iter().filter(|t| t.enabled).count();
-    println!("  {enabled_count} search techniques enabled");
-    println!();
+        // Show enabled techniques summary
+        let techs = engine_info::detect_techniques(&params);
+        let enabled_count = techs.iter().filter(|t| t.enabled).count();
+        println!("  {enabled_count} search techniques enabled");
+        println!();
+    }
 
     // Run
     let config = InternalBenchConfig {
@@ -329,6 +447,7 @@ fn run_bench(
         suite_name: "BK".into(),
         eval_preset: eval_preset.clone(),
         eval_file: eval_file.clone(),
+        quiet: bench_quiet,
     };
 
     #[cfg(feature = "tui")]
@@ -339,11 +458,14 @@ fn run_bench(
             "Depth: {depth}  Threads: {thread_count}  Hash: {hash}MB"
         ));
 
+        let mut tui_config = config.clone();
+        tui_config.quiet = false;
+
         match kishmat_benchmarker::tui::BenchTui::new(suite.len(), header_lines) {
             Ok(mut tui_state) => {
                 let summary = internal::run_internal_bench(
                     &suite,
-                    &config,
+                    &tui_config,
                     Some(Box::new(move |_i, _total, _result| {
                         // TUI callback would update here, but we need mutable access
                         // For simplicity, we'll use the non-TUI path and show TUI summary
@@ -359,12 +481,113 @@ fn run_bench(
     }
 
     let summary = internal::run_internal_bench(&suite, &config, None);
-    println!();
+    if !bench_quiet {
+        println!();
+    }
 
-    // Print NPS from startpos
-    let nps_5s = measure_nps(thread_count, hash, &eval_preset, eval_file.as_deref());
-    println!("{summary}");
-    println!("  NPS (5s startpos): {}", format_nps(nps_5s));
+    let nps_5s = internal::measure_startpos_nps(
+        thread_count,
+        hash,
+        &eval_preset,
+        eval_file.as_deref(),
+        bench_quiet,
+    );
+    if json_output {
+        println!(
+            "{}",
+            serde_json::json!({
+                "summary": summary.to_json_value(),
+                "nps_startpos_5s": nps_5s,
+            })
+        );
+    } else {
+        println!("{summary}");
+        println!("  NPS (5s startpos): {}", format_nps(nps_5s));
+    }
+}
+
+fn run_iterate(
+    target_elo: i32,
+    max_rounds: u32,
+    stagnation_limit: u32,
+    between: Option<String>,
+    json: bool,
+    json_progress_only: bool,
+    no_nps: bool,
+    depth: i32,
+    threads: Option<usize>,
+    hash: usize,
+    time: u64,
+    positions: Option<PathBuf>,
+    eval_preset: String,
+    eval_file: Option<PathBuf>,
+) {
+    let hw = HardwareInfo::detect();
+    let thread_count = threads.unwrap_or(hw.bench_threads());
+
+    let suite = if let Some(path) = positions {
+        match suite::load_custom_positions(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        suite::bk_suite()
+    };
+
+    let json_progress = json || json_progress_only;
+    let print_final_json = json && !json_progress_only;
+
+    let iter_cfg = EloIterateConfig {
+        target_elo,
+        max_rounds,
+        stagnation_limit,
+        between_shell: between,
+        json_progress,
+        quiet: json_progress,
+        bench: InternalBenchConfig {
+            depth,
+            threads: thread_count,
+            hash_mb: hash,
+            time_per_position: Duration::from_secs(time),
+            suite_name: "BK".into(),
+            eval_preset,
+            eval_file,
+            quiet: true,
+        },
+        measure_nps: !no_nps,
+    };
+
+    if !json_progress {
+        eprintln!(
+            "CCRL 40/15 proxy iterate: target ~{target_elo}  rounds≤{max_rounds}  stagnation≤{stagnation_limit}  threads={thread_count}"
+        );
+    }
+
+    let outcome = iterate::run_elo_iterate(&suite, &iter_cfg);
+
+    if print_final_json {
+        println!("{}", outcome.to_json_value());
+    } else if !json_progress && !outcome.success {
+        eprintln!(
+            "Stopped: {} (best approx. CCRL 40/15 {} on round {}, final {})",
+            outcome.reason,
+            outcome.best_elo,
+            outcome.best_round,
+            outcome.final_round.summary.approx_ccrl_40_15
+        );
+    } else if !json_progress && outcome.success {
+        eprintln!(
+            "Target reached: approx. CCRL 40/15 ~{} (round {})",
+            outcome.final_round.summary.approx_ccrl_40_15, outcome.rounds_run
+        );
+    }
+
+    if !outcome.success {
+        std::process::exit(1);
+    }
 }
 
 fn run_external(
@@ -415,43 +638,5 @@ fn run_external(
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
-    }
-}
-
-/// Measure NPS from startpos in 5 seconds.
-fn measure_nps(
-    threads: usize,
-    hash_mb: usize,
-    eval_preset: &str,
-    eval_file: Option<&std::path::Path>,
-) -> u64 {
-    use search::engine::SearchEngine;
-    use types::Board;
-
-    let mut engine = SearchEngine::new(hash_mb, threads);
-    if let Some(path) = eval_file {
-        // Explicit --eval-file: load that specific file.
-        if let Ok(network) = load_network(path) {
-            engine.set_nnue_network(network);
-        }
-    } else {
-        // No --eval-file: auto-detect the strongest available net.
-        let nnue_dir = std::path::Path::new("nnue");
-        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
-        if let Some(net) = auto_net {
-            eprintln!("{msg}");
-            engine.set_nnue_network(net);
-        }
-    }
-    // If the user explicitly requested a different preset, override the auto-applied one.
-    if eval_preset != "auto" {
-        engine.set_params_for_preset(eval_preset);
-    }
-    let mut board = Board::new();
-    let result = engine.search_time(&mut board, Duration::from_secs(5), 64);
-    if result.elapsed.as_millis() > 0 {
-        result.nodes * 1000 / result.elapsed.as_millis() as u64
-    } else {
-        result.nodes
     }
 }

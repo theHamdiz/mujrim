@@ -28,7 +28,7 @@ impl Default for ExternalBenchConfig {
             depth: 16,
             hash_mb: 128,
             threads: 1,
-            time_per_position: std::time::Duration::from_secs(120),
+            time_per_position: std::time::Duration::from_secs(30),
         }
     }
 }

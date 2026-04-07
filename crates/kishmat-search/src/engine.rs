@@ -5,7 +5,7 @@
 //! IIR, SEE-based pruning, futility/delta pruning, PV tracking.
 //! Supports Lazy SMP multi-threaded search via shared transposition table.
 
-use crate::move_picker::MovePicker;
+use crate::move_picker::{MovePicker, PickerTerminal};
 use crate::policy::{
     LmrContext, LmrPolicy, MainThreadPreferredRootSelection, RootSelectionPolicy,
     StockLikeLmrPolicy, ThreadOutcome,
@@ -35,6 +35,9 @@ const MAX_HISTORY: i32 = 16384;
 const NUM_PIECES: usize = 6;
 /// Number of squares.
 const NUM_SQUARES: usize = 64;
+/// History-malus bookkeeping in `search_ab` (stack-only; matches old `Vec` capacities).
+const SEARCHED_QUIETS_MAX: usize = 32;
+const SEARCHED_CAPTURES_MAX: usize = 16;
 /// Correction history table size (power of 2 for fast masking).
 const CORR_HIST_SIZE: usize = 16384;
 const CORR_HIST_MASK: usize = CORR_HIST_SIZE - 1;
@@ -1284,7 +1287,11 @@ fn search_ab(
     // If a TT move or good capture causes a cutoff, quiets are never generated.
     let us_idx = us.index();
     let killers_copy = state.killers[ply_usize];
-    let mut picker = MovePicker::new(tt_move, killers_copy, countermove);
+    let mut picker = match MovePicker::try_new(board, tt_move, killers_copy, countermove) {
+        Ok(p) => p,
+        Err(PickerTerminal::Checkmate) => return -MATE_SCORE + ply,
+        Err(PickerTerminal::Stalemate) => return 0,
+    };
 
     // Extract raw pointers to scoring data to avoid borrow conflicts.
     // Safety: These tables are only read by the closures during `picker.next()`
@@ -1336,12 +1343,6 @@ fn search_ab(
         score
     };
 
-    // Check for no legal moves (checkmate / stalemate)
-    picker.ensure_legal_moves(board);
-    if picker.total_legal() == 0 {
-        return if in_check { -MATE_SCORE + ply } else { 0 };
-    }
-
     let mut best_move = NULL_MOVE;
     let mut best_score = -INF;
     let mut node_type = NodeType::UpperBound;
@@ -1350,10 +1351,12 @@ fn search_ab(
     // Derive is_cut_node for LMR context where cut-node heuristic is valuable.
     let is_cut_node = allow_null;
 
-    // Track searched quiet moves for history malus (Stockfish-style)
-    let mut searched_quiets: Vec<Move> = Vec::with_capacity(32);
-    // Track searched captures for capture history malus
-    let mut searched_captures: Vec<(usize, types::Square, usize)> = Vec::with_capacity(16);
+    // Track searched quiet / capture moves for history malus (stack — no heap allocs per node).
+    let mut searched_quiets: [Move; SEARCHED_QUIETS_MAX] = [NULL_MOVE; SEARCHED_QUIETS_MAX];
+    let mut searched_quiets_len: usize = 0;
+    let mut searched_captures: [(usize, types::Square, usize); SEARCHED_CAPTURES_MAX] =
+        [(0, types::Square::A1, 0); SEARCHED_CAPTURES_MAX];
+    let mut searched_captures_len: usize = 0;
 
     // Singular extension data
     let can_do_singular = excluded_move.is_none()
@@ -1700,7 +1703,7 @@ fn search_ab(
                         }
 
                         // Penalize quiet moves searched before the cutoff
-                        for prev in &searched_quiets {
+                        for prev in searched_quiets[..searched_quiets_len].iter() {
                             if excluded_move
                                 .is_some_and(|em| em.from == prev.from && em.to == prev.to)
                             {
@@ -1735,7 +1738,9 @@ fn search_ab(
                             );
                         }
                         // Capture history malus: penalize captures that were searched before the cutoff capture
-                        for (prev_piece_idx, prev_to, prev_cap_idx) in &searched_captures {
+                        for (prev_piece_idx, prev_to, prev_cap_idx) in
+                            searched_captures[..searched_captures_len].iter()
+                        {
                             update_history(
                                 &mut state.cap_hist[*prev_piece_idx][prev_to.index()]
                                     [*prev_cap_idx],
@@ -1758,14 +1763,16 @@ fn search_ab(
             }
         }
 
-        // Track searched quiet moves for history malus
-        if !mv.is_capture() && !mv.is_promotion() {
-            searched_quiets.push(mv);
+        if !mv.is_capture() && !mv.is_promotion() && searched_quiets_len < SEARCHED_QUIETS_MAX {
+            searched_quiets[searched_quiets_len] = mv;
+            searched_quiets_len += 1;
         }
-        // Track searched captures for capture history malus
         if mv.is_capture() {
             if let Some(cap_idx) = captured_piece_idx {
-                searched_captures.push((moved_piece, mv.to, cap_idx));
+                if searched_captures_len < SEARCHED_CAPTURES_MAX {
+                    searched_captures[searched_captures_len] = (moved_piece, mv.to, cap_idx);
+                    searched_captures_len += 1;
+                }
             }
         }
     }
@@ -2607,6 +2614,12 @@ mod tests {
         let stored_neg = score_to_tt(mated_score, ply);
         let restored_neg = score_from_tt(stored_neg, ply);
         assert_eq!(restored_neg, mated_score);
+    }
+
+    #[test]
+    fn searched_history_malus_buffers_stack_sized_like_former_vecs() {
+        assert_eq!(SEARCHED_QUIETS_MAX, 32);
+        assert_eq!(SEARCHED_CAPTURES_MAX, 16);
     }
 
     #[test]

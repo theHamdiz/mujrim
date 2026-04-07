@@ -107,6 +107,43 @@ impl Board {
         legal
     }
 
+    /// Legal non-capture moves (quiet pushes, castling, quiet promotions; excludes EP and captures).
+    ///
+    /// Paired with [`Self::generate_legal_captures`], this partitions the legal move set:
+    /// captures ∩ quiets = ∅, captures ∪ quiets = legal moves.
+    pub fn generate_legal_quiets(&mut self) -> MoveList {
+        let pseudo = self.generate_pseudo_legal_moves(self.side_to_move);
+        let mut legal = MoveList::new();
+        let us = self.side_to_move;
+
+        for i in 0..pseudo.len() {
+            let mv = pseudo[i];
+            if mv.is_capture() {
+                continue;
+            }
+            // Promotions (incl. underpromotion) live in `generate_legal_captures` with captures.
+            if mv.is_promotion() {
+                continue;
+            }
+            self.make_move(mv);
+            if !self.is_in_check(us) {
+                legal.push(mv);
+            }
+            self.unmake_move(mv);
+        }
+        legal
+    }
+
+    /// Returns true if `mv` is legal for the side to move (full make/unmake check).
+    #[inline]
+    pub fn is_legal_move(&mut self, mv: Move) -> bool {
+        let us = self.side_to_move;
+        self.make_move(mv);
+        let ok = !self.is_in_check(us);
+        self.unmake_move(mv);
+        ok
+    }
+
     // ── Pawn moves ──────────────────────────────────────────────────────────
 
     fn gen_pawn_moves(&self, color: Color, moves: &mut MoveList) {
@@ -496,6 +533,49 @@ mod tests {
         let mut board = Board::new();
         let caps = board.generate_legal_captures();
         assert_eq!(caps.len(), 0, "Starting position should have 0 captures");
+    }
+
+    #[test]
+    fn test_legal_quiets_partition_full_moves() {
+        setup();
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "1k1r4/pp1b1R2/3q2pp/4p3/2B5/4Q3/PPP2B2/2K5 b - - 0 1",
+        ];
+        for fen in fens {
+            let mut board = Board::from_fen(fen).unwrap();
+            let full = board.generate_legal_moves();
+            let caps = board.generate_legal_captures();
+            let quiets = board.generate_legal_quiets();
+            assert_eq!(
+                caps.len() + quiets.len(),
+                full.len(),
+                "partition size mismatch for {fen}"
+            );
+            for m in full.as_slice() {
+                let in_caps = caps.iter().any(|c| same_move_struct(*m, *c));
+                let in_quiet = quiets.iter().any(|q| same_move_struct(*m, *q));
+                assert!(
+                    in_caps ^ in_quiet,
+                    "move {m} caps={in_caps} quiet={in_quiet} fen={fen}"
+                );
+            }
+        }
+    }
+
+    fn same_move_struct(a: crate::chess_move::Move, b: crate::chess_move::Move) -> bool {
+        a.from == b.from && a.to == b.to && a.promotion == b.promotion && a.flag == b.flag
+    }
+
+    #[test]
+    fn test_is_legal_move_accepts_generated_legal() {
+        setup();
+        let mut board = Board::new();
+        let legal = board.generate_legal_moves();
+        for m in legal.as_slice() {
+            assert!(board.is_legal_move(*m), "{m}");
+        }
     }
 
     // ── Perft suite (gold standard for correctness) ─────────────────────────

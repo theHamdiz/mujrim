@@ -16,6 +16,7 @@ pub mod engine_info;
 pub mod external;
 pub mod hardware;
 pub mod internal;
+pub mod iterate;
 pub mod suite;
 
 #[cfg(feature = "tui")]

@@ -4681,6 +4681,7 @@ name = "kishmat"
 version = "2.0.0"
 dependencies = [
  "clap",
+ "kishmat-bench-ratings",
  "kishmat-comms",
  "kishmat-eval",
  "kishmat-gpu",
@@ -4691,16 +4692,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kishmat-bench-ratings"
+version = "0.1.0"
+
+[[package]]
 name = "kishmat-benchmarker"
 version = "2.0.0"
 dependencies = [
  "clap",
  "crossterm",
+ "kishmat-bench-ratings",
  "kishmat-eval",
  "kishmat-protocols",
  "kishmat-search",
  "kishmat-types",
  "ratatui",
+ "serde_json",
 ]
 
 [[package]]

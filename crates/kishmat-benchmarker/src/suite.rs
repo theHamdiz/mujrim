@@ -7,6 +7,10 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use kishmat_bench_ratings::{
+    approx_ccrl_40_15_from_bk_accuracy, approx_lichess_blitz_from_bk_accuracy,
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // Bratko-Kopec Test Suite
 // ═══════════════════════════════════════════════════════════════════
@@ -195,7 +199,10 @@ pub struct BenchSummary {
     pub correct: usize,
     pub total: usize,
     pub accuracy: f64,
-    pub estimated_elo: i32,
+    /// Proxy for **CCRL 40/15**-style strength (BK accuracy; not an official list rating).
+    pub approx_ccrl_40_15: i32,
+    /// Rough **Lichess blitz–pool** analogue (offset from CCRL proxy).
+    pub approx_lichess_blitz: i32,
 }
 
 impl BenchSummary {
@@ -222,8 +229,47 @@ impl BenchSummary {
             correct,
             total,
             accuracy,
-            estimated_elo: estimate_elo(accuracy),
+            approx_ccrl_40_15: approx_ccrl_40_15_from_bk_accuracy(accuracy),
+            approx_lichess_blitz: approx_lichess_blitz_from_bk_accuracy(accuracy),
         }
+    }
+}
+
+impl BenchSummary {
+    /// Machine-readable summary for agents / `iterate --json` pipelines.
+    pub fn to_json_value(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        let results: Vec<serde_json::Value> = self
+            .results
+            .iter()
+            .map(|r| {
+                json!({
+                    "index": r.index,
+                    "correct": r.correct,
+                    "expected_move": r.expected_move,
+                    "found_move": r.found_move,
+                    "score_cp": r.score,
+                    "depth": r.depth,
+                    "nodes": r.nodes,
+                    "nps": r.nps,
+                    "elapsed_ms": r.elapsed.as_millis(),
+                })
+            })
+            .collect();
+
+        json!({
+            "engine_name": self.engine_name,
+            "correct": self.correct,
+            "total": self.total,
+            "accuracy": self.accuracy,
+            "approx_ccrl_40_15": self.approx_ccrl_40_15,
+            "approx_lichess_blitz": self.approx_lichess_blitz,
+            "nps_aggregate": self.nps,
+            "total_nodes": self.total_nodes,
+            "total_time_ms": self.total_time.as_millis(),
+            "results": results,
+        })
     }
 }
 
@@ -238,7 +284,16 @@ impl fmt::Display for BenchSummary {
             "║  Accuracy:    {:>2}/{:<2} ({:>5.1}%)                ║",
             self.correct, self.total, self.accuracy
         )?;
-        writeln!(f, "║  Est. ELO:    ~{:<30}║", self.estimated_elo)?;
+        writeln!(
+            f,
+            "║  Approx. CCRL 40/15:   ~{:<24}║",
+            self.approx_ccrl_40_15
+        )?;
+        writeln!(
+            f,
+            "║  Approx. Lichess blitz: ~{:<22}║",
+            self.approx_lichess_blitz
+        )?;
         writeln!(f, "║  NPS:         {:<31}║", format_nps(self.nps))?;
         writeln!(f, "║  Total nodes: {:<31}║", format_nps(self.total_nodes))?;
         writeln!(
@@ -249,24 +304,6 @@ impl fmt::Display for BenchSummary {
         writeln!(f, "╚══════════════════════════════════════════════╝")?;
         Ok(())
     }
-}
-
-/// Maps BK accuracy (0–100) to an approximate ELO rating.
-pub fn estimate_elo(accuracy: f64) -> i32 {
-    let elo = if accuracy <= 10.0 {
-        800.0 + accuracy * 40.0
-    } else if accuracy <= 30.0 {
-        1200.0 + (accuracy - 10.0) * 20.0
-    } else if accuracy <= 50.0 {
-        1600.0 + (accuracy - 30.0) * 15.0
-    } else if accuracy <= 70.0 {
-        1900.0 + (accuracy - 50.0) * 15.0
-    } else if accuracy <= 90.0 {
-        2200.0 + (accuracy - 70.0) * 15.0
-    } else {
-        2500.0 + (accuracy - 90.0) * 30.0
-    };
-    elo.round() as i32
 }
 
 /// Formats a number with human-readable suffixes (K, M, B).
@@ -304,10 +341,17 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_elo_range() {
-        assert!(estimate_elo(0.0) >= 800);
-        assert!(estimate_elo(50.0) >= 1600);
-        assert!(estimate_elo(100.0) >= 2500);
+    fn test_ccrl_lichess_from_bk_accuracy() {
+        assert!(approx_ccrl_40_15_from_bk_accuracy(0.0) >= 800);
+        assert!(approx_ccrl_40_15_from_bk_accuracy(50.0) >= 1600);
+        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(100.0), 2750);
+        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(90.0), 2500);
+        let plan = approx_ccrl_40_15_from_bk_accuracy(54.166666666666664);
+        assert!((plan - 1963).abs() <= 1);
+        assert_eq!(
+            approx_lichess_blitz_from_bk_accuracy(100.0),
+            approx_ccrl_40_15_from_bk_accuracy(100.0) + 115
+        );
     }
 
     #[test]

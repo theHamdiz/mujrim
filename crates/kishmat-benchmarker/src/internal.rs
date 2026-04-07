@@ -24,6 +24,8 @@ pub struct InternalBenchConfig {
     pub eval_preset: String,
     /// Optional runtime network file path.
     pub eval_file: Option<PathBuf>,
+    /// Suppress per-position `println` (for JSON / agent pipelines).
+    pub quiet: bool,
 }
 
 impl Default for InternalBenchConfig {
@@ -34,10 +36,11 @@ impl Default for InternalBenchConfig {
                 .map(|n| n.get().saturating_sub(2).max(1))
                 .unwrap_or(1),
             hash_mb: 128,
-            time_per_position: Duration::from_secs(120),
+            time_per_position: Duration::from_secs(30),
             suite_name: "Bratko-Kopec".to_string(),
             eval_preset: "auto".to_string(),
             eval_file: None,
+            quiet: false,
         }
     }
 }
@@ -73,7 +76,9 @@ pub fn run_internal_bench(
         let nnue_dir = std::path::Path::new("nnue");
         let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
         if let Some(net) = auto_net {
-            eprintln!("{msg}");
+            if !config.quiet {
+                eprintln!("{msg}");
+            }
             engine.set_nnue_network(net);
         }
     }
@@ -130,20 +135,22 @@ pub fn run_internal_bench(
         } else {
             "--".to_string()
         };
-        println!(
-            "[{:>2}] {} found={:<8} expected={:<8} score={:>5}cp  {} NPS ({}ms)",
-            i + 1,
-            status,
-            found_move,
-            if pos.expected_move.is_empty() {
-                "N/A"
-            } else {
-                &pos.expected_move
-            },
-            result.score,
-            format_nps(nps),
-            elapsed.as_millis(),
-        );
+        if !config.quiet {
+            println!(
+                "[{:>2}] {} found={:<8} expected={:<8} score={:>5}cp  {} NPS ({}ms)",
+                i + 1,
+                status,
+                found_move,
+                if pos.expected_move.is_empty() {
+                    "N/A"
+                } else {
+                    &pos.expected_move
+                },
+                result.score,
+                format_nps(nps),
+                elapsed.as_millis(),
+            );
+        }
 
         if let Some(ref cb) = on_progress {
             cb(i, positions.len(), &pos_result);
@@ -153,6 +160,44 @@ pub fn run_internal_bench(
     }
 
     BenchSummary::from_results("KishMat", results)
+}
+
+/// NPS from the starting position using a short wall-clock search (same setup as CLI `info` NPS line).
+pub fn measure_startpos_nps(
+    threads: usize,
+    hash_mb: usize,
+    eval_preset: &str,
+    eval_file: Option<&std::path::Path>,
+    quiet: bool,
+) -> u64 {
+    use search::engine::SearchEngine;
+    use types::Board;
+
+    let mut engine = SearchEngine::new(hash_mb, threads);
+    if let Some(path) = eval_file {
+        if let Ok(network) = load_network(path) {
+            engine.set_nnue_network(network);
+        }
+    } else {
+        let nnue_dir = std::path::Path::new("nnue");
+        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
+        if let Some(net) = auto_net {
+            if !quiet {
+                eprintln!("{msg}");
+            }
+            engine.set_nnue_network(net);
+        }
+    }
+    if eval_preset != "auto" {
+        engine.set_params_for_preset(eval_preset);
+    }
+    let mut board = Board::new();
+    let result = engine.search_time(&mut board, Duration::from_secs(5), 64);
+    if result.elapsed.as_millis() > 0 {
+        result.nodes * 1000 / result.elapsed.as_millis() as u64
+    } else {
+        result.nodes
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +216,7 @@ mod tests {
             suite_name: "Test".into(),
             eval_preset: "auto".into(),
             eval_file: None,
+            quiet: true,
         };
         let summary = run_internal_bench(&positions, &config, None);
         assert_eq!(summary.total, 1);
@@ -188,6 +234,7 @@ mod tests {
             suite_name: "Test".into(),
             eval_preset: "auto".into(),
             eval_file: Some(PathBuf::from("/nonexistent/kishmat/net.bin")),
+            quiet: true,
         };
         let summary = run_internal_bench(&positions, &config, None);
         assert_eq!(summary.total, 1);

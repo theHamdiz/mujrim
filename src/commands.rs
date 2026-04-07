@@ -454,7 +454,8 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     };
 
     let accuracy = (correct as f64) / (total_positions as f64) * 100.0;
-    let elo = estimate_elo(accuracy);
+    let ccrl = kishmat_bench_ratings::approx_ccrl_40_15_from_bk_accuracy(accuracy);
+    let lichess = kishmat_bench_ratings::approx_lichess_blitz_from_bk_accuracy(accuracy);
 
     println!("╔══════════════════════════════════════════════╗");
     println!("║                  RESULTS                    ║");
@@ -463,7 +464,8 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
         "║  Accuracy:    {:>2}/{:<2} ({:>5.1}%)                ║",
         correct, total_positions, accuracy
     );
-    println!("║  Est. ELO:    ~{:<30}║", elo);
+    println!("║  Approx. CCRL 40/15:   ~{:<24}║", ccrl);
+    println!("║  Approx. Lichess blitz: ~{:<22}║", lichess);
     println!(
         "║  NPS:         {:<31}║",
         format!("{} (5s, startpos)", format_nps(nps))
@@ -471,25 +473,6 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     println!("║  Total nodes: {:<31}║", format_nps(total_nodes));
     println!("║  Total time:  {:<31}║", format!("{total_time_ms}ms"));
     println!("╚══════════════════════════════════════════════╝");
-}
-
-/// Maps BK accuracy (0–100) to an approximate ELO rating.
-fn estimate_elo(accuracy: f64) -> i32 {
-    // Piecewise linear approximation based on engine testing data
-    let elo = if accuracy <= 10.0 {
-        800.0 + accuracy * 40.0
-    } else if accuracy <= 30.0 {
-        1200.0 + (accuracy - 10.0) * 20.0
-    } else if accuracy <= 50.0 {
-        1600.0 + (accuracy - 30.0) * 15.0
-    } else if accuracy <= 70.0 {
-        1900.0 + (accuracy - 50.0) * 15.0
-    } else if accuracy <= 90.0 {
-        2200.0 + (accuracy - 70.0) * 15.0
-    } else {
-        2500.0 + (accuracy - 90.0) * 30.0
-    };
-    elo.round() as i32
 }
 
 /// Detect GPU on Linux using `lspci` (works for AMD, NVIDIA, Intel).

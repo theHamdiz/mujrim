@@ -92,6 +92,19 @@ pub fn net() -> &'static Network {
     &NNUE
 }
 
+/// Feature transformer matrix as one contiguous `i16` slab: row `i` starts at `i * HIDDEN`.
+#[inline(always)]
+pub fn feature_weights_flat(net: &Network) -> &[i16] {
+    // SAFETY: `[Accumulator; N]` rows are packed; each row is exactly `HIDDEN` i16 values
+    // (`Accumulator` is `repr(C, align(64))` with no interior padding for the vals array).
+    unsafe {
+        std::slice::from_raw_parts(
+            net.feature_weights.as_ptr().cast::<i16>(),
+            net.feature_weights.len() * HIDDEN,
+        )
+    }
+}
+
 /// Get the king bucket for a given square (with rank flip for black).
 #[inline(always)]
 pub fn get_bucket<const SIDE: usize>(mut ksq: usize) -> usize {
@@ -142,17 +155,24 @@ pub fn forward(boys: &Accumulator, opps: &Accumulator) -> i32 {
 }
 
 /// Forward pass using an explicit network instance.
-#[inline]
+#[inline(always)]
 pub fn forward_with_network(network: &Network, boys: &Accumulator, opps: &Accumulator) -> i32 {
     let weights = &network.output_weights;
-    let sum = super::simd::flatten(&boys.vals, &weights[0].vals)
-        + super::simd::flatten(&opps.vals, &weights[1].vals);
+    let sum = super::simd::flatten_pair(&boys.vals, &weights[0].vals, &opps.vals, &weights[1].vals);
     (sum / QA + i32::from(network.output_bias)) * SCALE / QAB
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feature_weights_flat_matches_struct_layout() {
+        let net = net();
+        let flat = feature_weights_flat(net);
+        assert_eq!(flat.len(), net.feature_weights.len() * HIDDEN);
+        assert!(flat.len() > 1_000_000);
+    }
 
     #[test]
     fn test_network_size() {

@@ -48,17 +48,17 @@ perft depth="6":
     cargo run --release -- perft -d {{depth}}
 
 # Run the ELO benchmark suite — auto-detects all hardware
-bench depth="20" threads="" hash="128" time="120":
+bench depth="20" threads="" hash="128" time="30":
     @echo "Running KishMat Benchmark Suite..."
     RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}}
 
 # Benchmark an external UCI engine binary
-bench-uci engine depth="16" hash="128" threads="1" time="120":
+bench-uci engine depth="16" hash="128" threads="1" time="30":
     @echo "Benchmarking external engine: {{engine}}"
     RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- uci {{engine}} -d {{depth}} --hash {{hash}} -t {{threads}} --time {{time}}
 
 # Benchmark an external XBoard engine binary
-bench-xboard engine depth="16" hash="128" threads="1" time="120":
+bench-xboard engine depth="16" hash="128" threads="1" time="30":
     @echo "Benchmarking external XBoard engine: {{engine}}"
     RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- xboard {{engine}} -d {{depth}} --hash {{hash}} -t {{threads}} --time {{time}}
 
@@ -186,7 +186,7 @@ net-status:
     cargo run --release -p kishmat-tooling -- nnue status --dir "{{nets_dir}}"
 
 # Benchmark with a specific external network file
-bench-net net_path depth="16" hash="128" time="120":
+bench-net net_path depth="16" hash="128" time="30":
     @echo "Benchmarking KishMat with runtime NNUE file: {{net_path}}"
     RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}} --eval-file "{{net_path}}" --eval-preset auto
 

@@ -12,15 +12,21 @@
 
 use super::adapter::{ActiveNetwork, NnueNetworkInfo, NnueNetworkSource};
 use super::network::{
-    Accumulator, NUM_BUCKETS, Network, forward_with_network, get_base_index, get_bucket,
+    self as nn, Accumulator, NUM_BUCKETS, Network, forward_with_network, get_base_index, get_bucket,
 };
 use std::sync::Arc;
 use types::{Board, Color, Piece};
+
+/// Sentinel: `EvalEntry::king_sq` unset or entry never written (valid squares are 0..64).
+const NO_KING_SQ: u8 = u8::MAX;
 
 /// Number of bitboards we track for cache comparison.
 /// Layout: [white_occ, black_occ, pawn..king×2] = 14 total.
 /// But simpler: use 12 per-piece bitboards like before.
 const NUM_BBS: usize = 12;
+
+/// Max feature indices per flush; one NNUE refresh touches ≤32 pieces — 64 leaves headroom.
+const DELTA_BATCH: usize = 64;
 
 /// SEE piece values used for material scaling (matching Akimbo).
 const SEE_VALS: [i32; 6] = [100, 450, 450, 650, 1250, 0];
@@ -29,6 +35,8 @@ const SEE_VALS: [i32; 6] = [100, 450, 450, 650, 1250, 0];
 pub struct EvalEntry {
     /// Snapshot of the board's 12 piece bitboards (pieces[2][6]).
     pub bbs: [u64; NUM_BBS],
+    /// King squares used to build `white` / `black` (HalfKP indices depend on both kings).
+    pub king_sq: [u8; 2],
     pub white: Accumulator,
     pub black: Accumulator,
 }
@@ -46,6 +54,7 @@ impl Default for EvalTable {
             for entry in row.iter_mut() {
                 entry.white = Accumulator::default();
                 entry.black = Accumulator::default();
+                entry.king_sq = [NO_KING_SQ; 2];
             }
         }
         Self { table }
@@ -127,13 +136,22 @@ impl NNUEState {
         let entry = &mut self.table.table[wb][bb];
 
         // Check if cached accumulators are still valid
-        let is_fresh = entry.bbs.iter().all(|&b| b == 0);
+        let is_fresh = entry.bbs == [0u64; NUM_BBS];
+        let kings_changed = entry.king_sq[0] != w_king as u8
+            || entry.king_sq[1] != b_king as u8
+            || entry.king_sq[0] == NO_KING_SQ;
         if is_fresh {
             // Fresh entry — full compute
             Self::compute_entry(entry, net, board, w_king, b_king);
             entry.bbs = current_bbs;
+            entry.king_sq = [w_king as u8, b_king as u8];
+        } else if kings_changed {
+            // King moved (or sq cache invalid): every piece's HalfKP index can change — no incremental path.
+            Self::compute_entry(entry, net, board, w_king, b_king);
+            entry.bbs = current_bbs;
+            entry.king_sq = [w_king as u8, b_king as u8];
         } else if entry.bbs != current_bbs {
-            // Diff-based incremental update
+            // Diff-based incremental update (kings fixed; only pieces changed).
             Self::update_entry_diff(entry, net, &current_bbs, w_king, b_king);
             entry.bbs = current_bbs;
         }
@@ -150,7 +168,7 @@ impl NNUEState {
         raw * scale / 1024
     }
 
-    /// Incremental diff-based update: find bitboard differences and add/sub features.
+    /// Incremental diff-based update: batched row applies (one pass over `HIDDEN` per flush).
     fn update_entry_diff(
         entry: &mut EvalEntry,
         net: &Network,
@@ -159,13 +177,48 @@ impl NNUEState {
         b_king: usize,
     ) {
         let old_bbs = entry.bbs;
+        let weights = nn::feature_weights_flat(net);
 
         let wflip: usize = if w_king % 8 > 3 { 7 } else { 0 };
         let bflip: usize = if b_king % 8 > 3 { 7 } else { 0 } ^ 56;
 
-        // Our BBS layout: [w_pawn, w_knight, w_bishop, w_rook, w_queen, w_king,
-        //                   b_pawn, b_knight, b_bishop, b_rook, b_queen, b_king]
-        // Index: side_idx * 6 + piece_idx
+        let mut w_add = [0usize; DELTA_BATCH];
+        let mut b_add = [0usize; DELTA_BATCH];
+        let mut w_sub = [0usize; DELTA_BATCH];
+        let mut b_sub = [0usize; DELTA_BATCH];
+        let mut na = 0usize;
+        let mut ns = 0usize;
+
+        #[inline(always)]
+        fn flush_adds(
+            entry: &mut EvalEntry,
+            weights: &[i16],
+            w_add: &[usize],
+            b_add: &[usize],
+            n: usize,
+        ) {
+            if n == 0 {
+                return;
+            }
+            super::simd::accum_apply_deltas(&mut entry.white.vals, weights, &w_add[..n], &[]);
+            super::simd::accum_apply_deltas(&mut entry.black.vals, weights, &b_add[..n], &[]);
+        }
+
+        #[inline(always)]
+        fn flush_subs(
+            entry: &mut EvalEntry,
+            weights: &[i16],
+            w_sub: &[usize],
+            b_sub: &[usize],
+            n: usize,
+        ) {
+            if n == 0 {
+                return;
+            }
+            super::simd::accum_apply_deltas(&mut entry.white.vals, weights, &[], &w_sub[..n]);
+            super::simd::accum_apply_deltas(&mut entry.black.vals, weights, &[], &b_sub[..n]);
+        }
+
         for side_idx in 0..2usize {
             for piece_idx in 0..6usize {
                 let bb_idx = side_idx * 6 + piece_idx;
@@ -174,50 +227,41 @@ impl NNUEState {
 
                 if old_bb == new_bb {
                     continue;
-                } // No change for this piece/color
+                }
 
                 let wbase = get_base_index::<0>(side_idx, piece_idx, w_king);
                 let bbase = get_base_index::<1>(side_idx, piece_idx, b_king);
 
-                // Features to add (new but not old)
                 let mut add_diff = new_bb & !old_bb;
                 while add_diff != 0 {
                     let sq = add_diff.trailing_zeros() as usize;
                     add_diff &= add_diff - 1;
-
-                    let w_feat = wbase + (sq ^ wflip);
-                    let b_feat = bbase + (sq ^ bflip);
-
-                    super::simd::vector_add(
-                        &mut entry.white.vals,
-                        &net.feature_weights[w_feat].vals,
-                    );
-                    super::simd::vector_add(
-                        &mut entry.black.vals,
-                        &net.feature_weights[b_feat].vals,
-                    );
+                    w_add[na] = wbase + (sq ^ wflip);
+                    b_add[na] = bbase + (sq ^ bflip);
+                    na += 1;
+                    if na == DELTA_BATCH {
+                        flush_adds(entry, weights, &w_add, &b_add, DELTA_BATCH);
+                        na = 0;
+                    }
                 }
 
-                // Features to subtract (old but not new)
                 let mut sub_diff = old_bb & !new_bb;
                 while sub_diff != 0 {
                     let sq = sub_diff.trailing_zeros() as usize;
                     sub_diff &= sub_diff - 1;
-
-                    let w_feat = wbase + (sq ^ wflip);
-                    let b_feat = bbase + (sq ^ bflip);
-
-                    super::simd::vector_sub(
-                        &mut entry.white.vals,
-                        &net.feature_weights[w_feat].vals,
-                    );
-                    super::simd::vector_sub(
-                        &mut entry.black.vals,
-                        &net.feature_weights[b_feat].vals,
-                    );
+                    w_sub[ns] = wbase + (sq ^ wflip);
+                    b_sub[ns] = bbase + (sq ^ bflip);
+                    ns += 1;
+                    if ns == DELTA_BATCH {
+                        flush_subs(entry, weights, &w_sub, &b_sub, DELTA_BATCH);
+                        ns = 0;
+                    }
                 }
             }
         }
+
+        flush_adds(entry, weights, &w_add, &b_add, na);
+        flush_subs(entry, weights, &w_sub, &b_sub, ns);
     }
 
     /// Fully recompute the accumulators from a board position.
@@ -230,6 +274,7 @@ impl NNUEState {
         let entry = &mut self.table.table[wb][bb];
         Self::compute_entry(entry, net, board, w_king, b_king);
         entry.bbs = Self::snapshot_bbs(board);
+        entry.king_sq = [w_king as u8, b_king as u8];
     }
 
     /// Compute accumulators from scratch (the actual work).
@@ -242,31 +287,46 @@ impl NNUEState {
     ) {
         entry.white = net.feature_bias;
         entry.black = net.feature_bias;
+        let weights = nn::feature_weights_flat(net);
         let wflip: usize = if w_king % 8 > 3 { 7 } else { 0 };
         let bflip: usize = if b_king % 8 > 3 { 7 } else { 0 } ^ 56;
 
+        let mut w_idx = [0usize; DELTA_BATCH];
+        let mut b_idx = [0usize; DELTA_BATCH];
+        let mut n = 0usize;
+
         for side_idx in 0..2usize {
             for piece_idx in 0..6usize {
+                let w_base = get_base_index::<0>(side_idx, piece_idx, w_king);
+                let b_base = get_base_index::<1>(side_idx, piece_idx, b_king);
                 let mut bb_pieces = board.pieces[side_idx][piece_idx];
                 while bb_pieces != 0 {
                     let sq = bb_pieces.trailing_zeros() as usize;
                     bb_pieces &= bb_pieces - 1;
-
-                    let w_base = get_base_index::<0>(side_idx, piece_idx, w_king);
-                    let w_feat = w_base + (sq ^ wflip);
-                    super::simd::vector_add(
-                        &mut entry.white.vals,
-                        &net.feature_weights[w_feat].vals,
-                    );
-
-                    let b_base = get_base_index::<1>(side_idx, piece_idx, b_king);
-                    let b_feat = b_base + (sq ^ bflip);
-                    super::simd::vector_add(
-                        &mut entry.black.vals,
-                        &net.feature_weights[b_feat].vals,
-                    );
+                    w_idx[n] = w_base + (sq ^ wflip);
+                    b_idx[n] = b_base + (sq ^ bflip);
+                    n += 1;
+                    if n == DELTA_BATCH {
+                        super::simd::accum_apply_deltas(
+                            &mut entry.white.vals,
+                            weights,
+                            &w_idx[..DELTA_BATCH],
+                            &[],
+                        );
+                        super::simd::accum_apply_deltas(
+                            &mut entry.black.vals,
+                            weights,
+                            &b_idx[..DELTA_BATCH],
+                            &[],
+                        );
+                        n = 0;
+                    }
                 }
             }
+        }
+        if n > 0 {
+            super::simd::accum_apply_deltas(&mut entry.white.vals, weights, &w_idx[..n], &[]);
+            super::simd::accum_apply_deltas(&mut entry.black.vals, weights, &b_idx[..n], &[]);
         }
     }
 
@@ -386,6 +446,26 @@ mod tests {
         assert_eq!(
             score_incremental, score_scratch,
             "Incremental ({score_incremental}) vs scratch ({score_scratch}) mismatch"
+        );
+    }
+
+    #[test]
+    fn king_move_incremental_matches_full_refresh() {
+        types::init();
+        // White king a1 vs b1: same king bucket (BUCKETS[0]==BUCKETS[1]==0), same black king cell — exercises stale HalfKP base.
+        let board_ka1 = Board::from_fen("4k3/8/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let board_kb1 = Board::from_fen("4k3/8/8/8/8/8/8/1K6 w - - 0 1").unwrap();
+
+        let mut warm = NNUEState::new();
+        let _ = warm.evaluate(&board_ka1);
+        let after_king_move = warm.evaluate(&board_kb1);
+
+        let mut fresh = NNUEState::new();
+        let from_scratch = fresh.evaluate(&board_kb1);
+
+        assert_eq!(
+            after_king_move, from_scratch,
+            "After king move, NNUE must match full refresh: warm={after_king_move}, scratch={from_scratch}"
         );
     }
 
