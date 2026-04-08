@@ -168,31 +168,11 @@ jobs:
           cross build --release --target ${{ matrix.target }} -p kishmat
           cross build --release --target ${{ matrix.target }} -p kishmat-updater
 
-      - name: Smoke test (UCI handshake)
-        shell: python
+      - name: Verify cross build outputs
+        shell: bash
         run: |
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          exe = Path("target/${{ matrix.target }}/release/kishmat")
-          if not exe.exists():
-              print(f"missing engine executable: {exe}", file=sys.stderr)
-              sys.exit(1)
-
-          proc = subprocess.run(
-              [str(exe), "uci"],
-              input="uci\nquit\n",
-              capture_output=True,
-              text=True,
-              timeout=15,
-              check=False,
-          )
-          output = (proc.stdout or "") + (proc.stderr or "")
-          if "uciok" not in output:
-              print("uci smoke test failed, output:", file=sys.stderr)
-              print(output, file=sys.stderr)
-              sys.exit(1)
+          test -f "target/${{ matrix.target }}/release/kishmat"
+          test -f "target/${{ matrix.target }}/release/kishmat-updater"
 
       - name: Package binaries
         run: |

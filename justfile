@@ -55,7 +55,7 @@ bench depth="20" threads="" hash="256" time="30":
 # Run benchmark and emit machine-readable JSON summary
 bench-json depth="20" threads="" hash="256" time="30":
     @echo "Running KishMat Benchmark Suite (JSON)..."
-    RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}} --json {{ if threads != "" { "--threads " + threads } else { "" } }}
+    RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}} --json --quiet {{ if threads != "" { "--threads " + threads } else { "" } }}
 
 # Benchmark an external UCI engine binary
 bench-uci engine depth="16" hash="128" threads="1" time="30":

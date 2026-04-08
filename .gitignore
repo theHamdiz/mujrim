@@ -6,6 +6,7 @@ rust_out
 # IDE / editor
 .idea/
 .vscode/
+.venv/
 *.swp
 *.swo
 *~
@@ -13,6 +14,9 @@ rust_out
 # OS
 .DS_Store
 Thumbs.db
+*Icon
+Icon*
+Icon
 
 # Debug
 *.pdb

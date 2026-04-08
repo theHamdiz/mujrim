@@ -8,6 +8,8 @@
 //! - `SearchParams::akimbo()` — current defaults, tuned for Akimbo-family nets
 //! - `SearchParams::stockfish()` — Stockfish's SPRT-tuned values for SF nets
 
+use std::path::Path;
+
 /// All tunable search constants in one place.
 ///
 /// This struct replaces the scattered `const` definitions in `engine.rs` and
@@ -279,6 +281,98 @@ impl SearchParams {
         }
     }
 
+    /// Load optional overrides from a tuning TOML file.
+    ///
+    /// This reads `sprt/params.toml`-style values and applies known fields to
+    /// the in-memory search parameters. Unknown/missing keys are ignored.
+    pub fn with_tuning_file(mut self, path: &Path) -> Self {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return self;
+        };
+        let Ok(root) = raw.parse::<toml::Value>() else {
+            return self;
+        };
+
+        let get = |p: &[&str]| -> Option<f64> {
+            let mut cur = &root;
+            for key in p {
+                cur = cur.get(*key)?;
+            }
+            cur.as_float().or_else(|| cur.as_integer().map(|v| v as f64))
+        };
+
+        if let Some(v) = get(&["search", "null_move", "base_r", "value"]) {
+            self.nmp_base = v as i32;
+        }
+        if let Some(v) = get(&["search", "null_move", "depth_divisor", "value"]) {
+            self.nmp_depth_div = (v as i32).max(1);
+        }
+        if let Some(v) = get(&["search", "null_move", "eval_divisor", "value"]) {
+            self.nmp_eval_div = (v as i32).max(1);
+        }
+        if let Some(v) = get(&["search", "null_move", "eval_max", "value"]) {
+            self.nmp_eval_max = v as i32;
+        }
+        if let Some(v) = get(&["search", "lmr", "base", "value"]) {
+            self.lmr_base = v / 100.0;
+        }
+        if let Some(v) = get(&["search", "lmr", "divisor", "value"]) {
+            self.lmr_divisor = (v / 100.0).max(0.1);
+        }
+        if let Some(v) = get(&["search", "lmr", "history_divisor", "value"]) {
+            self.hist_lmr_div = (v as i32).max(1);
+        }
+        if let Some(v) = get(&["search", "lmr", "corr_divisor", "value"]) {
+            self.lmr_corr_mul = (v as i32).max(1);
+        }
+        if let Some(v) = get(&["search", "rfp", "margin_per_depth", "value"]) {
+            self.rfp_mul = v as i32;
+        }
+        if let Some(v) = get(&["search", "rfp", "improving_bonus", "value"]) {
+            self.rfp_improving_bonus = v as i32;
+        }
+        if let Some(v) = get(&["search", "rfp", "max_depth", "value"]) {
+            self.hist_prune_depth_limit = v as i32;
+        }
+        if let Some(v) = get(&["search", "razoring", "base", "value"]) {
+            self.razoring_base = v as i32;
+        }
+        if let Some(v) = get(&["search", "razoring", "quadratic", "value"]) {
+            self.razoring_depth_mul = v as i32;
+        }
+        if let Some(v) = get(&["search", "futility", "margin_per_depth", "value"]) {
+            self.futility_mul = v as i32;
+        }
+        if let Some(v) = get(&["search", "futility", "improving_bonus", "value"]) {
+            self.futility_improving_bonus = v as i32;
+        }
+        if let Some(v) = get(&["search", "futility", "max_depth", "value"]) {
+            self.futility_depth_limit = v as i32;
+        }
+        if let Some(v) = get(&["search", "lmp", "max_depth", "value"]) {
+            self.lmp_depth_limit = v as i32;
+        }
+        if let Some(v) = get(&["search", "aspiration", "initial_delta", "value"]) {
+            self.aspiration_window = v as i32;
+        }
+        if let Some(v) = get(&["search", "see_pruning", "quiet_margin", "value"]) {
+            self.see_quiet_margin = v as i32;
+        }
+        if let Some(v) = get(&["search", "see_pruning", "capture_base", "value"]) {
+            self.see_capture_margin = v as i32;
+        }
+        if let Some(v) = get(&["search", "see_pruning", "max_depth", "value"]) {
+            self.see_prune_depth_limit = v as i32;
+        }
+        if let Some(v) = get(&["search", "singular", "margin_multiplier", "value"]) {
+            self.se_margin_mul = v as i32;
+        }
+        if let Some(v) = get(&["search", "singular", "min_depth", "value"]) {
+            self.se_depth_min = v as i32;
+        }
+        self
+    }
+
     // ── Computed helper methods ─────────────────────────────────────
 
     /// Razoring margin: `base + mul * depth²`.
@@ -354,7 +448,12 @@ impl SearchParams {
 
 impl Default for SearchParams {
     fn default() -> Self {
-        Self::akimbo()
+        let base = Self::akimbo();
+        let tuning_path = std::env::var("KISHMAT_TUNING_FILE")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("sprt/params.toml"));
+        base.with_tuning_file(&tuning_path)
     }
 }
 

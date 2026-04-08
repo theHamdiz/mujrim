@@ -1,13 +1,13 @@
 [package]
 name = "kishmat-eval"
-version = "2.0.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Ahmad Hamdi Emara"]
 description = "Evaluation functions for the Kishmat engine"
 license = "MIT"
 
 [features]
-default = ["nnue", "simd", "akimbo-nnue"]
+default = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue"]
 nnue = []
 simd = []
 akimbo-nnue = ["nnue"]

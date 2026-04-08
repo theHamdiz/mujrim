@@ -4678,7 +4678,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kishmat"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "kishmat-bench-ratings",
@@ -4697,7 +4697,7 @@ version = "0.1.0"
 
 [[package]]
 name = "kishmat-benchmarker"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "crossterm",
@@ -4712,7 +4712,7 @@ dependencies = [
 
 [[package]]
 name = "kishmat-comms"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "kishmat-eval",
  "kishmat-search",
@@ -4721,14 +4721,14 @@ dependencies = [
 
 [[package]]
 name = "kishmat-eval"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "kishmat-types",
 ]
 
 [[package]]
 name = "kishmat-game"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "bevy",
  "kishmat-eval",
@@ -4739,7 +4739,7 @@ dependencies = [
 
 [[package]]
 name = "kishmat-gpu"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "metal 0.31.0",
  "objc2 0.6.4",
@@ -4747,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "kishmat-installer"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "iced",
@@ -4762,19 +4762,20 @@ dependencies = [
 
 [[package]]
 name = "kishmat-protocols"
-version = "2.0.0"
+version = "1.0.0"
 
 [[package]]
 name = "kishmat-search"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "kishmat-eval",
  "kishmat-types",
+ "toml 0.8.23",
 ]
 
 [[package]]
 name = "kishmat-tests"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "kishmat-comms",
  "kishmat-eval",
@@ -4784,7 +4785,7 @@ dependencies = [
 
 [[package]]
 name = "kishmat-tooling"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "dirs",
@@ -4797,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "kishmat-trainer"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "kishmat-eval",
  "kishmat-gpu",
@@ -4808,14 +4809,14 @@ dependencies = [
 
 [[package]]
 name = "kishmat-types"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "rand",
 ]
 
 [[package]]
 name = "kishmat-ui"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "arboard",
  "dirs",
@@ -4839,7 +4840,7 @@ dependencies = [
 
 [[package]]
 name = "kishmat-updater"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "dirs",
