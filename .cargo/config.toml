@@ -1,6 +1,0 @@
-[build]
-rustflags = ["-C", "target-cpu=native"]
-
-[env]
-# Search engine initialization (NNUE + large TT) needs more than default 2MB test stack
-RUST_MIN_STACK = "8388608"

@@ -50,7 +50,12 @@ perft depth="6":
 # Run the ELO benchmark suite — auto-detects all hardware
 bench depth="20" threads="" hash="256" time="30":
     @echo "Running KishMat Benchmark Suite..."
-    RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}}
+    RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}} {{ if threads != "" { "--threads " + threads } else { "" } }}
+
+# Run benchmark and emit machine-readable JSON summary
+bench-json depth="20" threads="" hash="256" time="30":
+    @echo "Running KishMat Benchmark Suite (JSON)..."
+    RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}} --json {{ if threads != "" { "--threads " + threads } else { "" } }}
 
 # Benchmark an external UCI engine binary
 bench-uci engine depth="16" hash="128" threads="1" time="30":
@@ -68,8 +73,8 @@ engine-info:
 
 # Run a quick NPS benchmark at depth 16
 nps:
-    @echo "NPS Benchmark (depth 16, startpos)..."
-    @printf 'uci\nisready\nposition startpos\ngo depth 16\nquit\n' | cargo run --release 2>&1 | tail -5
+    @echo "NPS Benchmark (depth 16, startpos, JSON summary)..."
+    @RUSTFLAGS="-C target-cpu=native" cargo run --release -p kishmat-benchmarker -- bench -d 16 --time 5 --json --quiet
 
 # Build and run the GUI application
 ui:

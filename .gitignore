@@ -16,6 +16,8 @@ Thumbs.db
 
 # Debug
 *.pdb
+.cargo/*
+.cargo
 
 # PGO data
 /tmp/kishmat-pgo/
