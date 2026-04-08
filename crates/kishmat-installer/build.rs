@@ -6,12 +6,7 @@
 use std::path::Path;
 
 /// Binaries that the installer bundles.
-const REQUIRED: &[&str] = &[
-    "kishmat",
-    "kishmat-ui",
-    "kishmat-game",
-    "kishmat-updater",
-];
+const REQUIRED: &[&str] = &["kishmat", "kishmat-ui", "kishmat-game", "kishmat-updater"];
 
 fn main() {
     let release_dir = Path::new("../../target/release");

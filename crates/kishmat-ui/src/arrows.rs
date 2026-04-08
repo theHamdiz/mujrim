@@ -89,7 +89,17 @@ impl canvas::Program<Msg> for ArrowOverlay {
                 let p_to = sq_center(to.file(), to.rank(), self.sq_size, self.flipped);
 
                 if is_knight_move(from_file, from_rank, to_file, to_rank) {
-                    draw_knight_arrow(frame, p_from, p_to, from_file, from_rank, to_file, to_rank, self.sq_size, self.flipped);
+                    draw_knight_arrow(
+                        frame,
+                        p_from,
+                        p_to,
+                        from_file,
+                        from_rank,
+                        to_file,
+                        to_rank,
+                        self.sq_size,
+                        self.flipped,
+                    );
                 } else {
                     draw_straight_arrow(frame, p_from, p_to, self.sq_size);
                 }
@@ -125,13 +135,25 @@ fn draw_straight_arrow(frame: &mut Frame, from: Point, to: Point, sq_size: f32) 
     // Shaft rectangle (4 corners)
     let s1 = Point::new(from.x + px * shaft_w * 0.5, from.y + py * shaft_w * 0.5);
     let s2 = Point::new(from.x - px * shaft_w * 0.5, from.y - py * shaft_w * 0.5);
-    let s3 = Point::new(shaft_end_x - px * shaft_w * 0.5, shaft_end_y - py * shaft_w * 0.5);
-    let s4 = Point::new(shaft_end_x + px * shaft_w * 0.5, shaft_end_y + py * shaft_w * 0.5);
+    let s3 = Point::new(
+        shaft_end_x - px * shaft_w * 0.5,
+        shaft_end_y - py * shaft_w * 0.5,
+    );
+    let s4 = Point::new(
+        shaft_end_x + px * shaft_w * 0.5,
+        shaft_end_y + py * shaft_w * 0.5,
+    );
 
     // Arrowhead triangle
     let h_tip = to;
-    let h_left = Point::new(shaft_end_x + px * head_half_w, shaft_end_y + py * head_half_w);
-    let h_right = Point::new(shaft_end_x - px * head_half_w, shaft_end_y - py * head_half_w);
+    let h_left = Point::new(
+        shaft_end_x + px * head_half_w,
+        shaft_end_y + py * head_half_w,
+    );
+    let h_right = Point::new(
+        shaft_end_x - px * head_half_w,
+        shaft_end_y - py * head_half_w,
+    );
 
     // Draw filled shaft
     let shaft_path = Path::new(|b| {
@@ -142,7 +164,10 @@ fn draw_straight_arrow(frame: &mut Frame, from: Point, to: Point, sq_size: f32) 
         b.close();
     });
     frame.fill(&shaft_path, ARROW_COLOR);
-    frame.stroke(&shaft_path, Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2));
+    frame.stroke(
+        &shaft_path,
+        Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2),
+    );
 
     // Draw filled arrowhead
     let head_path = Path::new(|b| {
@@ -152,7 +177,10 @@ fn draw_straight_arrow(frame: &mut Frame, from: Point, to: Point, sq_size: f32) 
         b.close();
     });
     frame.fill(&head_path, ARROW_COLOR);
-    frame.stroke(&head_path, Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2));
+    frame.stroke(
+        &head_path,
+        Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2),
+    );
 }
 
 /// Draws an L-shaped arrow for knight moves: horizontal leg then vertical leg.
@@ -208,8 +236,14 @@ fn draw_knight_arrow(
     // Shaft of second leg
     let s1 = Point::new(corner.x + px * shaft_w * 0.5, corner.y + py * shaft_w * 0.5);
     let s2 = Point::new(corner.x - px * shaft_w * 0.5, corner.y - py * shaft_w * 0.5);
-    let s3 = Point::new(shaft_end_x - px * shaft_w * 0.5, shaft_end_y - py * shaft_w * 0.5);
-    let s4 = Point::new(shaft_end_x + px * shaft_w * 0.5, shaft_end_y + py * shaft_w * 0.5);
+    let s3 = Point::new(
+        shaft_end_x - px * shaft_w * 0.5,
+        shaft_end_y - py * shaft_w * 0.5,
+    );
+    let s4 = Point::new(
+        shaft_end_x + px * shaft_w * 0.5,
+        shaft_end_y + py * shaft_w * 0.5,
+    );
 
     let shaft_path = Path::new(|b| {
         b.move_to(s1);
@@ -219,12 +253,21 @@ fn draw_knight_arrow(
         b.close();
     });
     frame.fill(&shaft_path, ARROW_COLOR);
-    frame.stroke(&shaft_path, Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2));
+    frame.stroke(
+        &shaft_path,
+        Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2),
+    );
 
     // Arrowhead
     let h_tip = to;
-    let h_left = Point::new(shaft_end_x + px * head_half_w, shaft_end_y + py * head_half_w);
-    let h_right = Point::new(shaft_end_x - px * head_half_w, shaft_end_y - py * head_half_w);
+    let h_left = Point::new(
+        shaft_end_x + px * head_half_w,
+        shaft_end_y + py * head_half_w,
+    );
+    let h_right = Point::new(
+        shaft_end_x - px * head_half_w,
+        shaft_end_y - py * head_half_w,
+    );
 
     let head_path = Path::new(|b| {
         b.move_to(h_tip);
@@ -233,7 +276,10 @@ fn draw_knight_arrow(
         b.close();
     });
     frame.fill(&head_path, ARROW_COLOR);
-    frame.stroke(&head_path, Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2));
+    frame.stroke(
+        &head_path,
+        Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2),
+    );
 }
 
 /// Draws a simple fat line segment (no arrowhead) for the first leg of an L-arrow.
@@ -266,7 +312,10 @@ fn draw_leg_segment(frame: &mut Frame, from: Point, to: Point, shaft_w: f32) {
         b.close();
     });
     frame.fill(&path, ARROW_COLOR);
-    frame.stroke(&path, Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2));
+    frame.stroke(
+        &path,
+        Stroke::default().with_color(ARROW_OUTLINE).with_width(1.2),
+    );
 }
 
 #[cfg(test)]

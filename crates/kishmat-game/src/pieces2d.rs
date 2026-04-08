@@ -1,6 +1,6 @@
-use bevy::prelude::*;
 use crate::layout::BoardLayout;
 use crate::state::ChessGame;
+use bevy::prelude::*;
 
 /// Marker for a piece sprite entity.
 #[derive(Component)]
@@ -38,7 +38,11 @@ pub fn spawn_pieces(
                     ..default()
                 },
                 Transform::from_translation(pos.with_z(2.0)),
-                PieceSprite { piece, color, square: sq },
+                PieceSprite {
+                    piece,
+                    color,
+                    square: sq,
+                },
             ));
         }
     }
@@ -64,7 +68,9 @@ pub fn sync_piece_positions(
         let sq = piece_sprite.square;
         if let Some((bp, bc)) = game.board.piece_on(sq) {
             if bp == piece_sprite.piece && bc == piece_sprite.color {
-                let target = layout.square_to_world(sq.file(), sq.rank(), game.flipped).with_z(2.0);
+                let target = layout
+                    .square_to_world(sq.file(), sq.rank(), game.flipped)
+                    .with_z(2.0);
                 if transform.translation.distance(target) > 1.0 {
                     commands.entity(entity).insert(PieceAnimation {
                         start: transform.translation,
@@ -97,11 +103,15 @@ pub fn sync_piece_positions(
         }
         if let Some((piece, color)) = game.board.piece_on(sq) {
             let texture = load_piece_texture(&asset_server, piece, color);
-            let final_pos = layout.square_to_world(sq.file(), sq.rank(), game.flipped).with_z(2.0);
+            let final_pos = layout
+                .square_to_world(sq.file(), sq.rank(), game.flipped)
+                .with_z(2.0);
 
             let start_pos = if let Some(mv) = game.last_move {
                 if mv.to == sq {
-                    layout.square_to_world(mv.from.file(), mv.from.rank(), game.flipped).with_z(2.0)
+                    layout
+                        .square_to_world(mv.from.file(), mv.from.rank(), game.flipped)
+                        .with_z(2.0)
                 } else {
                     final_pos
                 }
@@ -116,7 +126,11 @@ pub fn sync_piece_positions(
                     ..default()
                 },
                 Transform::from_translation(start_pos),
-                PieceSprite { piece, color, square: sq },
+                PieceSprite {
+                    piece,
+                    color,
+                    square: sq,
+                },
             ));
 
             if start_pos.distance(final_pos) > 1.0 {
@@ -157,7 +171,11 @@ pub fn animate_piece_movement(
     }
 }
 
-fn load_piece_texture(asset_server: &AssetServer, piece: types::Piece, color: types::Color) -> Handle<Image> {
+fn load_piece_texture(
+    asset_server: &AssetServer,
+    piece: types::Piece,
+    color: types::Color,
+) -> Handle<Image> {
     let prefix = match color {
         types::Color::White => "w",
         types::Color::Black => "b",

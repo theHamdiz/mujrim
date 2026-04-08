@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use eval::nnue::{load_network, NnueNetworkSource};
+use eval::nnue::{NnueNetworkSource, load_network};
 use kishmat_protocols::ProtocolKind;
 
 use kishmat_benchmarker::{

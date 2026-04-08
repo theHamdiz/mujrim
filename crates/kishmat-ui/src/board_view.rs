@@ -269,16 +269,9 @@ pub fn view_board<'a>(
     let piece_sz_pawn = sq_size * 0.70;
 
     // Premoved squares for highlighting — separate from and to for chess.com-style distinction
-    let premove_from_sqs: Vec<types::Square> = gs
-        .premove_queue
-        .iter()
-        .map(|(from, _)| *from)
-        .collect();
-    let premove_to_sqs: Vec<types::Square> = gs
-        .premove_queue
-        .iter()
-        .map(|(_, to)| *to)
-        .collect();
+    let premove_from_sqs: Vec<types::Square> =
+        gs.premove_queue.iter().map(|(from, _)| *from).collect();
+    let premove_to_sqs: Vec<types::Square> = gs.premove_queue.iter().map(|(_, to)| *to).collect();
 
     // Only show coords inside the board if position is Inside
     let show_inside_coords = show_coords && coord_position == CoordPosition::Inside;
@@ -405,9 +398,7 @@ pub fn view_board<'a>(
             let cell_content: Element<'a, Msg> =
                 if let Some((fade_piece, fade_color, progress)) = fading_capture {
                     match capture_anim_style {
-                        CaptureAnimStyle::Instant => {
-                            text("").into()
-                        }
+                        CaptureAnimStyle::Instant => text("").into(),
                         CaptureAnimStyle::Explosion => {
                             let handle = assets.get(fade_piece, fade_color);
                             let base_sz = if fade_piece == types::Piece::Pawn {

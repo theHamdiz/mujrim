@@ -1,6 +1,6 @@
 # KishMat Agent Guide
 
-Updated: 2026-03-19
+Updated: 2026-04-08
 
 ## Repository Rules
 - Always check latest dependency versions from the internet and read their docs before implementing updates.
@@ -40,3 +40,20 @@ Updated: 2026-03-19
 ## Open UI Workstream
 - Add multiple high-quality piece sets under separate folders (`default` + additional sets) and expose runtime switching in GUI settings.
 - Replace emoji-based UI icons with professional vector iconography suitable for `iced`.
+
+## CI/CD Baseline (Required)
+- CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test.
+- Release pipeline must produce artifacts for major platforms, including:
+  - macOS `aarch64` + `x86_64` + universal bundle
+  - Linux `x86_64` + `aarch64` (gnu and musl variants)
+  - Windows `x86_64`
+- Every release artifact should contain engine + UI (when supported) + updater + NNUE payload/metadata.
+- Smoke validation in release jobs should verify `kishmat` responds correctly to UCI handshake input.
+
+## Current Iteration Commands
+- Quality gate:
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `RUST_MIN_STACK=16777216 cargo test --workspace`
+- Fast strength estimate:
+  - `just bench-json depth=16 hash=128 time=5`

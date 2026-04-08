@@ -77,10 +77,7 @@ pub fn download_nnue_blocking(
 }
 
 /// Download Syzygy tablebases (blocking — run in a `Task::perform`).
-pub fn download_syzygy_blocking(
-    tier: SyzygyPieceSet,
-    dest_dir: &Path,
-) -> Result<usize, String> {
+pub fn download_syzygy_blocking(tier: SyzygyPieceSet, dest_dir: &Path) -> Result<usize, String> {
     let summary = syzygy::download_tables(dest_dir, tier, None)?;
     Ok(summary.downloaded)
 }

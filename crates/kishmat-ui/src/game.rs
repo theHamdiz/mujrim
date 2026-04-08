@@ -259,8 +259,10 @@ mod tests {
     #[test]
     fn test_arrows_clear_all() {
         let mut gs = setup();
-        gs.arrows.push((Square::from_index(0), Square::from_index(16)));
-        gs.arrows.push((Square::from_index(6), Square::from_index(21)));
+        gs.arrows
+            .push((Square::from_index(0), Square::from_index(16)));
+        gs.arrows
+            .push((Square::from_index(6), Square::from_index(21)));
         assert_eq!(gs.arrows.len(), 2);
 
         gs.arrows.clear();
@@ -280,4 +282,3 @@ mod tests {
         assert!(gs.arrow_start.is_none());
     }
 }
-

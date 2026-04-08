@@ -21,11 +21,7 @@ const MAX_SCORED: usize = 256;
 
 /// Sort `moves[..len]` and matching `scores[..len]` by score descending.
 #[inline]
-fn sort_moves_and_scores_desc(
-    moves: &mut MoveList,
-    scores: &mut [i32; MAX_SCORED],
-    len: usize,
-) {
+fn sort_moves_and_scores_desc(moves: &mut MoveList, scores: &mut [i32; MAX_SCORED], len: usize) {
     if len <= 1 {
         return;
     }
@@ -301,7 +297,11 @@ impl MovePicker {
                             bad_count += 1;
                         }
                     }
-                    sort_moves_and_scores_desc(&mut self.captures, &mut self.capture_scores, good_count);
+                    sort_moves_and_scores_desc(
+                        &mut self.captures,
+                        &mut self.capture_scores,
+                        good_count,
+                    );
                     sort_moves_and_scores_desc(
                         &mut self.bad_captures,
                         &mut self.bad_capture_scores,
@@ -410,7 +410,11 @@ impl MovePicker {
                             quiet_count += 1;
                         }
                     }
-                    sort_moves_and_scores_desc(&mut self.quiets, &mut self.quiet_scores, quiet_count);
+                    sort_moves_and_scores_desc(
+                        &mut self.quiets,
+                        &mut self.quiet_scores,
+                        quiet_count,
+                    );
                 }
 
                 Stage::Quiets => {

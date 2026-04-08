@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use crate::state::{AppState, ChessGame, TurnState};
+use bevy::prelude::*;
 
 /// Fired when the player wants to move to a target square.
 #[derive(Message)]
@@ -66,10 +66,7 @@ pub fn handle_undo(
 }
 
 /// Detect game over conditions.
-pub fn detect_game_over(
-    game: Res<ChessGame>,
-    mut app_state: ResMut<NextState<AppState>>,
-) {
+pub fn detect_game_over(game: Res<ChessGame>, mut app_state: ResMut<NextState<AppState>>) {
     if game.game_result.is_some() {
         app_state.set(AppState::GameOver);
     }

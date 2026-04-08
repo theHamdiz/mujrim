@@ -166,6 +166,36 @@ These were previously listed as gaps but are now implemented in KishMat 2.0:
 
 ---
 
-_Plan updated: 2026-03-19. Based on source code analysis of all four engines._
+## 6. Active Execution Plan (2026-04-08)
+
+### Immediate (in progress)
+1. Stabilize CI/CD across all target platforms and architectures.
+2. Add mandatory smoke tests for release artifacts.
+3. Ensure release bundles include the full runnable surface:
+   - engine (`kishmat`)
+   - GUI (`kishmat-ui`, where supported)
+   - updater (`kishmat-updater`)
+   - NNUE payload directory (`nnue/`, when present) + network catalog metadata.
+
+### Next tuning loop
+1. Establish baseline:
+   - `just bench-json depth=16 hash=128 time=5`
+   - `just bench depth=20 hash=256 time=30`
+2. Parameter sweep candidates:
+   - LMR base/divisor
+   - NMP reduction floor
+   - Futility/RFP margins
+   - Aspiration initial window
+3. SPRT automation:
+   - candidate vs baseline via `cutechess-cli`
+   - accept only statistically significant gains.
+
+### Definition of done for this phase
+- CI green on all configured build matrices.
+- Release artifacts generated for all target platforms.
+- Smoke tests pass.
+- Updated benchmark number recorded in `README.md`.
+
+_Plan updated: 2026-04-08. Based on current repository state and release goals._
 
 _KishMat: كش مات — The Arabian chess engine that will reach 3000+._

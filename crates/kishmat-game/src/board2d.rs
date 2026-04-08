@@ -1,6 +1,6 @@
-use bevy::prelude::*;
 use crate::layout::BoardLayout;
 use crate::state::ChessGame;
+use bevy::prelude::*;
 
 const LIGHT_SQUARE: Color = Color::srgb(0.93, 0.84, 0.71);
 const DARK_SQUARE: Color = Color::srgb(0.71, 0.53, 0.39);
@@ -84,7 +84,10 @@ pub fn spawn_board(mut commands: Commands, layout: Res<BoardLayout>) {
         );
         commands.spawn((
             Text2d::new(ch.to_string()),
-            TextFont { font_size, ..default() },
+            TextFont {
+                font_size,
+                ..default()
+            },
             TextColor(Color::srgb(0.8, 0.8, 0.8)),
             Transform::from_translation(pos),
             CoordLabel,
@@ -100,7 +103,10 @@ pub fn spawn_board(mut commands: Commands, layout: Res<BoardLayout>) {
         );
         commands.spawn((
             Text2d::new(ch.to_string()),
-            TextFont { font_size, ..default() },
+            TextFont {
+                font_size,
+                ..default()
+            },
             TextColor(Color::srgb(0.8, 0.8, 0.8)),
             Transform::from_translation(pos),
             CoordLabel,
@@ -114,7 +120,10 @@ pub fn resize_board(
     layout: Res<BoardLayout>,
     game: Option<Res<ChessGame>>,
     mut squares: Query<(&SquareEntity, &mut Transform, &mut Sprite), Without<HighlightOverlay>>,
-    mut coords: Query<(&CoordLabel, &mut Transform), (Without<SquareEntity>, Without<HighlightOverlay>)>,
+    mut coords: Query<
+        (&CoordLabel, &mut Transform),
+        (Without<SquareEntity>, Without<HighlightOverlay>),
+    >,
 ) {
     if !layout.is_changed() {
         return;
@@ -154,7 +163,12 @@ pub fn resize_board(
 pub fn update_square_highlights(
     game: Option<Res<ChessGame>>,
     layout: Res<BoardLayout>,
-    mut overlays: Query<(&HighlightOverlay, &mut Sprite, &mut Transform, &mut Visibility)>,
+    mut overlays: Query<(
+        &HighlightOverlay,
+        &mut Sprite,
+        &mut Transform,
+        &mut Visibility,
+    )>,
 ) {
     let Some(game) = game else {
         for (_, _, _, mut vis) in overlays.iter_mut() {
@@ -277,7 +291,11 @@ mod tests {
             for rank in 0..8u8 {
                 let pos = layout.square_to_world(file, rank, false);
                 let (f, r) = layout.world_to_square(pos.truncate(), false).unwrap();
-                assert_eq!((f, r), (file, rank), "roundtrip failed for ({file}, {rank})");
+                assert_eq!(
+                    (f, r),
+                    (file, rank),
+                    "roundtrip failed for ({file}, {rank})"
+                );
             }
         }
     }
@@ -297,6 +315,10 @@ mod tests {
     #[test]
     fn test_out_of_bounds() {
         let layout = BoardLayout::from_window(1200.0, 800.0);
-        assert!(layout.world_to_square(Vec2::new(-999.0, -999.0), false).is_none());
+        assert!(
+            layout
+                .world_to_square(Vec2::new(-999.0, -999.0), false)
+                .is_none()
+        );
     }
 }

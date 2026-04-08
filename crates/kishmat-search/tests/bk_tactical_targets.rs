@@ -69,9 +69,10 @@ fn bk_tactical_targets_are_legal() {
         let mut board = Board::from_fen(fen).expect(fen);
         let legal = board.generate_legal_moves();
         let needle = Move::from_uci(uci).expect(uci);
-        let ok = legal.as_slice().iter().any(|m| {
-            m.from == needle.from && m.to == needle.to && m.promotion == needle.promotion
-        });
+        let ok = legal
+            .as_slice()
+            .iter()
+            .any(|m| m.from == needle.from && m.to == needle.to && m.promotion == needle.promotion);
         assert!(ok, "expected move {uci} not legal in position {fen}");
     }
 }

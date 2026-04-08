@@ -58,6 +58,35 @@ jobs:
       - name: Build release (full workspace)
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
+      - name: Smoke test (UCI handshake)
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          exe = Path("target/${{ matrix.target }}/release/kishmat")
+          if os.name == "nt":
+              exe = exe.with_suffix(".exe")
+          if not exe.exists():
+              print(f"missing engine executable: {exe}", file=sys.stderr)
+              sys.exit(1)
+
+          proc = subprocess.run(
+              [str(exe), "uci"],
+              input="uci\nquit\n",
+              capture_output=True,
+              text=True,
+              timeout=15,
+              check=False,
+          )
+          output = (proc.stdout or "") + (proc.stderr or "")
+          if "uciok" not in output:
+              print("uci smoke test failed, output:", file=sys.stderr)
+              print(output, file=sys.stderr)
+              sys.exit(1)
+
       - name: Package binaries
         shell: bash
         run: |
@@ -69,6 +98,13 @@ jobs:
           cp "target/${{ matrix.target }}/release/kishmat${{ matrix.suffix }}"         "$DIR/"
           cp "target/${{ matrix.target }}/release/kishmat-ui${{ matrix.suffix }}"      "$DIR/" 2>/dev/null || true
           cp "target/${{ matrix.target }}/release/kishmat-updater${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
+
+          # Include NNUE payload metadata and optional runtime net directory.
+          mkdir -p "$DIR/nnue"
+          cp "crates/kishmat-eval/resources/networks.json" "$DIR/nnue/" 2>/dev/null || true
+          if [[ -d "nnue" ]]; then
+            cp -R "nnue/." "$DIR/nnue/" 2>/dev/null || true
+          fi
 
           # Copy docs
           cp README.md License.md "$DIR/" 2>/dev/null || true
@@ -132,6 +168,32 @@ jobs:
           cross build --release --target ${{ matrix.target }} -p kishmat
           cross build --release --target ${{ matrix.target }} -p kishmat-updater
 
+      - name: Smoke test (UCI handshake)
+        shell: python
+        run: |
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          exe = Path("target/${{ matrix.target }}/release/kishmat")
+          if not exe.exists():
+              print(f"missing engine executable: {exe}", file=sys.stderr)
+              sys.exit(1)
+
+          proc = subprocess.run(
+              [str(exe), "uci"],
+              input="uci\nquit\n",
+              capture_output=True,
+              text=True,
+              timeout=15,
+              check=False,
+          )
+          output = (proc.stdout or "") + (proc.stderr or "")
+          if "uciok" not in output:
+              print("uci smoke test failed, output:", file=sys.stderr)
+              print(output, file=sys.stderr)
+              sys.exit(1)
+
       - name: Package binaries
         run: |
           TAG="${GITHUB_REF_NAME}"
@@ -140,6 +202,11 @@ jobs:
 
           cp "target/${{ matrix.target }}/release/kishmat"         "$DIR/"
           cp "target/${{ matrix.target }}/release/kishmat-updater" "$DIR/" 2>/dev/null || true
+          mkdir -p "$DIR/nnue"
+          cp "crates/kishmat-eval/resources/networks.json" "$DIR/nnue/" 2>/dev/null || true
+          if [[ -d "nnue" ]]; then
+            cp -R "nnue/." "$DIR/nnue/" 2>/dev/null || true
+          fi
           cp README.md License.md "$DIR/" 2>/dev/null || true
 
           tar czf "${DIR}.tar.gz" "$DIR"

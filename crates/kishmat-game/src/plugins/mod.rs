@@ -30,18 +30,14 @@ impl Plugin for BoardPlugin {
                 OnEnter(AppState::Playing),
                 crate::board2d::spawn_board.after(crate::game_logic::start_new_game),
             )
-            .add_systems(
-                Update,
-                crate::layout::on_window_resize,
-            )
+            .add_systems(Update, crate::layout::on_window_resize)
             .add_systems(
                 Update,
                 crate::board2d::resize_board.run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
-                crate::board2d::update_square_highlights
-                    .run_if(in_state(AppState::Playing)),
+                crate::board2d::update_square_highlights.run_if(in_state(AppState::Playing)),
             )
             .add_systems(
                 Update,
@@ -58,34 +54,32 @@ pub struct PiecePlugin;
 impl Plugin for PiecePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
-                OnEnter(AppState::Playing),
-                crate::pieces2d::spawn_pieces.after(crate::game_logic::start_new_game),
-            )
-            .add_systems(
-                Update,
-                crate::pieces2d::sync_piece_positions
-                    .run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                Update,
-                crate::pieces2d::animate_piece_movement
-                    .run_if(in_state(AppState::Playing)),
-            )
-            // 3D piece systems (run when in 3D render mode)
-            .add_systems(
-                Update,
-                crate::pieces3d::sync_piece_positions_3d
-                    .run_if(in_state(AppState::Playing).and(
-                        |dim: Res<RenderDimension>| *dim == RenderDimension::ThreeD
-                    )),
-            )
-            .add_systems(
-                Update,
-                crate::pieces3d::animate_piece_movement_3d
-                    .run_if(in_state(AppState::Playing).and(
-                        |dim: Res<RenderDimension>| *dim == RenderDimension::ThreeD
-                    )),
-            );
+            OnEnter(AppState::Playing),
+            crate::pieces2d::spawn_pieces.after(crate::game_logic::start_new_game),
+        )
+        .add_systems(
+            Update,
+            crate::pieces2d::sync_piece_positions.run_if(in_state(AppState::Playing)),
+        )
+        .add_systems(
+            Update,
+            crate::pieces2d::animate_piece_movement.run_if(in_state(AppState::Playing)),
+        )
+        // 3D piece systems (run when in 3D render mode)
+        .add_systems(
+            Update,
+            crate::pieces3d::sync_piece_positions_3d.run_if(
+                in_state(AppState::Playing)
+                    .and(|dim: Res<RenderDimension>| *dim == RenderDimension::ThreeD),
+            ),
+        )
+        .add_systems(
+            Update,
+            crate::pieces3d::animate_piece_movement_3d.run_if(
+                in_state(AppState::Playing)
+                    .and(|dim: Res<RenderDimension>| *dim == RenderDimension::ThreeD),
+            ),
+        );
     }
 }
 
@@ -98,14 +92,8 @@ impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<crate::audio::SoundMessage>()
             .add_systems(Startup, crate::audio::load_audio_assets)
-            .add_systems(
-                Update,
-                crate::audio::play_background_music,
-            )
-            .add_systems(
-                Update,
-                crate::audio::play_sound_effects,
-            );
+            .add_systems(Update, crate::audio::play_background_music)
+            .add_systems(Update, crate::audio::play_sound_effects);
     }
 }
 
@@ -117,17 +105,17 @@ pub struct EnginePlugin;
 impl Plugin for EnginePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
-                OnEnter(AppState::Playing),
-                crate::engine::init_engine.after(crate::game_logic::start_new_game),
-            )
-            .add_systems(
-                Update,
-                crate::engine::start_engine_search.run_if(in_state(AppState::Playing)),
-            )
-            .add_systems(
-                Update,
-                crate::engine::poll_engine_result.run_if(in_state(AppState::Playing)),
-            );
+            OnEnter(AppState::Playing),
+            crate::engine::init_engine.after(crate::game_logic::start_new_game),
+        )
+        .add_systems(
+            Update,
+            crate::engine::start_engine_search.run_if(in_state(AppState::Playing)),
+        )
+        .add_systems(
+            Update,
+            crate::engine::poll_engine_result.run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -140,7 +128,10 @@ impl Plugin for GameLogicPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<crate::game_logic::MoveMessage>()
             .add_message::<crate::game_logic::UndoMessage>()
-            .add_systems(OnEnter(AppState::Playing), crate::game_logic::start_new_game)
+            .add_systems(
+                OnEnter(AppState::Playing),
+                crate::game_logic::start_new_game,
+            )
             .add_systems(
                 Update,
                 crate::game_logic::execute_move.run_if(in_state(AppState::Playing)),
@@ -189,7 +180,10 @@ impl Plugin for UiPlugin {
                 Update,
                 crate::ui::update_depth_text.run_if(in_state(AppState::Playing)),
             )
-            .add_systems(OnEnter(AppState::GameOver), crate::ui::spawn_game_over_overlay)
+            .add_systems(
+                OnEnter(AppState::GameOver),
+                crate::ui::spawn_game_over_overlay,
+            )
             .add_systems(
                 Update,
                 crate::ui::game_over_button_system.run_if(in_state(AppState::GameOver)),

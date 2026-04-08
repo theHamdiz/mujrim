@@ -75,6 +75,17 @@ just test        # Run all tests
 just bench       # Run ELO benchmark suite
 ```
 
+### Recommended Verification Commands
+
+These are the default quality gates used for local iteration before pushing:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+RUST_MIN_STACK=16777216 cargo test --workspace
+just bench-json depth=16 hash=128 time=5
+```
+
 ### Using cargo directly
 
 ```bash
@@ -273,6 +284,12 @@ just bench-uci ./stockfish    # Benchmark external UCI engine
 just engine-info              # Show NNUE + technique info
 ```
 
+### Current Practical Elo Reporting
+
+- Fast local estimate: `just bench-json depth=16 hash=128 time=5`
+- Full regression estimate: `just bench depth=20 hash=256 time=30`
+- SPRT-style tuning runs: use `cutechess-cli` pair testing with candidate parameter sets (see `PLAN.md`)
+
 ---
 
 ## Protocol Support
@@ -322,6 +339,15 @@ just uninstall   # Remove all installed files
 | **macOS** | `.app` bundle in `~/Applications` (GUI + CLI + updater), CLI in `~/.local/bin` |
 | **Linux** | Binaries in `~/.local/bin`, `.desktop` entry, HiDPI icons |
 | **Windows** | Binaries in `%LOCALAPPDATA%/KishMat`, Start Menu shortcut |
+
+### Release Bundles
+
+CI release artifacts are generated for all major platforms and include:
+- `kishmat` (engine)
+- `kishmat-ui` (GUI) where target supports native GUI stack
+- `kishmat-updater`
+- NNUE payload (`nnue/` when present) plus `crates/kishmat-eval/resources/networks.json`
+- `README.md` and `License.md`
 
 ---
 

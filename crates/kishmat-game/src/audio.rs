@@ -132,11 +132,10 @@ pub fn load_audio_assets(
 }
 
 /// Play the background music on loop when in-game.
-pub fn play_background_music(
-    mut commands: Commands,
-    audio_assets: Option<ResMut<AudioAssets>>,
-) {
-    let Some(mut audio_assets) = audio_assets else { return };
+pub fn play_background_music(mut commands: Commands, audio_assets: Option<ResMut<AudioAssets>>) {
+    let Some(mut audio_assets) = audio_assets else {
+        return;
+    };
     if !audio_assets.bgm_playing {
         commands.spawn((
             AudioPlayer::new(audio_assets.bgm.clone()),

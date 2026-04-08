@@ -34,10 +34,7 @@ impl BoardLayout {
         let area_left = -(width / 2.0);
         let area_right = (width / 2.0) - HUD_WIDTH;
         let area_center_x = (area_left + area_right) / 2.0;
-        let board_origin = Vec2::new(
-            area_center_x - board_size / 2.0,
-            -board_size / 2.0,
-        );
+        let board_origin = Vec2::new(area_center_x - board_size / 2.0, -board_size / 2.0);
 
         Self {
             board_size,
@@ -77,10 +74,7 @@ impl BoardLayout {
 }
 
 /// Recompute board layout when window size changes.
-pub fn on_window_resize(
-    mut layout: ResMut<BoardLayout>,
-    windows: Query<&Window>,
-) {
+pub fn on_window_resize(mut layout: ResMut<BoardLayout>, windows: Query<&Window>) {
     let Ok(window) = windows.single() else { return };
     let new = BoardLayout::from_window(window.width(), window.height());
     if (new.board_size - layout.board_size).abs() > 0.5 {

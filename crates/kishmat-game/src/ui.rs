@@ -1,6 +1,6 @@
-use bevy::prelude::*;
-use crate::state::{AppState, ChessGame, GameResult, EngineConfig};
 use crate::engine::EngineInfo;
+use crate::state::{AppState, ChessGame, EngineConfig, GameResult};
+use bevy::prelude::*;
 
 // ── Colors ──────────────────────────────────────────────────────────────────
 const BG_COLOR: Color = Color::srgba(0.12, 0.12, 0.15, 0.95);
@@ -118,7 +118,10 @@ pub fn despawn_menu(mut commands: Commands, menu: Query<Entity, With<MenuRoot>>)
 }
 
 pub fn menu_button_system(
-    mut interaction_q: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<MenuPlayButton>)>,
+    mut interaction_q: Query<
+        (&Interaction, &mut BackgroundColor),
+        (Changed<Interaction>, With<MenuPlayButton>),
+    >,
     mut app_state: ResMut<NextState<AppState>>,
     mut audio_messages: MessageWriter<crate::audio::SoundMessage>,
 ) {
@@ -285,9 +288,30 @@ fn spawn_hud_button<M: Component>(parent: &mut ChildSpawnerCommands, label: &str
 pub fn update_hud(
     game: Option<Res<ChessGame>>,
     engine_info: Option<Res<EngineInfo>>,
-    mut turn_text: Query<&mut Text, (With<HudTurnText>, Without<HudEngineText>, Without<HudMoveList>)>,
-    mut engine_text: Query<&mut Text, (With<HudEngineText>, Without<HudTurnText>, Without<HudMoveList>)>,
-    mut move_list: Query<&mut Text, (With<HudMoveList>, Without<HudTurnText>, Without<HudEngineText>)>,
+    mut turn_text: Query<
+        &mut Text,
+        (
+            With<HudTurnText>,
+            Without<HudEngineText>,
+            Without<HudMoveList>,
+        ),
+    >,
+    mut engine_text: Query<
+        &mut Text,
+        (
+            With<HudEngineText>,
+            Without<HudTurnText>,
+            Without<HudMoveList>,
+        ),
+    >,
+    mut move_list: Query<
+        &mut Text,
+        (
+            With<HudMoveList>,
+            Without<HudTurnText>,
+            Without<HudEngineText>,
+        ),
+    >,
 ) {
     let Some(game) = game else { return };
 
@@ -303,10 +327,7 @@ pub fn update_hud(
                         } else {
                             format!("{:+.1}", info.score as f64 / 100.0)
                         };
-                        **text = format!(
-                            "d{} {} | {}n",
-                            info.depth, score_str, info.nodes
-                        );
+                        **text = format!("d{} {} | {}n", info.depth, score_str, info.nodes);
                     }
                 }
             }
@@ -333,10 +354,7 @@ pub fn update_hud(
                 } else {
                     format!("{:+.1}", info.score as f64 / 100.0)
                 };
-                **text = format!(
-                    "d{} {} | {}n",
-                    info.depth, score_str, info.nodes
-                );
+                **text = format!("d{} {} | {}n", info.depth, score_str, info.nodes);
             }
         }
     }

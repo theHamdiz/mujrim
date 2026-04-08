@@ -17,7 +17,6 @@ pub struct EmbeddedBinary {
     pub description: &'static str,
 }
 
-
 // We cannot conditionally include_bytes at compile time without a feature gate
 // or a build-script-generated file. Instead, we use a cfg-gated approach:
 // the binaries are included only when the `embed` feature is active.
@@ -111,7 +110,11 @@ mod tests {
         let mut names: Vec<&str> = BINARIES.iter().map(|b| b.filename).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), BINARIES.len(), "duplicate filenames in BINARIES");
+        assert_eq!(
+            names.len(),
+            BINARIES.len(),
+            "duplicate filenames in BINARIES"
+        );
     }
 
     #[test]

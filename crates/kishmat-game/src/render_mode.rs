@@ -1,10 +1,10 @@
-use bevy::prelude::*;
 use crate::board2d::BoardEntity;
 use crate::board3d::Board3dEntity;
 use crate::layout::BoardLayout;
 use crate::pieces2d::PieceSprite;
 use crate::pieces3d::Piece3d;
 use crate::state::RenderDimension;
+use bevy::prelude::*;
 
 /// Toggle between 2D and 3D rendering mode with the Tab key.
 ///

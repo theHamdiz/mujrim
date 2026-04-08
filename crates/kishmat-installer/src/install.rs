@@ -42,9 +42,7 @@ pub fn default_install_dir() -> PathBuf {
 /// Returns an error string on failure.
 pub fn install_all(install_dir: &Path) -> Result<InstallResult, String> {
     if !embedded::has_payload() {
-        return Err(
-            "No binaries embedded. Rebuild with: just installer".into(),
-        );
+        return Err("No binaries embedded. Rebuild with: just installer".into());
     }
 
     fs::create_dir_all(install_dir)
@@ -81,8 +79,7 @@ fn write_binary(bin: &EmbeddedBinary, dir: &Path, exe_suffix: bool) -> Result<()
     };
 
     let dest = dir.join(&filename);
-    let mut file = fs::File::create(&dest)
-        .map_err(|e| format!("Write {}: {e}", dest.display()))?;
+    let mut file = fs::File::create(&dest).map_err(|e| format!("Write {}: {e}", dest.display()))?;
     file.write_all(bin.data)
         .map_err(|e| format!("Write {}: {e}", dest.display()))?;
 
@@ -91,8 +88,7 @@ fn write_binary(bin: &EmbeddedBinary, dir: &Path, exe_suffix: bool) -> Result<()
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&dest, perms)
-            .map_err(|e| format!("chmod {}: {e}", dest.display()))?;
+        fs::set_permissions(&dest, perms).map_err(|e| format!("chmod {}: {e}", dest.display()))?;
     }
 
     Ok(())
@@ -131,8 +127,7 @@ fn create_macos_bundles(bin_dir: &Path) -> Result<usize, String> {
         let src = bin_dir.join(bin.filename);
         let dst = macos_dir.join(app_name.replace(' ', ""));
         if src.exists() {
-            fs::copy(&src, &dst)
-                .map_err(|e| format!("Copy to bundle: {e}"))?;
+            fs::copy(&src, &dst).map_err(|e| format!("Copy to bundle: {e}"))?;
         }
 
         // Write Info.plist
@@ -187,16 +182,13 @@ fn create_linux_desktop_entries(bin_dir: &Path) -> Result<usize, String> {
     let app_dir = home.join(".local/share/applications");
     let icon_dir = home.join(".local/share/icons/kishmat");
 
-    fs::create_dir_all(&app_dir)
-        .map_err(|e| format!("Create {}: {e}", app_dir.display()))?;
-    fs::create_dir_all(&icon_dir)
-        .map_err(|e| format!("Create {}: {e}", icon_dir.display()))?;
+    fs::create_dir_all(&app_dir).map_err(|e| format!("Create {}: {e}", app_dir.display()))?;
+    fs::create_dir_all(&icon_dir).map_err(|e| format!("Create {}: {e}", icon_dir.display()))?;
 
     // Write icon
     let logo_png = include_bytes!("../assets/logo.png");
     let icon_path = icon_dir.join("kishmat.png");
-    fs::write(&icon_path, logo_png)
-        .map_err(|e| format!("Write icon: {e}"))?;
+    fs::write(&icon_path, logo_png).map_err(|e| format!("Write icon: {e}"))?;
 
     let mut created = 0usize;
 

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use std::sync::{mpsc, Mutex};
+use std::sync::{Mutex, mpsc};
 
 use crate::state::{ChessGame, EngineConfig, TurnState};
 
@@ -62,9 +62,7 @@ pub fn start_engine_search(
         });
     });
 
-    commands.insert_resource(EngineTask {
-        rx: Mutex::new(rx),
-    });
+    commands.insert_resource(EngineTask { rx: Mutex::new(rx) });
 }
 
 /// Non-blocking poll: check the channel without stalling.
@@ -91,11 +89,15 @@ pub fn poll_engine_result(
             engine_info.best_move_uci = result.best_move.to_uci();
 
             let legal = game.board.generate_legal_moves();
-            if let Some(mv) = legal.iter().find(|m| {
-                m.from == result.best_move.from
-                    && m.to == result.best_move.to
-                    && m.promotion == result.best_move.promotion
-            }).copied() {
+            if let Some(mv) = legal
+                .iter()
+                .find(|m| {
+                    m.from == result.best_move.from
+                        && m.to == result.best_move.to
+                        && m.promotion == result.best_move.promotion
+                })
+                .copied()
+            {
                 let is_capture = mv.is_capture();
                 game.make_move(mv);
 

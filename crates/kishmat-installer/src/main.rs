@@ -402,13 +402,13 @@ impl App {
         let title = text("KishMat Installer").size(16).color(TEXT_PRIMARY);
 
         let close_btn = button(iced_fonts::lucide::x().size(16))
-        .on_press(Msg::ExitApp)
-        .style(|_, _| button::Style {
-            background: None,
-            text_color: TEXT_SECONDARY,
-            ..Default::default()
-        })
-        .padding([4, 8]);
+            .on_press(Msg::ExitApp)
+            .style(|_, _| button::Style {
+                background: None,
+                text_color: TEXT_SECONDARY,
+                ..Default::default()
+            })
+            .padding([4, 8]);
 
         let drag_area = mouse_area(container(title).padding([8, 16]).width(Length::Fill))
             .on_press(Msg::DragWindow);
@@ -559,8 +559,8 @@ impl App {
 
         let syzygy_picker: Element<'_, Msg> = if self.download_syzygy {
             let tier_label = text("Piece count:").size(13).color(TEXT_SECONDARY);
-            let picker = pick_list(SYZYGY_TIERS, Some(self.syzygy_tier), Msg::SetSyzygyTier)
-                .text_size(13);
+            let picker =
+                pick_list(SYZYGY_TIERS, Some(self.syzygy_tier), Msg::SetSyzygyTier).text_size(13);
 
             let size_note = text(format!(
                 "Estimated download: {}",
@@ -626,8 +626,7 @@ impl App {
     fn view_installing(&self) -> Element<'_, Msg> {
         let heading = text("Installing…").size(24).color(TEXT_PRIMARY);
 
-        let bar = container(progress_bar(0.0..=1.0, self.progress_value))
-            .max_width(500);
+        let bar = container(progress_bar(0.0..=1.0, self.progress_value)).max_width(500);
 
         let status = text(&self.progress_msg).size(14).color(TEXT_SECONDARY);
 

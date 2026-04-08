@@ -1635,19 +1635,63 @@ impl App {
 
         // ── Center: Pill-shaped action buttons ──
         let mut actions = row![].spacing(3).align_y(Alignment::Center);
-        actions = actions.push(pill_button(lucide_icon(iced_fonts::lucide::settings), "Options", pal, false, Msg::ToggleOptions));
+        actions = actions.push(pill_button(
+            lucide_icon(iced_fonts::lucide::settings),
+            "Options",
+            pal,
+            false,
+            Msg::ToggleOptions,
+        ));
         if matches!(self.screen, Screen::Playing) {
             actions = actions
-                .push(pill_button(lucide_icon(iced_fonts::lucide::camera), "Shot", pal, false, Msg::TakeScreenshot))
-                .push(pill_button(lucide_icon(iced_fonts::lucide::plus), "New", pal, false, Msg::NewGame))
-                .push(pill_button(lucide_icon(iced_fonts::lucide::arrow_up_down), "Flip", pal, false, Msg::FlipBoard))
-                .push(pill_button(lucide_icon(iced_fonts::lucide::flag), "Resign", pal, true, Msg::Resign))
+                .push(pill_button(
+                    lucide_icon(iced_fonts::lucide::camera),
+                    "Shot",
+                    pal,
+                    false,
+                    Msg::TakeScreenshot,
+                ))
+                .push(pill_button(
+                    lucide_icon(iced_fonts::lucide::plus),
+                    "New",
+                    pal,
+                    false,
+                    Msg::NewGame,
+                ))
+                .push(pill_button(
+                    lucide_icon(iced_fonts::lucide::arrow_up_down),
+                    "Flip",
+                    pal,
+                    false,
+                    Msg::FlipBoard,
+                ))
+                .push(pill_button(
+                    lucide_icon(iced_fonts::lucide::flag),
+                    "Resign",
+                    pal,
+                    true,
+                    Msg::Resign,
+                ))
                 .push(pill_sep(pal))
-                .push(pill_button(lucide_icon(iced_fonts::lucide::clipboard_copy), "PGN", pal, false, Msg::ExportPGN))
-                .push(pill_button(lucide_icon(iced_fonts::lucide::film), "GIF", pal, false, Msg::ExportGIF));
+                .push(pill_button(
+                    lucide_icon(iced_fonts::lucide::clipboard_copy),
+                    "PGN",
+                    pal,
+                    false,
+                    Msg::ExportPGN,
+                ))
+                .push(pill_button(
+                    lucide_icon(iced_fonts::lucide::film),
+                    "GIF",
+                    pal,
+                    false,
+                    Msg::ExportGIF,
+                ));
             let (rec_icon, rec_label): (Element<'_, Msg>, &str) = match self.recorder.state() {
                 recording::RecordState::Idle => (lucide_icon(iced_fonts::lucide::circle), "Rec"),
-                recording::RecordState::Recording => (lucide_icon(iced_fonts::lucide::circle_stop), "Stop"),
+                recording::RecordState::Recording => {
+                    (lucide_icon(iced_fonts::lucide::circle_stop), "Stop")
+                }
                 recording::RecordState::Saving => (lucide_icon(iced_fonts::lucide::save), "…"),
             };
             actions = actions.push(pill_button(
@@ -1659,7 +1703,13 @@ impl App {
             ));
         } else {
             // Menu screen: show Start Game button
-            actions = actions.push(pill_button(lucide_icon(iced_fonts::lucide::play), "Start", pal, false, Msg::StartGame));
+            actions = actions.push(pill_button(
+                lucide_icon(iced_fonts::lucide::play),
+                "Start",
+                pal,
+                false,
+                Msg::StartGame,
+            ));
         }
 
         // Wrap action buttons in a pill container
@@ -1684,7 +1734,13 @@ impl App {
         // ── Right: Status + Exit ──
         let right = row![
             text(&self.status).size(10).color(pal.text_secondary),
-            pill_button(lucide_icon(iced_fonts::lucide::x), "Exit", pal, true, Msg::ExitApp),
+            pill_button(
+                lucide_icon(iced_fonts::lucide::x),
+                "Exit",
+                pal,
+                true,
+                Msg::ExitApp
+            ),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -1930,9 +1986,27 @@ impl App {
             config_slider("Hash (MB)", cfg.hash_mb, "MB", 1, 4096, Msg::CfgHashChanged),
             config_slider("Threads", cfg.threads, "", 1, 32, Msg::CfgThreadsChanged),
             Space::new().height(4),
-            settings_row("Ponder", toggler(cfg.ponder).on_toggle(|_| Msg::CfgTogglePonder).size(18).into()),
-            settings_row("Opening Book", toggler(cfg.use_book).on_toggle(|_| Msg::CfgToggleBook).size(18).into()),
-            settings_row("NNUE Eval", toggler(cfg.use_nnue).on_toggle(|_| Msg::CfgToggleNnue).size(18).into()),
+            settings_row(
+                "Ponder",
+                toggler(cfg.ponder)
+                    .on_toggle(|_| Msg::CfgTogglePonder)
+                    .size(18)
+                    .into()
+            ),
+            settings_row(
+                "Opening Book",
+                toggler(cfg.use_book)
+                    .on_toggle(|_| Msg::CfgToggleBook)
+                    .size(18)
+                    .into()
+            ),
+            settings_row(
+                "NNUE Eval",
+                toggler(cfg.use_nnue)
+                    .on_toggle(|_| Msg::CfgToggleNnue)
+                    .size(18)
+                    .into()
+            ),
             Space::new().height(4),
             row![
                 text("Eval Net").size(12).color(TEXT_SECONDARY).width(75),
@@ -2205,7 +2279,11 @@ impl App {
         };
 
         let capture_anim_picker = pick_list(
-            vec![CaptureAnimStyle::Explosion, CaptureAnimStyle::Fire, CaptureAnimStyle::Instant],
+            vec![
+                CaptureAnimStyle::Explosion,
+                CaptureAnimStyle::Fire,
+                CaptureAnimStyle::Instant,
+            ],
             Some(s.capture_anim_style),
             Msg::SetCaptureAnim,
         )
@@ -2222,10 +2300,7 @@ impl App {
             iced_fonts::lucide::monitor,
             "Display",
             column![
-                settings_row(
-                    "Board Theme",
-                    theme_picker.into(),
-                ),
+                settings_row("Board Theme", theme_picker.into(),),
                 settings_row(
                     "Show Coordinates",
                     toggler(s.show_coords)
@@ -2233,10 +2308,7 @@ impl App {
                         .size(18)
                         .into(),
                 ),
-                settings_row(
-                    "Coord Position",
-                    coord_pos_picker.into(),
-                ),
+                settings_row("Coord Position", coord_pos_picker.into(),),
                 settings_row(
                     "Animation",
                     row![
@@ -2247,10 +2319,7 @@ impl App {
                     .align_y(Alignment::Center)
                     .into(),
                 ),
-                settings_row(
-                    "Capture Effect",
-                    capture_anim_picker.into(),
-                ),
+                settings_row("Capture Effect", capture_anim_picker.into(),),
             ]
             .spacing(2)
             .into(),
@@ -2281,10 +2350,7 @@ impl App {
                 ),
                 settings_row(
                     "Sound Effects",
-                    toggler(s.sfx_on)
-                        .on_toggle(Msg::SetSfx)
-                        .size(18)
-                        .into(),
+                    toggler(s.sfx_on).on_toggle(Msg::SetSfx).size(18).into(),
                 ),
                 settings_row(
                     "BGM Volume",
@@ -2299,10 +2365,7 @@ impl App {
                     .align_y(Alignment::Center)
                     .into(),
                 ),
-                settings_row(
-                    "Game Mood",
-                    mood_picker.into(),
-                ),
+                settings_row("Game Mood", mood_picker.into(),),
             ]
             .spacing(2)
             .into(),
@@ -2394,10 +2457,27 @@ impl App {
 
         // Tab switcher
         let settings_tab_active = self.options_tab == OptionsTab::Settings;
-        let settings_color = if settings_tab_active { Color::WHITE } else { TEXT_SECONDARY };
-        let tools_color = if !settings_tab_active { Color::WHITE } else { TEXT_SECONDARY };
+        let settings_color = if settings_tab_active {
+            Color::WHITE
+        } else {
+            TEXT_SECONDARY
+        };
+        let tools_color = if !settings_tab_active {
+            Color::WHITE
+        } else {
+            TEXT_SECONDARY
+        };
         let tab_buttons = row![
-            button(row![iced_fonts::lucide::settings().size(13).color(settings_color), text(" Settings").size(13).color(settings_color)].spacing(4).align_y(Alignment::Center))
+            button(
+                row![
+                    iced_fonts::lucide::settings()
+                        .size(13)
+                        .color(settings_color),
+                    text(" Settings").size(13).color(settings_color)
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center)
+            )
             .on_press(Msg::SwitchOptionsTab(OptionsTab::Settings))
             .padding([6, 16])
             .style(move |_theme, _status| button::Style {
@@ -2413,7 +2493,14 @@ impl App {
                 text_color: Color::WHITE,
                 ..Default::default()
             }),
-            button(row![iced_fonts::lucide::wrench().size(13).color(tools_color), text(" Tools").size(13).color(tools_color)].spacing(4).align_y(Alignment::Center))
+            button(
+                row![
+                    iced_fonts::lucide::wrench().size(13).color(tools_color),
+                    text(" Tools").size(13).color(tools_color)
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center)
+            )
             .on_press(Msg::SwitchOptionsTab(OptionsTab::Tools))
             .padding([6, 16])
             .style(move |_theme, _status| button::Style {
@@ -2435,26 +2522,32 @@ impl App {
 
         // Build tab content
         let tab_content: Element<'_, Msg> = if settings_tab_active {
-            scrollable(
-                column![
-                    display_section,
-                    audio_section,
-                    game_section,
-                ]
-                .spacing(12),
-            )
-            .height(450)
-            .into()
+            scrollable(column![display_section, audio_section, game_section,].spacing(12))
+                .height(450)
+                .into()
         } else {
             // Tools tab
             let syzygy_section = settings_card(
                 iced_fonts::lucide::database,
                 "Syzygy Tablebases",
                 column![
-                    settings_row("Status", text(&self.syzygy_status).size(12).color(TEXT_PRIMARY).into()),
-                    settings_row("Path", text("./syzygy/").size(12).color(TEXT_PRIMARY).into()),
+                    settings_row(
+                        "Status",
+                        text(&self.syzygy_status)
+                            .size(12)
+                            .color(TEXT_PRIMARY)
+                            .into()
+                    ),
+                    settings_row(
+                        "Path",
+                        text("./syzygy/").size(12).color(TEXT_PRIMARY).into()
+                    ),
                     Space::new().height(4),
-                    styled_button_with_icon(iced_fonts::lucide::download, "Download 3-4-5 Piece Tables (~1 GB)", Msg::SyzygyDownload),
+                    styled_button_with_icon(
+                        iced_fonts::lucide::download,
+                        "Download 3-4-5 Piece Tables (~1 GB)",
+                        Msg::SyzygyDownload
+                    ),
                 ]
                 .spacing(2)
                 .into(),
@@ -2464,18 +2557,29 @@ impl App {
                 iced_fonts::lucide::brain,
                 "NNUE Networks",
                 column![
-                    settings_row("Status", text(&self.nnue_status).size(12).color(TEXT_PRIMARY).into()),
+                    settings_row(
+                        "Status",
+                        text(&self.nnue_status).size(12).color(TEXT_PRIMARY).into()
+                    ),
                     settings_row("Path", text("./nnue/").size(12).color(TEXT_PRIMARY).into()),
                     Space::new().height(4),
-                    styled_button_with_icon(iced_fonts::lucide::download, "Download All NNUE Networks", Msg::NnueDownload),
+                    styled_button_with_icon(
+                        iced_fonts::lucide::download,
+                        "Download All NNUE Networks",
+                        Msg::NnueDownload
+                    ),
                 ]
                 .spacing(2)
                 .into(),
             );
 
-            let mut tuning_content = column![
-                settings_row("Status", text(&self.tuning_status).size(12).color(TEXT_PRIMARY).into()),
-            ]
+            let mut tuning_content = column![settings_row(
+                "Status",
+                text(&self.tuning_status)
+                    .size(12)
+                    .color(TEXT_PRIMARY)
+                    .into()
+            ),]
             .spacing(2);
 
             if let Some(ref params) = self.tuning_params {
@@ -2494,26 +2598,24 @@ impl App {
                     let min_i = param.min_i32();
                     let max_i = param.max_i32();
                     let val_i = param.value_i32();
-                    tuning_content = tuning_content.push(
-                        settings_row(
-                            &name_label,
-                            row![
-                                slider(min_i..=max_i, val_i, move |v| Msg::TuneSetParam(
-                                    sec.clone(),
-                                    nm.clone(),
-                                    v as f64
-                                ))
-                                .width(100),
-                                text(format!("{val_i}"))
-                                    .size(11)
-                                    .color(TEXT_PRIMARY)
-                                    .width(50),
-                            ]
-                            .spacing(6)
-                            .align_y(Alignment::Center)
-                            .into(),
-                        ),
-                    );
+                    tuning_content = tuning_content.push(settings_row(
+                        &name_label,
+                        row![
+                            slider(min_i..=max_i, val_i, move |v| Msg::TuneSetParam(
+                                sec.clone(),
+                                nm.clone(),
+                                v as f64
+                            ))
+                            .width(100),
+                            text(format!("{val_i}"))
+                                .size(11)
+                                .color(TEXT_PRIMARY)
+                                .width(50),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .into(),
+                    ));
                 }
                 tuning_content = tuning_content.push(Space::new().height(4));
                 tuning_content = tuning_content.push(
@@ -2537,11 +2639,9 @@ impl App {
             let updates_section = settings_card(
                 iced_fonts::lucide::refresh_cw,
                 "Updates",
-                column![
-                    styled_button("Check for Updates", Msg::CheckForUpdates),
-                ]
-                .spacing(4)
-                .into(),
+                column![styled_button("Check for Updates", Msg::CheckForUpdates),]
+                    .spacing(4)
+                    .into(),
             );
 
             scrollable(
@@ -2671,9 +2771,12 @@ fn styled_button_with_icon<'a>(
     let label_text = label.to_string();
     button(
         container(
-            row![icon_fn().size(12), text(label_text).size(12).color(TEXT_PRIMARY)]
-                .spacing(6)
-                .align_y(Alignment::Center),
+            row![
+                icon_fn().size(12),
+                text(label_text).size(12).color(TEXT_PRIMARY)
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
         )
         .center_x(Length::Shrink)
         .center_y(30)

@@ -931,11 +931,7 @@ fn should_apply_iir(
     in_check: bool,
     excluded_move: Option<Move>,
 ) -> bool {
-    tt_move.is_none()
-        && depth >= 4
-        && !is_pv
-        && !in_check
-        && excluded_move.is_none()
+    tt_move.is_none() && depth >= 4 && !is_pv && !in_check && excluded_move.is_none()
 }
 
 /// Alpha-beta search (free function so it can be called from any thread).
@@ -1136,8 +1132,7 @@ fn search_ab(
             && static_eval >= beta
             && ply_usize >= state.min_nmp_ply
         {
-            let r = params.null_move_r(depth, static_eval, beta)
-                + i32::from(improving);
+            let r = params.null_move_r(depth, static_eval, beta) + i32::from(improving);
 
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
@@ -1220,8 +1215,7 @@ fn search_ab(
         // ProbCut with TT guard (Akimbo line 340/431)
         // Skip ProbCut if TT at sufficient depth already shows score < pc_beta.
         let pb_beta = beta + 200;
-        let can_probcut = tt_score
-            .map_or(true, |ts| !(tt_depth >= depth - 3 && ts < pb_beta));
+        let can_probcut = tt_score.map_or(true, |ts| !(tt_depth >= depth - 3 && ts < pb_beta));
         if depth >= 5 && beta.abs() < MATE_SCORE - 100 && can_probcut {
             let mut caps = board.generate_legal_captures();
             let mut cap_scores: Vec<i32> = (0..caps.len())
@@ -1566,11 +1560,7 @@ fn search_ab(
         } else {
             // LMR: Late Move Reductions — enhanced with stat_score
             let mut reduction = 0;
-            if moves_searched >= 1
-                && depth >= 2
-                && !mv.is_capture()
-                && !mv.is_promotion()
-            {
+            if moves_searched >= 1 && depth >= 2 && !mv.is_capture() && !mv.is_promotion() {
                 let d = (depth as usize).min(127);
                 let m = moves_searched.min(127);
                 let base = lmr_table[d][m];
@@ -2649,7 +2639,6 @@ mod tests {
         assert!(same_move_key(q, q));
     }
 
-
     #[test]
     fn test_nmp_material_ok_requires_non_pawn_material() {
         setup();
@@ -2783,10 +2772,9 @@ mod tests {
                 setup();
                 // Position where white is up a full queen — RFP should fire
                 // at shallow depth with eval >> beta.
-                let mut board = Board::from_fen(
-                    "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-                )
-                .unwrap();
+                let mut board =
+                    Board::from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+                        .unwrap();
                 let mut engine = SearchEngine::new(1, 1);
                 let result = engine.search_depth(&mut board, 4);
                 // Score should be positive (huge material advantage) but NOT
@@ -2818,10 +2806,9 @@ mod tests {
             .spawn(|| {
                 setup();
                 // Quiet position with extra knight — QS should hit stand-pat immediately
-                let mut board = Board::from_fen(
-                    "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 1",
-                )
-                .unwrap();
+                let mut board =
+                    Board::from_fen("rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq - 0 1")
+                        .unwrap();
                 let tt = TranspositionTable::new(1);
                 let stopped = AtomicBool::new(false);
                 let mut state = ThreadState::new(Arc::new(ActiveNetwork::Embedded));
@@ -2900,7 +2887,10 @@ mod tests {
                 );
 
                 // PV must be non-empty
-                assert!(!result.pv.is_empty(), "PV line must not be empty at depth 8");
+                assert!(
+                    !result.pv.is_empty(),
+                    "PV line must not be empty at depth 8"
+                );
 
                 // Reasonable node count
                 assert!(

@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use crate::state::ChessGame;
+use bevy::prelude::*;
 
 /// Marker for a 3D piece entity.
 #[derive(Component)]
@@ -27,11 +27,7 @@ pub fn square_to_world_3d(file: u8, rank: u8, flipped: bool) -> Vec3 {
     } else {
         (file, rank)
     };
-    Vec3::new(
-        (f as f32 - 3.5) * SQ_SIZE,
-        0.1,
-        (r as f32 - 3.5) * SQ_SIZE,
-    )
+    Vec3::new((f as f32 - 3.5) * SQ_SIZE, 0.1, (r as f32 - 3.5) * SQ_SIZE)
 }
 
 /// Spawn 3D piece meshes (placeholder cylinders with spheres on top).
@@ -66,14 +62,20 @@ pub fn spawn_pieces_3d(
                 half_height: height / 2.0,
                 radius,
             });
-            let sphere = meshes.add(Sphere { radius: radius * 0.8 });
+            let sphere = meshes.add(Sphere {
+                radius: radius * 0.8,
+            });
 
             commands
                 .spawn((
                     Mesh3d(cylinder),
                     MeshMaterial3d(mat.clone()),
                     Transform::from_translation(piece_pos),
-                    Piece3d { piece, color, square: sq },
+                    Piece3d {
+                        piece,
+                        color,
+                        square: sq,
+                    },
                 ))
                 .with_children(|parent| {
                     parent.spawn((
@@ -166,13 +168,19 @@ pub fn sync_piece_positions_3d(
                 half_height: height / 2.0,
                 radius,
             });
-            let sphere = meshes.add(Sphere { radius: radius * 0.8 });
+            let sphere = meshes.add(Sphere {
+                radius: radius * 0.8,
+            });
 
             let mut entity_cmds = commands.spawn((
                 Mesh3d(cylinder),
                 MeshMaterial3d(mat.clone()),
                 Transform::from_translation(start_pos),
-                Piece3d { piece, color, square: sq },
+                Piece3d {
+                    piece,
+                    color,
+                    square: sq,
+                },
             ));
 
             entity_cmds.with_children(|parent| {
