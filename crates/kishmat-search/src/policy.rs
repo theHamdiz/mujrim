@@ -153,7 +153,9 @@ impl LmrPolicy for StockLikeLmrPolicy {
         if ctx.is_pv {
             reduction -= 1;
         }
-        if !ctx.improving {
+        // Penalize non-improving nodes less on PV lines — only tighten on cut nodes
+        // (common pattern in strong engines; reduces tactical LMR mistakes).
+        if !ctx.improving && ctx.is_cut_node {
             reduction += 1;
         }
         if ctx.is_killer {
@@ -304,5 +306,35 @@ mod tests {
             ..bad
         };
         assert!(policy.adjust_reduction(base, &good) < policy.adjust_reduction(base, &bad));
+    }
+
+    #[test]
+    fn lmr_improving_penalty_only_on_cut_nodes() {
+        let policy = StockLikeLmrPolicy;
+        let base = 3;
+        let mut pv_quiet = LmrContext {
+            is_capture: false,
+            is_losing_capture: false,
+            is_pv: true,
+            improving: false,
+            is_killer: false,
+            gives_check: false,
+            mv_stat_score: 0,
+            cap_hist_score: 0,
+            corr_abs: 0,
+            is_cut_node: false,
+            tt_was_pv: false,
+            hist_lmr_div: 8192,
+            lmr_corr_mul: 448,
+            lmr_cut_node_bonus: 2,
+            child_cutoffs: 10,
+        };
+        let r_pv = policy.adjust_reduction(base, &pv_quiet);
+        pv_quiet.is_cut_node = true;
+        let r_cut = policy.adjust_reduction(base, &pv_quiet);
+        assert!(
+            r_cut > r_pv,
+            "non-improving should add reduction only as cut node"
+        );
     }
 }

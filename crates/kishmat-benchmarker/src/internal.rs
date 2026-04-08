@@ -31,12 +31,10 @@ pub struct InternalBenchConfig {
 impl Default for InternalBenchConfig {
     fn default() -> Self {
         Self {
-            depth: 16,
-            threads: std::thread::available_parallelism()
-                .map(|n| n.get().saturating_sub(2).max(1))
-                .unwrap_or(1),
+            depth: 20,
+            threads: 1,
             hash_mb: 256,
-            time_per_position: Duration::from_secs(30),
+            time_per_position: Duration::from_secs(90),
             suite_name: "Bratko-Kopec".to_string(),
             eval_preset: "auto".to_string(),
             eval_file: None,
@@ -204,6 +202,14 @@ pub fn measure_startpos_nps(
 mod tests {
     use super::*;
     use crate::suite::bk_suite;
+
+    #[test]
+    fn default_bench_config_favors_stable_bk_scores() {
+        let c = InternalBenchConfig::default();
+        assert_eq!(c.threads, 1);
+        assert_eq!(c.depth, 20);
+        assert_eq!(c.time_per_position.as_secs(), 90);
+    }
 
     #[test]
     fn test_internal_bench_runs_one_position() {

@@ -5,12 +5,12 @@
 //! - **Lichess** (Glicko-2 from online games)
 //!
 //! Anchoring uses this project’s PLAN estimate: **~54.2% BK → ~1963 CCRL 40/15** (historical depth 16, 120s/pos; default bench is now tighter).
-//! The BK suite tops out well below Stockfish-level **match** Elo; 100% → ~2800 on this proxy
-//! means “perfect tactical suite score at your bench settings”, not an official list placement.
+//! The BK suite tops out well below Stockfish-level **match** Elo; **100% → 3500** on this proxy
+//! is an upper calibration for tactical-suite perfection at your bench settings, not an official list placement.
 
 /// Approximate strength on the **CCRL 40/15**-style scale from BK accuracy (percent correct, 0–100).
 ///
-/// Piecewise spine: **90% → 2500**, **100% → 2800** (+30 per point over 90%; still a suite proxy only).
+/// Piecewise spine: **90% → 2500**, **100% → 3500** (+100 per point over 90%; still a suite proxy only).
 #[must_use]
 pub fn approx_ccrl_40_15_from_bk_accuracy(accuracy: f64) -> i32 {
     let elo = if accuracy <= 10.0 {
@@ -24,7 +24,7 @@ pub fn approx_ccrl_40_15_from_bk_accuracy(accuracy: f64) -> i32 {
     } else if accuracy <= 90.0 {
         2200.0 + (accuracy - 70.0) * 15.0
     } else {
-        2500.0 + (accuracy - 90.0) * 30.0
+        2500.0 + (accuracy - 90.0) * 100.0
     };
     elo.round() as i32
 }
@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn top_end_capped_for_ccrl_proxy() {
         assert_eq!(approx_ccrl_40_15_from_bk_accuracy(90.0), 2500);
-        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(100.0), 2800);
+        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(100.0), 3500);
     }
 
     #[test]
@@ -60,6 +60,6 @@ mod tests {
             approx_lichess_blitz_from_bk_accuracy(54.166666666666664),
             approx_ccrl_40_15_from_bk_accuracy(54.166666666666664) + 115
         );
-        assert_eq!(approx_lichess_blitz_from_bk_accuracy(100.0), 2800 + 115);
+        assert_eq!(approx_lichess_blitz_from_bk_accuracy(100.0), 3500 + 115);
     }
 }

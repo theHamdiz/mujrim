@@ -30,7 +30,7 @@ pub struct EloIterateConfig {
 impl Default for EloIterateConfig {
     fn default() -> Self {
         Self {
-            target_elo: 2800,
+            target_elo: 3500,
             min_bk_correct: None,
             max_rounds: 100,
             stagnation_limit: 20,

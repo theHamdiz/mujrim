@@ -8,7 +8,7 @@
 //! - `SearchParams::akimbo()` — current defaults, tuned for Akimbo-family nets
 //! - `SearchParams::stockfish()` — Stockfish's SPRT-tuned values for SF nets
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// All tunable search constants in one place.
 ///
@@ -85,6 +85,8 @@ pub struct SearchParams {
     pub se_depth_min: i32,
     /// Maximum double extensions per path.
     pub max_dbl_exts: i32,
+    /// Second margin (centipawns) below `se_beta` to trigger double singular extension.
+    pub se_double_ext_margin: i32,
 
     // ── Null-move verification ─────────────────────────────────────
     /// Minimum depth to trigger NMP verification search.
@@ -170,6 +172,7 @@ impl SearchParams {
             se_margin_mul: 1,
             se_depth_min: 6,
             max_dbl_exts: 5,
+            se_double_ext_margin: 25,
 
             // NMP verification
             nmp_min_verif_depth: 17,
@@ -197,8 +200,8 @@ impl SearchParams {
 
     /// Parameters tuned for Stockfish NNUE networks.
     ///
-    /// Values extracted from Stockfish's source (SPRT-tuned over millions
-    /// of games). These are optimal for the HalfKAv2_hm architecture.
+    /// Stockfish-inspired baselines with **tighter pruning depth caps** so tactical tests lose
+    /// fewer quiet lines to LMP / SEE / futility; revisit with SPRT on long games if needed.
     pub fn stockfish() -> Self {
         Self {
             // Razoring — identical to Akimbo (both use SF formula)
@@ -213,49 +216,43 @@ impl SearchParams {
             futility_base: 188,
             futility_mul: 77,
             futility_improving_bonus: 46,
-            futility_depth_limit: 13,
+            futility_depth_limit: 8,
 
-            // Null-move pruning — SF: R = 7 + depth/3
-            nmp_depth_min: 3,
+            // Null-move pruning — SF: R = 7 + depth/3; start one ply later than SF default.
+            nmp_depth_min: 4,
             nmp_base: 7,
             nmp_depth_div: 3,
             nmp_eval_div: 200,
             nmp_eval_max: 3,
 
             // LMR — SF: reductions[i] = 2809/128 * ln(i), but we keep the 2D table
-            // SF's effective LMR is more aggressive due to the 1D base + per-node adjustments
             lmr_base: 0.77,
             lmr_divisor: 2.36,
-            lmr_cut_node_bonus: 3,
+            lmr_cut_node_bonus: 2,
 
-            // LMP — SF has no explicit depth limit, applies via moveCount formula
-            lmp_depth_limit: 12,
+            lmp_depth_limit: 6,
 
-            // History pruning — SF: -3826 * depth (more aggressive)
             hist_prune_margin: -3826,
-            hist_prune_depth_limit: 12,
+            hist_prune_depth_limit: 6,
             hist_lmr_div: 2917,
 
-            // SEE pruning — SF: captures margin based on depth + captHist
             see_capture_margin: -185,
             see_quiet_margin: -25,
-            see_prune_depth_limit: 12,
+            see_prune_depth_limit: 6,
 
-            // Singular extensions — SF: singularBeta = ttValue - 58*depth/57
             se_margin_mul: 1,
-            se_depth_min: 8,
-            max_dbl_exts: 5,
+            se_depth_min: 6,
+            max_dbl_exts: 8,
+            se_double_ext_margin: 22,
 
             // NMP verification
             nmp_min_verif_depth: 17,
             nmp_verif_frac: 12,
 
-            // Aspiration
-            aspiration_window: 16,
+            aspiration_window: 32,
 
-            // Quiescence
             delta_margin: 400,
-            max_qs_ply: 8,
+            max_qs_ply: 16,
 
             // History bonus — SF: 121*depth - 75 (capped at 932)
             history_bonus_mul: 121,
@@ -281,6 +278,20 @@ impl SearchParams {
         }
     }
 
+    /// Like [`Self::for_preset`], then apply `sprt/params.toml` only for **non-Stockfish** presets.
+    ///
+    /// Stockfish-family nets keep SPRT-tuned SF search constants; the repo tuning file targets
+    /// Akimbo-style overlays (`KISHMAT_TUNING_FILE` still applies the same way).
+    #[must_use]
+    pub fn for_preset_with_repo_tuning(preset_name: &str) -> Self {
+        let base = Self::for_preset(preset_name);
+        if preset_name == "stockfish" {
+            base
+        } else {
+            base.with_default_tuning_file()
+        }
+    }
+
     /// Load optional overrides from a tuning TOML file.
     ///
     /// This reads `sprt/params.toml`-style values and applies known fields to
@@ -298,7 +309,8 @@ impl SearchParams {
             for key in p {
                 cur = cur.get(*key)?;
             }
-            cur.as_float().or_else(|| cur.as_integer().map(|v| v as f64))
+            cur.as_float()
+                .or_else(|| cur.as_integer().map(|v| v as f64))
         };
 
         if let Some(v) = get(&["search", "null_move", "base_r", "value"]) {
@@ -370,7 +382,25 @@ impl SearchParams {
         if let Some(v) = get(&["search", "singular", "min_depth", "value"]) {
             self.se_depth_min = v as i32;
         }
+        if let Some(v) = get(&["search", "singular", "double_ext_margin", "value"]) {
+            self.se_double_ext_margin = v as i32;
+        }
         self
+    }
+
+    /// Path used for optional TOML overrides (`KISHMAT_TUNING_FILE` or `sprt/params.toml`).
+    #[must_use]
+    pub fn default_tuning_file_path() -> PathBuf {
+        std::env::var("KISHMAT_TUNING_FILE")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("sprt/params.toml"))
+    }
+
+    /// Apply [`Self::with_tuning_file`] using [`Self::default_tuning_file_path`].
+    #[must_use]
+    pub fn with_default_tuning_file(self) -> Self {
+        self.with_tuning_file(&Self::default_tuning_file_path())
     }
 
     // ── Computed helper methods ─────────────────────────────────────
@@ -448,12 +478,7 @@ impl SearchParams {
 
 impl Default for SearchParams {
     fn default() -> Self {
-        let base = Self::akimbo();
-        let tuning_path = std::env::var("KISHMAT_TUNING_FILE")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("sprt/params.toml"));
-        base.with_tuning_file(&tuning_path)
+        Self::for_preset_with_repo_tuning("akimbo")
     }
 }
 
@@ -478,8 +503,15 @@ mod tests {
         assert_eq!(p.nmp_base, 7);
         assert_eq!(p.nmp_depth_div, 3);
         assert_eq!(p.null_move_r(12, 300, 200), 7 + 4 + 0); // 11
-        assert_eq!(p.futility_depth_limit, 13);
+        assert_eq!(p.futility_depth_limit, 8);
         assert_eq!(p.hist_prune_margin, -3826);
+        assert_eq!(p.nmp_depth_min, 4);
+        assert_eq!(p.lmp_depth_limit, 6);
+        assert_eq!(p.see_prune_depth_limit, 6);
+        assert_eq!(p.se_depth_min, 6);
+        assert_eq!(p.max_qs_ply, 16);
+        assert_eq!(p.se_double_ext_margin, 22);
+        assert_eq!(p.aspiration_window, 32);
     }
 
     #[test]
@@ -492,6 +524,14 @@ mod tests {
         // Unknown preset falls back to akimbo
         let unknown = SearchParams::for_preset("unknown");
         assert_eq!(unknown.nmp_base, 5);
+    }
+
+    #[test]
+    fn for_preset_with_repo_tuning_matches_stockfish_without_overlay() {
+        let a = SearchParams::for_preset_with_repo_tuning("stockfish");
+        let b = SearchParams::stockfish();
+        assert_eq!(a.nmp_base, b.nmp_base);
+        assert_eq!(a.lmr_base, b.lmr_base);
     }
 
     #[test]

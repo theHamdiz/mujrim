@@ -10,6 +10,15 @@
 </p>
 
 <p align="center">
+  <a href="#overview"><img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" /></a>
+  <a href="License.md"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" /></a>
+  <a href="#engine-features"><img src="https://img.shields.io/badge/search-Lazy%20SMP-green?style=flat-square" alt="Lazy SMP" /></a>
+  <a href="#engine-features"><img src="https://img.shields.io/badge/protocol-UCI%20%7C%20XBoard-lightgrey?style=flat-square" alt="UCI | XBoard" /></a>
+  <a href="#engine-features"><img src="https://img.shields.io/badge/eval-Classical%20%2B%20NNUE-purple?style=flat-square" alt="Classical + NNUE" /></a>
+  <a href="#gui-features"><img src="https://img.shields.io/badge/gui-iced%200.14-cyan?style=flat-square" alt="iced 0.14 GUI" /></a>
+</p>
+
+<p align="center">
   <a href="https://ko-fi.com/thehamdiz">Support on Ko-fi</a> ·
   <a href="License.md">MIT License</a>
 </p>
@@ -86,10 +95,19 @@ Release profile uses full optimization (`lto = "fat"`, `codegen-units = 1`, `opt
 
 ### BK suite proxy (latest local run)
 
-- Accuracy: `16/24` (`66.67%`)
-- Approx CCRL 40/15 proxy: `~2150`
+Settings: depth `16`, `30s` per position, release build, strongest NNUE from `nnue/`, Stockfish search preset.
+
+- Accuracy: `16/24` (`66.67%`) — short runs can vary by about one position either way.
+- Approx CCRL 40/15 proxy: `~2150` (piecewise mapping from accuracy; **100% on this suite → 3500** on the same proxy scale).
 - Approx Lichess blitz proxy: `~2265`
-- Start position NPS (5s sample): `~3.7M`
+- Start position NPS (5s sample): `~4.0M`
+
+This proxy is for regression tracking only. It is **not** real CCRL or Lichess list Elo. Reaching **3500** on this scale requires essentially a perfect BK pass (or better suite coverage), which is far above today’s strength; `kishmat-benchmarker iterate` uses `--target-elo 3500` by default as that ceiling.
+
+### Elo iterate (BK loop)
+
+- Example: `cargo run --release -p kishmat-benchmarker -- iterate --target-elo 3500 --depth 16 --time 30`
+- Stops when the proxy reaches the target, BK count hits `--min-bk`, or stagnation / max rounds. With current play strength, expect stagnation **below** 3500.
 
 ### Head-to-head baseline (latest local run)
 

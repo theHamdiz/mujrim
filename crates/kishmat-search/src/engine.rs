@@ -399,8 +399,11 @@ impl SearchEngine {
     }
 
     /// Configure search params for a given network preset name.
+    ///
+    /// Applies repo tuning overlays only for non-Stockfish presets (see
+    /// [`SearchParams::for_preset_with_repo_tuning`]).
     pub fn set_params_for_preset(&mut self, preset: &str) {
-        self.set_params(SearchParams::for_preset(preset));
+        self.set_params(SearchParams::for_preset_with_repo_tuning(preset));
     }
 
     /// Set the active NNUE network source.
@@ -920,9 +923,8 @@ impl SearchEngine {
 
 /// When to apply IIR (internal iterative reduction): depth -= 1 with no TT move.
 ///
-/// Skips PV nodes (need full depth for the principal variation), in-check nodes
-/// (small tree, reduction hurts), singular-extension verification (`excluded_move`),
-/// and shallow nodes (depth below 4).
+/// Skips in-check nodes and singular-extension verification (`excluded_move`).
+/// Cut nodes: depth ≥ 4. PV nodes: depth ≥ 6 (later threshold so the main line keeps depth).
 #[inline]
 fn should_apply_iir(
     tt_move: Option<Move>,
@@ -931,7 +933,10 @@ fn should_apply_iir(
     in_check: bool,
     excluded_move: Option<Move>,
 ) -> bool {
-    tt_move.is_none() && depth >= 4 && !is_pv && !in_check && excluded_move.is_none()
+    tt_move.is_none()
+        && !in_check
+        && excluded_move.is_none()
+        && if is_pv { depth >= 6 } else { depth >= 4 }
 }
 
 /// Alpha-beta search (free function so it can be called from any thread).
@@ -1423,9 +1428,8 @@ fn search_ab(
                         }
                         if se_score < se_beta {
                             extension = 1; // TT move is singular — extend
-                            // Double extension — per-path counter (Akimbo: dbl_exts < 5)
-                            if !is_pv
-                                && se_score < se_beta - 25
+                            // Double extension when clearly singular (PV included — helps tactics).
+                            if se_score < se_beta - params.se_double_ext_margin
                                 && state.dbl_exts[ply_usize] < params.max_dbl_exts
                             {
                                 state.dbl_exts[ply_usize] += 1;
@@ -2657,7 +2661,8 @@ mod tests {
         let m = Move::from_uci("e2e4").unwrap();
         assert!(!should_apply_iir(None, 3, false, false, None));
         assert!(should_apply_iir(None, 4, false, false, None));
-        assert!(!should_apply_iir(None, 4, true, false, None));
+        assert!(!should_apply_iir(None, 5, true, false, None));
+        assert!(should_apply_iir(None, 6, true, false, None));
         assert!(!should_apply_iir(None, 4, false, true, None));
         assert!(!should_apply_iir(None, 4, false, false, Some(m)));
         assert!(!should_apply_iir(Some(m), 4, false, false, None));

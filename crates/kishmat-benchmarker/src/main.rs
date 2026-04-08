@@ -66,7 +66,7 @@ enum Commands {
         hash: usize,
 
         /// Per-position time limit in seconds.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 90)]
         time: u64,
 
         /// Path to a custom FEN file (default: built-in BK suite).
@@ -100,8 +100,8 @@ enum Commands {
 
     /// Repeat BK benchmarks until the CCRL 40/15 proxy reaches `--target`, `--min-bk` hits, or limits stop.
     Iterate {
-        /// Stop when BK accuracy maps to at least this **approx. CCRL 40/15** (100% suite → ~2800).
-        #[arg(long, default_value_t = 2800)]
+        /// Stop when BK accuracy maps to at least this **approx. CCRL 40/15** (100% BK suite → 3500 on this proxy).
+        #[arg(long, default_value_t = 3500)]
         target_elo: i32,
 
         /// Stop when at least this many positions match (24-pos BK suite). Use 0 to disable.
@@ -145,7 +145,7 @@ enum Commands {
         hash: usize,
 
         /// Per-position time limit in seconds.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 90)]
         time: u64,
 
         /// Path to a custom FEN file (default: built-in BK suite).
@@ -384,7 +384,8 @@ fn run_bench(
     };
     let params = search::search_params::SearchParams::default();
 
-    let thread_count = threads.unwrap_or(hw.bench_threads());
+    // Single-thread BK runs are slower but far more stable for suite scores (Lazy SMP noise).
+    let thread_count = threads.unwrap_or(1);
 
     if !bench_quiet {
         // Print header
@@ -529,8 +530,7 @@ fn run_iterate(
     eval_preset: String,
     eval_file: Option<PathBuf>,
 ) {
-    let hw = HardwareInfo::detect();
-    let thread_count = threads.unwrap_or(hw.bench_threads());
+    let thread_count = threads.unwrap_or(1);
 
     let suite = if let Some(path) = positions {
         match suite::load_custom_positions(&path) {

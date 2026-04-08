@@ -260,6 +260,7 @@ impl BenchSummary {
 
         json!({
             "engine_name": self.engine_name,
+            "strength_number_bk_proxy": self.approx_ccrl_40_15,
             "correct": self.correct,
             "total": self.total,
             "accuracy": self.accuracy,
@@ -275,6 +276,12 @@ impl BenchSummary {
 
 impl fmt::Display for BenchSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "Strength number (BK suite proxy): {} — run the same command again to track progress; not official CCRL Elo.",
+            self.approx_ccrl_40_15
+        )?;
+        writeln!(f)?;
         writeln!(f, "╔══════════════════════════════════════════════╗")?;
         writeln!(f, "║                  RESULTS                    ║")?;
         writeln!(f, "╠══════════════════════════════════════════════╣")?;
@@ -344,11 +351,11 @@ mod tests {
     fn test_ccrl_lichess_from_bk_accuracy() {
         assert!(approx_ccrl_40_15_from_bk_accuracy(0.0) >= 800);
         assert!(approx_ccrl_40_15_from_bk_accuracy(50.0) >= 1600);
-        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(100.0), 2800);
+        assert_eq!(approx_ccrl_40_15_from_bk_accuracy(100.0), 3500);
         assert_eq!(approx_ccrl_40_15_from_bk_accuracy(90.0), 2500);
         let plan = approx_ccrl_40_15_from_bk_accuracy(54.166666666666664);
         assert!((plan - 1963).abs() <= 1);
-        assert_eq!(approx_lichess_blitz_from_bk_accuracy(100.0), 2915);
+        assert_eq!(approx_lichess_blitz_from_bk_accuracy(100.0), 3500 + 115);
     }
 
     #[test]
