@@ -153,9 +153,7 @@ impl LmrPolicy for StockLikeLmrPolicy {
         if ctx.is_pv {
             reduction -= 1;
         }
-        // Penalize non-improving nodes less on PV lines — only tighten on cut nodes
-        // (common pattern in strong engines; reduces tactical LMR mistakes).
-        if !ctx.improving && ctx.is_cut_node {
+        if !ctx.improving {
             reduction += 1;
         }
         if ctx.is_killer {
