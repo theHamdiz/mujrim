@@ -4,7 +4,7 @@
 //! Supports straight arrows and L-shaped knight-move arrows.
 
 use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke};
-use iced::{Color, Element, Length, Point, mouse};
+use iced::{Color, Element, Event, Length, Point, mouse};
 
 use crate::Msg;
 
@@ -116,7 +116,15 @@ pub fn sq_center(file: u8, rank: u8, sq_size: f32, flipped: bool) -> Point {
     )
 }
 
+/// Maps a point inside the board canvas to a display-row/col used by board messages.
+pub fn display_square_at(point: Point, sq_size: f32) -> Option<(usize, usize)> {
+    crate::game::point_to_display(point.x, point.y, sq_size)
+}
+
 /// Renders all annotation arrows as a transparent canvas overlay.
+///
+/// The overlay always owns right-click press/release so arrows work even when
+/// stacked above the piece grid (which otherwise intercepts mouse hit-testing).
 pub fn arrow_canvas<'a>(
     arrows: &[(types::Square, types::Square)],
     sq_size: f32,
@@ -147,6 +155,41 @@ struct ArrowOverlay {
 
 impl canvas::Program<Msg> for ArrowOverlay {
     type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: &Event,
+        bounds: iced::Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<canvas::Action<Msg>> {
+        let Some(position) = cursor.position_in(bounds) else {
+            return None;
+        };
+        let Some((row, col)) = display_square_at(position, self.sq_size) else {
+            return None;
+        };
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                Some(canvas::Action::publish(Msg::BoardRightDown(row, col)).and_capture())
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
+                Some(canvas::Action::publish(Msg::BoardRightUp(row, col)).and_capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        _bounds: iced::Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        // None keeps square-button hover visuals working; update() still sees
+        // right-clicks first because the stack visits the top layer first.
+        mouse::Interaction::None
+    }
 
     fn draw(
         &self,
@@ -457,6 +500,21 @@ mod tests {
         assert!(!is_knight_move(4, 1, 4, 3));
         // Not a knight: diagonal df=1, dr=1
         assert!(!is_knight_move(3, 3, 4, 4));
+    }
+
+    #[test]
+    fn display_square_at_maps_centers_to_display_grid() {
+        let sq = 64.0;
+        assert_eq!(
+            display_square_at(Point::new(sq * 0.5, sq * 0.5), sq),
+            Some((0, 0))
+        );
+        assert_eq!(
+            display_square_at(Point::new(sq * 7.5, sq * 7.5), sq),
+            Some((7, 7))
+        );
+        assert_eq!(display_square_at(Point::new(-1.0, 10.0), sq), None);
+        assert_eq!(display_square_at(Point::new(10.0, sq * 8.0), sq), None);
     }
 
     #[test]

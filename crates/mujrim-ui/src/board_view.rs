@@ -9,7 +9,7 @@
 //! - Drawing arrows overlay
 //! - Move animation overlay with capture effects (instant or explosion)
 
-use iced::widget::{Svg, button, column, container, mouse_area, row, stack, text};
+use iced::widget::{Svg, button, column, container, row, stack, text};
 use iced::{Alignment, Color, Element, Length};
 
 use crate::game::GameState;
@@ -554,6 +554,7 @@ pub fn view_board<'a>(
 
             let cell = button(container(cell_with_coords).width(sq_size).height(sq_size))
                 .on_press(Msg::BoardClick(display_row, display_col))
+                .padding(0)
                 .width(sq_size)
                 .height(sq_size)
                 .style(move |_theme, status| {
@@ -578,12 +579,7 @@ pub fn view_board<'a>(
                     }
                 });
 
-            // Wrap with mouse_area for right-click arrow drawing
-            let cell_with_right_click = mouse_area(cell)
-                .on_right_press(Msg::BoardRightDown(display_row, display_col))
-                .on_right_release(Msg::BoardRightUp(display_row, display_col));
-
-            rank_row = rank_row.push(cell_with_right_click);
+            rank_row = rank_row.push(cell);
         }
 
         board_col = board_col.push(rank_row);
@@ -608,6 +604,19 @@ pub fn view_board<'a>(
             ..Default::default()
         })
         .into();
+
+    // Arrow canvas sits above the piece grid and owns right-click press/release
+    // (see arrows::ArrowOverlay::update). Left clicks are not captured and fall
+    // through to the square buttons. The overlay is always present so the first
+    // arrow can be drawn even when the list is still empty.
+    let board_px = sq_size * 8.0;
+    let board_elem: Element<'a, Msg> = stack![
+        board_elem,
+        crate::arrows::arrow_canvas(arrows, sq_size, gs.flipped, arrow_appearance),
+    ]
+    .width(Length::Fixed(board_px))
+    .height(Length::Fixed(board_px))
+    .into();
 
     if show_coords && coord_position == CoordPosition::Outside {
         let coord_label_color = colors.coord_color(true);
@@ -657,15 +666,6 @@ pub fn view_board<'a>(
             file_labels,
         ]
         .spacing(0)
-        .into()
-    } else if !arrows.is_empty() {
-        let board_px = sq_size * 8.0;
-        stack![
-            board_elem,
-            crate::arrows::arrow_canvas(arrows, sq_size, gs.flipped, arrow_appearance),
-        ]
-        .width(Length::Fixed(board_px))
-        .height(Length::Fixed(board_px))
         .into()
     } else {
         board_elem

@@ -2,6 +2,27 @@
 
 use types::{Board, Square};
 
+/// Maps a board display cell `(row, col)` (0 = top/left of the widget) to a chess square.
+pub fn display_to_square(row: usize, col: usize, flipped: bool) -> Square {
+    let rank = if flipped { row } else { 7 - row };
+    let file = if flipped { 7 - col } else { col };
+    Square::from_index(rank * 8 + file)
+}
+
+/// Maps a board-local pointer position to a display cell `(row, col)`.
+pub fn point_to_display(x: f32, y: f32, sq_size: f32) -> Option<(usize, usize)> {
+    if !(sq_size.is_finite() && sq_size > 0.0) {
+        return None;
+    }
+    let col = (x / sq_size).floor() as i32;
+    let row = (y / sq_size).floor() as i32;
+    if (0..8).contains(&col) && (0..8).contains(&row) {
+        Some((row as usize, col as usize))
+    } else {
+        None
+    }
+}
+
 /// Holds the current game state.
 pub struct GameState {
     pub board: Board,
@@ -76,6 +97,28 @@ impl GameState {
         }
 
         Some(mv)
+    }
+
+    /// Begin a right-drag annotation arrow on `from`.
+    pub fn begin_arrow(&mut self, from: Square) {
+        self.arrow_start = Some(from);
+    }
+
+    /// Finish a right-drag annotation: toggle the arrow, or clear all on same-square release.
+    pub fn finish_arrow(&mut self, to: Square) {
+        let Some(from) = self.arrow_start.take() else {
+            return;
+        };
+        if from == to {
+            self.arrows.clear();
+            return;
+        }
+        let arrow = (from, to);
+        if let Some(idx) = self.arrows.iter().position(|a| *a == arrow) {
+            self.arrows.remove(idx);
+        } else {
+            self.arrows.push(arrow);
+        }
     }
 }
 
@@ -243,30 +286,29 @@ mod tests {
         let mut gs = setup();
         let e2 = Square::from_index(12);
         let e4 = Square::from_index(28);
-        let arrow = (e2, e4);
 
-        // Add an arrow
-        gs.arrows.push(arrow);
-        assert_eq!(gs.arrows.len(), 1);
+        gs.begin_arrow(e2);
+        gs.finish_arrow(e4);
+        assert_eq!(gs.arrows, vec![(e2, e4)]);
 
-        // Toggle off: remove if exists
-        if let Some(idx) = gs.arrows.iter().position(|a| *a == arrow) {
-            gs.arrows.remove(idx);
-        }
+        gs.begin_arrow(e2);
+        gs.finish_arrow(e4);
         assert!(gs.arrows.is_empty());
     }
 
     #[test]
     fn test_arrows_clear_all() {
         let mut gs = setup();
-        gs.arrows
-            .push((Square::from_index(0), Square::from_index(16)));
-        gs.arrows
-            .push((Square::from_index(6), Square::from_index(21)));
+        gs.begin_arrow(Square::from_index(0));
+        gs.finish_arrow(Square::from_index(16));
+        gs.begin_arrow(Square::from_index(6));
+        gs.finish_arrow(Square::from_index(21));
         assert_eq!(gs.arrows.len(), 2);
 
-        gs.arrows.clear();
+        gs.begin_arrow(Square::from_index(0));
+        gs.finish_arrow(Square::from_index(0));
         assert!(gs.arrows.is_empty());
+        assert!(gs.arrow_start.is_none());
     }
 
     #[test]
@@ -274,11 +316,40 @@ mod tests {
         let mut gs = setup();
         assert!(gs.arrow_start.is_none());
 
-        gs.arrow_start = Some(Square::from_index(12));
-        assert!(gs.arrow_start.is_some());
+        gs.begin_arrow(Square::from_index(12));
+        assert_eq!(gs.arrow_start, Some(Square::from_index(12)));
 
-        let taken = gs.arrow_start.take();
-        assert_eq!(taken, Some(Square::from_index(12)));
+        gs.finish_arrow(Square::from_index(28));
+        assert!(gs.arrow_start.is_none());
+        assert_eq!(gs.arrows.len(), 1);
+    }
+
+    #[test]
+    fn test_display_to_square_matches_board_layout() {
+        // Unflipped: top-left display cell is a8.
+        assert_eq!(display_to_square(0, 0, false).index(), 56);
+        // Unflipped: bottom-right display cell is h1.
+        assert_eq!(display_to_square(7, 7, false).index(), 7);
+        // Flipped: top-left display cell is h1.
+        assert_eq!(display_to_square(0, 0, true).index(), 7);
+        // Flipped: bottom-right display cell is a8.
+        assert_eq!(display_to_square(7, 7, true).index(), 56);
+    }
+
+    #[test]
+    fn test_point_to_display_maps_square_centers() {
+        let sq = 80.0;
+        assert_eq!(point_to_display(40.0, 40.0, sq), Some((0, 0)));
+        assert_eq!(point_to_display(600.0, 600.0, sq), Some((7, 7)));
+        assert_eq!(point_to_display(-1.0, 40.0, sq), None);
+        assert_eq!(point_to_display(40.0, 640.0, sq), None);
+    }
+
+    #[test]
+    fn test_finish_arrow_without_start_is_noop() {
+        let mut gs = setup();
+        gs.finish_arrow(Square::from_index(28));
+        assert!(gs.arrows.is_empty());
         assert!(gs.arrow_start.is_none());
     }
 }

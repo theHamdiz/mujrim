@@ -1229,12 +1229,7 @@ impl App {
                     if !is_human {
                         // Queue premove if enabled
                         if self.settings.premoves_enabled {
-                            let sq_index = if gs.flipped {
-                                row * 8 + col
-                            } else {
-                                (7 - row) * 8 + col
-                            };
-                            let clicked_sq = types::Square::from_index(sq_index);
+                            let clicked_sq = game::display_to_square(row, col, gs.flipped);
                             if let Some(from) = gs.selected_square {
                                 // Queue the premove
                                 if !self.settings.multi_premoves {
@@ -1251,12 +1246,7 @@ impl App {
                         return Task::none();
                     }
 
-                    let sq_index = if gs.flipped {
-                        row * 8 + col
-                    } else {
-                        (7 - row) * 8 + col
-                    };
-                    let clicked_sq = types::Square::from_index(sq_index);
+                    let clicked_sq = game::display_to_square(row, col, gs.flipped);
 
                     if gs.selected_square.is_some() {
                         // Check if this is a legal move destination
@@ -1315,8 +1305,7 @@ impl App {
                             })
                         });
                         if !legal {
-                            self.status =
-                                "Discarded a stale or illegal engine result.".to_owned();
+                            self.status = "Discarded a stale or illegal engine result.".to_owned();
                             self.engine_info = info;
                             uci_process::cancel_all_pondering();
                             return Task::none();
@@ -1330,8 +1319,7 @@ impl App {
                         uci_process::cancel_all_pondering();
                         if self.engine_move_retries > 0 {
                             self.engine_move_retries -= 1;
-                            self.status =
-                                format!("Engine failed: {error} — retrying…");
+                            self.status = format!("Engine failed: {error} — retrying…");
                             return self.trigger_engine_move();
                         }
                         Task::none()
@@ -1994,12 +1982,8 @@ impl App {
                 if self.settings.draw_arrows
                     && let Some(ref mut gs) = self.game
                 {
-                    let sq_index = if gs.flipped {
-                        row * 8 + col
-                    } else {
-                        (7 - row) * 8 + col
-                    };
-                    gs.arrow_start = Some(types::Square::from_index(sq_index));
+                    let from = game::display_to_square(row, col, gs.flipped);
+                    gs.begin_arrow(from);
                 }
                 Task::none()
             }
@@ -2007,26 +1991,11 @@ impl App {
                 if self.settings.draw_arrows
                     && let Some(ref mut gs) = self.game
                 {
-                    let sq_index = if gs.flipped {
-                        row * 8 + col
-                    } else {
-                        (7 - row) * 8 + col
-                    };
-                    let to_sq = types::Square::from_index(sq_index);
-                    if let Some(from_sq) = gs.arrow_start.take() {
-                        if from_sq != to_sq {
-                            // Toggle arrow: remove if exists, add if not
-                            let arrow = (from_sq, to_sq);
-                            if let Some(idx) = gs.arrows.iter().position(|a| *a == arrow) {
-                                gs.arrows.remove(idx);
-                            } else {
-                                gs.arrows.push(arrow);
-                            }
-                        } else {
-                            // Right-click on same square: clear all arrows
-                            gs.arrows.clear();
-                        }
-                    }
+                    let to = game::display_to_square(row, col, gs.flipped);
+                    gs.finish_arrow(to);
+                } else if let Some(ref mut gs) = self.game {
+                    // Release outside an armed drag should not leave a stale start.
+                    gs.arrow_start = None;
                 }
                 Task::none()
             }
