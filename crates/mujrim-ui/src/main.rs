@@ -276,6 +276,8 @@ struct App {
     screen: Screen,
     game: Option<game::GameState>,
     game_generation: u64,
+    /// Automatic engine-search retries remaining after a protocol/spawn failure.
+    engine_move_retries: u8,
     selected_mode: GameMode,
     white_player: PlayerConfig,
     black_player: PlayerConfig,
@@ -517,7 +519,7 @@ enum Msg {
     SelectBundledWhite(BundledEngineChoice),
     SelectBundledBlack(BundledEngineChoice),
     BoardClick(usize, usize),
-    EngineMove(u64, types::Move, String),
+    EngineMove(u64, Result<(types::Move, String), String>),
     NewGame,
     FlipBoard,
     Resign,
@@ -628,6 +630,7 @@ impl Default for App {
             screen: Screen::Menu,
             game: None,
             game_generation: 0,
+            engine_move_retries: 1,
             selected_mode: GameMode::HumanVsHuman,
             white_player: PlayerConfig::Human,
             black_player: PlayerConfig::Human,
@@ -690,6 +693,7 @@ impl Default for App {
 impl App {
     fn invalidate_engine_tasks(&mut self) {
         self.game_generation = self.game_generation.wrapping_add(1);
+        self.engine_move_retries = 1;
         uci_process::cancel_all_pondering();
     }
 
@@ -1296,25 +1300,43 @@ impl App {
                 }
                 Task::none()
             }
-            Msg::EngineMove(generation, mv, info) => {
+            Msg::EngineMove(generation, result) => {
                 if generation != self.game_generation {
                     return Task::none();
                 }
-                let legal = self.game.as_mut().is_some_and(|game| {
-                    game.board.generate_legal_moves().iter().any(|candidate| {
-                        candidate.from == mv.from
-                            && candidate.to == mv.to
-                            && candidate.promotion == mv.promotion
-                    })
-                });
-                if !legal {
-                    self.status = "Discarded a stale or illegal engine result.".to_owned();
-                    uci_process::cancel_all_pondering();
-                    return Task::none();
+                match result {
+                    Ok((mv, info)) => {
+                        self.engine_move_retries = 1;
+                        let legal = self.game.as_mut().is_some_and(|game| {
+                            game.board.generate_legal_moves().iter().any(|candidate| {
+                                candidate.from == mv.from
+                                    && candidate.to == mv.to
+                                    && candidate.promotion == mv.promotion
+                            })
+                        });
+                        if !legal {
+                            self.status =
+                                "Discarded a stale or illegal engine result.".to_owned();
+                            self.engine_info = info;
+                            uci_process::cancel_all_pondering();
+                            return Task::none();
+                        }
+                        self.start_animation(mv, Some(info), true);
+                        Task::none()
+                    }
+                    Err(error) => {
+                        self.status = format!("Engine failed: {error}");
+                        self.engine_info = error.clone();
+                        uci_process::cancel_all_pondering();
+                        if self.engine_move_retries > 0 {
+                            self.engine_move_retries -= 1;
+                            self.status =
+                                format!("Engine failed: {error} — retrying…");
+                            return self.trigger_engine_move();
+                        }
+                        Task::none()
+                    }
                 }
-                // Start animation for engine move
-                self.start_animation(mv, Some(info), true);
-                Task::none()
             }
             Msg::EngineInfo(info) => {
                 self.engine_info = info;
@@ -2171,19 +2193,19 @@ impl App {
                 .any(|m| m.from == book_move.from && m.to == book_move.to)
             {
                 return Task::perform(
-                    async move { (book_move, String::from("Book move")) },
-                    move |(mv, info)| Msg::EngineMove(generation, mv, info),
+                    async move { Ok((book_move, String::from("Book move"))) },
+                    move |result| Msg::EngineMove(generation, result),
                 );
             }
         }
 
         let mut board_clone = gs.board.clone();
-        let fallback_board_clone = gs.board.clone();
         let time_secs = self.engine_cfg.time_per_move as u64;
         let hash_mb = bounded_hash_mb(self.engine_cfg.hash_mb);
         let threads = self.engine_cfg.threads as usize;
         let max_depth = self.engine_cfg.max_depth;
         let use_nnue = self.engine_cfg.use_nnue;
+        let use_book = self.engine_cfg.use_book;
         let ponder = self.engine_cfg.ponder;
         let eval_file = self.engine_cfg.eval_file.clone();
 
@@ -2191,51 +2213,34 @@ impl App {
             async move {
                 let handle = std::thread::Builder::new()
                     .stack_size(8 * 1024 * 1024)
-                    .spawn(move || {
+                    .spawn(move || -> Result<(types::Move, String), String> {
                         types::init();
                         match side_player {
                             PlayerConfig::Human => {
-                                let legal = board_clone.generate_legal_moves();
-                                let mv = *legal.iter().next().expect("No legal moves");
-                                (mv, String::from("No engine selected"))
+                                Err("No engine selected for this side.".to_owned())
                             }
                             PlayerConfig::BuiltIn { .. } => {
-                                let mut engine = search::SearchEngine::new(hash_mb, threads);
-                                engine.set_use_nnue(use_nnue);
-                                let mut note = String::new();
-                                if let Some(path) = eval_file.as_ref() {
-                                    match eval::nnue::load_network(std::path::Path::new(path)) {
-                                        Ok(net) => {
-                                            engine.set_nnue_network(net);
-                                            note = format!(" | net {}", engine.nnue_info().name);
-                                        }
-                                        Err(err) => {
-                                            note = format!(" | EvalFile error: {err}");
-                                        }
-                                    }
-                                }
-                                let result = engine.search_time(
+                                let (mv, info) = builtin_engine_search(
                                     &mut board_clone,
+                                    hash_mb,
+                                    threads,
+                                    use_nnue,
+                                    eval_file.as_deref(),
                                     std::time::Duration::from_secs(time_secs),
                                     max_depth,
-                                );
-                                (
-                                    result.best_move,
-                                    format!(
-                                        "depth {} | score {} cp | {} nodes | {:.0} nps{}",
-                                        result.depth,
-                                        result.score,
-                                        result.nodes,
-                                        result.nodes as f64
-                                            / result.elapsed.as_secs_f64().max(0.001),
-                                        note,
-                                    ),
-                                )
+                                )?;
+                                Ok((mv, info))
                             }
                             PlayerConfig::External { path, protocol } => {
                                 let fen = board_clone.to_fen();
                                 let legal = board_clone.generate_legal_moves();
-                                match uci_process::query_best_move(
+                                let search = uci_process::ExternalSearchConfig {
+                                    ponder,
+                                    use_nnue,
+                                    own_book: use_book,
+                                    eval_file,
+                                };
+                                let info = uci_process::query_best_move(
                                     &path,
                                     protocol,
                                     &fen,
@@ -2243,56 +2248,29 @@ impl App {
                                     std::time::Duration::from_secs(time_secs),
                                     hash_mb,
                                     threads,
-                                    ponder,
-                                ) {
-                                    Ok(info) => {
-                                        if let Some(mv) = legal
-                                            .iter()
-                                            .find(|m| m.to_uci() == info.best_move)
-                                            .copied()
-                                        {
-                                            (
-                                                mv,
-                                                format!("{protocol} {}", info.telemetry()),
-                                            )
-                                        } else {
-                                            let mv = *legal
-                                                .iter()
-                                                .next()
-                                                .expect("No legal moves in external fallback");
-                                            (
-                                                mv,
-                                                format!(
-                                                    "{protocol} returned illegal move '{}' - fallback",
-                                                    info.best_move
-                                                ),
-                                            )
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let mv = *legal
-                                            .iter()
-                                            .next()
-                                            .expect("No legal moves in external error fallback");
-                                        (mv, format!("{protocol} error: {e} - fallback move"))
-                                    }
-                                }
+                                    &search,
+                                )?;
+                                let mv = legal
+                                    .iter()
+                                    .find(|m| m.to_uci() == info.best_move)
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "{protocol} returned illegal move '{}'",
+                                            info.best_move
+                                        )
+                                    })?;
+                                Ok((mv, format!("{protocol} {}", info.telemetry())))
                             }
                         }
                     })
                     .expect("Failed to spawn engine thread");
                 match handle.join() {
                     Ok(result) => result,
-                    Err(_) => {
-                        let mut fb = fallback_board_clone;
-                        types::init();
-                        let moves = fb.generate_legal_moves();
-                        let mv = *moves.iter().next().expect("No legal moves in fallback");
-                        (mv, String::from("Engine error - fallback move"))
-                    }
+                    Err(_) => Err("Engine thread panicked".to_owned()),
                 }
             },
-            move |(mv, info)| Msg::EngineMove(generation, mv, info),
+            move |result| Msg::EngineMove(generation, result),
         )
     }
 
@@ -4720,7 +4698,8 @@ async fn run_quick_tournament(
                 .map(|engine| {
                     let mut spec = EngineSpec::new(engine.path.clone());
                     spec.name = engine.name;
-                    spec.uci_options = uci_process::uci_resource_options(&engine.path, false);
+                    spec.uci_options =
+                        uci_process::uci_resource_options(&engine.path, false, true, None);
                     TournamentEngine {
                         engine: spec,
                         established_elo: None,
@@ -5025,6 +5004,75 @@ async fn pick_nnue_file() -> Option<String> {
         .pick_file()
         .await?;
     Some(file.path().to_string_lossy().to_string())
+}
+
+/// Persistent built-in search so consecutive GUI moves reuse TT / history,
+/// matching how CuteChess keeps an engine process alive across moves.
+fn builtin_engine_search(
+    board: &mut types::Board,
+    hash_mb: usize,
+    threads: usize,
+    use_nnue: bool,
+    eval_file: Option<&str>,
+    time: std::time::Duration,
+    max_depth: i32,
+) -> Result<(types::Move, String), String> {
+    use std::sync::{Mutex, OnceLock};
+
+    struct BuiltinCache {
+        hash_mb: usize,
+        threads: usize,
+        use_nnue: bool,
+        eval_file: Option<String>,
+        engine: search::SearchEngine,
+    }
+
+    static CACHE: OnceLock<Mutex<Option<BuiltinCache>>> = OnceLock::new();
+    let mut guard = CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let needs_rebuild = guard.as_ref().is_none_or(|cached| {
+        cached.hash_mb != hash_mb
+            || cached.threads != threads
+            || cached.use_nnue != use_nnue
+            || cached.eval_file.as_deref() != eval_file
+    });
+
+    if needs_rebuild {
+        let mut engine = search::SearchEngine::new(hash_mb, threads);
+        engine.set_use_nnue(use_nnue);
+        if let Some(path) = eval_file {
+            let net = eval::nnue::load_network(std::path::Path::new(path))
+                .map_err(|err| format!("EvalFile error: {err}"))?;
+            engine.set_nnue_network(net);
+        }
+        *guard = Some(BuiltinCache {
+            hash_mb,
+            threads,
+            use_nnue,
+            eval_file: eval_file.map(str::to_owned),
+            engine,
+        });
+    }
+
+    let cached = guard.as_mut().expect("builtin cache just initialized");
+    let result = cached.engine.search_time(board, time, max_depth);
+    let note = eval_file
+        .map(|_| format!(" | net {}", cached.engine.nnue_info().name))
+        .unwrap_or_default();
+    Ok((
+        result.best_move,
+        format!(
+            "depth {} | score {} cp | {} nodes | {:.0} nps{}",
+            result.depth,
+            result.score,
+            result.nodes,
+            result.nodes as f64 / result.elapsed.as_secs_f64().max(0.001),
+            note,
+        ),
+    ))
 }
 
 #[cfg(test)]

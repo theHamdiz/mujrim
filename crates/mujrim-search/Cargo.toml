@@ -13,6 +13,6 @@ nnue = ["eval/nnue"]
 
 [dependencies]
 types = { package = "mujrim-types", path = "../mujrim-types" }
-eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, features = ["nnue"] }
+eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, features = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "embedded-networks"] }
 toml = "0.8"
 sha2 = "0.10"

@@ -10,7 +10,9 @@ use mujrim_protocols::{
 };
 
 const EXTERNAL_ENGINE_MEMORY_OVERHEAD_MB: usize = 192;
-const MAX_EXTERNAL_ENGINE_MEMORY_MB: usize = 768;
+/// Cap is intentionally high: large NNUE nets + hash must not OOM-kill engines
+/// mid-game the way a 768 MiB ceiling did for mujrim / Stockfish stacks.
+const MAX_EXTERNAL_ENGINE_MEMORY_MB: usize = 4096;
 const MAX_CACHED_ENGINE_SESSIONS: usize = 2;
 
 static ENGINE_POOL: OnceLock<Mutex<Vec<CachedExternalEngine>>> = OnceLock::new();
@@ -93,6 +95,14 @@ impl ExternalMoveResult {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ExternalSearchConfig {
+    pub ponder: bool,
+    pub use_nnue: bool,
+    pub own_book: bool,
+    pub eval_file: Option<String>,
+}
+
 pub fn query_best_move(
     engine_path: &str,
     protocol: ExternalEngineProtocol,
@@ -101,7 +111,7 @@ pub fn query_best_move(
     movetime: Duration,
     hash_mb: usize,
     threads: usize,
-    ponder: bool,
+    search: &ExternalSearchConfig,
 ) -> Result<ExternalMoveResult, String> {
     let cancel_epoch = CANCEL_EPOCH.load(Ordering::Acquire);
     let key = EngineSessionKey {
@@ -109,6 +119,9 @@ pub fn query_best_move(
         protocol,
         hash_mb,
         threads,
+        use_nnue: search.use_nnue,
+        own_book: search.own_book,
+        eval_file: search.eval_file.clone(),
     };
     let mut pool = engine_pool()
         .lock()
@@ -130,7 +143,7 @@ pub fn query_best_move(
         movetime: Some(movetime),
         node_limit: None,
     };
-    let result = run_cached_search(&mut pool[index], &request, ponder, cancel_epoch);
+    let result = run_cached_search(&mut pool[index], &request, search.ponder, cancel_epoch);
     if result.is_err() {
         pool.remove(index);
     }
@@ -159,6 +172,9 @@ struct EngineSessionKey {
     protocol: ExternalEngineProtocol,
     hash_mb: usize,
     threads: usize,
+    use_nnue: bool,
+    own_book: bool,
+    eval_file: Option<String>,
 }
 
 struct CachedExternalEngine {
@@ -189,15 +205,27 @@ impl CachedExternalEngine {
     }
 
     fn configure(&mut self, ponder: bool) -> Result<(), String> {
-        let custom = if self.key.protocol == ExternalEngineProtocol::Uci {
-            uci_resource_options(Path::new(&self.key.path), ponder)
+        let mut custom = if self.key.protocol == ExternalEngineProtocol::Uci {
+            uci_resource_options(
+                Path::new(&self.key.path),
+                ponder,
+                self.key.use_nnue,
+                self.key.eval_file.as_deref(),
+            )
         } else {
             Vec::new()
         };
+        // Prefer explicit GUI EvalFile over any auto-detected network.
+        if self.key.protocol == ExternalEngineProtocol::Uci
+            && let Some(eval_file) = self.key.eval_file.as_ref()
+        {
+            custom.retain(|(name, _)| !name.eq_ignore_ascii_case("EvalFile"));
+            custom.push(("EvalFile".to_owned(), eval_file.clone()));
+        }
         self.session.configure(&EngineOptions {
             hash_mb: Some(self.key.hash_mb),
             threads: Some(self.key.threads),
-            own_book: None,
+            own_book: Some(self.key.own_book),
             custom,
         })?;
         self.ponder_enabled = ponder;
@@ -213,20 +241,31 @@ impl CachedExternalEngine {
     }
 }
 
-pub fn uci_resource_options(engine: &Path, ponder: bool) -> Vec<(String, String)> {
+pub fn uci_resource_options(
+    engine: &Path,
+    ponder: bool,
+    use_nnue: bool,
+    eval_file: Option<&str>,
+) -> Vec<(String, String)> {
     const STOCKFISH_SHA256: &str =
         "ab28990d4ea3d5c97f7d3918bc5dd5061609330369fe00c2d93a34d4777b5552";
 
-    let mut options = vec![("Ponder".to_owned(), ponder.to_string())];
+    let mut options = vec![
+        ("Ponder".to_owned(), ponder.to_string()),
+        ("UseNNUE".to_owned(), use_nnue.to_string()),
+    ];
     let file_name = engine
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let overhead_name = if file_name.contains("v60") {
+    let overhead_name = if file_name.contains("v60") || file_name.contains("reckless") {
         "MoveOverhead"
-    } else {
+    } else if file_name.contains("stockfish") {
         "Move Overhead"
+    } else {
+        // Mujrim and most UCI engines use the compact spelling.
+        "MoveOverhead"
     };
     options.push((overhead_name.to_owned(), "150".to_owned()));
 
@@ -240,13 +279,13 @@ pub fn uci_resource_options(engine: &Path, ponder: bool) -> Vec<(String, String)
         ));
     }
 
-    let uses_stockfish_stack = file_name.contains("stockfish")
-        || matches!(
-            file_name.as_str(),
-            "mujrim" | "mujrim-external" | "mujrim-embedded"
-        );
+    // Only auto-inject Stockfish EvalFile for actual Stockfish binaries.
+    // Forcing it onto mujrim previously overrode the embedded Reckless net and
+    // made GUI play diverge from CuteChess (which leaves EvalFile alone).
+    let is_stockfish = file_name.contains("stockfish");
     static STOCKFISH_NETWORK: OnceLock<Option<PathBuf>> = OnceLock::new();
-    if uses_stockfish_stack
+    if eval_file.is_none()
+        && is_stockfish
         && let Some(network) = STOCKFISH_NETWORK
             .get_or_init(|| {
                 resource_directories(engine, "nnue")
@@ -261,6 +300,8 @@ pub fn uci_resource_options(engine: &Path, ponder: bool) -> Vec<(String, String)
             "EvalFile".to_owned(),
             network.to_string_lossy().into_owned(),
         ));
+    } else if let Some(path) = eval_file {
+        options.push(("EvalFile".to_owned(), path.to_owned()));
     }
     options
 }
@@ -376,7 +417,8 @@ mod tests {
     fn external_engine_memory_includes_bounded_overhead() {
         assert_eq!(external_memory_limit_mb(64), 256);
         assert_eq!(external_memory_limit_mb(512), 704);
-        assert_eq!(external_memory_limit_mb(4096), 768);
+        assert_eq!(external_memory_limit_mb(4096), 4096);
+        assert_eq!(external_memory_limit_mb(16_384), 4096);
     }
 
     #[test]
@@ -421,5 +463,55 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn mujrim_resource_options_do_not_force_stockfish_evalfile() {
+        let options = uci_resource_options(Path::new("C:/engines/mujrim.exe"), false, true, None);
+        assert!(
+            !options
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("EvalFile")),
+            "mujrim must keep its embedded network unless the user sets EvalFile: {options:?}"
+        );
+        assert!(options.iter().any(|(n, v)| n == "UseNNUE" && v == "true"));
+        assert!(options.iter().any(|(n, v)| n == "MoveOverhead" && v == "150"));
+    }
+
+    #[test]
+    fn explicit_evalfile_is_forwarded_for_any_engine() {
+        let options = uci_resource_options(
+            Path::new("C:/engines/mujrim.exe"),
+            true,
+            false,
+            Some(r"C:\nets\custom.nnue"),
+        );
+        assert!(options.iter().any(|(n, v)| n == "EvalFile" && v.ends_with("custom.nnue")));
+        assert!(options.iter().any(|(n, v)| n == "UseNNUE" && v == "false"));
+        assert!(options.iter().any(|(n, v)| n == "Ponder" && v == "true"));
+    }
+
+    #[test]
+    fn stockfish_uses_spaced_move_overhead_option_name() {
+        let options =
+            uci_resource_options(Path::new("C:/engines/stockfish.exe"), false, true, None);
+        assert!(
+            options.iter().any(|(n, _)| n == "Move Overhead"),
+            "{options:?}"
+        );
+    }
+
+    #[test]
+    fn engine_search_rejects_illegal_uci_without_fallback_move() {
+        types::init();
+        let mut board = types::Board::new();
+        let legal = board.generate_legal_moves();
+        assert!(
+            legal.iter().all(|mv| mv.to_uci() != "e2e5"),
+            "sanity: e2e5 must be illegal from startpos"
+        );
+        // The GUI must surface this as Err, never substitute legal.iter().next().
+        let resolved = legal.iter().find(|m| m.to_uci() == "e2e5").copied();
+        assert!(resolved.is_none());
     }
 }
