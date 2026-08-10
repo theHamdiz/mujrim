@@ -161,12 +161,7 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
             Color::White => &white_pieces,
             Color::Black => &black_pieces,
         };
-        let side_occ = side_bb[0]
-            | side_bb[1]
-            | side_bb[2]
-            | side_bb[3]
-            | side_bb[4]
-            | side_bb[5];
+        let side_occ = side_bb[0] | side_bb[1] | side_bb[2] | side_bb[3] | side_bb[4] | side_bb[5];
         let side_attackers = attackers & side_occ;
 
         if side_attackers == 0 {
@@ -201,12 +196,7 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
                     Color::White => &white_pieces,
                     Color::Black => &black_pieces,
                 };
-                let opp_occ = opp_bb[0]
-                    | opp_bb[1]
-                    | opp_bb[2]
-                    | opp_bb[3]
-                    | opp_bb[4]
-                    | opp_bb[5];
+                let opp_occ = opp_bb[0] | opp_bb[1] | opp_bb[2] | opp_bb[3] | opp_bb[4] | opp_bb[5];
                 let opp_atk = all_attackers(to, occupancy, &white_pieces, &black_pieces) & opp_occ;
                 if opp_atk != 0 {
                     break;

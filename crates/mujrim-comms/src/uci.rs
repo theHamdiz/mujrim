@@ -456,6 +456,7 @@ impl UciHandler {
                 node_limit,
                 stopped: false,
                 use_soft_time: time_limit.is_some() && node_limit.is_none(),
+                force_helpers: false,
             },
         )
     }

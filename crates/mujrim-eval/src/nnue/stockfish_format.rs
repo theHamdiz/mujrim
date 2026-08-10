@@ -1353,6 +1353,8 @@ fn piece_feature_index(
         9, 8, 4, 5, 6, 7, 7, 6, 5, 4, 0, 1, 2, 3, 3, 2, 1, 0,
     ];
     let vertical_flip = 56 * perspective;
+    // HalfKAv2_hm OrientTBL flips files a-d. FullThreats / PP_3Wide flip e-h instead —
+    // keep these conventions distinct or the network diverges from Stockfish.
     let orient = (7 * usize::from(king_square & 7 < 4)) ^ vertical_flip;
     let piece_offset = if piece == Piece::King.index() {
         640

@@ -1,8 +1,9 @@
 //! Advanced tapered evaluation combining middlegame and endgame scores.
-//! Inspired by Stockfish, Ethereal, and Berserk evaluation techniques.
+//! Targeting Stockfish 11-class classical (HCE) strength for `UseNNUE=false`.
 //!
 //! Features:
-//! - Material + PeSTO piece-square tables
+//! - Material + PeSTO piece-square tables (combined lookup for speed)
+//! - Tempo
 //! - Mobility per piece type (safe squares only)
 //! - King safety (attack zone, attacker weights, pawn shield/storm)
 //! - Pawn structure (doubled, isolated, backward, connected, passed)
@@ -17,10 +18,6 @@ use crate::psqt;
 use types::bitboard::{Bitboard, count_bits, iter_bits};
 use types::board::attack_tables::*;
 use types::{Board, Color, Piece};
-
-// ── Material values ─────────────────────────────────────────────────────────
-const MG_PIECE_VALUES: [i32; 6] = [82, 337, 365, 477, 1025, 0];
-const EG_PIECE_VALUES: [i32; 6] = [94, 281, 297, 512, 936, 0];
 
 // ── Game phase ──────────────────────────────────────────────────────────────
 const PHASE_VALUES: [i32; 6] = [0, 1, 1, 2, 4, 0];
@@ -100,6 +97,10 @@ const CONNECTED_ROOKS_EG: i32 = 5;
 
 // ── Space ───────────────────────────────────────────────────────────────────
 const SPACE_BONUS: i32 = 4;
+
+// ── Tempo (Stockfish 11-era classical side-to-move bonus) ────────────────────
+const TEMPO_MG: i32 = 28;
+const TEMPO_EG: i32 = 24;
 
 // ── File & rank masks ───────────────────────────────────────────────────────
 const FILE_MASKS: [Bitboard; 8] = [
@@ -192,15 +193,12 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
     let mut b_attackers_count = 0i32;
     let mut b_attacker_weight = 0i32;
 
-    // ── Material + PSQT ──────────────────────────────────────────────────
+    // ── Material + PSQT (combined tables keep the hot path cache-friendly) ─
     for &color in &[Color::White, Color::Black] {
         let sign = if color == Color::White { 1 } else { -1 };
         for &piece in &Piece::ALL {
             let bb = board.piece_bb(piece, color);
-            let count = bb.count_ones() as i32;
-            mg += sign * MG_PIECE_VALUES[piece.index()] * count;
-            eg += sign * EG_PIECE_VALUES[piece.index()] * count;
-            phase += PHASE_VALUES[piece.index()] * count;
+            phase += PHASE_VALUES[piece.index()] * bb.count_ones() as i32;
 
             for sq_idx in iter_bits(bb) {
                 let idx = if color == Color::White {
@@ -208,9 +206,22 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
                 } else {
                     sq_idx ^ 56
                 };
-                mg += sign * psqt::mg_value(piece, idx);
-                eg += sign * psqt::eg_value(piece, idx);
+                let (piece_mg, piece_eg) = psqt::combined_value(piece, idx);
+                mg += sign * piece_mg;
+                eg += sign * piece_eg;
             }
+        }
+    }
+
+    // Tempo for the side to move (applied from White's perspective below).
+    match board.side_to_move {
+        Color::White => {
+            mg += TEMPO_MG;
+            eg += TEMPO_EG;
+        }
+        Color::Black => {
+            mg -= TEMPO_MG;
+            eg -= TEMPO_EG;
         }
     }
 
@@ -450,12 +461,12 @@ fn pawn_attacks_bb(pawns: Bitboard, color: Color) -> Bitboard {
     }
 }
 
-// ── King danger: quadratic scaling ──────────────────────────────────────────
+// ── King danger: quadratic scaling with a soft floor (SF11-style) ───────────
 #[inline(always)]
 fn king_danger(weight: i32) -> i32 {
     let w = weight.min(KING_DANGER_TABLE_SIZE as i32 - 1).max(0);
-    // Quadratic: danger = weight^2 / 64 (scaled to be meaningful in centipawns)
-    (w * w) / 64
+    // Quadratic danger plus a linear term so sparse attacks still matter.
+    (w * w) / 64 + w / 4
 }
 
 // ── Pawn shield evaluation ──────────────────────────────────────────────────
@@ -854,7 +865,8 @@ mod tests {
         let b = evaluate(
             &Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").unwrap(),
         );
-        assert!((w + b).abs() < 30, "Symmetry broken: w={w}, b={b}");
+        // Tempo makes both side-to-move scores positive; the mirror should still match.
+        assert!((w - b).abs() < 30, "Symmetry broken: w={w}, b={b}");
     }
 
     #[test]
@@ -921,5 +933,29 @@ mod tests {
             center > corner,
             "Center knight should score higher: center={center}, corner={corner}"
         );
+    }
+
+    #[test]
+    fn classical_eval_is_deterministic() {
+        setup();
+        let board =
+            Board::from_fen("r1bq1rk1/ppp2ppp/2n2n2/2bp4/4P3/2P2N2/PP1N1PPP/R1BQ1RK1 w - - 2 9")
+                .unwrap();
+        let first = evaluate(&board);
+        for _ in 0..32 {
+            assert_eq!(evaluate(&board), first);
+        }
+    }
+
+    #[test]
+    fn tempo_favors_side_to_move_on_symmetric_material() {
+        setup();
+        let white = evaluate(&Board::new());
+        let black = evaluate(
+            &Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1").unwrap(),
+        );
+        // With tempo, each side-to-move score should be non-negative on startpos.
+        assert!(white >= 0, "white-to-move startpos={white}");
+        assert!(black >= 0, "black-to-move startpos={black}");
     }
 }

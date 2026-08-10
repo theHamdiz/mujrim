@@ -129,6 +129,23 @@ pub fn default_embedded_network() -> ActiveNetwork {
     }
 }
 
+/// Embedded network that matches an explicit EvalPreset / search-profile name.
+///
+/// Returns `None` for `"auto"` or unknown names. Callers must not apply a preset's
+/// search parameters without also installing this network — otherwise Stockfish
+/// pruning runs on a Reckless (or Akimbo) evaluator.
+#[inline]
+pub fn embedded_network_for_preset(preset: &str) -> Option<ActiveNetwork> {
+    match preset {
+        "akimbo" => Some(ActiveNetwork::Embedded),
+        #[cfg(feature = "stockfish-nnue")]
+        "stockfish" => Some(ActiveNetwork::EmbeddedStockfish),
+        #[cfg(feature = "reckless-nnue")]
+        "reckless" => Some(ActiveNetwork::EmbeddedReckless),
+        _ => None,
+    }
+}
+
 impl NnueNetworkSource for ActiveNetwork {
     #[inline(always)]
     fn parameters(&self) -> NnueNetworkParameters<'_> {
@@ -615,6 +632,26 @@ mod tests {
             network,
             super::super::stockfish_format::embedded()
         ));
+    }
+
+    #[test]
+    fn embedded_network_for_preset_matches_named_profiles() {
+        assert!(matches!(
+            embedded_network_for_preset("akimbo"),
+            Some(ActiveNetwork::Embedded)
+        ));
+        #[cfg(feature = "stockfish-nnue")]
+        assert!(matches!(
+            embedded_network_for_preset("stockfish"),
+            Some(ActiveNetwork::EmbeddedStockfish)
+        ));
+        #[cfg(feature = "reckless-nnue")]
+        assert!(matches!(
+            embedded_network_for_preset("reckless"),
+            Some(ActiveNetwork::EmbeddedReckless)
+        ));
+        assert!(embedded_network_for_preset("auto").is_none());
+        assert!(embedded_network_for_preset("unknown").is_none());
     }
 
     #[test]

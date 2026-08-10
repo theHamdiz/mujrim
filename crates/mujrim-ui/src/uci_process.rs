@@ -475,7 +475,11 @@ mod tests {
             "mujrim must keep its embedded network unless the user sets EvalFile: {options:?}"
         );
         assert!(options.iter().any(|(n, v)| n == "UseNNUE" && v == "true"));
-        assert!(options.iter().any(|(n, v)| n == "MoveOverhead" && v == "150"));
+        assert!(
+            options
+                .iter()
+                .any(|(n, v)| n == "MoveOverhead" && v == "150")
+        );
     }
 
     #[test]
@@ -486,7 +490,11 @@ mod tests {
             false,
             Some(r"C:\nets\custom.nnue"),
         );
-        assert!(options.iter().any(|(n, v)| n == "EvalFile" && v.ends_with("custom.nnue")));
+        assert!(
+            options
+                .iter()
+                .any(|(n, v)| n == "EvalFile" && v.ends_with("custom.nnue"))
+        );
         assert!(options.iter().any(|(n, v)| n == "UseNNUE" && v == "false"));
         assert!(options.iter().any(|(n, v)| n == "Ponder" && v == "true"));
     }

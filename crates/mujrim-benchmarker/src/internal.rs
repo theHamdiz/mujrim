@@ -46,6 +46,43 @@ impl Default for InternalBenchConfig {
 /// Callback for live progress reporting.
 pub type ProgressCallback = Box<dyn Fn(usize, usize, &PositionResult) + Send>;
 
+/// Install the evaluator + search stack that belong together.
+///
+/// Explicit EvalPreset names always load the matching embedded network before
+/// applying search parameters. A bare `set_params_for_preset("stockfish")` on top
+/// of Reckless is the historical NPS / strength mismatch.
+fn configure_engine_eval(
+    engine: &mut SearchEngine,
+    eval_preset: &str,
+    eval_file: Option<&std::path::Path>,
+    quiet: bool,
+) {
+    if let Some(path) = eval_file {
+        match load_network(path) {
+            Ok(network) => engine.set_nnue_network(network),
+            Err(e) => eprintln!(
+                "info string EvalFile load failed for '{}': {e} (using embedded net)",
+                path.display()
+            ),
+        }
+    } else if let Some(network) = eval::nnue::embedded_network_for_preset(eval_preset) {
+        engine.set_nnue_network(network);
+    } else {
+        let nnue_dir = std::path::Path::new("nnue");
+        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
+        if let Some(net) = auto_net {
+            if !quiet {
+                eprintln!("{msg}");
+            }
+            engine.set_nnue_network(net);
+        }
+    }
+
+    if eval_preset != "auto" {
+        engine.set_params_for_preset(eval_preset);
+    }
+}
+
 /// Run an internal benchmark against the given positions.
 ///
 /// Returns a `BenchSummary` with per-position results. If `on_progress` is
@@ -56,34 +93,12 @@ pub fn run_internal_bench(
     on_progress: Option<ProgressCallback>,
 ) -> BenchSummary {
     let mut engine = SearchEngine::new(config.hash_mb, config.threads);
-    if let Some(path) = &config.eval_file {
-        // Explicit --eval-file: load that specific network.
-        match load_network(path) {
-            Ok(network) => {
-                engine.set_nnue_network(network);
-            }
-            Err(e) => {
-                eprintln!(
-                    "info string EvalFile load failed for '{}': {e} (using embedded net)",
-                    path.display()
-                );
-            }
-        }
-    } else {
-        // No --eval-file: auto-detect the strongest available net.
-        let nnue_dir = std::path::Path::new("nnue");
-        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
-        if let Some(net) = auto_net {
-            if !config.quiet {
-                eprintln!("{msg}");
-            }
-            engine.set_nnue_network(net);
-        }
-    }
-    // If the user explicitly requested a preset, override the auto-applied one.
-    if config.eval_preset != "auto" {
-        engine.set_params_for_preset(&config.eval_preset);
-    }
+    configure_engine_eval(
+        &mut engine,
+        &config.eval_preset,
+        config.eval_file.as_deref(),
+        config.quiet,
+    );
 
     let mut results = Vec::with_capacity(positions.len());
 
@@ -168,23 +183,7 @@ pub fn measure_startpos_nps(
     use types::Board;
 
     let mut engine = SearchEngine::new(hash_mb, threads);
-    if let Some(path) = eval_file {
-        if let Ok(network) = load_network(path) {
-            engine.set_nnue_network(network);
-        }
-    } else {
-        let nnue_dir = std::path::Path::new("nnue");
-        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
-        if let Some(net) = auto_net {
-            if !quiet {
-                eprintln!("{msg}");
-            }
-            engine.set_nnue_network(net);
-        }
-    }
-    if eval_preset != "auto" {
-        engine.set_params_for_preset(eval_preset);
-    }
+    configure_engine_eval(&mut engine, eval_preset, eval_file, quiet);
     let mut board = Board::new();
     let result = engine.search_time(&mut board, Duration::from_secs(5), 64);
     rate_per_second(result.nodes, result.elapsed)
@@ -201,6 +200,21 @@ mod tests {
         assert_eq!(c.threads, 1);
         assert_eq!(c.depth, 20);
         assert_eq!(c.time_per_position.as_secs(), 90);
+    }
+
+    #[test]
+    fn stockfish_eval_preset_installs_stockfish_network_and_params() {
+        let mut engine = SearchEngine::new(4, 1);
+        configure_engine_eval(&mut engine, "stockfish", None, true);
+        assert_eq!(engine.params().nmp_base, 7);
+        assert_eq!(
+            engine.nnue_info().format,
+            eval::nnue::NetworkFormat::Stockfish
+        );
+        assert_eq!(
+            engine.network_profile(),
+            eval::nnue::NnueSearchProfile::Stockfish
+        );
     }
 
     #[test]

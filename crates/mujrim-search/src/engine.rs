@@ -675,6 +675,11 @@ pub struct SearchLimits {
     pub node_limit: Option<u64>,
     pub stopped: bool,
     pub use_soft_time: bool,
+    /// When true, Lazy SMP helpers run even under a hard node limit.
+    ///
+    /// Default searches keep helpers off for node-limited runs so equal-node
+    /// duels stay deterministic. Classical HCE throughput benches set this.
+    pub force_helpers: bool,
 }
 
 impl Default for SearchLimits {
@@ -685,6 +690,7 @@ impl Default for SearchLimits {
             node_limit: None,
             stopped: false,
             use_soft_time: true,
+            force_helpers: false,
         }
     }
 }
@@ -1090,6 +1096,11 @@ impl SearchEngine {
         self.nnue_network.preset_hint()
     }
 
+    /// Active search-stack profile (Akimbo / Stockfish / Reckless).
+    pub fn network_profile(&self) -> eval::nnue::NnueSearchProfile {
+        self.search_stack.network_profile()
+    }
+
     /// Parameters from the currently composed evaluator-compatible stack.
     pub fn params(&self) -> &SearchParams {
         &self.search_stack.params
@@ -1136,7 +1147,7 @@ impl SearchEngine {
             .unwrap_or(NULL_MOVE);
         let initial_root_score = self.previous_best_score;
         let shared_best_stat = Arc::new(AtomicU32::new(root_score_stat(0, initial_root_score)));
-        let use_helpers = limits.node_limit.is_none();
+        let use_helpers = limits.node_limit.is_none() || limits.force_helpers;
         let helper_threads = if use_helpers { self.num_threads } else { 1 };
 
         // Spawn helper threads for Lazy SMP (threads > 1)
@@ -1568,6 +1579,7 @@ impl SearchEngine {
                 node_limit: None,
                 stopped: false,
                 use_soft_time: true,
+                force_helpers: false,
             },
         )
     }
@@ -1587,6 +1599,7 @@ impl SearchEngine {
                 node_limit: None,
                 stopped: false,
                 use_soft_time: true,
+                force_helpers: false,
             },
         )
     }
@@ -1606,6 +1619,7 @@ impl SearchEngine {
                 node_limit: None,
                 stopped: false,
                 use_soft_time: false,
+                force_helpers: false,
             },
         )
     }
@@ -1620,6 +1634,7 @@ impl SearchEngine {
                 node_limit: Some(nodes.max(1)),
                 stopped: false,
                 use_soft_time: false,
+                force_helpers: false,
             },
         )
     }
@@ -4495,6 +4510,49 @@ mod tests {
         assert!(engine.use_nnue());
         engine.set_use_nnue(false);
         assert!(!engine.use_nnue());
+    }
+
+    #[test]
+    fn use_nnue_false_uses_classical_eval_in_search() {
+        setup();
+        let mut classical = SearchEngine::new(4, 1);
+        classical.set_use_nnue(false);
+        assert!(!classical.use_nnue());
+
+        let board = Board::new();
+        let classical_static = eval::evaluate(&board);
+        let mut nnue_state = NNUEState::new();
+        let nnue_static = nnue_state.evaluate(&board);
+        assert_ne!(
+            classical_static, nnue_static,
+            "HCE and NNUE must be distinct evaluators"
+        );
+
+        let mut search_board = board;
+        let result = classical.search_nodes(&mut search_board, 1_200, 6);
+        assert!(result.nodes > 0);
+        assert_ne!(result.best_move, NULL_MOVE);
+
+        let mut see_board = Board::from_fen("4k3/8/8/3q4/4P3/8/8/4K3 w - - 0 1").unwrap();
+        let capture = see_board
+            .generate_legal_moves()
+            .iter()
+            .find(|mv| mv.to_uci() == "e4d5")
+            .copied()
+            .expect("pawn takes queen e4d5");
+        assert!(see::see(&see_board, capture) > 0);
+    }
+
+    #[test]
+    fn stockfish_preset_selects_stockfish_search_params() {
+        let mut engine = SearchEngine::new(1, 1);
+        engine.set_params_for_preset("stockfish");
+        assert_eq!(
+            engine.network_profile(),
+            eval::nnue::NnueSearchProfile::Stockfish
+        );
+        assert_eq!(engine.params().nmp_base, 7);
+        assert_eq!(engine.params().aspiration_window, 32);
     }
 
     #[test]

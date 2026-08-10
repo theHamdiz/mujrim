@@ -44,7 +44,7 @@ mod reckless_simd;
 pub use accumulator::NNUEState;
 pub use adapter::{
     ActiveNetwork, NetworkFormat, NnueNetworkInfo, NnueNetworkParameters, NnueNetworkSource,
-    NnueSearchProfile, auto_detect_network, default_embedded_network, enabled_network_formats,
-    load_network,
+    NnueSearchProfile, auto_detect_network, default_embedded_network, embedded_network_for_preset,
+    enabled_network_formats, load_network,
 };
 pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, forward_with_network, net};

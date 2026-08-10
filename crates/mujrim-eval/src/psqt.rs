@@ -86,6 +86,11 @@ const KING_EG: [i32; 64] = [
     16, 7, -9, -27, -11, 4, 13, 14, 4, -5, -17, -53, -34, -21, -11, -28, -14, -24, -43,
 ];
 
+/// Middlegame material values baked into [`combined_value`].
+const MG_PIECE_VALUES: [i32; 6] = [82, 337, 365, 477, 1025, 0];
+/// Endgame material values baked into [`combined_value`].
+const EG_PIECE_VALUES: [i32; 6] = [94, 281, 297, 512, 936, 0];
+
 /// Returns the middlegame PSQT value for a piece on a square (White perspective).
 /// For Black, pass the mirrored square index (63 - sq).
 pub fn mg_value(piece: Piece, sq_index: usize) -> i32 {
@@ -97,6 +102,16 @@ pub fn mg_value(piece: Piece, sq_index: usize) -> i32 {
         Piece::Queen => QUEEN_MG[sq_index],
         Piece::King => KING_MG[sq_index],
     }
+}
+
+/// Material + PSQT in one lookup (White-oriented square index).
+#[inline(always)]
+pub fn combined_value(piece: Piece, sq_index: usize) -> (i32, i32) {
+    let idx = piece.index();
+    (
+        MG_PIECE_VALUES[idx] + mg_value(piece, sq_index),
+        EG_PIECE_VALUES[idx] + eg_value(piece, sq_index),
+    )
 }
 
 /// Returns the endgame PSQT value for a piece on a square (White perspective).
@@ -131,5 +146,18 @@ mod tests {
         let e4_val = KING_MG[Square::E4.index()];
         // G1 is a common castled square, E4 is exposed
         assert!(g1_val > e4_val);
+    }
+
+    #[test]
+    fn combined_value_includes_material_and_psqt() {
+        let (mg, eg) = combined_value(Piece::Queen, Square::D4.index());
+        assert_eq!(
+            mg,
+            MG_PIECE_VALUES[Piece::Queen.index()] + QUEEN_MG[Square::D4.index()]
+        );
+        assert_eq!(
+            eg,
+            EG_PIECE_VALUES[Piece::Queen.index()] + QUEEN_EG[Square::D4.index()]
+        );
     }
 }
