@@ -1,4 +1,4 @@
-# KishMat Tunable Parameters
+# Mujrim Tunable Parameters
 # 
 # Each parameter has: name, current value, min, max, step
 # Use SPRT testing to find optimal values.

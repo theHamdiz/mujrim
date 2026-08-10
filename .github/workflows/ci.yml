@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_MIN_STACK: "16777216"
+  CARGO_BUILD_JOBS: "1"
 
 jobs:
   # ── Quick checks (format, clippy, tests) on native runners ──
@@ -38,10 +39,27 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --release --workspace --all-targets -- -D warnings
 
-      - name: Build
-        run: cargo build --workspace
+      - name: Build optimized artifacts
+        run: |
+          cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer
+          cargo build --release -p mujrim-ui
+          cargo build --release -p mujrim-game
+
+      - name: Prepare standalone fallback alias
+        shell: python
+        run: |
+          import os
+          import shutil
+          from pathlib import Path
+
+          suffix = ".exe" if os.name == "nt" else ""
+          release = Path("target/release")
+          shutil.copy2(
+              release / f"mujrim-native-v60{suffix}",
+              release / f"mujrim-v60{suffix}",
+          )
 
       - name: Smoke test (UCI handshake)
         shell: python
@@ -51,7 +69,7 @@ jobs:
           import sys
           from pathlib import Path
 
-          exe = Path("target/debug/kishmat")
+          exe = Path("target/release/mujrim")
           if os.name == "nt":
               exe = exe.with_suffix(".exe")
           if not exe.exists():
@@ -73,7 +91,7 @@ jobs:
               sys.exit(1)
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --profile release-test --workspace
 
   # ── Cross-compile check for ARM/MUSL targets ──
   cross-check:
@@ -101,4 +119,4 @@ jobs:
 
       # Only build the CLI engine for cross targets (UI needs native GPU libs)
       - name: Cross build (engine only)
-        run: cross build --release --target ${{ matrix.target }} -p kishmat
+        run: cross build --release --target ${{ matrix.target }} -p mujrim

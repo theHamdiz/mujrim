@@ -1,0 +1,18 @@
+[package]
+name = "mujrim-tests"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Integration tests for the Mujrim chess engine"
+license = "MIT"
+
+[features]
+default = ["book", "nnue"]
+book = ["search/book"]
+nnue = ["search/nnue"]
+
+[dependencies]
+types = { package = "mujrim-types", path = "../mujrim-types" }
+search = { package = "mujrim-search", path = "../mujrim-search" }
+eval = { package = "mujrim-eval", path = "../mujrim-eval" }
+comms = { package = "mujrim-comms", path = "../mujrim-comms" }

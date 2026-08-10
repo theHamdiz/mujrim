@@ -1,5 +1,6 @@
 # Build artifacts
 /target
+/target-*
 **/target
 rust_out
 
@@ -24,27 +25,29 @@ Icon
 .cargo
 
 # PGO data
-/tmp/kishmat-pgo/
+/tmp/mujrim-pgo/
 
 # Syzygy tablebases (downloaded at runtime)
 syzygy/
 
 # NNUE networks (downloaded at runtime)
-nnue/
+/nnue/
 
 # External NNUE networks in resources (only the embedded net.bin is tracked)
-crates/kishmat-eval/resources/*.nnue
-crates/kishmat-eval/resources/*.bin
-crates/kishmat-eval/resources/*.net
-crates/kishmat-eval/resources/*.nnue.zst
-crates/kishmat-eval/resources/akimbo-*.bin
-crates/kishmat-eval/resources/stockfish-*.nnue
-crates/kishmat-eval/resources/viridithas-*
+crates/mujrim-eval/resources/*.nnue
+crates/mujrim-eval/resources/*.bin
+crates/mujrim-eval/resources/*.net
+crates/mujrim-eval/resources/*.nnue.zst
+crates/mujrim-eval/resources/akimbo-*.bin
+crates/mujrim-eval/resources/stockfish-*.nnue
+crates/mujrim-eval/resources/viridithas-*
+!crates/mujrim-eval/resources/ak_default.bin
+!crates/mujrim-eval/resources/reckless_v60.nnue
 
-crates/kishmat-ui/target/*
-crates/kishmat-game/target/*
-crates/kishmat-installer/target/*
+crates/mujrim-ui/target/*
+crates/mujrim-game/target/*
+crates/mujrim-installer/target/*
 
 # SPRT test results
 sprt/results.pgn
-dist/
+/dist/**

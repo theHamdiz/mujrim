@@ -1,0 +1,17 @@
+[package]
+name = "mujrim-gpu"
+version = "2.0.0"
+edition = "2024"
+description = "GPU/NPU auto-detection and compute backends for Mujrim"
+
+[dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.31", optional = true }
+objc2 = { version = "0.6", optional = true }
+
+[features]
+default = ["auto-detect"]
+auto-detect = []
+metal-backend = ["metal", "objc2"]
+cuda-backend = []

@@ -1,4 +1,4 @@
-# KishMat Agent Guide
+# Mujrim Agent Guide
 
 Updated: 2026-04-08
 
@@ -11,8 +11,8 @@ Updated: 2026-04-08
 - Prefer modular, trait-based designs with no unnecessary runtime overhead.
 
 ## Current State
-- A structured AI-agent tool surface is implemented in `kishmat-tooling`.
-- Entry point: `kishmat-tooling agent`.
+- A structured AI-agent tool surface is implemented in `mujrim-tooling`.
+- Entry point: `mujrim-tooling agent`.
 - Output contract: JSON (machine-readable for agent orchestration).
 - Tool domains are split by responsibility:
   - `engine.*`
@@ -21,9 +21,9 @@ Updated: 2026-04-08
   - `updater.*`
 
 ## Agent Tool Commands
-- `kishmat-tooling agent list [--pretty]`
-- `kishmat-tooling agent describe <tool> [--pretty]`
-- `kishmat-tooling agent call <tool> --input '<json-object>' [--pretty]`
+- `mujrim-tooling agent list [--pretty]`
+- `mujrim-tooling agent describe <tool> [--pretty]`
+- `mujrim-tooling agent call <tool> --input '<json-object>' [--pretty]`
 
 ## Implemented Tool Set
 - `engine.analyze`
@@ -48,7 +48,7 @@ Updated: 2026-04-08
   - Linux `x86_64` + `aarch64` (gnu and musl variants)
   - Windows `x86_64`
 - Every release artifact should contain engine + UI (when supported) + updater + NNUE payload/metadata.
-- Smoke validation in release jobs should verify `kishmat` responds correctly to UCI handshake input.
+- Smoke validation in release jobs should verify `mujrim` responds correctly to UCI handshake input.
 
 ## Current Iteration Commands
 - Quality gate:

@@ -1,0 +1,20 @@
+[package]
+name = "mujrim-comms"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "UCI and XBoard protocol handlers for the Mujrim engine"
+license = "MIT"
+
+[features]
+default = ["xboard", "book", "nnue", "reckless-nnue", "stockfish-nnue"]
+xboard = []
+book = ["search/book"]
+nnue = ["search/nnue"]
+reckless-nnue = ["eval/reckless-nnue"]
+stockfish-nnue = ["eval/stockfish-nnue"]
+
+[dependencies]
+types = { package = "mujrim-types", path = "../mujrim-types" }
+search = { package = "mujrim-search", path = "../mujrim-search", default-features = false }
+eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false }

@@ -1,0 +1,32 @@
+[package]
+name = "mujrim-native-v60"
+version = "2.0.0"
+edition = "2024"
+build = "build/build.rs"
+publish = false
+license = "AGPL-3.0-only"
+
+[package.metadata.mujrim-native]
+upstream-revision = "d6603046e76d66edd43622ded23458da1af50c68"
+network = "v60-7f587dfb"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+syzygy = []
+spsa = []
+embedded-network = []
+
+[build-dependencies]
+cc = "1.2.19"
+
+[dependencies]
+libc = "0.2.175"
+sha2 = "0.10"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+wasm-bindgen = "0.2"
+js-sys = "0.3"

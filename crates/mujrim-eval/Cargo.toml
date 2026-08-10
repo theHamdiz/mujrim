@@ -1,0 +1,20 @@
+[package]
+name = "mujrim-eval"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Evaluation functions for the Mujrim engine"
+license = "MIT"
+
+[features]
+default = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue"]
+nnue = []
+simd = []
+akimbo-nnue = ["nnue"]
+stockfish-nnue = ["nnue"]
+reckless-nnue = ["nnue"]
+embedded-networks = ["nnue"]
+
+[dependencies]
+types = { package = "mujrim-types", path = "../mujrim-types" }
+sha2 = "0.10"

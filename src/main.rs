@@ -1,4 +1,6 @@
-//! KishMat Chess Engine — CLI entry point.
+#![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
+
+//! Mujrim Chess Engine — CLI entry point.
 //!
 //! Supports multiple modes:
 //! - `uci`: Standard UCI protocol (default when no subcommand)
@@ -18,14 +20,170 @@ static GLOBAL: MiMalloc = MiMalloc;
 mod commands;
 
 use clap::{Arg, Command};
+use std::path::PathBuf;
+
+const EXTERNAL_BACKENDS: &[&str] = &[
+    "stockfish",
+    "plentychess",
+    "obsidian",
+    "reckless",
+    "akimbo",
+    "ethereal",
+];
+const NATIVE_PASSTHROUGH_MARKER: &str = "MUJRIM_NATIVE_PASSTHROUGH_ACTIVE";
+
+#[derive(Clone, Copy)]
+struct NativeSearchStackProfile {
+    engine_id: &'static str,
+    display_name: &'static str,
+    authors: &'static str,
+    memory_limit_bytes: u64,
+    max_hash_mb: usize,
+    max_threads: usize,
+}
+
+fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
+    match engine_id {
+        "stockfish" => NativeSearchStackProfile {
+            engine_id,
+            display_name: "Mujrim Elite 2.0.0",
+            authors: "Ahmad Hamdi Emara (Egypt)",
+            memory_limit_bytes: 1536 * 1024 * 1024,
+            max_hash_mb: 1024,
+            max_threads: 12,
+        },
+        "reckless" => NativeSearchStackProfile {
+            engine_id,
+            display_name: "Mujrim v60 2.0.0",
+            authors: "Ahmad Hamdi Emara (Egypt)",
+            memory_limit_bytes: 1024 * 1024 * 1024,
+            max_hash_mb: 768,
+            max_threads: 8,
+        },
+        "akimbo" => NativeSearchStackProfile {
+            engine_id,
+            display_name: "Mujrim Akimbo Adapter 2.0.0",
+            authors: "Ahmad Hamdi Emara (Egypt) / Akimbo authors",
+            memory_limit_bytes: 512 * 1024 * 1024,
+            max_hash_mb: 384,
+            max_threads: 8,
+        },
+        _ => NativeSearchStackProfile {
+            engine_id,
+            display_name: "Mujrim External Search Adapter 2.0.0",
+            authors: "Ahmad Hamdi Emara (Egypt) / upstream engine authors",
+            memory_limit_bytes: 512 * 1024 * 1024,
+            max_hash_mb: 384,
+            max_threads: 8,
+        },
+    }
+}
+
+fn passthrough_engine_id(
+    backend: &str,
+    uci_mode: bool,
+    native_passthrough_active: bool,
+) -> Option<&str> {
+    if !uci_mode || backend == "universal" || (backend == "native" && native_passthrough_active) {
+        return None;
+    }
+    if backend == "native" {
+        return Some("mujrim-v60");
+    }
+    EXTERNAL_BACKENDS.contains(&backend).then_some(backend)
+}
+
+fn fallback_engine_id(backend: &str, explicit_path: bool) -> Option<&'static str> {
+    (!explicit_path && matches!(backend, "stockfish" | "native")).then_some("mujrim-v60")
+}
+
+fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to locate current executable: {error}"))?;
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("failed to locate current directory: {error}"))?;
+    let engine = mujrim_protocols::catalog::discover_engine(
+        engine_id,
+        &executable,
+        &current_dir,
+        explicit_path.map(PathBuf::as_path),
+    )?;
+    let environment: &[(&str, &str)] = if engine_id == "mujrim-v60" {
+        &[(NATIVE_PASSTHROUGH_MARKER, "1")]
+    } else {
+        &[]
+    };
+    let status = if engine_id == "mujrim-v60" {
+        mujrim_protocols::run_passthrough_with_environment(
+            &engine,
+            &[],
+            environment,
+            Some(512 * 1024 * 1024),
+        )?
+    } else {
+        let profile = search_stack_profile(
+            EXTERNAL_BACKENDS
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == engine_id)
+                .ok_or_else(|| format!("unsupported native search stack '{engine_id}'"))?,
+        );
+        debug_assert_eq!(profile.engine_id, engine_id);
+        let adapter = mujrim_protocols::BoundedUciIdentityAdapter {
+            identity: mujrim_protocols::UciIdentityAdapter {
+                name: profile.display_name,
+                author: profile.authors,
+            },
+            max_hash_mb: profile.max_hash_mb,
+            max_threads: profile.max_threads,
+        };
+        mujrim_protocols::run_uci_search_stack_adapter(
+            &engine,
+            &[],
+            environment,
+            Some(profile.memory_limit_bytes),
+            &adapter,
+        )?
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("'{}' exited with {status}", engine.display()))
+    }
+}
 
 fn main() {
     types::init();
 
-    let matches = Command::new("KishMat Chess Engine")
+    let matches = Command::new("Mujrim Chess Engine")
         .version("2.0.0")
         .author("Ahmad Hamdi <contact@hamdiz.me>")
         .about("A high-performance chess engine with NNUE-enhanced evaluation")
+        .arg(
+            Arg::new("backend")
+                .long("backend")
+                .value_parser([
+                    "native",
+                    "universal",
+                    "stockfish",
+                    "plentychess",
+                    "obsidian",
+                    "reckless",
+                    "akimbo",
+                    "ethereal",
+                ])
+                .default_value("stockfish")
+                .global(true)
+                .help("Search backend to expose over UCI"),
+        )
+        .arg(
+            Arg::new("engine-path")
+                .long("engine-path")
+                .value_name("PATH")
+                .value_parser(clap::value_parser!(PathBuf))
+                .global(true)
+                .help("Explicit executable for the selected external backend"),
+        )
         .subcommand(Command::new("uci").about("Run in UCI protocol mode (for chess GUIs)"))
         .subcommand(
             Command::new("xboard")
@@ -103,6 +261,36 @@ fn main() {
         )
         .get_matches();
 
+    let uci_mode =
+        matches.subcommand().is_none() || matches!(matches.subcommand(), Some(("uci", _)));
+    let backend = matches
+        .get_one::<String>("backend")
+        .map_or("stockfish", String::as_str);
+    let passthrough_active = std::env::var_os(NATIVE_PASSTHROUGH_MARKER).is_some();
+    if let Some(engine_id) = passthrough_engine_id(backend, uci_mode, passthrough_active) {
+        match run_external_backend(engine_id, matches.get_one::<PathBuf>("engine-path")) {
+            Ok(()) => return,
+            Err(error) => {
+                if let Some(fallback) =
+                    fallback_engine_id(backend, matches.get_one::<PathBuf>("engine-path").is_some())
+                {
+                    eprintln!(
+                        "info string {backend} backend unavailable; trying {fallback}: {error}"
+                    );
+                    match run_external_backend(fallback, None) {
+                        Ok(()) => return,
+                        Err(fallback_error) => eprintln!(
+                            "info string {fallback} unavailable; using universal adapter: {fallback_error}"
+                        ),
+                    }
+                } else {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+
     match matches.subcommand() {
         Some(("uci", _)) => {
             commands::run_uci();
@@ -143,5 +331,69 @@ fn main() {
         _ => {
             commands::run_uci();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EXTERNAL_BACKENDS, fallback_engine_id, passthrough_engine_id, search_stack_profile,
+    };
+
+    #[test]
+    fn every_bundled_engine_is_available_as_a_backend() {
+        assert_eq!(EXTERNAL_BACKENDS.len(), 6);
+        for engine in mujrim_protocols::catalog::BUNDLED_ENGINES {
+            assert!(
+                matches!(engine.0, "mujrim" | "mujrim-v60")
+                    || EXTERNAL_BACKENDS.contains(&engine.0)
+            );
+        }
+    }
+
+    #[test]
+    fn uci_backends_route_to_matching_native_search_stacks() {
+        assert_eq!(
+            passthrough_engine_id("native", true, false),
+            Some("mujrim-v60")
+        );
+        assert_eq!(
+            passthrough_engine_id("stockfish", true, false),
+            Some("stockfish")
+        );
+        assert_eq!(
+            passthrough_engine_id("reckless", true, false),
+            Some("reckless")
+        );
+        assert_eq!(passthrough_engine_id("universal", true, false), None);
+        assert_eq!(passthrough_engine_id("native", true, true), None);
+    }
+
+    #[test]
+    fn non_uci_commands_keep_the_in_process_implementation() {
+        assert_eq!(passthrough_engine_id("native", false, false), None);
+        assert_eq!(passthrough_engine_id("stockfish", false, false), None);
+    }
+
+    #[test]
+    fn packaged_default_falls_back_without_masking_explicit_path_errors() {
+        assert_eq!(fallback_engine_id("stockfish", false), Some("mujrim-v60"));
+        assert_eq!(fallback_engine_id("native", false), Some("mujrim-v60"));
+        assert_eq!(fallback_engine_id("stockfish", true), None);
+        assert_eq!(fallback_engine_id("reckless", false), None);
+    }
+
+    #[test]
+    fn native_stack_profiles_keep_search_and_evaluation_paired() {
+        let stockfish = search_stack_profile("stockfish");
+        let reckless = search_stack_profile("reckless");
+        let akimbo = search_stack_profile("akimbo");
+
+        assert_eq!(stockfish.engine_id, "stockfish");
+        assert_eq!(stockfish.display_name, "Mujrim Elite 2.0.0");
+        assert_eq!(reckless.engine_id, "reckless");
+        assert_eq!(reckless.display_name, "Mujrim v60 2.0.0");
+        assert_eq!(akimbo.engine_id, "akimbo");
+        assert!(akimbo.display_name.contains("Akimbo"));
     }
 }

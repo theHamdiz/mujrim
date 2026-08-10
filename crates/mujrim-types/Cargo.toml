@@ -1,0 +1,10 @@
+[package]
+name = "mujrim-types"
+version = "2.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Core chess types for the Mujrim engine"
+license = "MIT"
+
+[dependencies]
+rand = "0.9"
