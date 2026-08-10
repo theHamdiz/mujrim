@@ -146,7 +146,7 @@ impl Board {
             hash: 0,
             total_material: 0,
             plies_from_null: 0,
-            history: Vec::new(),
+            history: Vec::with_capacity(256),
             hash_history: Vec::with_capacity(256),
         }
     }

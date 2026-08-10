@@ -16,15 +16,11 @@ pub fn see(board: &Board, mv: Move) -> i32 {
     let to = mv.to.index();
     let from = mv.from.index();
 
-    // Build piece bitboards by color: [Pawn, Knight, Bishop, Rook, Queen, King]
-    let mut white_pieces = [0u64; 6];
-    let mut black_pieces = [0u64; 6];
-    for &piece in &Piece::ALL {
-        white_pieces[piece.index()] = board.piece_bb(piece, Color::White);
-        black_pieces[piece.index()] = board.piece_bb(piece, Color::Black);
-    }
+    // Snapshot piece bitboards once (avoid per-piece accessor calls).
+    let mut white_pieces = board.pieces[Color::White.index()];
+    let mut black_pieces = board.pieces[Color::Black.index()];
 
-    let mut occupancy = board.all_occupancy();
+    let mut occupancy = board.occupancy[0] | board.occupancy[1];
 
     // Determine the initial captured piece value
     let initial_value =
@@ -68,10 +64,25 @@ pub fn see(board: &Board, mv: Move) -> i32 {
         let attackers = get_attackers_to_square(to, occupancy, &white_pieces, &black_pieces);
 
         // Find the least valuable attacker for the current side
-        let side_attackers = match side {
-            Color::White => attackers & white_pieces.iter().fold(0u64, |acc, &bb| acc | bb),
-            Color::Black => attackers & black_pieces.iter().fold(0u64, |acc, &bb| acc | bb),
+        let side_occ = match side {
+            Color::White => {
+                white_pieces[0]
+                    | white_pieces[1]
+                    | white_pieces[2]
+                    | white_pieces[3]
+                    | white_pieces[4]
+                    | white_pieces[5]
+            }
+            Color::Black => {
+                black_pieces[0]
+                    | black_pieces[1]
+                    | black_pieces[2]
+                    | black_pieces[3]
+                    | black_pieces[4]
+                    | black_pieces[5]
+            }
         };
+        let side_attackers = attackers & side_occ;
 
         if side_attackers == 0 {
             break; // No more attackers for this side
@@ -138,14 +149,10 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
     }
 
     // Full inline swap loop
-    let mut white_pieces = [0u64; 6];
-    let mut black_pieces = [0u64; 6];
-    for &piece in &Piece::ALL {
-        white_pieces[piece.index()] = board.piece_bb(piece, Color::White);
-        black_pieces[piece.index()] = board.piece_bb(piece, Color::Black);
-    }
+    let mut white_pieces = board.pieces[Color::White.index()];
+    let mut black_pieces = board.pieces[Color::Black.index()];
 
-    let mut occupancy = board.all_occupancy() & !(1u64 << from);
+    let mut occupancy = (board.occupancy[0] | board.occupancy[1]) & !(1u64 << from);
     let mut side = board.side_to_move.opponent();
 
     loop {
@@ -154,7 +161,13 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
             Color::White => &white_pieces,
             Color::Black => &black_pieces,
         };
-        let side_attackers = attackers & side_bb.iter().fold(0u64, |acc, &bb| acc | bb);
+        let side_occ = side_bb[0]
+            | side_bb[1]
+            | side_bb[2]
+            | side_bb[3]
+            | side_bb[4]
+            | side_bb[5];
+        let side_attackers = attackers & side_occ;
 
         if side_attackers == 0 {
             break;
@@ -188,8 +201,13 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
                     Color::White => &white_pieces,
                     Color::Black => &black_pieces,
                 };
-                let opp_atk = all_attackers(to, occupancy, &white_pieces, &black_pieces)
-                    & opp_bb.iter().fold(0u64, |acc, &bb| acc | bb);
+                let opp_occ = opp_bb[0]
+                    | opp_bb[1]
+                    | opp_bb[2]
+                    | opp_bb[3]
+                    | opp_bb[4]
+                    | opp_bb[5];
+                let opp_atk = all_attackers(to, occupancy, &white_pieces, &black_pieces) & opp_occ;
                 if opp_atk != 0 {
                     break;
                 }
