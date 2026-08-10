@@ -565,7 +565,71 @@ mod avx2 {
         _mm256_madd_epi16(pairwise, _mm256_set1_epi16(1))
     }
 
-    #[inline]
+    #[repr(C, align(16))]
+    #[derive(Clone, Copy)]
+    struct SparseEntry {
+        indexes: [u16; 8],
+        count: usize,
+    }
+
+    const fn build_sparse_table() -> [SparseEntry; 256] {
+        let mut table = [SparseEntry {
+            indexes: [0; 8],
+            count: 0,
+        }; 256];
+        let mut mask = 0;
+        while mask < table.len() {
+            let mut bit = 0;
+            let mut count = 0;
+            while bit < 8 {
+                if mask & (1 << bit) != 0 {
+                    table[mask].indexes[count] = bit as u16;
+                    count += 1;
+                }
+                bit += 1;
+            }
+            table[mask].count = count;
+            mask += 1;
+        }
+        table
+    }
+
+    static SPARSE_TABLE: [SparseEntry; 256] = build_sparse_table();
+
+    #[inline(always)]
+    unsafe fn nonzero_mask(values: __m256i) -> usize {
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let eq = _mm256_cmpeq_epi32(values, zero);
+            // Movemask sets a bit per lane that is all-ones (== zero). Invert for nonzero.
+            let zero_bits = _mm256_movemask_ps(_mm256_castsi256_ps(eq)) as u32;
+            (!zero_bits & 0xFF) as usize
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn collect_nonzero_groups(
+        transformed: &[u8; HIDDEN_SIZE],
+        indexes: &mut [u16; HIDDEN_SIZE / 4],
+    ) -> usize {
+        unsafe {
+            let mut count = 0;
+            let mut base: u16 = 0;
+            for offset in (0..HIDDEN_SIZE).step_by(32) {
+                let values = _mm256_loadu_si256(transformed.as_ptr().add(offset).cast());
+                let mask = nonzero_mask(values);
+                let entry = &SPARSE_TABLE[mask];
+                for index in 0..entry.count {
+                    *indexes.get_unchecked_mut(count + index) =
+                        base + *entry.indexes.get_unchecked(index);
+                }
+                count += entry.count;
+                base = base.wrapping_add(8);
+            }
+            count
+        }
+    }
+
     #[target_feature(enable = "avx2")]
     unsafe fn horizontal_sum(value: __m256) -> f32 {
         let high = _mm256_extractf128_ps::<1>(value);
@@ -587,12 +651,29 @@ mod avx2 {
             let transformed = activate(piece, threat, stm);
             let packed =
                 std::slice::from_raw_parts(transformed.as_ptr().cast::<i32>(), HIDDEN_SIZE / 4);
+            let mut indexes = [0u16; HIDDEN_SIZE / 4];
+            let count = collect_nonzero_groups(&transformed, &mut indexes);
+
             let mut sums = [_mm256_setzero_si256(); L2_SIZE / 8];
-            for (group, &input) in packed.iter().enumerate() {
-                if input == 0 {
-                    continue;
+            let mut pairs = indexes[..count].chunks_exact(2);
+            for pair in &mut pairs {
+                let first = pair[0] as usize;
+                let second = pair[1] as usize;
+                let first_input = _mm256_set1_epi32(packed[first]);
+                let second_input = _mm256_set1_epi32(packed[second]);
+                let first_base = weights.l1.as_ptr().add(first * L2_SIZE * 4);
+                let second_base = weights.l1.as_ptr().add(second * L2_SIZE * 4);
+                for output in (0..L2_SIZE).step_by(8) {
+                    let first_row = _mm256_loadu_si256(first_base.add(output * 4).cast());
+                    let second_row = _mm256_loadu_si256(second_base.add(output * 4).cast());
+                    let lane = &mut sums[output / 8];
+                    *lane = _mm256_add_epi32(*lane, dot_bytes(first_input, first_row));
+                    *lane = _mm256_add_epi32(*lane, dot_bytes(second_input, second_row));
                 }
-                let input = _mm256_set1_epi32(input);
+            }
+            if let Some(&group) = pairs.remainder().first() {
+                let group = group as usize;
+                let input = _mm256_set1_epi32(packed[group]);
                 let base = weights.l1.as_ptr().add(group * L2_SIZE * 4);
                 for output in (0..L2_SIZE).step_by(8) {
                     let row = _mm256_loadu_si256(base.add(output * 4).cast());
