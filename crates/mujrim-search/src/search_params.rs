@@ -158,9 +158,10 @@ impl SearchParams {
             nmp_eval_max: 6,
 
             // LMR — slightly less aggressive for tactical positions (BK / short time).
+            // Cut-node bonus 1 (was 2): quieter prophylaxis survives deeper LMR.
             lmr_base: 0.45,
             lmr_divisor: 2.48,
-            lmr_cut_node_bonus: 2,
+            lmr_cut_node_bonus: 1,
 
             // LMP — trim quiet pruning at higher depths.
             lmp_depth_limit: 7,

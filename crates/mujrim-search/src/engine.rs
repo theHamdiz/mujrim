@@ -1735,6 +1735,22 @@ fn reckless_lmr_search_depth(effective_depth: i32, reduction: i32, is_pv: bool) 
     (effective_depth - reduction).clamp(1, effective_depth + 2) + 2 * i32::from(is_pv)
 }
 
+/// Stock-like PV lines keep one extra ply under LMR (native-style compensation).
+#[inline(always)]
+fn stock_like_lmr_search_depth(effective_depth: i32, reduction: i32, is_pv: bool) -> i32 {
+    (effective_depth - reduction).max(1) + i32::from(is_pv)
+}
+
+/// Negative singular extension when the TT move is not singular.
+#[inline(always)]
+fn negative_singular_extension(move_ordering: MoveOrderingProfile) -> i32 {
+    if move_ordering == MoveOrderingProfile::Reckless {
+        -1
+    } else {
+        -2
+    }
+}
+
 #[inline(always)]
 fn singular_multicut_score(
     singular_score: i32,
@@ -2395,7 +2411,9 @@ fn search_ab(
             } else if let Some(score) = singular_multicut_score(se_score, beta, move_ordering) {
                 return score;
             } else if tt_sc >= beta || (tt_sc <= alpha && !is_pv) {
-                extension = -1;
+                // StockLike uses -2 so quiet prophylaxis can displace sticky
+                // tactical TT moves (BK#8). Reckless keeps the classic -1 gate.
+                extension = negative_singular_extension(move_ordering);
             }
         }
 
@@ -2524,6 +2542,7 @@ fn search_ab(
             }
         }
 
+        // Prefetch the child TT slot before make; hash_after matches post-make key.
         tt.prefetch(board.tt_hash_after(mv));
         state.nnue_state.make_move(board, mv);
 
@@ -2533,8 +2552,6 @@ fn search_ab(
         state.prev_move[ply_usize] = mv;
         state.prev_piece[ply_usize] = moved_piece;
         state.move_counts[ply_usize] = (moves_searched + 1) as u16;
-        // Prefetch TT for the position we're about to search
-        tt.prefetch(board.tt_hash());
 
         let score;
         // Cap extensions at remaining depth to prevent going negative
@@ -2563,8 +2580,17 @@ fn search_ab(
             );
         } else {
             // LMR: Late Move Reductions — enhanced with stat_score.
+            // Root quiet probes keep full-depth ZW searches so prophylaxis /
+            // breakthroughs (BK#8 / BK#23) are not buried by LMR.
             let mut reduction = 0;
-            if moves_searched >= 1
+            // StockLike: all root quiets. Reckless keeps LMR at root and relies
+            // on the pawn near-miss re-search below (stable for BK#8/#23).
+            let root_quiet_no_lmr = is_root
+                && move_ordering == MoveOrderingProfile::StockLike
+                && !mv.is_capture()
+                && !mv.is_promotion();
+            if !root_quiet_no_lmr
+                && moves_searched >= 1
                 && depth >= 2
                 && ((!mv.is_capture() && !mv.is_promotion()) || lmr_policy.reduce_noisy_moves())
             {
@@ -2608,12 +2634,14 @@ fn search_ab(
                     reduction.clamp(0, effective_depth - 1)
                 };
             }
-            let reduced_depth = if reduction > 0
-                && move_ordering == MoveOrderingProfile::Reckless
-            {
-                reckless_lmr_search_depth(effective_depth, reduction, is_pv)
+            let reduced_depth = if reduction > 0 {
+                if move_ordering == MoveOrderingProfile::Reckless {
+                    reckless_lmr_search_depth(effective_depth, reduction, is_pv)
+                } else {
+                    stock_like_lmr_search_depth(effective_depth, reduction, is_pv)
+                }
             } else {
-                effective_depth - reduction
+                effective_depth
             };
             // PVS null-window search with reduction
             state.reductions[ply_usize] = (effective_depth - reduced_depth).max(0);
@@ -2636,18 +2664,22 @@ fn search_ab(
             );
             state.reductions[ply_usize] = 0;
             // Re-search with full window if ZW fails high.
-            // Reckless root also re-searches near-miss quiet pawn pushes:
-            // breakthroughs like BK#1 `d4d5` / BK#16 `c7c6` otherwise only
-            // receive NonPV fail-lows and never enter the TT as Exact.
+            // Root near-miss research lets quiet breakthroughs / prophylaxis
+            // that only fail-low on the ZW probe still earn a PV window.
             const RECKLESS_ROOT_PAWN_NEAR_MISS: i32 = 120;
-            let reckless_root_near_miss = is_root
-                && move_ordering == MoveOrderingProfile::Reckless
-                && moved_piece == Piece::Pawn.index()
+            const STOCK_ROOT_QUIET_NEAR_MISS: i32 = 160;
+            let root_near_miss = is_root
                 && !mv.is_capture()
                 && !mv.is_promotion()
                 && s <= alpha
-                && s > alpha - RECKLESS_ROOT_PAWN_NEAR_MISS;
-            if (s > alpha && (is_pv || reduction > 0)) || reckless_root_near_miss {
+                && match move_ordering {
+                    MoveOrderingProfile::Reckless => {
+                        moved_piece == Piece::Pawn.index()
+                            && s > alpha - RECKLESS_ROOT_PAWN_NEAR_MISS
+                    }
+                    MoveOrderingProfile::StockLike => s > alpha - STOCK_ROOT_QUIET_NEAR_MISS,
+                };
+            if (s > alpha && (is_pv || reduction > 0)) || root_near_miss {
                 let mut research_depth = effective_depth;
                 if move_ordering == MoveOrderingProfile::Reckless {
                     if !is_root {
@@ -2662,7 +2694,7 @@ fn search_ab(
                 if move_ordering != MoveOrderingProfile::Reckless
                     || research_depth > reduced_depth
                     || is_pv
-                    || reckless_root_near_miss
+                    || root_near_miss
                 {
                     s = -search_ab(
                         board,
@@ -2673,7 +2705,7 @@ fn search_ab(
                             alpha: -beta,
                             beta: -alpha,
                             ply: ply + 1,
-                            is_pv: is_pv || reckless_root_near_miss,
+                            is_pv: is_pv || root_near_miss,
                             is_root: false,
                             excluded_move: None,
                             total_extensions: new_total_extensions,
@@ -3752,12 +3784,41 @@ mod tests {
     }
 
     #[test]
+    fn stock_like_lmr_search_depth_keeps_pv_compensation() {
+        assert_eq!(stock_like_lmr_search_depth(12, 3, false), 9);
+        assert_eq!(stock_like_lmr_search_depth(12, 3, true), 10);
+        assert_eq!(stock_like_lmr_search_depth(4, 5, false), 1);
+        assert_eq!(stock_like_lmr_search_depth(4, 5, true), 2);
+    }
+
+    #[test]
+    fn negative_singular_extension_matches_adapter_aggressiveness() {
+        assert_eq!(
+            negative_singular_extension(MoveOrderingProfile::Reckless),
+            -1
+        );
+        assert_eq!(
+            negative_singular_extension(MoveOrderingProfile::StockLike),
+            -2
+        );
+    }
+
+    #[test]
     fn reckless_root_pawn_near_miss_margin_is_tight() {
         // Shallow NonPV scores after d4d5 sit well below a ~400cp king-move
         // alpha; only probes within 120cp earn a full-window root re-search.
         const MARGIN: i32 = 120;
         assert!(316 > 400 - MARGIN);
         assert!(178 <= 400 - MARGIN);
+    }
+
+    #[test]
+    fn stock_root_quiet_near_miss_margin_covers_prophylaxis() {
+        // BK#8 king/rook slides often land 80–150cp under a bishop-pin alpha.
+        const MARGIN: i32 = 160;
+        assert!(320 > 400 - MARGIN);
+        assert!(250 > 400 - MARGIN);
+        assert!(200 <= 400 - MARGIN);
     }
 
     fn test_context<'a>(
