@@ -359,6 +359,8 @@ struct App {
     live_tournament: Option<tournament_live::LiveTournamentHandle>,
     live_tournament_view: tournament_live::LiveTournamentSnapshot,
     selected_tournament_id: Option<String>,
+    selected_tournament_game_id: Option<usize>,
+    tournament_review_active: bool,
     /// Latest multi-engine analysis arrows for the analysis/review board.
     analysis_arrows: Vec<BoardArrow>,
     analysis_status: String,
@@ -545,6 +547,7 @@ enum Msg {
     TournamentTick(Instant),
     QuickTournamentFinished(Box<mujrim_benchmarker::strength::TournamentSummary>),
     SelectTournament(String),
+    SelectTournamentGame(usize),
     EngineCatalogProbed(Vec<EngineMetadata>),
     AnalyzeGame,
     GameAnalysisFinished(Result<Vec<AnalyzedPly>, String>),
@@ -749,6 +752,8 @@ impl Default for App {
             live_tournament: None,
             live_tournament_view: tournament_live::LiveTournamentSnapshot::default(),
             selected_tournament_id: None,
+            selected_tournament_game_id: None,
+            tournament_review_active: false,
             analysis_arrows: Vec::new(),
             analysis_status: "Pick engines and run multi-engine analysis.".to_owned(),
             analysis_engines_selected: vec!["builtin".to_owned()],
@@ -772,6 +777,57 @@ impl App {
         self.analysis_scores_cp.clear();
         self.review_board = None;
         self.review_ply = None;
+    }
+
+    fn load_tournament_game(&mut self, game: &tournament_live::PlayedGame) -> Result<(), String> {
+        self.invalidate_engine_tasks();
+        self.animation = None;
+        self.active_puzzle = None;
+        self.selected_tournament_game_id = Some(game.id);
+        self.tournament_review_active = true;
+        self.initial_fen = game.initial_fen.clone();
+        self.move_log = game.moves.clone();
+        self.move_annotations = vec![None; game.moves.len()];
+        self.clear_review_state();
+        let mut state = replay_study_game(&game.initial_fen, &game.moves)?;
+        state.refresh_move_overlays(self.settings.show_last_move, None, &[]);
+        self.game = Some(state);
+        self.engine_info = format!(
+            "{} (White) vs {} (Black)\nResult {}",
+            game.white,
+            game.black,
+            game.result_label()
+        );
+        self.status = format!("Tournament game · {}", game.title());
+        Ok(())
+    }
+
+    fn follow_latest_tournament_game(&mut self) -> Task<Msg> {
+        let Some(latest) = self.live_tournament_view.latest_game_id() else {
+            return Task::none();
+        };
+        if self.selected_tournament_game_id == Some(latest) {
+            return Task::none();
+        }
+        let Some(game) = self.live_tournament_view.game(latest).cloned() else {
+            return Task::none();
+        };
+        match self.load_tournament_game(&game) {
+            Ok(()) => {
+                if game.moves.is_empty() {
+                    Task::none()
+                } else {
+                    Task::perform(
+                        analyze_game(self.initial_fen.clone(), self.move_log.clone()),
+                        Msg::GameAnalysisFinished,
+                    )
+                }
+            }
+            Err(error) => {
+                self.tournament_status = format!("Could not open tournament game: {error}");
+                Task::none()
+            }
+        }
     }
 
     /// Boot function for iced 0.14 — returns (State, Task).
@@ -1396,8 +1452,11 @@ impl App {
                 let handle = tournament_live::LiveTournamentHandle::new(self.tournament_format);
                 self.live_tournament_view = handle.clone_snapshot();
                 self.live_tournament = Some(handle.clone());
+                self.selected_tournament_game_id = None;
+                self.tournament_review_active = false;
                 self.tournament_status =
-                    "Tournament running — live pairings and standings update below.".to_owned();
+                    "Tournament running — live pairings, boards, and standings update below."
+                        .to_owned();
                 let format = self.tournament_format;
                 Task::perform(run_quick_tournament(engines, format, handle), |summary| {
                     Msg::QuickTournamentFinished(Box::new(summary))
@@ -1418,6 +1477,9 @@ impl App {
                     self.live_tournament_view = handle.clone_snapshot();
                     if !self.live_tournament_view.status_line.is_empty() {
                         self.tournament_status = self.live_tournament_view.status_line.clone();
+                    }
+                    if self.live_tournament_view.running {
+                        return self.follow_latest_tournament_game();
                     }
                 }
                 Task::none()
@@ -1452,12 +1514,40 @@ impl App {
                 self.live_tournament_view.standings =
                     tournament_live::standing_rows(&names, &summary.standings);
                 self.live_tournament_view.game_results = summary.game_results.clone();
+                let games = mujrim_benchmarker::strength::games_from_summary(&summary);
+                if self.live_tournament_view.played_games.len() < games.len() {
+                    self.live_tournament_view.played_games.clear();
+                    self.live_tournament_view.append_games(games);
+                }
                 self.refresh_tournament_history();
-                Task::none()
+                self.follow_latest_tournament_game()
             }
             Msg::SelectTournament(id) => {
                 self.selected_tournament_id = Some(id);
                 Task::none()
+            }
+            Msg::SelectTournamentGame(id) => {
+                let Some(game) = self.live_tournament_view.game(id).cloned() else {
+                    self.tournament_status = format!("Tournament game #{id} is unavailable.");
+                    return Task::none();
+                };
+                match self.load_tournament_game(&game) {
+                    Ok(()) => {
+                        if game.moves.is_empty() {
+                            Task::none()
+                        } else {
+                            self.status = "Analyzing tournament game for the eval graph…".to_owned();
+                            Task::perform(
+                                analyze_game(self.initial_fen.clone(), self.move_log.clone()),
+                                Msg::GameAnalysisFinished,
+                            )
+                        }
+                    }
+                    Err(error) => {
+                        self.tournament_status = format!("Could not open tournament game: {error}");
+                        Task::none()
+                    }
+                }
             }
             Msg::EngineCatalogProbed(engines) => {
                 for engine in &engines {
@@ -4093,6 +4183,205 @@ impl App {
         .into()
     }
 
+    fn view_tournament_game_board(&self) -> Element<'_, Msg> {
+        let palette = self.settings.board_theme.gui_palette();
+        let Some(game_id) = self.selected_tournament_game_id else {
+            return text("Select a finished game to open the match board.")
+                .size(13)
+                .color(palette.text_secondary)
+                .into();
+        };
+        let Some(played) = self.live_tournament_view.game(game_id) else {
+            return text("Selected tournament game is no longer available.")
+                .size(13)
+                .color(palette.text_secondary)
+                .into();
+        };
+        let Some(gs) = self.game.as_ref().filter(|_| self.tournament_review_active) else {
+            return text("Loading tournament board…")
+                .size(13)
+                .color(palette.text_secondary)
+                .into();
+        };
+
+        let sq_size = ((self.window_width * 0.28) / 8.0)
+            .min(56.0)
+            .clamp(28.0, 56.0);
+        let board = board_view::view_board(
+            gs,
+            &self.assets,
+            board_view::BoardViewOptions {
+                sq_size,
+                anim: None,
+                theme: self.settings.board_theme,
+                piece_set: self.settings.piece_set,
+                show_coords: self.settings.show_coords,
+                coord_position: self.settings.coord_position,
+                capture_anim_style: self.settings.capture_anim_style,
+                overlay_arrows: &gs.overlay_arrows,
+                user_arrows: &gs.arrows,
+                arrow_appearance: arrows::ArrowAppearance {
+                    shape: self.settings.arrow_shape,
+                    color: self.settings.arrow_color,
+                    size: self.settings.arrow_size,
+                },
+                display_board: self.review_board.as_ref(),
+                show_legal_moves: false,
+                show_last_move: self.settings.show_last_move,
+            },
+        );
+
+        let result_panel = container(
+            column![
+                text(played.title()).size(16).color(palette.text_primary),
+                text(format!(
+                    "White {} · Black {} · {}",
+                    played.white,
+                    played.black,
+                    played.result_label()
+                ))
+                .size(13)
+                .color(palette.text_secondary),
+                text(format!("{} plies", played.moves.len()))
+                    .size(12)
+                    .color(palette.text_secondary),
+                text(&self.engine_info)
+                    .size(12)
+                    .color(palette.accent_alt),
+            ]
+            .spacing(4),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(palette.sidebar)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: palette.border,
+            },
+            ..Default::default()
+        });
+
+        let moves_content: Element<'_, Msg> = if self.move_log.is_empty() {
+            text("No moves recorded.")
+                .size(12)
+                .color(palette.text_secondary)
+                .into()
+        } else {
+            let mut moves_col = column![].spacing(2).padding([2, 4]);
+            for (i, pair) in self.move_log.chunks(2).enumerate() {
+                let white_index = i * 2;
+                let white_move = move_history_button(
+                    annotated_move_label(
+                        &pair[0],
+                        self.move_annotations.get(white_index).copied().flatten(),
+                    ),
+                    white_index + 1,
+                    self.review_ply == Some(white_index + 1),
+                    palette,
+                );
+                let black_move = if let Some(black) = pair.get(1) {
+                    move_history_button(
+                        annotated_move_label(
+                            black,
+                            self.move_annotations
+                                .get(white_index + 1)
+                                .copied()
+                                .flatten(),
+                        ),
+                        white_index + 2,
+                        self.review_ply == Some(white_index + 2),
+                        palette,
+                    )
+                } else {
+                    container(text("…").size(12).color(palette.text_secondary))
+                        .width(72)
+                        .into()
+                };
+                moves_col = moves_col.push(
+                    row![
+                        text(format!("{}.", i + 1))
+                            .size(11)
+                            .color(palette.text_secondary)
+                            .width(28),
+                        white_move,
+                        black_move
+                    ]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+                );
+            }
+            scrollable(moves_col).height(Length::Fixed(180.0)).into()
+        };
+
+        let mut side = column![
+            result_panel,
+            text("Move list").size(12).color(palette.text_secondary),
+            container(moves_content)
+                .padding(6)
+                .width(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(iced::Background::Color(palette.sidebar)),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: palette.border,
+                    },
+                    ..Default::default()
+                }),
+        ]
+        .spacing(8)
+        .width(Length::FillPortion(2));
+
+        if self.analysis_scores_cp.iter().any(Option::is_some) {
+            side = side
+                .push(text("Eval histogram").size(12).color(palette.text_secondary))
+                .push(
+                    container(eval_graph::view(&self.analysis_scores_cp, 96.0))
+                        .padding(6)
+                        .width(Length::Fill)
+                        .style(move |_theme| container::Style {
+                            background: Some(iced::Background::Color(palette.sidebar)),
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                width: 1.0,
+                                color: palette.border,
+                            },
+                            ..Default::default()
+                        }),
+                );
+        } else if !self.move_log.is_empty() {
+            side = side.push(
+                text("Eval graph fills in after automatic game analysis.")
+                    .size(11)
+                    .color(palette.text_secondary),
+            );
+        }
+
+        side = side.push(
+            row![
+                styled_button("Analyze game", Msg::AnalyzeGame),
+                styled_button("Open in Analysis", Msg::OpenAnalysis),
+            ]
+            .spacing(8),
+        );
+        if self.review_ply.is_some() {
+            side = side.push(styled_button(
+                "Return to final position",
+                Msg::ReturnToLivePosition,
+            ));
+        }
+
+        row![
+            container(board).width(Length::FillPortion(3)),
+            side,
+        ]
+        .spacing(14)
+        .width(Length::Fill)
+        .into()
+    }
+
     fn view_tournament_hub(&self) -> Element<'_, Msg> {
         let palette = self.settings.board_theme.gui_palette();
         let live = &self.live_tournament_view;
@@ -4305,33 +4594,46 @@ impl App {
         }
 
         let mut match_col =
-            column![text("Pairings").size(14).color(palette.text_primary)].spacing(4);
-        if live.finished_matches.is_empty() {
+            column![text("Games").size(14).color(palette.text_primary)].spacing(4);
+        if !live.finished_matches.is_empty() {
+            match_col = match_col.push(
+                text("Pairing scores")
+                    .size(12)
+                    .color(palette.text_secondary),
+            );
+            for row in live.finished_matches.iter().rev().take(8) {
+                match_col = match_col.push(
+                    text(row.label())
+                        .size(11)
+                        .color(palette.text_secondary),
+                );
+            }
+            match_col = match_col.push(Space::new().height(6)).push(
+                text("Open a game board")
+                    .size(12)
+                    .color(palette.text_secondary),
+            );
+        }
+        if live.played_games.is_empty() {
             match_col = match_col.push(
                 text(if running {
-                    "Waiting for the first completed pairing…"
+                    "Waiting for the first completed game…"
                 } else {
-                    "No pairings yet. Start a tournament to populate results."
+                    "No games yet. Start a tournament to populate boards and results."
                 })
                 .size(12)
                 .color(palette.text_secondary),
             );
         } else {
-            for game in live.finished_matches.iter().rev().take(12) {
-                let score = tournament_live::score_label(game.white_points, game.black_points);
-                let detail = game
-                    .error
-                    .as_deref()
-                    .map(|error| format!(" · {error}"))
-                    .unwrap_or_default();
-                match_col = match_col.push(
-                    text(format!(
-                        "R{} · {} {} {}{detail}",
-                        game.round, game.white, score, game.black
-                    ))
-                    .size(12)
-                    .color(palette.text_primary),
-                );
+            for game in live.played_games.iter().rev().take(24) {
+                let selected = self.selected_tournament_game_id == Some(game.id);
+                match_col = match_col.push(tournament_game_button(
+                    game.title(),
+                    format!("Match {} · {} plies", game.match_index, game.moves.len()),
+                    game.id,
+                    selected,
+                    palette,
+                ));
             }
         }
 
@@ -4340,6 +4642,8 @@ impl App {
             "Live Board & Results",
             column![
                 live_rows,
+                Space::new().height(8),
+                self.view_tournament_game_board(),
                 Space::new().height(8),
                 row![
                     container(scrollable(standings_col).height(Length::Fixed(220.0)))
@@ -4510,7 +4814,7 @@ impl App {
             text("Engine Tournaments")
                 .size(30)
                 .color(palette.text_primary),
-            text("Watch pairings live, cancel safely between moves, and reopen final standings.")
+            text("Watch games on the board as they finish, cancel safely between moves, and reopen standings.")
                 .size(14)
                 .color(palette.text_secondary),
             row![roster, controls].spacing(16).width(Length::Fill),
@@ -5895,6 +6199,7 @@ async fn run_quick_tournament(
                             error,
                             standings,
                             game_results,
+                            games,
                         } => {
                             guard.completed_matches = index;
                             guard.total_matches = total.max(guard.total_matches);
@@ -5912,6 +6217,7 @@ async fn run_quick_tournament(
                             guard.standings =
                                 tournament_live::standing_rows(&guard.engine_names, &standings);
                             guard.game_results = game_results;
+                            guard.append_games(games);
                             guard.current_white.clear();
                             guard.current_black.clear();
                             guard.status_line = if let Some(error) = error {
@@ -5981,6 +6287,11 @@ async fn run_quick_tournament(
                 guard.engine_names = names.clone();
                 guard.standings = tournament_live::standing_rows(&names, &summary.standings);
                 guard.game_results = summary.game_results.clone();
+                let games = mujrim_benchmarker::strength::games_from_summary(&summary);
+                if guard.played_games.len() < games.len() {
+                    guard.played_games.clear();
+                    guard.append_games(games);
+                }
             }
             summary
         });
@@ -6182,6 +6493,45 @@ fn tournament_history_button<'a>(
             Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.28)
         } else if matches!(button_status, button::Status::Hovered) {
             Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.14)
+        } else {
+            Color::TRANSPARENT
+        };
+        button::Style {
+            background: Some(iced::Background::Color(background)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            text_color: pal.text_primary,
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+fn tournament_game_button<'a>(
+    title: String,
+    detail: String,
+    id: usize,
+    selected: bool,
+    pal: board_view::GuiPalette,
+) -> Element<'a, Msg> {
+    button(
+        column![
+            text(title).size(12).color(pal.text_primary),
+            text(detail).size(11).color(pal.text_secondary),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+    )
+    .on_press(Msg::SelectTournamentGame(id))
+    .padding(7)
+    .width(Length::Fill)
+    .style(move |_theme, button_status| {
+        let background = if selected {
+            Color::from_rgba(pal.accent_alt.r, pal.accent_alt.g, pal.accent_alt.b, 0.30)
+        } else if matches!(button_status, button::Status::Hovered) {
+            Color::from_rgba(pal.accent_alt.r, pal.accent_alt.g, pal.accent_alt.b, 0.14)
         } else {
             Color::TRANSPARENT
         };

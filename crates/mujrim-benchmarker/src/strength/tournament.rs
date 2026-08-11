@@ -88,6 +88,18 @@ impl TournamentSummary {
     }
 }
 
+/// One concrete game from a finished tournament pairing (UCI move list for board replay).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TournamentGameSnapshot {
+    pub match_index: usize,
+    pub round: usize,
+    pub white: String,
+    pub black: String,
+    pub white_score: f64,
+    pub initial_fen: String,
+    pub moves: Vec<String>,
+}
+
 /// Live progress events emitted while a tournament is running.
 #[derive(Clone, Debug)]
 pub enum TournamentEvent {
@@ -113,11 +125,72 @@ pub enum TournamentEvent {
         error: Option<String>,
         standings: Vec<Standing>,
         game_results: Vec<TournamentResult>,
+        games: Vec<TournamentGameSnapshot>,
     },
     Cancelled {
         standings: Vec<Standing>,
         game_results: Vec<TournamentResult>,
     },
+}
+
+/// Flatten every played game in a match for UI replay.
+pub fn games_from_match(
+    summary: &MatchSummary,
+    match_index: usize,
+    round: usize,
+) -> Vec<TournamentGameSnapshot> {
+    let fen = super::openings::START_FEN.to_owned();
+    let mut games = Vec::with_capacity(summary.pairs.len().saturating_mul(2));
+    for pair in &summary.pairs {
+        games.push(TournamentGameSnapshot {
+            match_index,
+            round,
+            white: summary.candidate.clone(),
+            black: summary.reference.clone(),
+            white_score: pair.candidate_white.outcome.score(),
+            initial_fen: fen.clone(),
+            moves: pair.candidate_white.moves.clone(),
+        });
+        games.push(TournamentGameSnapshot {
+            match_index,
+            round,
+            white: summary.reference.clone(),
+            black: summary.candidate.clone(),
+            white_score: 1.0 - pair.candidate_black.outcome.score(),
+            initial_fen: fen.clone(),
+            moves: pair.candidate_black.moves.clone(),
+        });
+    }
+    games
+}
+
+/// Flatten every game across a finished tournament summary.
+pub fn games_from_summary(summary: &TournamentSummary) -> Vec<TournamentGameSnapshot> {
+    summary
+        .matches
+        .iter()
+        .enumerate()
+        .flat_map(|(index, match_summary)| {
+            let round = summary
+                .game_results
+                .iter()
+                .find(|result| {
+                    summary
+                        .engines
+                        .get(result.pairing.white)
+                        .map(|engine| engine.engine.name.as_str())
+                        == Some(match_summary.candidate.as_str())
+                        && summary
+                            .engines
+                            .get(result.pairing.black)
+                            .map(|engine| engine.engine.name.as_str())
+                            == Some(match_summary.reference.as_str())
+                })
+                .map(|result| result.pairing.round)
+                .unwrap_or(index + 1);
+            games_from_match(match_summary, index + 1, round)
+        })
+        .collect()
 }
 
 pub type TournamentProgress = Arc<dyn Fn(TournamentEvent) + Send + Sync>;
@@ -367,6 +440,7 @@ fn execute_plan(
             })
             .collect::<Vec<_>>();
         let current_standings = standings(&entrants, game_results);
+        let games = games_from_match(&summary, index, pairing.round);
         emit(TournamentEvent::MatchFinished {
             index,
             total: total.max(index),
@@ -378,6 +452,7 @@ fn execute_plan(
             error: match_error.clone(),
             standings: current_standings,
             game_results: game_results.clone(),
+            games,
         });
         matches.push(summary);
         if cancel.load(Ordering::Acquire) {
@@ -518,6 +593,64 @@ mod tests {
         assert_eq!(config.move_time, None);
         assert_eq!(config.nodes_per_move, 0);
         assert_eq!(config.max_depth, 10);
+    }
+
+    #[test]
+    fn games_from_match_emits_both_color_swapped_boards() {
+        use crate::strength::runner::{GameRecord, PairRecord, Termination};
+        use crate::strength::stats::{GameOutcome, PairCount, ScoreCount, SprtDecision};
+        use std::time::Duration;
+
+        let game = |moves: &[&str], outcome: GameOutcome, candidate_white: bool| GameRecord {
+            candidate_white,
+            outcome,
+            termination: Termination::MaxPlies,
+            plies: moves.len(),
+            nodes: 0,
+            elapsed: Duration::ZERO,
+            candidate_telemetry: Default::default(),
+            reference_telemetry: Default::default(),
+            moves: moves.iter().map(|uci| (*uci).to_owned()).collect(),
+        };
+        let summary = MatchSummary {
+            candidate: "Alpha".into(),
+            reference: "Beta".into(),
+            pairs: vec![PairRecord {
+                index: 0,
+                candidate_white: game(&["e2e4", "e7e5"], GameOutcome::Win, true),
+                candidate_black: game(&["d2d4", "d7d5"], GameOutcome::Draw, false),
+            }],
+            scores: ScoreCount {
+                wins: 1,
+                draws: 1,
+                losses: 0,
+            },
+            pair_counts: PairCount::default(),
+            elo_delta: 0.0,
+            elo_low: 0.0,
+            elo_high: 0.0,
+            llr: 0.0,
+            sprt_decision: SprtDecision::Continue,
+            total_nodes: 0,
+            elapsed: Duration::ZERO,
+            error: None,
+            reference_elo: None,
+            config: MatchConfig::default(),
+            opening_count: 1,
+            opening_fingerprint: "test".into(),
+            resumed_pairs: 0,
+        };
+        let games = games_from_match(&summary, 3, 2);
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].white, "Alpha");
+        assert_eq!(games[0].black, "Beta");
+        assert_eq!(games[0].white_score, 1.0);
+        assert_eq!(games[0].moves, vec!["e2e4".to_owned(), "e7e5".to_owned()]);
+        assert_eq!(games[1].white, "Beta");
+        assert_eq!(games[1].black, "Alpha");
+        assert_eq!(games[1].white_score, 0.5);
+        assert_eq!(games[0].match_index, 3);
+        assert_eq!(games[0].round, 2);
     }
 
     #[test]

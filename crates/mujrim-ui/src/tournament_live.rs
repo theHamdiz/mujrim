@@ -3,11 +3,11 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use mujrim_benchmarker::strength::TournamentGameSnapshot;
 use mujrim_study::tournament::{Standing, TournamentFormat, TournamentResult};
 
 #[derive(Clone, Debug)]
 pub struct FinishedMatchRow {
-    #[allow(dead_code)]
     pub index: usize,
     pub round: usize,
     pub white: String,
@@ -15,6 +15,21 @@ pub struct FinishedMatchRow {
     pub white_points: f64,
     pub black_points: f64,
     pub error: Option<String>,
+}
+
+impl FinishedMatchRow {
+    pub fn label(&self) -> String {
+        let score = score_label(self.white_points, self.black_points);
+        let detail = self
+            .error
+            .as_deref()
+            .map(|error| format!(" · {error}"))
+            .unwrap_or_default();
+        format!(
+            "#{}/R{} · {} {} {}{detail}",
+            self.index, self.round, self.white, score, self.black
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +45,48 @@ pub struct StandingRow {
     pub performance: Option<f64>,
 }
 
+/// Replayable tournament game for the hub board viewer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayedGame {
+    pub id: usize,
+    pub match_index: usize,
+    pub round: usize,
+    pub white: String,
+    pub black: String,
+    pub white_score: f64,
+    pub initial_fen: String,
+    pub moves: Vec<String>,
+}
+
+impl PlayedGame {
+    pub fn from_snapshot(id: usize, snapshot: TournamentGameSnapshot) -> Self {
+        Self {
+            id,
+            match_index: snapshot.match_index,
+            round: snapshot.round,
+            white: snapshot.white,
+            black: snapshot.black,
+            white_score: snapshot.white_score,
+            initial_fen: snapshot.initial_fen,
+            moves: snapshot.moves,
+        }
+    }
+
+    pub fn result_label(&self) -> &'static str {
+        result_label(self.white_score)
+    }
+
+    pub fn title(&self) -> String {
+        format!(
+            "R{} · {} {} {}",
+            self.round,
+            self.white,
+            self.result_label(),
+            self.black
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LiveTournamentSnapshot {
     pub running: bool,
@@ -43,6 +100,7 @@ pub struct LiveTournamentSnapshot {
     pub finished_matches: Vec<FinishedMatchRow>,
     pub standings: Vec<StandingRow>,
     pub game_results: Vec<TournamentResult>,
+    pub played_games: Vec<PlayedGame>,
     pub cancelled: bool,
     pub finished: bool,
     pub status_line: String,
@@ -70,6 +128,21 @@ impl LiveTournamentSnapshot {
         } else {
             "Waiting for first pairing…".to_owned()
         }
+    }
+
+    pub fn append_games(&mut self, games: Vec<TournamentGameSnapshot>) {
+        for game in games {
+            let id = self.played_games.len();
+            self.played_games.push(PlayedGame::from_snapshot(id, game));
+        }
+    }
+
+    pub fn game(&self, id: usize) -> Option<&PlayedGame> {
+        self.played_games.get(id)
+    }
+
+    pub fn latest_game_id(&self) -> Option<usize> {
+        self.played_games.last().map(|game| game.id)
     }
 }
 
@@ -146,6 +219,7 @@ pub fn result_label(white_score: f64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mujrim_benchmarker::strength::TournamentGameSnapshot;
     use mujrim_study::tournament::{Entrant, Pairing, standings};
 
     #[test]
@@ -201,5 +275,37 @@ mod tests {
                 .status_line
                 .contains("Cancel requested")
         );
+    }
+
+    #[test]
+    fn append_games_assigns_stable_ids_and_titles() {
+        let mut snap = LiveTournamentSnapshot::default();
+        snap.append_games(vec![
+            TournamentGameSnapshot {
+                match_index: 1,
+                round: 1,
+                white: "Alpha".into(),
+                black: "Beta".into(),
+                white_score: 1.0,
+                initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+                moves: vec!["e2e4".into(), "e7e5".into()],
+            },
+            TournamentGameSnapshot {
+                match_index: 1,
+                round: 1,
+                white: "Beta".into(),
+                black: "Alpha".into(),
+                white_score: 0.5,
+                initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+                moves: vec!["d2d4".into()],
+            },
+        ]);
+        assert_eq!(snap.played_games.len(), 2);
+        assert_eq!(snap.played_games[0].id, 0);
+        assert_eq!(snap.played_games[1].id, 1);
+        assert_eq!(snap.latest_game_id(), Some(1));
+        assert_eq!(snap.game(0).unwrap().result_label(), "1-0");
+        assert!(snap.game(0).unwrap().title().contains("Alpha"));
+        assert_eq!(snap.game(0).unwrap().moves.len(), 2);
     }
 }
