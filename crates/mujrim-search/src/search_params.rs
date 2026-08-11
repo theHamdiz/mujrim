@@ -298,9 +298,7 @@ impl SearchParams {
         params.se_depth_min = 6;
         params.ldse_depth_max = 7;
         params.ldse_margin = 25;
-        // Native-v60 starts near 16–23; 10 was locking onto quiet king moves
-        // (BK#1 f2f3/f2e3) before the d4d5 breakthrough could fail-high.
-        params.aspiration_window = 16;
+        params.aspiration_window = 10;
         params
     }
 
@@ -577,7 +575,7 @@ mod tests {
         assert_eq!(p.se_depth_min, 6);
         assert_eq!(p.ldse_depth_max, 7);
         assert_eq!(p.ldse_margin, 25);
-        assert_eq!(p.aspiration_window, 16);
+        assert_eq!(p.aspiration_window, 10);
     }
 
     #[test]
@@ -587,7 +585,7 @@ mod tests {
         let reckless = SearchParams::for_preset("reckless");
         assert_eq!(akimbo.nmp_base, 5);
         assert_eq!(sf.nmp_base, 7);
-        assert_eq!(reckless.aspiration_window, 16);
+        assert_eq!(reckless.aspiration_window, 10);
 
         // Unknown preset falls back to akimbo
         let unknown = SearchParams::for_preset("unknown");
