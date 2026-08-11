@@ -126,7 +126,7 @@ pub struct UciHandler {
     /// Contempt value (positive = avoid draws)
     contempt: i32,
     /// Active runtime NNUE source (embedded by default).
-    eval_network: Arc<dyn NnueNetworkSource + Send + Sync>,
+    eval_network: Arc<ActiveNetwork>,
     /// Eval preset: "auto", "akimbo", "stockfish", or "reckless".
     eval_preset: String,
     /// Optional single-component search-policy overlay for controlled matches.
@@ -233,7 +233,7 @@ impl UciHandler {
         #[cfg(not(feature = "book"))]
         let has_book = false;
 
-        let eval_network: Arc<dyn NnueNetworkSource + Send + Sync> =
+        let eval_network: Arc<ActiveNetwork> =
             Arc::new(eval::nnue::default_embedded_network());
 
         let preset = eval_network.search_profile().as_str();

@@ -131,6 +131,31 @@ pub(crate) fn apply_i16_rows(
     (kernels().apply_i16)(accumulator, weights, adds, subs);
 }
 
+/// Copy `src` into `dst` while applying feature-transformer row deltas in one pass.
+#[inline]
+pub(crate) fn apply_i16_rows_from(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: NEON is enabled for this compilation target.
+        unsafe { neon::apply_i16_rows_from(dst, src, weights, adds, subs) }
+        return;
+    }
+    #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: AVX2 is enabled for this compilation target.
+        unsafe { avx2::apply_i16_rows_from(dst, src, weights, adds, subs) }
+        return;
+    }
+    #[allow(unreachable_code)]
+    scalar::apply_i16_rows_from(dst, src, weights, adds, subs);
+}
+
 #[inline]
 pub(crate) fn apply_i8_rows(
     accumulator: &mut [i16; HIDDEN_SIZE],
@@ -152,6 +177,31 @@ pub(crate) fn apply_i8_rows(
     }
     #[allow(unreachable_code)]
     (kernels().apply_i8)(accumulator, weights, adds, subs);
+}
+
+/// Copy `src` into `dst` while applying signed i8 feature rows in one pass.
+#[inline]
+pub(crate) fn apply_i8_rows_from(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[u8],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: NEON is enabled for this compilation target.
+        unsafe { neon::apply_i8_rows_from(dst, src, weights, adds, subs) }
+        return;
+    }
+    #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: AVX2 is enabled for this compilation target.
+        unsafe { avx2::apply_i8_rows_from(dst, src, weights, adds, subs) }
+        return;
+    }
+    #[allow(unreachable_code)]
+    scalar::apply_i8_rows_from(dst, src, weights, adds, subs);
 }
 
 #[inline]
@@ -286,6 +336,33 @@ mod scalar {
         }
     }
 
+    pub(super) fn apply_i16_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        const CHUNK: usize = 16;
+        for start in (0..HIDDEN_SIZE).step_by(CHUNK) {
+            let mut values = [0i16; CHUNK];
+            values.copy_from_slice(&src[start..start + CHUNK]);
+            for &index in adds {
+                let row = index * HIDDEN_SIZE + start;
+                for lane in 0..CHUNK {
+                    values[lane] = values[lane].wrapping_add(weights[row + lane]);
+                }
+            }
+            for &index in subs {
+                let row = index * HIDDEN_SIZE + start;
+                for lane in 0..CHUNK {
+                    values[lane] = values[lane].wrapping_sub(weights[row + lane]);
+                }
+            }
+            dst[start..start + CHUNK].copy_from_slice(&values);
+        }
+    }
+
     pub(super) fn apply_i8_rows(
         accumulator: &mut [i16; HIDDEN_SIZE],
         weights: &[u8],
@@ -309,6 +386,33 @@ mod scalar {
                 }
             }
             accumulator[start..start + CHUNK].copy_from_slice(&values);
+        }
+    }
+
+    pub(super) fn apply_i8_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[u8],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        const CHUNK: usize = 16;
+        for start in (0..HIDDEN_SIZE).step_by(CHUNK) {
+            let mut values = [0i16; CHUNK];
+            values.copy_from_slice(&src[start..start + CHUNK]);
+            for &index in adds {
+                let row = index * HIDDEN_SIZE + start;
+                for lane in 0..CHUNK {
+                    values[lane] = values[lane].wrapping_add(weights[row + lane] as i8 as i16);
+                }
+            }
+            for &index in subs {
+                let row = index * HIDDEN_SIZE + start;
+                for lane in 0..CHUNK {
+                    values[lane] = values[lane].wrapping_sub(weights[row + lane] as i8 as i16);
+                }
+            }
+            dst[start..start + CHUNK].copy_from_slice(&values);
         }
     }
 
@@ -438,6 +542,62 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn apply_i16_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 8;
+            const BLOCK: usize = REGISTERS * 16;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [_mm256_setzero_si256(); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm256_loadu_si256(src.as_ptr().add(index + register * 16).cast());
+                }
+
+                let paired = adds.len().min(subs.len());
+                for pair in 0..paired {
+                    let add = weights.as_ptr().add(adds[pair] * HIDDEN_SIZE + index);
+                    let sub = weights.as_ptr().add(subs[pair] * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = _mm256_add_epi16(
+                            *value,
+                            _mm256_sub_epi16(
+                                _mm256_loadu_si256(add.add(register * 16).cast()),
+                                _mm256_loadu_si256(sub.add(register * 16).cast()),
+                            ),
+                        );
+                    }
+                }
+                for &row in &adds[paired..] {
+                    let add = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = _mm256_add_epi16(
+                            *value,
+                            _mm256_loadu_si256(add.add(register * 16).cast()),
+                        );
+                    }
+                }
+                for &row in &subs[paired..] {
+                    let sub = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = _mm256_sub_epi16(
+                            *value,
+                            _mm256_loadu_si256(sub.add(register * 16).cast()),
+                        );
+                    }
+                }
+                for (register, value) in values.iter().enumerate() {
+                    _mm256_storeu_si256(dst.as_mut_ptr().add(index + register * 16).cast(), *value);
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
     pub(super) unsafe fn apply_i8_rows(
         accumulator: &mut [i16; HIDDEN_SIZE],
         weights: &[u8],
@@ -484,6 +644,55 @@ mod avx2 {
                         accumulator.as_mut_ptr().add(index + register * 16).cast(),
                         *value,
                     );
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn apply_i8_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[u8],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 8;
+            const BLOCK: usize = REGISTERS * 16;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [_mm256_setzero_si256(); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm256_loadu_si256(src.as_ptr().add(index + register * 16).cast());
+                }
+
+                let paired = adds.len().min(subs.len());
+                for pair in 0..paired {
+                    let add = weights.as_ptr().add(adds[pair] * HIDDEN_SIZE + index);
+                    let sub = weights.as_ptr().add(subs[pair] * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        let offset = register * 16;
+                        let add = _mm256_cvtepi8_epi16(_mm_loadu_si128(add.add(offset).cast()));
+                        let sub = _mm256_cvtepi8_epi16(_mm_loadu_si128(sub.add(offset).cast()));
+                        *value = _mm256_add_epi16(*value, _mm256_sub_epi16(add, sub));
+                    }
+                }
+                for &row in &adds[paired..] {
+                    let add = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        let bytes = _mm_loadu_si128(add.add(register * 16).cast());
+                        *value = _mm256_add_epi16(*value, _mm256_cvtepi8_epi16(bytes));
+                    }
+                }
+                for &row in &subs[paired..] {
+                    let sub = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        let bytes = _mm_loadu_si128(sub.add(register * 16).cast());
+                        *value = _mm256_sub_epi16(*value, _mm256_cvtepi8_epi16(bytes));
+                    }
+                }
+                for (register, value) in values.iter().enumerate() {
+                    _mm256_storeu_si256(dst.as_mut_ptr().add(index + register * 16).cast(), *value);
                 }
             }
         }
@@ -812,6 +1021,55 @@ mod neon {
         }
     }
 
+    pub(super) unsafe fn apply_i16_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 16;
+            const BLOCK: usize = REGISTERS * 8;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [vdupq_n_s16(0); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = vld1q_s16(src.as_ptr().add(index + register * 8));
+                }
+
+                let paired = adds.len().min(subs.len());
+                for pair in 0..paired {
+                    let add = weights.as_ptr().add(adds[pair] * HIDDEN_SIZE + index);
+                    let sub = weights.as_ptr().add(subs[pair] * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = vaddq_s16(
+                            *value,
+                            vsubq_s16(
+                                vld1q_s16(add.add(register * 8)),
+                                vld1q_s16(sub.add(register * 8)),
+                            ),
+                        );
+                    }
+                }
+                for &row in &adds[paired..] {
+                    let add = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = vaddq_s16(*value, vld1q_s16(add.add(register * 8)));
+                    }
+                }
+                for &row in &subs[paired..] {
+                    let sub = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = vsubq_s16(*value, vld1q_s16(sub.add(register * 8)));
+                    }
+                }
+                for (register, value) in values.iter().enumerate() {
+                    vst1q_s16(dst.as_mut_ptr().add(index + register * 8), *value);
+                }
+            }
+        }
+    }
+
     pub(super) unsafe fn apply_i8_rows(
         accumulator: &mut [i16; HIDDEN_SIZE],
         weights: &[u8],
@@ -852,6 +1110,52 @@ mod neon {
                 }
                 for (register, value) in values.iter().enumerate() {
                     vst1q_s16(accumulator.as_mut_ptr().add(index + register * 8), *value);
+                }
+            }
+        }
+    }
+
+    pub(super) unsafe fn apply_i8_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[u8],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 16;
+            const BLOCK: usize = REGISTERS * 8;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [vdupq_n_s16(0); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = vld1q_s16(src.as_ptr().add(index + register * 8));
+                }
+
+                let paired = adds.len().min(subs.len());
+                for pair in 0..paired {
+                    let add = weights.as_ptr().add(adds[pair] * HIDDEN_SIZE + index);
+                    let sub = weights.as_ptr().add(subs[pair] * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        let offset = register * 8;
+                        let add = vmovl_s8(vld1_s8(add.add(offset).cast()));
+                        let sub = vmovl_s8(vld1_s8(sub.add(offset).cast()));
+                        *value = vaddq_s16(*value, vsubq_s16(add, sub));
+                    }
+                }
+                for &row in &adds[paired..] {
+                    let add = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = vaddq_s16(*value, vmovl_s8(vld1_s8(add.add(register * 8).cast())));
+                    }
+                }
+                for &row in &subs[paired..] {
+                    let sub = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                    for (register, value) in values.iter_mut().enumerate() {
+                        *value = vsubq_s16(*value, vmovl_s8(vld1_s8(sub.add(register * 8).cast())));
+                    }
+                }
+                for (register, value) in values.iter().enumerate() {
+                    vst1q_s16(dst.as_mut_ptr().add(index + register * 8), *value);
                 }
             }
         }
@@ -1136,6 +1440,38 @@ mod tests {
         let mut actual = expected;
         scalar::apply_i16_rows(&mut expected, &weights, &[2, 7], &[4]);
         apply_i16_rows(&mut actual, &weights, &[2, 7], &[4]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn i16_rows_from_matches_copy_then_apply() {
+        let weights = (0..HIDDEN_SIZE * 8)
+            .map(|index| (index as i16).wrapping_mul(41))
+            .collect::<Vec<_>>();
+        let mut src = [0i16; HIDDEN_SIZE];
+        for (index, value) in src.iter_mut().enumerate() {
+            *value = (index as i16).wrapping_mul(3);
+        }
+        let mut expected = src;
+        apply_i16_rows(&mut expected, &weights, &[1, 5], &[3]);
+        let mut actual = [0i16; HIDDEN_SIZE];
+        apply_i16_rows_from(&mut actual, &src, &weights, &[1, 5], &[3]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn i8_rows_from_matches_copy_then_apply() {
+        let weights = (0..HIDDEN_SIZE * 8)
+            .map(|index| ((index * 17) % 200) as u8)
+            .collect::<Vec<_>>();
+        let mut src = [0i16; HIDDEN_SIZE];
+        for (index, value) in src.iter_mut().enumerate() {
+            *value = (index as i16).wrapping_mul(5) - 40;
+        }
+        let mut expected = src;
+        apply_i8_rows(&mut expected, &weights, &[0, 4], &[2]);
+        let mut actual = [0i16; HIDDEN_SIZE];
+        apply_i8_rows_from(&mut actual, &src, &weights, &[0, 4], &[2]);
         assert_eq!(actual, expected);
     }
 

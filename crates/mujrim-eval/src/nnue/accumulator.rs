@@ -10,9 +10,7 @@
 //! board state. With typical moves changing 2-4 piece bitboard entries,
 //! this is ~10x faster than full recompute.
 
-#[cfg(test)]
-use super::adapter::ActiveNetwork;
-use super::adapter::{NnueNetworkInfo, NnueNetworkParameters, NnueNetworkSource};
+use super::adapter::{ActiveNetwork, NnueNetworkInfo, NnueNetworkParameters, NnueNetworkSource};
 use super::network::{
     self as nn, Accumulator, NUM_BUCKETS, Network, forward_with_network, get_base_index, get_bucket,
 };
@@ -77,7 +75,7 @@ impl Default for EvalTable {
 /// NNUE state for use in the search.
 pub struct NNUEState {
     table: Option<EvalTable>,
-    source: Arc<dyn NnueNetworkSource + Send + Sync>,
+    source: Arc<ActiveNetwork>,
     #[cfg(feature = "reckless-nnue")]
     reckless: Option<super::reckless_format::RecklessAccumulatorState>,
     #[cfg(feature = "stockfish-nnue")]
@@ -95,7 +93,7 @@ impl NNUEState {
         Self::with_network(Arc::new(super::adapter::default_embedded_network()))
     }
 
-    pub fn with_network(source: Arc<dyn NnueNetworkSource + Send + Sync>) -> Self {
+    pub fn with_network(source: Arc<ActiveNetwork>) -> Self {
         let parameters = source.parameters();
         let table = match &parameters {
             NnueNetworkParameters::Akimbo(_) => Some(EvalTable::default()),
@@ -223,30 +221,46 @@ impl NNUEState {
 
     /// Evaluate the position using NNUE with incremental accumulator updates.
     pub fn evaluate(&mut self, board: &Board) -> i32 {
-        let parameters = self.source.parameters();
-        #[cfg(feature = "stockfish-nnue")]
-        if let NnueNetworkParameters::Stockfish(network) = &parameters {
-            return self
-                .stockfish
-                .as_mut()
-                .expect("Stockfish source has matching accumulator state")
-                .evaluate(board, network);
-        }
-        #[cfg(feature = "reckless-nnue")]
-        if let NnueNetworkParameters::Reckless(network) = &parameters {
-            return self
-                .reckless
-                .as_mut()
-                .expect("Reckless source has matching accumulator state")
-                .evaluate(board, network);
+        match self.source.as_ref() {
+            #[cfg(feature = "reckless-nnue")]
+            ActiveNetwork::EmbeddedReckless => {
+                return self
+                    .reckless
+                    .as_mut()
+                    .expect("Reckless source has matching accumulator state")
+                    .evaluate(board, super::reckless_format::embedded());
+            }
+            #[cfg(feature = "reckless-nnue")]
+            ActiveNetwork::ExternalReckless { network, .. } => {
+                return self
+                    .reckless
+                    .as_mut()
+                    .expect("Reckless source has matching accumulator state")
+                    .evaluate(board, network);
+            }
+            #[cfg(feature = "stockfish-nnue")]
+            ActiveNetwork::EmbeddedStockfish => {
+                return self
+                    .stockfish
+                    .as_mut()
+                    .expect("Stockfish source has matching accumulator state")
+                    .evaluate(board, super::stockfish_format::embedded());
+            }
+            #[cfg(feature = "stockfish-nnue")]
+            ActiveNetwork::ExternalStockfish { network, .. } => {
+                return self
+                    .stockfish
+                    .as_mut()
+                    .expect("Stockfish source has matching accumulator state")
+                    .evaluate(board, network);
+            }
+            ActiveNetwork::Embedded => {}
+            ActiveNetwork::ExternalAkimbo { .. } => {}
         }
 
-        #[cfg(any(feature = "reckless-nnue", feature = "stockfish-nnue"))]
-        let NnueNetworkParameters::Akimbo(net) = parameters else {
-            unreachable!("all enabled NNUE backends are handled")
+        let NnueNetworkParameters::Akimbo(net) = self.source.parameters() else {
+            unreachable!("non-Akimbo backends are handled above")
         };
-        #[cfg(not(any(feature = "reckless-nnue", feature = "stockfish-nnue")))]
-        let NnueNetworkParameters::Akimbo(net) = parameters;
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();
 
@@ -411,34 +425,53 @@ impl NNUEState {
 
     /// Fully recompute the accumulators from a board position.
     pub fn reinit_from(&mut self, board: &Board) {
-        let parameters = self.source.parameters();
-        #[cfg(feature = "stockfish-nnue")]
-        if let NnueNetworkParameters::Stockfish(network) = &parameters {
-            let state = self
-                .stockfish
-                .as_mut()
-                .expect("Stockfish source has matching accumulator state");
-            state.clear();
-            let _ = state.evaluate(board, network);
-            return;
-        }
-        #[cfg(feature = "reckless-nnue")]
-        if let NnueNetworkParameters::Reckless(network) = &parameters {
-            let state = self
-                .reckless
-                .as_mut()
-                .expect("Reckless source has matching accumulator state");
-            state.clear();
-            let _ = state.evaluate(board, network);
-            return;
+        match self.source.as_ref() {
+            #[cfg(feature = "stockfish-nnue")]
+            ActiveNetwork::EmbeddedStockfish => {
+                let state = self
+                    .stockfish
+                    .as_mut()
+                    .expect("Stockfish source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, super::stockfish_format::embedded());
+                return;
+            }
+            #[cfg(feature = "stockfish-nnue")]
+            ActiveNetwork::ExternalStockfish { network, .. } => {
+                let state = self
+                    .stockfish
+                    .as_mut()
+                    .expect("Stockfish source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, network);
+                return;
+            }
+            #[cfg(feature = "reckless-nnue")]
+            ActiveNetwork::EmbeddedReckless => {
+                let state = self
+                    .reckless
+                    .as_mut()
+                    .expect("Reckless source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, super::reckless_format::embedded());
+                return;
+            }
+            #[cfg(feature = "reckless-nnue")]
+            ActiveNetwork::ExternalReckless { network, .. } => {
+                let state = self
+                    .reckless
+                    .as_mut()
+                    .expect("Reckless source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, network);
+                return;
+            }
+            ActiveNetwork::Embedded | ActiveNetwork::ExternalAkimbo { .. } => {}
         }
 
-        #[cfg(any(feature = "reckless-nnue", feature = "stockfish-nnue"))]
-        let NnueNetworkParameters::Akimbo(net) = parameters else {
-            unreachable!("all enabled NNUE backends are handled")
+        let NnueNetworkParameters::Akimbo(net) = self.source.parameters() else {
+            unreachable!("non-Akimbo backends are handled above")
         };
-        #[cfg(not(any(feature = "reckless-nnue", feature = "stockfish-nnue")))]
-        let NnueNetworkParameters::Akimbo(net) = parameters;
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();
         let wb = get_bucket::<0>(w_king);
@@ -547,26 +580,6 @@ unsafe fn boxed_and_zeroed<T>() -> Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct CountingSource {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl NnueNetworkSource for CountingSource {
-        fn parameters(&self) -> NnueNetworkParameters<'_> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            NnueNetworkParameters::Akimbo(nn::net())
-        }
-
-        fn info(&self) -> NnueNetworkInfo {
-            ActiveNetwork::Embedded.info()
-        }
-
-        fn search_profile(&self) -> super::super::adapter::NnueSearchProfile {
-            super::super::adapter::NnueSearchProfile::Akimbo
-        }
-    }
 
     #[test]
     fn initialized_prefix_exposes_only_written_entries() {
@@ -609,19 +622,13 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "reckless-nnue")]
     #[test]
-    fn evaluation_reads_network_parameters_once() {
+    fn reckless_evaluate_uses_concrete_active_network() {
         types::init();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let source = Arc::new(CountingSource {
-            calls: Arc::clone(&calls),
-        });
-        let mut state = NNUEState::with_network(source);
-        let after_construction = calls.load(Ordering::Relaxed);
-
-        let _ = state.evaluate(&Board::new());
-
-        assert_eq!(calls.load(Ordering::Relaxed), after_construction + 1);
+        let mut state = NNUEState::with_network(Arc::new(ActiveNetwork::EmbeddedReckless));
+        let score = state.evaluate(&Board::new());
+        assert!(score.abs() < 500);
     }
 
     #[cfg(feature = "reckless-nnue")]

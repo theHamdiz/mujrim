@@ -88,7 +88,7 @@ pub fn run_with_network(
     }
 
     let network_name = network.info().name;
-    let source: std::sync::Arc<dyn NnueNetworkSource + Send + Sync> = std::sync::Arc::new(network);
+    let source: std::sync::Arc<ActiveNetwork> = std::sync::Arc::new(network);
     let mut hot_state = NNUEState::with_network(std::sync::Arc::clone(&source));
     let hot_board = Board::new();
     let mut checksum = warm_up(&mut hot_state, &hot_board, config.warmup);

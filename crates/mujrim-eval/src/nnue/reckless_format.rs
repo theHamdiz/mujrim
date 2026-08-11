@@ -628,9 +628,9 @@ impl RecklessAccumulatorState {
                     let (parents, children) = self.piece_stack.split_at_mut(child);
                     let parent = &parents[child - 1];
                     let frame = &mut children[0];
-                    frame.values[pov] = parent.values[pov];
-                    apply_piece_delta(
+                    apply_piece_delta_from(
                         &mut frame.values[pov],
+                        &parent.values[pov],
                         network.piece_weights(),
                         &self.threat_stack[child],
                         king_squares[pov],
@@ -709,7 +709,6 @@ impl RecklessAccumulatorState {
                     let (parents, children) = self.threat_stack.split_at_mut(child);
                     let parent = &parents[child - 1];
                     let frame = &mut children[0];
-                    frame.values[pov] = parent.values[pov];
                     self.add_scratch.clear();
                     self.sub_scratch.clear();
                     for &delta in &frame.deltas[..frame.delta_count] {
@@ -733,8 +732,9 @@ impl RecklessAccumulatorState {
                             self.sub_scratch.push(feature);
                         }
                     }
-                    apply_i8_rows(
+                    apply_i8_rows_from(
                         &mut frame.values[pov],
+                        &parent.values[pov],
                         network.threat_weights(),
                         &self.add_scratch,
                         &self.sub_scratch,
@@ -900,14 +900,16 @@ fn piece_update_source(
     None
 }
 
-fn apply_piece_delta(
-    accumulator: &mut [i16; HIDDEN_SIZE],
+fn apply_piece_delta_from(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
     weights: &[i16],
     frame: &ThreatFrame,
     king_square: usize,
     pov: usize,
 ) {
     let Some(mv) = frame.pending_move else {
+        *dst = *src;
         return;
     };
     let mover = frame.pending_mover;
@@ -971,7 +973,7 @@ fn apply_piece_delta(
         sub_count += 1;
     }
 
-    apply_i16_rows(accumulator, weights, &adds[..add_count], &subs[..sub_count]);
+    apply_i16_rows_from(dst, src, weights, &adds[..add_count], &subs[..sub_count]);
 }
 
 fn snapshot_pieces(board: &Board) -> [u64; 12] {
@@ -1104,6 +1106,16 @@ fn apply_i16_rows(
     super::reckless_simd::apply_i16_rows(accumulator, weights, adds, subs);
 }
 
+fn apply_i16_rows_from(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    super::reckless_simd::apply_i16_rows_from(dst, src, weights, adds, subs);
+}
+
 fn apply_i8_rows(
     accumulator: &mut [i16; HIDDEN_SIZE],
     weights: &[u8],
@@ -1111,6 +1123,16 @@ fn apply_i8_rows(
     subs: &[usize],
 ) {
     super::reckless_simd::apply_i8_rows(accumulator, weights, adds, subs);
+}
+
+fn apply_i8_rows_from(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[u8],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    super::reckless_simd::apply_i8_rows_from(dst, src, weights, adds, subs);
 }
 
 fn diff_sorted(old: &[usize], new: &[usize], adds: &mut Vec<usize>, subs: &mut Vec<usize>) {

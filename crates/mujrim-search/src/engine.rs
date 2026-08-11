@@ -780,7 +780,7 @@ struct ThreadState {
 }
 
 impl ThreadState {
-    fn new(nnue_network: Arc<dyn NnueNetworkSource + Send + Sync>) -> Self {
+    fn new(nnue_network: Arc<ActiveNetwork>) -> Self {
         let mut countermoves = boxed_zeroed::<[[Move; 64]; 64]>();
         for row in countermoves.iter_mut() {
             row.fill(NULL_MOVE);
@@ -996,7 +996,7 @@ pub struct SearchEngine {
     pub tt: Arc<TranspositionTable>,
     pub num_threads: usize,
     stopped: Arc<AtomicBool>,
-    nnue_network: Arc<dyn NnueNetworkSource + Send + Sync>,
+    nnue_network: Arc<ActiveNetwork>,
     /// Coherent evaluator-specific parameters and search policies.
     search_stack: SearchStack,
     use_nnue: bool,
@@ -1016,7 +1016,7 @@ impl SearchEngine {
     pub fn new(tt_size_mb: usize, num_threads: usize) -> Self {
         let embedded = default_embedded_network();
         let search_stack = SearchStack::for_network(embedded.search_profile());
-        let nnue_network: Arc<dyn NnueNetworkSource + Send + Sync> = Arc::new(embedded);
+        let nnue_network: Arc<ActiveNetwork> = Arc::new(embedded);
         let state = ThreadState::new(Arc::clone(&nnue_network));
         // NNUE is always available (embedded trained net)
         Self {
@@ -1052,7 +1052,7 @@ impl SearchEngine {
     }
 
     /// Set the active NNUE network source.
-    pub fn set_nnue_network_source(&mut self, network: Arc<dyn NnueNetworkSource + Send + Sync>) {
+    pub fn set_nnue_network_source(&mut self, network: Arc<ActiveNetwork>) {
         let profile = network.search_profile();
         self.state.nnue_state = NNUEState::with_network(Arc::clone(&network));
         self.nnue_network = network;
