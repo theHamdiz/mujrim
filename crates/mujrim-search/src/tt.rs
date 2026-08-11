@@ -249,7 +249,7 @@ fn unpack_entry(hash: u64, data: u64) -> TTEntry {
 }
 
 /// A bucket of atomic TT entries.
-#[repr(C)]
+#[repr(C, align(64))]
 struct Bucket {
     entries: [AtomicEntry; BUCKET_SIZE],
 }
@@ -468,6 +468,12 @@ mod tests {
     fn test_tt_miss() {
         let tt = TranspositionTable::new(1);
         assert!(tt.probe(99999).is_none());
+    }
+
+    #[test]
+    fn tt_bucket_is_cacheline_aligned() {
+        assert_eq!(std::mem::align_of::<Bucket>(), 64);
+        assert!(std::mem::size_of::<Bucket>().is_multiple_of(64));
     }
 
     #[test]
