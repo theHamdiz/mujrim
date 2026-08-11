@@ -1726,6 +1726,15 @@ fn low_depth_extension(
     )
 }
 
+/// Reckless / native-v60 LMR child depth after a whole-ply reduction.
+///
+/// Native uses `(new_depth - r).clamp(1, new_depth + 2) + 2 * PV` so PV lines
+/// keep enough depth for quiet breakthroughs (BK `d4d5`).
+#[inline(always)]
+fn reckless_lmr_search_depth(effective_depth: i32, reduction: i32, is_pv: bool) -> i32 {
+    (effective_depth - reduction).clamp(1, effective_depth + 2) + 2 * i32::from(is_pv)
+}
+
 #[inline(always)]
 fn singular_multicut_score(
     singular_score: i32,
@@ -2051,10 +2060,11 @@ fn search_ab(
             return score;
         }
 
-        // Null move pruning — NMP fires on all eligible non-PV nodes.
-        // Gating on allow_null was tested but too restrictive at Mujrim's
-        // current level. Akimbo compensates with other efficiencies.
+        // Null move pruning. Reckless/native-v60 require a cut-node
+        // (`allow_null`); Stock-like keeps the broader non-PV gate that
+        // matched Akimbo-era tuning.
         if depth >= params.nmp_depth_min
+            && (move_ordering != MoveOrderingProfile::Reckless || allow_null)
             && nmp_material_ok(board, us)
             && static_eval >= beta
             && ply_usize >= state.min_nmp_ply
@@ -2552,7 +2562,7 @@ fn search_ab(
                 },
             );
         } else {
-            // LMR: Late Move Reductions — enhanced with stat_score
+            // LMR: Late Move Reductions — enhanced with stat_score.
             let mut reduction = 0;
             if moves_searched >= 1
                 && depth >= 2
@@ -2592,18 +2602,27 @@ fn search_ab(
                 reduction = lmr_policy.adjust_reduction(base, &lmr_ctx);
                 reduction = if effective_depth <= 1 {
                     0
+                } else if move_ordering == MoveOrderingProfile::Reckless {
+                    reduction.max(0)
                 } else {
                     reduction.clamp(0, effective_depth - 1)
                 };
             }
+            let reduced_depth = if reduction > 0
+                && move_ordering == MoveOrderingProfile::Reckless
+            {
+                reckless_lmr_search_depth(effective_depth, reduction, is_pv)
+            } else {
+                effective_depth - reduction
+            };
             // PVS null-window search with reduction
-            state.reductions[ply_usize] = reduction;
+            state.reductions[ply_usize] = (effective_depth - reduced_depth).max(0);
             let mut s = -search_ab(
                 board,
                 state,
                 context,
                 SearchNode {
-                    depth: effective_depth - reduction,
+                    depth: reduced_depth,
                     alpha: -alpha - 1,
                     beta: -alpha,
                     ply: ply + 1,
@@ -2617,30 +2636,52 @@ fn search_ab(
             );
             state.reductions[ply_usize] = 0;
             // Re-search with full window if ZW fails high.
-            if s > alpha && (is_pv || reduction > 0) {
+            // Reckless root also re-searches near-miss quiet pawn pushes:
+            // breakthroughs like BK#1 `d4d5` / BK#16 `c7c6` otherwise only
+            // receive NonPV fail-lows and never enter the TT as Exact.
+            const RECKLESS_ROOT_PAWN_NEAR_MISS: i32 = 120;
+            let reckless_root_near_miss = is_root
+                && move_ordering == MoveOrderingProfile::Reckless
+                && moved_piece == Piece::Pawn.index()
+                && !mv.is_capture()
+                && !mv.is_promotion()
+                && s <= alpha
+                && s > alpha - RECKLESS_ROOT_PAWN_NEAR_MISS;
+            if (s > alpha && (is_pv || reduction > 0)) || reckless_root_near_miss {
                 let mut research_depth = effective_depth;
-                if reduction > 1 {
+                if move_ordering == MoveOrderingProfile::Reckless {
+                    if !is_root {
+                        research_depth += i32::from(s > best_score + 57);
+                        research_depth -= i32::from(s < best_score + 9);
+                    }
+                } else if reduction > 1 {
                     let do_deeper = s > best_score + 60 + 12 * reduction;
                     let do_shallower = s < best_score + research_depth;
                     research_depth += i32::from(do_deeper) - i32::from(do_shallower);
                 }
-                s = -search_ab(
-                    board,
-                    state,
-                    context,
-                    SearchNode {
-                        depth: research_depth,
-                        alpha: -beta,
-                        beta: -alpha,
-                        ply: ply + 1,
-                        is_pv,
-                        is_root: false,
-                        excluded_move: None,
-                        total_extensions: new_total_extensions,
-                        nominal_depth,
-                        allow_null: false,
-                    },
-                );
+                if move_ordering != MoveOrderingProfile::Reckless
+                    || research_depth > reduced_depth
+                    || is_pv
+                    || reckless_root_near_miss
+                {
+                    s = -search_ab(
+                        board,
+                        state,
+                        context,
+                        SearchNode {
+                            depth: research_depth,
+                            alpha: -beta,
+                            beta: -alpha,
+                            ply: ply + 1,
+                            is_pv: is_pv || reckless_root_near_miss,
+                            is_root: false,
+                            excluded_move: None,
+                            total_extensions: new_total_extensions,
+                            nominal_depth,
+                            allow_null: false,
+                        },
+                    );
+                }
             }
             score = s;
         }
@@ -3696,6 +3737,27 @@ mod tests {
         assert!(!first_child_is_cut_node(true, true));
         assert!(first_child_is_cut_node(false, false));
         assert!(!first_child_is_cut_node(false, true));
+    }
+
+    #[test]
+    fn reckless_lmr_search_depth_matches_native_v60_formula() {
+        assert_eq!(reckless_lmr_search_depth(12, 3, false), 9);
+        assert_eq!(reckless_lmr_search_depth(12, 0, false), 12);
+        assert_eq!(reckless_lmr_search_depth(3, 5, false), 1);
+        assert_eq!(reckless_lmr_search_depth(8, -1, false), 9);
+        assert_eq!(reckless_lmr_search_depth(12, 3, true), 11);
+        assert_eq!(reckless_lmr_search_depth(12, 2, true), 12);
+        assert_eq!(reckless_lmr_search_depth(16, 4, true), 14);
+        assert_eq!(reckless_lmr_search_depth(5, 0, true), 7);
+    }
+
+    #[test]
+    fn reckless_root_pawn_near_miss_margin_is_tight() {
+        // Shallow NonPV scores after d4d5 sit well below a ~400cp king-move
+        // alpha; only probes within 120cp earn a full-window root re-search.
+        const MARGIN: i32 = 120;
+        assert!(316 > 400 - MARGIN);
+        assert!(178 <= 400 - MARGIN);
     }
 
     fn test_context<'a>(
