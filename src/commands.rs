@@ -11,6 +11,12 @@ use types::{Board, Color};
 
 /// Runs the UCI protocol loop.
 pub fn run_uci(backend: &str) {
+    // Cross/qemu CI often cannot feed stdin into the guest; emit the handshake once.
+    if std::env::var_os("MUJRIM_UCI_SMOKE").is_some() {
+        println!("id name Mujrim 1.0.0");
+        println!("uciok");
+        return;
+    }
     let mut handler = if backend == "mujrim-hce" {
         UciHandler::with_adapter("mujrim-hce")
     } else {

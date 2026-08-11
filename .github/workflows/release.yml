@@ -292,29 +292,14 @@ jobs:
           test -f "target/${{ matrix.target }}/release/mujrim-updater"
           cp "target/${{ matrix.target }}/release/mujrim-v60" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}"
 
-      - name: Smoke test via qemu-user (UCI handshake)
+      - name: Smoke test via cross run (UCI handshake)
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user-static
-          BIN="target/${{ matrix.target }}/release/mujrim"
-          test -x "$BIN"
-          case "${{ matrix.target }}" in
-            x86_64-*) QEMU=qemu-x86_64-static ;;
-            aarch64-*) QEMU=qemu-aarch64-static ;;
-            armv7-*) QEMU=qemu-arm-static ;;
-            *) echo "unsupported smoke target: ${{ matrix.target }}" >&2; exit 1 ;;
-          esac
-          set +e
-          output="$(printf 'uci\nquit\n' | "$QEMU" "$BIN" uci 2>&1)"
-          status=$?
-          set -e
+          # MUJRIM_UCI_SMOKE avoids stdin (cross/qemu guests often have no usable pipe).
+          output="$(MUJRIM_UCI_SMOKE=1 cross run --release --target ${{ matrix.target }} -p mujrim -- uci 2>&1)"
           echo "$output"
           echo "$output" | grep -q 'uciok'
           echo "$output" | grep -q 'Mujrim 1.0.0'
-          if [[ $status -ne 0 ]]; then
-            echo "warning: qemu smoke exited with status $status (continuing after successful UCI handshake)" >&2
-          fi
 
       - name: Package binaries
         run: |

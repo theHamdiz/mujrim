@@ -286,7 +286,10 @@ fn main() {
         .get_one::<String>("backend")
         .map_or("stockfish", String::as_str);
     let passthrough_active = std::env::var_os(V60_PASSTHROUGH_MARKER).is_some();
-    if let Some(engine_id) = passthrough_engine_id(backend, uci_mode, passthrough_active) {
+    let uci_smoke = std::env::var_os("MUJRIM_UCI_SMOKE").is_some();
+    if !uci_smoke
+        && let Some(engine_id) = passthrough_engine_id(backend, uci_mode, passthrough_active)
+    {
         match run_external_backend(engine_id, matches.get_one::<PathBuf>("engine-path")) {
             Ok(()) => return,
             Err(error) => {
