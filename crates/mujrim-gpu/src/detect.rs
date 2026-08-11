@@ -360,6 +360,7 @@ fn get_total_memory_mb() -> u64 {
     }
 }
 
+#[allow(dead_code)] // Used by platform-specific memory probes.
 const fn bytes_to_mebibytes(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
 }

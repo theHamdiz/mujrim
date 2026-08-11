@@ -541,6 +541,7 @@ mod avx2 {
         }
     }
 
+    #[allow(dead_code)] // Kept for AVX2 parity; not all hosts enable this path.
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn apply_i16_rows_from(
         dst: &mut [i16; HIDDEN_SIZE],
@@ -649,6 +650,7 @@ mod avx2 {
         }
     }
 
+    #[allow(dead_code)] // Kept for AVX2 parity; not all hosts enable this path.
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn apply_i8_rows_from(
         dst: &mut [i16; HIDDEN_SIZE],
