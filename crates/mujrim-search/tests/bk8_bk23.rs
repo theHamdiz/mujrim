@@ -59,6 +59,23 @@ fn bk8_reckless_finds_prophylaxis_by_depth_16() {
 }
 
 #[test]
+#[ignore = "BK#8 still flips to f1b5/c3a4 by depth 20; tracking separately"]
+fn bk8_reckless_stays_stable_through_depth_20() {
+    types::init();
+    let mut board = Board::from_fen(BK8_FEN).unwrap();
+    let mut eng = SearchEngine::new(128, 1);
+    eng.set_params_for_preset("reckless");
+    let res = eng.search_depth(&mut board, 20);
+    assert_expected(
+        &res.best_move.to_uci(),
+        BK8_EXPECTED,
+        "BK#8 Reckless d20",
+        res.score,
+        res.nodes,
+    );
+}
+
+#[test]
 #[cfg_attr(
     debug_assertions,
     ignore = "depth-16 Reckless search is too slow under debug"
