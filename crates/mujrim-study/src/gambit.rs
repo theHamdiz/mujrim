@@ -125,7 +125,12 @@ mod tests {
             lesson
                 .validate()
                 .unwrap_or_else(|error| panic!("{}: {error}", lesson.id));
-            assert!(!lesson.coaching_arrows(lesson.moves.len()).unwrap().is_empty());
+            assert!(
+                !lesson
+                    .coaching_arrows(lesson.moves.len())
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 

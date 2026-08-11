@@ -1,7 +1,7 @@
 //! Canvas-based annotation arrows with numbered multi-color steps.
 
-use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::alignment::{Horizontal, Vertical};
+use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Element, Event, Length, Point, mouse};
 
 use mujrim_study::board_marks::{ArrowRole, BoardArrow, MarkColor};
@@ -251,17 +251,11 @@ fn draw_board_arrow(
     };
     let (fill, outline) = mark_colors(color, arrow.resolved_opacity());
     let scale = appearance.size.scale();
-    if appearance.shape == ArrowShape::Smart && is_knight_move(from_file, from_rank, to_file, to_rank)
+    if appearance.shape == ArrowShape::Smart
+        && is_knight_move(from_file, from_rank, to_file, to_rank)
     {
         draw_knight_arrow(
-            frame,
-            arrow.from,
-            arrow.to,
-            sq_size,
-            flipped,
-            scale,
-            fill,
-            outline,
+            frame, arrow.from, arrow.to, sq_size, flipped, scale, fill, outline,
         );
     } else {
         draw_straight_arrow(frame, p_from, p_to, sq_size, scale, fill, outline);
@@ -276,10 +270,7 @@ fn draw_step_badge(frame: &mut Frame, tip: Point, sq_size: f32, step: u8, fill: 
     let center = Point::new(tip.x + sq_size * 0.18, tip.y - sq_size * 0.18);
     let badge = Path::circle(center, radius);
     frame.fill(&badge, Color::from_rgba(0.08, 0.08, 0.10, 0.82));
-    frame.stroke(
-        &badge,
-        Stroke::default().with_color(fill).with_width(1.5),
-    );
+    frame.stroke(&badge, Stroke::default().with_color(fill).with_width(1.5));
     frame.fill_text(Text {
         content: step.to_string(),
         position: center,

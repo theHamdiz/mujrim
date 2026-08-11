@@ -1456,11 +1456,8 @@ impl SearchEngine {
                 use std::io::Write;
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
-                let score_str = format_uci_score_value(
-                    best_score,
-                    board,
-                    self.search_stack.eval_mode(),
-                );
+                let score_str =
+                    format_uci_score_value(best_score, board, self.search_stack.eval_mode());
 
                 let pv_str = if best_pv.is_empty() {
                     format!("{best_move}")
@@ -2006,13 +2003,8 @@ fn search_ab(
         let raw_eval =
             tt_raw_eval.unwrap_or_else(|| hybrid_eval(board, &mut state.nnue_state, use_nnue));
         let corr = state.correction(board, move_ordering);
-        let corrected = corrected_network_eval(
-            board,
-            raw_eval,
-            corr,
-            state.optimism[us.index()],
-            eval_mode,
-        );
+        let corrected =
+            corrected_network_eval(board, raw_eval, corr, state.optimism[us.index()], eval_mode);
         (Some(raw_eval), corrected, corr)
     };
     let mut static_eval = corrected_eval;
@@ -4495,13 +4487,7 @@ mod tests {
             9
         );
         assert_ne!(
-            corrected_network_eval(
-                &board,
-                9,
-                0,
-                0,
-                EvalMode::Nnue(NnueSearchProfile::Reckless)
-            ),
+            corrected_network_eval(&board, 9, 0, 0, EvalMode::Nnue(NnueSearchProfile::Reckless)),
             9
         );
     }

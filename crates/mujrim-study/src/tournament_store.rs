@@ -139,10 +139,7 @@ pub fn list_tournaments(sqlite: &Connection) -> Result<Vec<StoredTournament>, St
     Ok(tournaments)
 }
 
-pub fn load_tournament(
-    sqlite: &Connection,
-    id: &str,
-) -> Result<Option<StoredTournament>, String> {
+pub fn load_tournament(sqlite: &Connection, id: &str) -> Result<Option<StoredTournament>, String> {
     let meta = sqlite
         .query_row(
             "SELECT id,name,format,status,created_at FROM tournaments WHERE id=?1",

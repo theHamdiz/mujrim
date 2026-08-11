@@ -130,11 +130,7 @@ impl GameState {
     pub fn end_drag(&mut self) -> Option<(Square, Square)> {
         let from = self.drag_from.take()?;
         let to = self.drag_over.take().unwrap_or(from);
-        if from == to {
-            None
-        } else {
-            Some((from, to))
-        }
+        if from == to { None } else { Some((from, to)) }
     }
 
     /// Try to make a move from the selected square to `target`.

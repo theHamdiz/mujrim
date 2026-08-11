@@ -644,14 +644,12 @@ pub fn view_board<'a>(
         ))
         .width(sq_size)
         .height(sq_size);
-        let floating_layer = container(
-            container(floating).padding(iced::Padding {
-                top: y.max(0.0),
-                right: 0.0,
-                bottom: 0.0,
-                left: x.max(0.0),
-            }),
-        )
+        let floating_layer = container(container(floating).padding(iced::Padding {
+            top: y.max(0.0),
+            right: 0.0,
+            bottom: 0.0,
+            left: x.max(0.0),
+        }))
         .width(Length::Fixed(board_px))
         .height(Length::Fixed(board_px));
         stack![

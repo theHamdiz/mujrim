@@ -132,9 +132,8 @@ mod tests {
 
     #[test]
     fn multi_engine_arrows_are_colored_and_stepped() {
-        let mut analysis = MultiEngineAnalysis::new(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-        );
+        let mut analysis =
+            MultiEngineAnalysis::new("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         analysis.push_opinion(sample_opinion("Mujrim", 0, "e2e4"));
         analysis.push_opinion(sample_opinion("Reckless", 1, "d2d4"));
         let arrows = analysis.all_arrows(4, 1);
@@ -147,9 +146,8 @@ mod tests {
 
     #[test]
     fn consensus_picks_majority_first_move() {
-        let mut analysis = MultiEngineAnalysis::new(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-        );
+        let mut analysis =
+            MultiEngineAnalysis::new("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         analysis.push_opinion(sample_opinion("A", 0, "e2e4"));
         analysis.push_opinion(sample_opinion("B", 1, "e2e4"));
         analysis.push_opinion(sample_opinion("C", 2, "d2d4"));

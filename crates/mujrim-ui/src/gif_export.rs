@@ -263,10 +263,13 @@ pub fn export_game_gif(move_log: &[String], delay_cs: u16) -> Result<Vec<u8>, St
     Ok(gif_bytes)
 }
 
-/// Parse a UCI move string (e.g., "e2e4", "e7e8q") against legal moves.
+/// Parse a UCI move string (e.g., "e2e4", "e7e8q", "e7e8q+") against legal moves.
 fn parse_uci_move(uci: &str, legal: &types::MoveList) -> Option<types::Move> {
-    let uci = uci.trim();
-    if uci.len() < 4 {
+    let uci = uci
+        .trim()
+        .trim_end_matches(['+', '#', '!', '?'])
+        .to_ascii_lowercase();
+    if uci.len() < 4 || uci.len() > 5 {
         return None;
     }
 
@@ -281,10 +284,15 @@ fn parse_uci_move(uci: &str, legal: &types::MoveList) -> Option<types::Move> {
 
     let from_sq = types::Square::from_index(from_rank * 8 + from_file);
     let to_sq = types::Square::from_index(to_rank * 8 + to_file);
+    let promotion = if uci.len() == 5 {
+        Some(types::Piece::from_char(uci.as_bytes()[4] as char)?)
+    } else {
+        None
+    };
 
     legal
         .iter()
-        .find(|m| m.from == from_sq && m.to == to_sq)
+        .find(|m| m.from == from_sq && m.to == to_sq && m.promotion == promotion)
         .copied()
 }
 
@@ -327,6 +335,14 @@ mod tests {
     fn invalid_move_is_reported_instead_of_silently_omitted() {
         let error = export_game_gif(&["e2e5".to_string()], 100).unwrap_err();
         assert_eq!(error, "invalid move 1: e2e5");
+    }
+
+    #[test]
+    fn exports_accept_check_and_mate_uci_suffixes() {
+        let moves = vec!["e2e4+".to_string(), "e7e5#".to_string()];
+        let gif = export_game_gif(&moves, 80).unwrap();
+        assert!(gif.len() > 100);
+        assert_eq!(&gif[0..3], b"GIF");
     }
 
     #[test]

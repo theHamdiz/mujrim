@@ -88,6 +88,16 @@ ui:
     @echo "Launching Mujrim Chess GUI..."
     cargo run --release -p mujrim-ui
 
+# Package dual-arch Windows dist trees (windows-aarch64 + windows-x86_64)
+# Build + assemble dist/windows-aarch64 and dist/windows-x86_64 replicas.
+# On Arm64 hosts, x86_64 uses llvm-mingw + x86_64-pc-windows-gnullvm when available.
+# Examples:
+#   just package-dist-windows
+#   just package-dist-windows -Clean
+#   just package-dist-windows -PackageOnly
+package-dist-windows *args:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-dist-windows.ps1 {{args}}
+
 # Build and run the Bevy chess game (always release)
 game:
     @echo "Building Mujrim Bevy Game..."

@@ -13,15 +13,19 @@ mod motion;
 mod noise;
 mod pieces;
 mod recording;
+mod tournament_live;
 mod uci_process;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iced::widget::{
     Image, Space, button, column, container, mouse_area, pick_list, row, scrollable, slider, text,
     text_input, toggler,
 };
 use iced::{Alignment, Color, Element, Font, Length, Subscription, Task, Theme};
+use motion::AnimPace;
 use mujrim_protocols::catalog::{
     DiscoveredEngine, RuntimeCompatibility, discover_bundled_engines_from_environment,
 };
@@ -30,12 +34,10 @@ use mujrim_study::board_marks::BoardArrow;
 use mujrim_study::database::{EngineMetadata, GameMetadata, GameQuery, GameSummary, StudyDatabase};
 use mujrim_study::gambit::{self, GambitLesson};
 use mujrim_study::opening::OpeningExplorer;
-use mujrim_study::tournament::{Entrant, TournamentFormat, TournamentResult};
+use mujrim_study::tournament::{Entrant, TournamentFormat};
 use mujrim_study::tournament_store::StoredTournament;
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
-use motion::AnimPace;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pieces::PieceAssets;
 use uci_process::ExternalEngineProtocol;
@@ -354,6 +356,9 @@ struct App {
     tournament_format: TournamentFormat,
     tournament_status: String,
     stored_tournaments: Vec<StoredTournament>,
+    live_tournament: Option<tournament_live::LiveTournamentHandle>,
+    live_tournament_view: tournament_live::LiveTournamentSnapshot,
+    selected_tournament_id: Option<String>,
     /// Latest multi-engine analysis arrows for the analysis/review board.
     analysis_arrows: Vec<BoardArrow>,
     analysis_status: String,
@@ -524,11 +529,7 @@ impl std::fmt::Display for PlayerConfig {
     }
 }
 
-type EngineMoveOk = (
-    types::Move,
-    String,
-    Option<(types::Square, types::Square)>,
-);
+type EngineMoveOk = (types::Move, String, Option<(types::Square, types::Square)>);
 
 #[derive(Debug, Clone)]
 enum Msg {
@@ -540,7 +541,10 @@ enum Msg {
     OpenAnalysis,
     SelectTournamentFormat(TournamentFormat),
     RunQuickTournament,
-    QuickTournamentFinished(String),
+    CancelTournament,
+    TournamentTick(Instant),
+    QuickTournamentFinished(Box<mujrim_benchmarker::strength::TournamentSummary>),
+    SelectTournament(String),
     EngineCatalogProbed(Vec<EngineMetadata>),
     AnalyzeGame,
     GameAnalysisFinished(Result<Vec<AnalyzedPly>, String>),
@@ -586,6 +590,7 @@ enum Msg {
     ToggleBGM,
     CoinFlip,
     CoinFlipTick(Instant),
+    HubTick(Instant),
     ToggleRecording,
     RecordCaptureTick,
     TakeScreenshot,
@@ -741,6 +746,9 @@ impl Default for App {
             tournament_format: TournamentFormat::RoundRobin,
             tournament_status: String::new(),
             stored_tournaments,
+            live_tournament: None,
+            live_tournament_view: tournament_live::LiveTournamentSnapshot::default(),
+            selected_tournament_id: None,
             analysis_arrows: Vec::new(),
             analysis_status: "Pick engines and run multi-engine analysis.".to_owned(),
             analysis_engines_selected: vec!["builtin".to_owned()],
@@ -801,6 +809,21 @@ impl App {
 
         if matches!(self.coin_flip, CoinFlipState::Flipping { .. }) {
             subs.push(iced::time::every(Duration::from_millis(16)).map(Msg::CoinFlipTick));
+        }
+
+        if matches!(self.screen, Screen::Menu)
+            && self.settings.system_motion
+            && self.hub_opened_at.elapsed() < Duration::from_millis(1000)
+        {
+            subs.push(iced::time::every(Duration::from_millis(16)).map(Msg::HubTick));
+        }
+
+        if self
+            .live_tournament
+            .as_ref()
+            .is_some_and(|handle| handle.clone_snapshot().running)
+        {
+            subs.push(iced::time::every(Duration::from_millis(120)).map(Msg::TournamentTick));
         }
 
         if self.recorder.state() == recording::RecordState::Recording {
@@ -930,7 +953,11 @@ impl App {
         }
         for bundled in &self.bundled_engines {
             let id = bundled.path.to_string_lossy().into_owned();
-            if self.analysis_engines_selected.iter().any(|selected| selected == &id) {
+            if self
+                .analysis_engines_selected
+                .iter()
+                .any(|selected| selected == &id)
+            {
                 engines.push(analysis::AnalysisEngineSpec {
                     id: id.clone(),
                     name: bundled.display_name.to_owned(),
@@ -1160,21 +1187,24 @@ impl App {
         Task::none()
     }
 
-    fn persist_tournament_summary(&mut self, summary: &str) {
+    fn persist_tournament_summary(
+        &mut self,
+        summary: &mujrim_benchmarker::strength::TournamentSummary,
+    ) {
         let Some(database) = self.study_database.as_mut() else {
             return;
         };
-        let roster = tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
-        if roster.len() < 2 {
+        if summary.engines.len() < 2 {
             return;
         }
-        let entrants = roster
+        let entrants = summary
+            .engines
             .iter()
             .enumerate()
             .map(|(index, engine)| Entrant {
                 id: format!("engine-{index}"),
-                name: engine.name.clone(),
-                seed_elo: None,
+                name: engine.engine.name.clone(),
+                seed_elo: engine.established_elo,
             })
             .collect::<Vec<_>>();
         let id = format!(
@@ -1184,19 +1214,27 @@ impl App {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
+        let status = if summary.cancelled {
+            format!("Cancelled · {}", format_tournament_summary(summary))
+        } else if let Some(error) = &summary.error {
+            format!("Stopped · {error}")
+        } else {
+            format!("Finished · {}", format_tournament_summary(summary))
+        };
         let tournament = StoredTournament {
-            id,
-            name: format!("{} quick tournament", self.tournament_format),
-            format: self.tournament_format,
+            id: id.clone(),
+            name: format!("{} quick tournament", summary.format),
+            format: summary.format,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
-            status: summary.to_owned(),
+            status,
             entrants,
-            results: Vec::<TournamentResult>::new(),
+            results: summary.game_results.clone(),
         };
         let _ = database.save_tournament(&tournament);
+        self.selected_tournament_id = Some(id);
     }
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
@@ -1286,8 +1324,8 @@ impl App {
             }
             Msg::GambitStep(delta) => {
                 if let Some(lesson) = self.active_gambit {
-                    let next = (self.gambit_ply as i32 + delta)
-                        .clamp(0, lesson.moves.len() as i32) as usize;
+                    let next = (self.gambit_ply as i32 + delta).clamp(0, lesson.moves.len() as i32)
+                        as usize;
                     self.gambit_ply = next;
                     if let Ok(fen) = lesson.fen_after_plies(next)
                         && let Ok(board) = types::Board::from_fen(&fen)
@@ -1325,10 +1363,7 @@ impl App {
             }
             Msg::RunMultiEngineAnalysis => self.run_multi_engine_analysis_task(),
             Msg::MultiEngineAnalysisFinished(snapshot) => {
-                let consensus = snapshot
-                    .consensus
-                    .as_deref()
-                    .unwrap_or("no consensus");
+                let consensus = snapshot.consensus.as_deref().unwrap_or("no consensus");
                 self.analysis_status = format!(
                     "{} · {} opinions",
                     snapshot.status,
@@ -1345,6 +1380,12 @@ impl App {
                 Task::none()
             }
             Msg::RunQuickTournament => {
+                if self.live_tournament.is_some() {
+                    self.tournament_status =
+                        "A tournament is already running. Cancel it before starting another."
+                            .to_owned();
+                    return Task::none();
+                }
                 let engines =
                     tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
                 if engines.len() < 2 {
@@ -1352,17 +1393,70 @@ impl App {
                         "At least two detected UCI engines are required.".to_owned();
                     return Task::none();
                 }
-                self.tournament_status = "Tournament running with safe resource limits…".to_owned();
+                let handle = tournament_live::LiveTournamentHandle::new(self.tournament_format);
+                self.live_tournament_view = handle.clone_snapshot();
+                self.live_tournament = Some(handle.clone());
+                self.tournament_status =
+                    "Tournament running — live pairings and standings update below.".to_owned();
                 let format = self.tournament_format;
-                Task::perform(
-                    run_quick_tournament(engines, format),
-                    Msg::QuickTournamentFinished,
-                )
+                Task::perform(run_quick_tournament(engines, format, handle), |summary| {
+                    Msg::QuickTournamentFinished(Box::new(summary))
+                })
+            }
+            Msg::CancelTournament => {
+                if let Some(handle) = &self.live_tournament {
+                    handle.request_cancel();
+                    self.live_tournament_view = handle.clone_snapshot();
+                    self.tournament_status = self.live_tournament_view.status_line.clone();
+                } else {
+                    self.tournament_status = "No tournament is running.".to_owned();
+                }
+                Task::none()
+            }
+            Msg::TournamentTick(_now) => {
+                if let Some(handle) = &self.live_tournament {
+                    self.live_tournament_view = handle.clone_snapshot();
+                    if !self.live_tournament_view.status_line.is_empty() {
+                        self.tournament_status = self.live_tournament_view.status_line.clone();
+                    }
+                }
+                Task::none()
             }
             Msg::QuickTournamentFinished(summary) => {
+                if let Some(handle) = &self.live_tournament {
+                    self.live_tournament_view = handle.clone_snapshot();
+                }
+                self.live_tournament = None;
+                self.live_tournament_view.running = false;
+                self.live_tournament_view.finished = true;
                 self.persist_tournament_summary(&summary);
-                self.tournament_status = summary;
+                self.tournament_status = if summary.cancelled {
+                    format!(
+                        "Tournament cancelled. {}",
+                        format_tournament_summary(&summary)
+                    )
+                } else if let Some(error) = &summary.error {
+                    format!("Tournament stopped: {error}")
+                } else {
+                    format!(
+                        "Tournament complete. {}",
+                        format_tournament_summary(&summary)
+                    )
+                };
+                self.live_tournament_view.status_line = self.tournament_status.clone();
+                let names = summary
+                    .engines
+                    .iter()
+                    .map(|engine| engine.engine.name.clone())
+                    .collect::<Vec<_>>();
+                self.live_tournament_view.standings =
+                    tournament_live::standing_rows(&names, &summary.standings);
+                self.live_tournament_view.game_results = summary.game_results.clone();
                 self.refresh_tournament_history();
+                Task::none()
+            }
+            Msg::SelectTournament(id) => {
+                self.selected_tournament_id = Some(id);
                 Task::none()
             }
             Msg::EngineCatalogProbed(engines) => {
@@ -2065,6 +2159,7 @@ impl App {
                 }
                 Task::none()
             }
+            Msg::HubTick(_now) => Task::none(),
             Msg::ToggleRecording => {
                 match self.recorder.state() {
                     recording::RecordState::Idle => {
@@ -2601,15 +2696,16 @@ impl App {
                                             info.best_move
                                         )
                                     })?;
-                                let ponder_sq = info.ponder_move.as_deref().and_then(|ponder_uci| {
-                                    let mut predicted = board_clone.clone();
-                                    predicted.make_move(mv);
-                                    predicted
-                                        .generate_legal_moves()
-                                        .into_iter()
-                                        .find(|candidate| candidate.to_uci() == ponder_uci)
-                                        .map(|ponder_mv| (ponder_mv.from, ponder_mv.to))
-                                });
+                                let ponder_sq =
+                                    info.ponder_move.as_deref().and_then(|ponder_uci| {
+                                        let mut predicted = board_clone.clone();
+                                        predicted.make_move(mv);
+                                        predicted
+                                            .generate_legal_moves()
+                                            .into_iter()
+                                            .find(|candidate| candidate.to_uci() == ponder_uci)
+                                            .map(|ponder_mv| (ponder_mv.from, ponder_mv.to))
+                                    });
                                 Ok((mv, format!("{protocol} {}", info.telemetry()), ponder_sq))
                             }
                         }
@@ -2693,14 +2789,14 @@ impl App {
                 lucide_icon(iced_fonts::lucide::house),
                 "Home",
                 pal,
-                false,
+                matches!(self.screen, Screen::Menu),
                 Msg::OpenHome,
             ),
             pill_button(
                 lucide_icon(iced_fonts::lucide::settings),
                 "Options",
                 pal,
-                false,
+                self.show_options,
                 Msg::ToggleOptions,
             ),
         ]
@@ -2947,6 +3043,24 @@ impl App {
         ]
         .spacing(10);
 
+        let elapsed_ms = self.hub_opened_at.elapsed().as_millis() as u64;
+        let left_in = if self.settings.system_motion {
+            motion::hub_stagger(elapsed_ms, 120, 520)
+        } else {
+            1.0
+        };
+        let right_in = if self.settings.system_motion {
+            motion::hub_stagger(elapsed_ms, 220, 520)
+        } else {
+            1.0
+        };
+        let start_in = if self.settings.system_motion {
+            motion::hub_stagger(elapsed_ms, 340, 480)
+        } else {
+            1.0
+        };
+        let panel_height = (self.window_height - 390.0).clamp(240.0, 460.0);
+
         // ── Left column: Game Setup ──
         let mode_picker = pick_list(
             vec![
@@ -2957,13 +3071,13 @@ impl App {
             Some(self.selected_mode),
             Msg::SelectMode,
         )
-        .width(280);
+        .width(Length::Fill);
         let bundled_choices = bundled_engine_choices(&self.bundled_engines);
         let selected_white = selected_bundled_engine(&self.bundled_engines, &self.white_player);
         let selected_black = selected_bundled_engine(&self.bundled_engines, &self.black_player);
 
-        let badge_w = 40.0;
-        let w_badge = container(text("W").size(16).color(Color::from_rgb(0.20, 0.15, 0.10)))
+        let badge_w = 36.0;
+        let w_badge = container(text("W").size(15).color(Color::from_rgb(0.20, 0.15, 0.10)))
             .center_x(badge_w)
             .center_y(badge_w)
             .width(badge_w)
@@ -2971,13 +3085,13 @@ impl App {
             .style(|_theme| container::Style {
                 background: Some(iced::Background::Color(Color::from_rgb(0.94, 0.88, 0.76))),
                 border: iced::Border {
-                    radius: 6.0.into(),
+                    radius: 8.0.into(),
                     width: 1.0,
                     color: Color::from_rgb(0.80, 0.75, 0.60),
                 },
                 ..Default::default()
             });
-        let b_badge = container(text("B").size(16).color(Color::from_rgb(0.80, 0.80, 0.85)))
+        let b_badge = container(text("B").size(15).color(Color::from_rgb(0.80, 0.80, 0.85)))
             .center_x(badge_w)
             .center_y(badge_w)
             .width(badge_w)
@@ -2985,7 +3099,7 @@ impl App {
             .style(|_theme| container::Style {
                 background: Some(iced::Background::Color(Color::from_rgb(0.14, 0.12, 0.16))),
                 border: iced::Border {
-                    radius: 6.0.into(),
+                    radius: 8.0.into(),
                     width: 1.0,
                     color: Color::from_rgb(0.30, 0.30, 0.35),
                 },
@@ -2993,22 +3107,36 @@ impl App {
             });
 
         let mut left_col = column![
-            text("Game Setup").size(14).color(ACCENT_TEAL),
-            Space::new().height(8),
+            text("Game Setup").size(16).color(Color::from_rgba(
+                pal.accent_alt.r,
+                pal.accent_alt.g,
+                pal.accent_alt.b,
+                left_in,
+            )),
+            text("Choose players and load engines")
+                .size(12)
+                .color(Color::from_rgba(
+                    pal.text_secondary.r,
+                    pal.text_secondary.g,
+                    pal.text_secondary.b,
+                    0.85 * left_in,
+                )),
+            Space::new().height(10),
             text("Mode").size(12).color(pal.text_secondary),
             mode_picker,
-            Space::new().height(8),
+            Space::new().height(10),
+            text("White").size(12).color(pal.text_secondary),
             row![
                 w_badge,
-                text(format!(" {}", self.white_player))
+                text(format!("{}", self.white_player))
                     .size(13)
                     .color(pal.text_primary)
             ]
-            .spacing(8)
+            .spacing(10)
             .align_y(Alignment::Center),
         ]
-        .spacing(4)
-        .width(340);
+        .spacing(6)
+        .width(Length::Fill);
 
         if matches!(self.selected_mode, GameMode::EngineVsEngine) {
             left_col = left_col
@@ -3019,24 +3147,29 @@ impl App {
                         Msg::SelectBundledWhite,
                     )
                     .placeholder("Auto-detected White engine")
-                    .width(280),
+                    .width(Length::Fill),
                 )
-                .push(styled_button("Load White UCI", Msg::LoadWhiteUciEngine))
-                .push(styled_button(
-                    "Load White XBoard",
-                    Msg::LoadWhiteXboardEngine,
-                ));
+                .push(
+                    row![
+                        styled_button("Load White UCI", Msg::LoadWhiteUciEngine),
+                        styled_button("Load White XBoard", Msg::LoadWhiteXboardEngine),
+                    ]
+                    .spacing(8),
+                );
         }
-        left_col = left_col.push(
-            row![
-                b_badge,
-                text(format!(" {}", self.black_player))
-                    .size(13)
-                    .color(pal.text_primary)
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        );
+        left_col = left_col
+            .push(Space::new().height(8))
+            .push(text("Black").size(12).color(pal.text_secondary))
+            .push(
+                row![
+                    b_badge,
+                    text(format!("{}", self.black_player))
+                        .size(13)
+                        .color(pal.text_primary)
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
         if matches!(
             self.selected_mode,
             GameMode::HumanVsEngine | GameMode::EngineVsEngine
@@ -3045,32 +3178,36 @@ impl App {
                 .push(
                     pick_list(bundled_choices, selected_black, Msg::SelectBundledBlack)
                         .placeholder("Auto-detected Black engine")
-                        .width(280),
+                        .width(Length::Fill),
                 )
-                .push(styled_button("Load Black UCI", Msg::LoadBlackUciEngine))
-                .push(styled_button(
-                    "Load Black XBoard",
-                    Msg::LoadBlackXboardEngine,
-                ));
+                .push(
+                    row![
+                        styled_button("Load Black UCI", Msg::LoadBlackUciEngine),
+                        styled_button("Load Black XBoard", Msg::LoadBlackXboardEngine),
+                    ]
+                    .spacing(8),
+                );
         }
 
         // Coin flip (HumanVsEngine)
         if matches!(self.selected_mode, GameMode::HumanVsEngine) {
-            left_col = left_col.push(Space::new().height(8));
+            left_col = left_col
+                .push(Space::new().height(10))
+                .push(text("Side selection").size(12).color(pal.text_secondary));
             let flip_el: Element<'_, Msg> = match &self.coin_flip {
                 CoinFlipState::Idle => button(
                     container(
                         row![
                             iced_fonts::lucide::coins().size(18),
-                            text(" Flip Coin").size(13).color(Color::WHITE)
+                            text(" Flip for side").size(13).color(Color::WHITE)
                         ]
                         .spacing(6)
                         .align_y(Alignment::Center),
                     )
-                    .center_x(160)
-                    .center_y(36)
-                    .width(160)
-                    .height(36),
+                    .center_x(180)
+                    .center_y(38)
+                    .width(180)
+                    .height(38),
                 )
                 .on_press(Msg::CoinFlip)
                 .style(|_theme, status| {
@@ -3082,7 +3219,7 @@ impl App {
                     button::Style {
                         background: Some(iced::Background::Color(bg)),
                         border: iced::Border {
-                            radius: 8.0.into(),
+                            radius: 10.0.into(),
                             ..Default::default()
                         },
                         text_color: Color::WHITE,
@@ -3116,9 +3253,20 @@ impl App {
             left_col = left_col.push(flip_el);
         }
 
-        let left_card = container(glass_card(left_col.into()))
-            .width(340)
-            .height(Length::Fill);
+        let left_scroll = scrollable(left_col.padding([0, 4]))
+            .height(Length::Fixed(panel_height))
+            .width(Length::Fill);
+        let left_card = container(glass_card(
+            column![
+                Space::new().height(motion::hub_slide_y(left_in, 18.0)),
+                left_scroll,
+            ]
+            .into(),
+            pal,
+            left_in,
+        ))
+        .width(360)
+        .height(Length::Fixed(panel_height + 28.0));
 
         // ── Right column: Engine Settings ──
         let cfg = &self.engine_cfg;
@@ -3129,8 +3277,21 @@ impl App {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Embedded".to_string());
         let right_col = column![
-            text("Engine Settings").size(14).color(ACCENT_TEAL),
-            Space::new().height(8),
+            text("Engine Settings").size(16).color(Color::from_rgba(
+                pal.accent_alt.r,
+                pal.accent_alt.g,
+                pal.accent_alt.b,
+                right_in,
+            )),
+            text("Tune search, book, and network")
+                .size(12)
+                .color(Color::from_rgba(
+                    pal.text_secondary.r,
+                    pal.text_secondary.g,
+                    pal.text_secondary.b,
+                    0.85 * right_in,
+                )),
+            Space::new().height(10),
             config_slider(
                 "Time / Move",
                 cfg.time_per_move,
@@ -3149,7 +3310,7 @@ impl App {
                 Msg::CfgHashChanged,
             ),
             config_slider("Threads", cfg.threads, "", 1, 32, Msg::CfgThreadsChanged),
-            Space::new().height(4),
+            Space::new().height(8),
             settings_row(
                 "Ponder",
                 toggler(cfg.ponder)
@@ -3171,10 +3332,13 @@ impl App {
                     .size(18)
                     .into()
             ),
-            Space::new().height(4),
+            Space::new().height(8),
             row![
-                text("Eval Net").size(12).color(TEXT_SECONDARY).width(75),
-                text(eval_file_label).size(12).color(TEXT_PRIMARY),
+                text("Eval Net")
+                    .size(12)
+                    .color(pal.text_secondary)
+                    .width(75),
+                text(eval_file_label).size(12).color(pal.text_primary),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -3184,45 +3348,63 @@ impl App {
             ]
             .spacing(8),
         ]
-        .spacing(4)
-        .width(340);
+        .spacing(6)
+        .width(Length::Fill);
 
-        let right_card = container(glass_card(right_col.into()))
-            .width(340)
-            .height(Length::Fill);
+        let right_scroll = scrollable(right_col.padding([0, 4]))
+            .height(Length::Fixed(panel_height))
+            .width(Length::Fill);
+        let right_card = container(glass_card(
+            column![
+                Space::new().height(motion::hub_slide_y(right_in, 18.0)),
+                right_scroll,
+            ]
+            .into(),
+            pal,
+            right_in,
+        ))
+        .width(360)
+        .height(Length::Fixed(panel_height + 28.0));
 
         // ── Start button ──
         let start_btn = button(
             container(text("Start Game").size(16).color(Color::WHITE))
-                .center_x(200)
+                .center_x(220)
                 .center_y(48)
-                .width(200)
+                .width(220)
                 .height(48),
         )
         .on_press(Msg::StartGame)
-        .style(|_theme, status| {
+        .style(move |_theme, status| {
+            let base = Color::from_rgba(ACCENT.r, ACCENT.g, ACCENT.b, 0.35 + 0.65 * start_in);
             let bg = if matches!(status, button::Status::Hovered) {
-                Color::from_rgb(0.30, 0.60, 1.0)
+                Color::from_rgba(0.30, 0.60, 1.0, 0.35 + 0.65 * start_in)
             } else {
-                ACCENT
+                base
             };
             button::Style {
                 background: Some(iced::Background::Color(bg)),
                 border: iced::Border {
-                    radius: 10.0.into(),
+                    radius: 12.0.into(),
                     ..Default::default()
                 },
-                text_color: Color::WHITE,
+                text_color: Color::from_rgba(1.0, 1.0, 1.0, 0.45 + 0.55 * start_in),
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.25 * start_in),
+                    offset: iced::Vector::new(0.0, 4.0),
+                    blur_radius: 12.0,
+                },
                 ..Default::default()
             }
         });
 
         // ── Two-column layout ──
-        let two_cols =
-            row![left_card, Space::new().width(20), right_card].align_y(Alignment::Start);
+        let two_cols = row![left_card, Space::new().width(24), right_card]
+            .spacing(0)
+            .align_y(Alignment::Start);
 
         let menu_content = column![
-            Space::new().height(28),
+            Space::new().height(20),
             logo_img,
             Space::new().height(6),
             title,
@@ -3230,14 +3412,15 @@ impl App {
             tagline,
             Space::new().height(12),
             quick_actions,
-            Space::new().height(18),
+            Space::new().height(16),
             two_cols,
-            Space::new().height(20),
+            Space::new().height(motion::hub_slide_y(start_in, 14.0) + 12.0),
             start_btn,
             Space::new().height(8),
             text("Studio v2 · multi-engine ready")
                 .size(11)
                 .color(pal.text_secondary),
+            Space::new().height(20),
         ]
         .spacing(4)
         .align_x(Alignment::Center)
@@ -3255,9 +3438,14 @@ impl App {
                 ..Default::default()
             });
         let menu_fg = container(
-            container(menu_content)
-                .center_x(Length::Fill)
-                .width(Length::Fill),
+            scrollable(
+                container(menu_content)
+                    .center_x(Length::Fill)
+                    .width(Length::Fill)
+                    .padding([0, 16]),
+            )
+            .height(Length::Fill)
+            .width(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill);
@@ -3506,18 +3694,27 @@ impl App {
                 .push(Space::new().height(8))
                 .push(container(controls).padding(8).width(Length::Fill));
         }
-        let side_panel = container(side_content)
-            .padding(12)
-            .height(board_total)
-            .style(move |_theme| container::Style {
-                background: Some(iced::Background::Color(pal.panel)),
-                border: iced::Border {
-                    radius: 8.0.into(),
-                    width: 1.0,
-                    color: pal.border,
-                },
-                ..Default::default()
-            });
+        let side_panel = container(
+            scrollable(side_content)
+                .height(Length::Fixed(board_total))
+                .width(Length::Fill),
+        )
+        .padding(12)
+        .height(board_total)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(pal.panel)),
+            border: iced::Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: pal.border,
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 12.0,
+            },
+            ..Default::default()
+        });
 
         let game_layout = row![board_view, side_panel]
             .spacing(20)
@@ -3662,7 +3859,7 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
-                scrollable(game_rows).height(Length::Fixed(300.0)),
+                scrollable(game_rows).height(Length::Fixed(340.0)),
             ]
             .spacing(10)
             .into(),
@@ -3731,9 +3928,7 @@ impl App {
                         text(format!("{} ({})", lesson.name, lesson.eco))
                             .size(14)
                             .color(palette.text_primary),
-                        text(lesson.summary)
-                            .size(12)
-                            .color(palette.text_secondary),
+                        text(lesson.summary).size(12).color(palette.text_secondary),
                     ]
                     .spacing(2)
                     .width(Length::Fill),
@@ -3900,6 +4095,9 @@ impl App {
 
     fn view_tournament_hub(&self) -> Element<'_, Msg> {
         let palette = self.settings.board_theme.gui_palette();
+        let live = &self.live_tournament_view;
+        let running = self.live_tournament.is_some();
+
         let mut engines = column![].spacing(6);
         for engine in &self.bundled_engines {
             engines = engines.push(
@@ -3944,32 +4142,248 @@ impl App {
         let roster = settings_card(
             iced_fonts::lucide::cpu,
             "Detected Engine Roster",
-            engines.into(),
+            scrollable(engines).height(Length::Fixed(180.0)).into(),
+        );
+
+        let mut controls = column![
+            text("Every pairing swaps colors on the same opening.")
+                .size(13)
+                .color(palette.text_secondary),
+            pick_list(
+                TournamentFormat::ALL,
+                Some(self.tournament_format),
+                Msg::SelectTournamentFormat,
+            )
+            .width(Length::Fill),
+            text("Safe preset: 1 worker · 1 thread · 16 MiB hash · 384/768 MiB caps.")
+                .size(12)
+                .color(palette.text_secondary),
+        ]
+        .spacing(10);
+        if running {
+            controls = controls
+                .push(styled_button(
+                    "Cancel tournament safely",
+                    Msg::CancelTournament,
+                ))
+                .push(
+                    text("Cancel waits for the current engine move, then stops new pairings.")
+                        .size(12)
+                        .color(palette.text_secondary),
+                );
+        } else {
+            controls = controls.push(styled_button(
+                "Run quick tournament",
+                Msg::RunQuickTournament,
+            ));
+        }
+        controls = controls.push(
+            text(&self.tournament_status)
+                .size(13)
+                .color(palette.accent_alt),
         );
         let controls = settings_card(
             iced_fonts::lucide::trophy,
             "Tournament Control",
-            column![
-                text("Every pairing swaps colors on the same opening.")
-                    .size(13)
-                    .color(palette.text_secondary),
-                pick_list(
-                    TournamentFormat::ALL,
-                    Some(self.tournament_format),
-                    Msg::SelectTournamentFormat,
-                )
-                .width(Length::Fill),
-                text("Safe preset: one worker, one engine thread, 16 MiB hash, 384 MiB per process, 768 MiB total.")
-                    .size(13)
-                    .color(palette.text_secondary),
-                styled_button("Run quick tournament", Msg::RunQuickTournament),
-                text(&self.tournament_status)
-                    .size(13)
-                    .color(palette.accent_alt),
+            controls.into(),
+        );
+
+        let progress_pct = (live.progress_fraction() * 100.0).round() as i32;
+        let progress_bar = container(Space::new().width(Length::Fill).height(10.0))
+            .width(Length::FillPortion(
+                ((live.progress_fraction() * 1000.0) as u16).max(1),
+            ))
+            .height(10.0)
+            .style(move |_theme| container::Style {
+                background: Some(iced::Background::Color(palette.accent_alt)),
+                border: iced::Border {
+                    radius: 5.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let progress_track = container(
+            row![
+                progress_bar,
+                Space::new().width(Length::FillPortion(
+                    (1000u16.saturating_sub(((live.progress_fraction() * 1000.0) as u16).max(1)))
+                        .max(1)
+                ))
             ]
-            .spacing(10)
+            .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(10.0)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(
+                palette.border.r,
+                palette.border.g,
+                palette.border.b,
+                0.55,
+            ))),
+            border: iced::Border {
+                radius: 5.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let live_rows = column![
+            text(if running {
+                "Live Event"
+            } else if live.finished {
+                "Latest Results"
+            } else {
+                "Event Monitor"
+            })
+            .size(16)
+            .color(palette.accent_alt),
+            text(format!(
+                "{} · {}/{} pairings · {progress_pct}%",
+                live.format_label,
+                live.completed_matches,
+                live.total_matches.max(live.completed_matches)
+            ))
+            .size(13)
+            .color(palette.text_secondary),
+            progress_track,
+            text(live.current_match_label())
+                .size(18)
+                .color(palette.text_primary),
+            text(&live.status_line)
+                .size(13)
+                .color(palette.text_secondary),
+        ]
+        .spacing(8);
+
+        let mut standings_col = column![
+            text(if running {
+                "Current Standings"
+            } else {
+                "Final Standings"
+            })
+            .size(14)
+            .color(palette.text_primary)
+        ]
+        .spacing(4);
+        if live.standings.is_empty() {
+            standings_col = standings_col.push(
+                text("Standings appear after the first finished pairing.")
+                    .size(12)
+                    .color(palette.text_secondary),
+            );
+        } else {
+            for row in &live.standings {
+                let perf = row
+                    .performance
+                    .map(|elo| format!("{elo:.0} Elo"))
+                    .unwrap_or_else(|| "—".to_owned());
+                standings_col = standings_col.push(
+                    row![
+                        text(format!("{}.", row.rank))
+                            .size(13)
+                            .color(palette.text_secondary)
+                            .width(28),
+                        text(&row.name)
+                            .size(13)
+                            .color(palette.text_primary)
+                            .width(Length::Fill),
+                        text(format!("{:.1}", row.points))
+                            .size(13)
+                            .color(palette.accent_alt)
+                            .width(42),
+                        text(format!("{}-{}-{}", row.wins, row.draws, row.losses))
+                            .size(12)
+                            .color(palette.text_secondary)
+                            .width(70),
+                        text(perf).size(12).color(palette.text_secondary).width(70),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+
+        let mut match_col =
+            column![text("Pairings").size(14).color(palette.text_primary)].spacing(4);
+        if live.finished_matches.is_empty() {
+            match_col = match_col.push(
+                text(if running {
+                    "Waiting for the first completed pairing…"
+                } else {
+                    "No pairings yet. Start a tournament to populate results."
+                })
+                .size(12)
+                .color(palette.text_secondary),
+            );
+        } else {
+            for game in live.finished_matches.iter().rev().take(12) {
+                let score = tournament_live::score_label(game.white_points, game.black_points);
+                let detail = game
+                    .error
+                    .as_deref()
+                    .map(|error| format!(" · {error}"))
+                    .unwrap_or_default();
+                match_col = match_col.push(
+                    text(format!(
+                        "R{} · {} {} {}{detail}",
+                        game.round, game.white, score, game.black
+                    ))
+                    .size(12)
+                    .color(palette.text_primary),
+                );
+            }
+        }
+
+        let live_card = settings_card(
+            iced_fonts::lucide::activity,
+            "Live Board & Results",
+            column![
+                live_rows,
+                Space::new().height(8),
+                row![
+                    container(scrollable(standings_col).height(Length::Fixed(220.0)))
+                        .width(Length::FillPortion(3))
+                        .padding(8)
+                        .style(move |_theme| container::Style {
+                            background: Some(iced::Background::Color(palette.sidebar)),
+                            border: iced::Border {
+                                radius: 10.0.into(),
+                                width: 1.0,
+                                color: palette.border,
+                            },
+                            ..Default::default()
+                        }),
+                    Space::new().width(12),
+                    container(scrollable(match_col).height(Length::Fixed(220.0)))
+                        .width(Length::FillPortion(2))
+                        .padding(8)
+                        .style(move |_theme| container::Style {
+                            background: Some(iced::Background::Color(palette.sidebar)),
+                            border: iced::Border {
+                                radius: 10.0.into(),
+                                width: 1.0,
+                                color: palette.border,
+                            },
+                            ..Default::default()
+                        }),
+                ]
+                .width(Length::Fill),
+            ]
+            .spacing(8)
             .into(),
         );
+
+        let selected = self
+            .selected_tournament_id
+            .as_ref()
+            .and_then(|id| {
+                self.stored_tournaments
+                    .iter()
+                    .find(|tournament| &tournament.id == id)
+            })
+            .or_else(|| self.stored_tournaments.first());
+
         let mut history = column![].spacing(6);
         if self.stored_tournaments.is_empty() {
             history = history.push(
@@ -3978,38 +4392,129 @@ impl App {
                     .color(palette.text_secondary),
             );
         } else {
-            for tournament in self.stored_tournaments.iter().take(8) {
-                history = history.push(
-                    column![
-                        text(&tournament.name)
-                            .size(14)
-                            .color(palette.text_primary),
-                        text(&tournament.status)
-                            .size(12)
-                            .color(palette.text_secondary),
-                    ]
-                    .spacing(2),
-                );
+            for tournament in self.stored_tournaments.iter().take(10) {
+                let selected_id = self.selected_tournament_id.as_deref()
+                    == Some(tournament.id.as_str())
+                    || (self.selected_tournament_id.is_none()
+                        && self
+                            .stored_tournaments
+                            .first()
+                            .is_some_and(|first| first.id == tournament.id));
+                history = history.push(tournament_history_button(
+                    tournament.name.clone(),
+                    tournament.status.clone(),
+                    tournament.id.clone(),
+                    selected_id,
+                    palette,
+                ));
             }
         }
+
+        let mut detail = column![].spacing(6);
+        if let Some(tournament) = selected {
+            detail = detail
+                .push(text(&tournament.name).size(16).color(palette.text_primary))
+                .push(
+                    text(format!("{} · {}", tournament.format, tournament.status))
+                        .size(12)
+                        .color(palette.text_secondary),
+                );
+            let standings = tournament.standings();
+            let names = tournament
+                .entrants
+                .iter()
+                .map(|entrant| entrant.name.clone())
+                .collect::<Vec<_>>();
+            let rows = tournament_live::standing_rows(&names, &standings);
+            if rows.is_empty() {
+                detail = detail.push(
+                    text("This event has no completed games stored.")
+                        .size(12)
+                        .color(palette.text_secondary),
+                );
+            } else {
+                for row in rows {
+                    detail = detail.push(
+                        text(format!(
+                            "{}. {}  {:.1} pts  ({}-{}-{})",
+                            row.rank, row.name, row.points, row.wins, row.draws, row.losses
+                        ))
+                        .size(12)
+                        .color(palette.text_primary),
+                    );
+                }
+            }
+            if !tournament.results.is_empty() {
+                detail = detail
+                    .push(Space::new().height(6))
+                    .push(text("Game results").size(13).color(palette.text_secondary));
+                for result in tournament.results.iter().take(16) {
+                    let white = names
+                        .get(result.pairing.white)
+                        .map(String::as_str)
+                        .unwrap_or("?");
+                    let black = names
+                        .get(result.pairing.black)
+                        .map(String::as_str)
+                        .unwrap_or("?");
+                    detail = detail.push(
+                        text(format!(
+                            "R{} · {} {} {}",
+                            result.pairing.round,
+                            white,
+                            tournament_live::result_label(result.white_score),
+                            black
+                        ))
+                        .size(12)
+                        .color(palette.text_primary),
+                    );
+                }
+            }
+        } else {
+            detail = detail.push(
+                text("Select a saved tournament to inspect final standings.")
+                    .size(13)
+                    .color(palette.text_secondary),
+            );
+        }
+
         let history_card = settings_card(
             iced_fonts::lucide::history,
             "Saved Results",
             column![
-                history,
+                row![
+                    container(scrollable(history).height(Length::Fixed(240.0)))
+                        .width(Length::FillPortion(2)),
+                    Space::new().width(12),
+                    container(scrollable(detail).height(Length::Fixed(240.0)))
+                        .width(Length::FillPortion(3))
+                        .padding(8)
+                        .style(move |_theme| container::Style {
+                            background: Some(iced::Background::Color(palette.sidebar)),
+                            border: iced::Border {
+                                radius: 10.0.into(),
+                                width: 1.0,
+                                color: palette.border,
+                            },
+                            ..Default::default()
+                        }),
+                ]
+                .width(Length::Fill),
                 styled_button("Refresh history", Msg::RefreshTournamentHistory),
             ]
             .spacing(10)
             .into(),
         );
+
         let content = column![
             text("Engine Tournaments")
                 .size(30)
                 .color(palette.text_primary),
-            text("Organize engine events, persist standings in the study database, and reopen prior results.")
+            text("Watch pairings live, cancel safely between moves, and reopen final standings.")
                 .size(14)
                 .color(palette.text_secondary),
             row![roster, controls].spacing(16).width(Length::Fill),
+            live_card,
             history_card,
         ]
         .spacing(16)
@@ -4592,19 +5097,37 @@ impl App {
 }
 
 /// Translucent glass card with rounded corners for landing screen.
-fn glass_card(content: Element<'_, Msg>) -> Element<'_, Msg> {
+fn glass_card(
+    content: Element<'_, Msg>,
+    pal: board_view::GuiPalette,
+    alpha: f32,
+) -> Element<'_, Msg> {
+    let alpha = alpha.clamp(0.0, 1.0);
     container(content)
-        .padding(20)
+        .padding(18)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_theme| container::Style {
+        .style(move |_theme| container::Style {
             background: Some(iced::Background::Color(Color::from_rgba(
-                0.086, 0.129, 0.243, 0.85,
+                pal.panel.r,
+                pal.panel.g,
+                pal.panel.b,
+                0.72 + 0.18 * alpha,
             ))),
             border: iced::Border {
-                radius: 12.0.into(),
+                radius: 16.0.into(),
                 width: 1.0,
-                color: Color::from_rgba(0.30, 0.35, 0.50, 0.6),
+                color: Color::from_rgba(
+                    pal.border.r,
+                    pal.border.g,
+                    pal.border.b,
+                    0.35 + 0.45 * alpha,
+                ),
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.28 * alpha),
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 18.0,
             },
             ..Default::default()
         })
@@ -4998,16 +5521,27 @@ async fn pick_pgn_file() -> Option<String> {
     Some(file.path().to_string_lossy().into_owned())
 }
 
+fn normalize_logged_uci(notation: &str) -> String {
+    notation
+        .trim()
+        .trim_end_matches(['+', '#', '!', '?'])
+        .to_ascii_lowercase()
+}
+
+fn find_logged_move(board: &mut types::Board, notation: &str) -> Option<types::Move> {
+    let uci = normalize_logged_uci(notation);
+    board
+        .generate_legal_moves()
+        .iter()
+        .find(|mv| mv.to_uci() == uci)
+        .copied()
+}
+
 fn replay_study_game(initial_fen: &str, moves: &[String]) -> Result<game::GameState, String> {
     types::init();
     let mut state = game::GameState::new(types::Board::from_fen(initial_fen)?);
     for (ply, notation) in moves.iter().enumerate() {
-        let mv = state
-            .board
-            .generate_legal_moves()
-            .iter()
-            .find(|mv| mv.to_uci() == *notation)
-            .copied()
+        let mv = find_logged_move(&mut state.board, notation)
             .ok_or_else(|| format!("illegal move {notation} at ply {}", ply + 1))?;
         state.last_move_squares = vec![mv.from, mv.to];
         state.board.make_move(mv);
@@ -5292,16 +5826,20 @@ fn tournament_engine_roster(
 async fn run_quick_tournament(
     engines: Vec<QuickTournamentEngine>,
     format: TournamentFormat,
-) -> String {
+    handle: tournament_live::LiveTournamentHandle,
+) -> mujrim_benchmarker::strength::TournamentSummary {
+    let cancel = Arc::clone(&handle.cancel);
+    let snapshot = Arc::clone(&handle.snapshot);
     let worker = std::thread::Builder::new()
         .name("mujrim-tournament".to_owned())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             use mujrim_benchmarker::strength::{
-                EngineSpec, MatchConfig, TournamentConfig, TournamentEngine, run_tournament,
+                EngineSpec, MatchConfig, TournamentConfig, TournamentEngine, TournamentEvent,
+                TournamentProgress, run_tournament_with_control,
             };
 
-            let roster = engines
+            let roster: Vec<TournamentEngine> = engines
                 .into_iter()
                 .map(|engine| {
                     let mut spec = EngineSpec::new(engine.path.clone());
@@ -5315,6 +5853,92 @@ async fn run_quick_tournament(
                     }
                 })
                 .collect();
+            let progress: TournamentProgress = Arc::new({
+                let snapshot = Arc::clone(&snapshot);
+                move |event: TournamentEvent| {
+                    let Ok(mut guard) = snapshot.lock() else {
+                        return;
+                    };
+                    match event {
+                        TournamentEvent::Planned {
+                            total_matches,
+                            engine_names,
+                        } => {
+                            guard.total_matches = total_matches;
+                            guard.engine_names = engine_names;
+                            guard.status_line =
+                                format!("Scheduled {total_matches} pairings. Starting…");
+                        }
+                        TournamentEvent::MatchStarted {
+                            index,
+                            total,
+                            round,
+                            white,
+                            black,
+                        } => {
+                            guard.total_matches = total.max(guard.total_matches);
+                            guard.current_round = round;
+                            guard.current_white = white.clone();
+                            guard.current_black = black.clone();
+                            guard.status_line = format!(
+                                "Playing {index}/{total} · Round {round} · {white} vs {black}"
+                            );
+                        }
+                        TournamentEvent::MatchFinished {
+                            index,
+                            total,
+                            round,
+                            white,
+                            black,
+                            white_points,
+                            black_points,
+                            error,
+                            standings,
+                            game_results,
+                        } => {
+                            guard.completed_matches = index;
+                            guard.total_matches = total.max(guard.total_matches);
+                            guard
+                                .finished_matches
+                                .push(tournament_live::FinishedMatchRow {
+                                    index,
+                                    round,
+                                    white: white.clone(),
+                                    black: black.clone(),
+                                    white_points,
+                                    black_points,
+                                    error: error.clone(),
+                                });
+                            guard.standings =
+                                tournament_live::standing_rows(&guard.engine_names, &standings);
+                            guard.game_results = game_results;
+                            guard.current_white.clear();
+                            guard.current_black.clear();
+                            guard.status_line = if let Some(error) = error {
+                                format!("Match {index}/{total} stopped: {error}")
+                            } else {
+                                format!(
+                                    "Finished {index}/{total} · {white} {} {}",
+                                    tournament_live::score_label(white_points, black_points),
+                                    black
+                                )
+                            };
+                        }
+                        TournamentEvent::Cancelled {
+                            standings,
+                            game_results,
+                        } => {
+                            guard.cancelled = true;
+                            guard.running = false;
+                            guard.standings =
+                                tournament_live::standing_rows(&guard.engine_names, &standings);
+                            guard.game_results = game_results;
+                            guard.status_line =
+                                "Tournament cancelled. Partial standings are available.".to_owned();
+                        }
+                    }
+                }
+            });
             let match_config = MatchConfig {
                 pairs: 1,
                 concurrency: 1,
@@ -5327,9 +5951,10 @@ async fn run_quick_tournament(
                 max_plies: 160,
                 early_stop: false,
                 checkpoint_path: None,
+                stop_flag: Some(Arc::clone(&cancel)),
                 ..MatchConfig::default()
             };
-            run_tournament(
+            let summary = run_tournament_with_control(
                 roster,
                 TournamentConfig {
                     match_config,
@@ -5340,19 +5965,48 @@ async fn run_quick_tournament(
                     }),
                     ..TournamentConfig::default()
                 },
-            )
+                cancel,
+                Some(progress),
+            );
+            if let Ok(mut guard) = snapshot.lock() {
+                guard.running = false;
+                guard.finished = true;
+                guard.cancelled = summary.cancelled;
+                guard.error = summary.error.clone();
+                let names = summary
+                    .engines
+                    .iter()
+                    .map(|engine| engine.engine.name.clone())
+                    .collect::<Vec<_>>();
+                guard.engine_names = names.clone();
+                guard.standings = tournament_live::standing_rows(&names, &summary.standings);
+                guard.game_results = summary.game_results.clone();
+            }
+            summary
         });
-    let summary = match worker {
+    match worker {
         Ok(worker) => match worker.join() {
             Ok(summary) => summary,
-            Err(_) => return "Tournament worker failed unexpectedly.".to_owned(),
+            Err(_) => mujrim_benchmarker::strength::TournamentSummary {
+                format,
+                engines: Vec::new(),
+                matches: Vec::new(),
+                standings: Vec::new(),
+                game_results: Vec::new(),
+                cancelled: false,
+                error: Some("Tournament worker failed unexpectedly.".to_owned()),
+            },
         },
-        Err(error) => return format!("Could not start tournament worker: {error}"),
-    };
-    if let Some(error) = summary.error {
-        return format!("Tournament stopped: {error}");
+        Err(error) => mujrim_benchmarker::strength::TournamentSummary {
+            format,
+            engines: Vec::new(),
+            matches: Vec::new(),
+            standings: Vec::new(),
+            game_results: Vec::new(),
+            cancelled: false,
+            error: Some(format!("Could not start tournament worker: {error}")),
+        },
     }
-    format_tournament_summary(&summary)
 }
 
 fn tournament_directory_name(format: TournamentFormat) -> &'static str {
@@ -5417,13 +6071,14 @@ fn analyze_game_at_depth_from(
     let mut engine = search::SearchEngine::new(32, 1);
     let mut analysis = Vec::with_capacity(moves.len());
     for (ply, notation) in moves.iter().enumerate() {
-        let uci = notation.trim_end_matches(['+', '#']);
         let legal_moves = board.generate_legal_moves();
-        let played = legal_moves
-            .iter()
-            .find(|mv| mv.to_uci() == uci)
-            .copied()
-            .ok_or_else(|| format!("illegal move '{uci}' at ply {}", ply + 1))?;
+        let played = find_logged_move(&mut board, notation).ok_or_else(|| {
+            format!(
+                "illegal move '{}' at ply {}",
+                normalize_logged_uci(notation),
+                ply + 1
+            )
+        })?;
         let moving_value = board
             .piece_on(played.from)
             .map_or(0, |(piece, _)| piece_value(piece));
@@ -5504,6 +6159,45 @@ fn annotated_move_label(notation: &str, annotation: Option<MoveAnnotation>) -> S
     )
 }
 
+fn tournament_history_button<'a>(
+    name: String,
+    status: String,
+    id: String,
+    selected: bool,
+    pal: board_view::GuiPalette,
+) -> Element<'a, Msg> {
+    button(
+        column![
+            text(name).size(13).color(pal.text_primary),
+            text(status).size(11).color(pal.text_secondary),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+    )
+    .on_press(Msg::SelectTournament(id))
+    .padding(8)
+    .width(Length::Fill)
+    .style(move |_theme, button_status| {
+        let background = if selected {
+            Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.28)
+        } else if matches!(button_status, button::Status::Hovered) {
+            Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.14)
+        } else {
+            Color::TRANSPARENT
+        };
+        button::Style {
+            background: Some(iced::Background::Color(background)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            text_color: pal.text_primary,
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
 fn move_history_button<'a>(
     label: String,
     ply: usize,
@@ -5547,10 +6241,14 @@ fn build_pgn(white: &str, black: &str, moves: &[String], result: &str) -> String
         "[Event \"Mujrim Game\"]\n[Site \"Local\"]\n[Date \"????.??.??\"]\n[White \"{white}\"]\n[Black \"{black}\"]\n[Result \"{result}\"]\n\n"
     );
     for (index, pair) in moves.chunks(2).enumerate() {
-        pgn.push_str(&format!("{}. {}", index + 1, pair[0]));
+        pgn.push_str(&format!(
+            "{}. {}",
+            index + 1,
+            normalize_logged_uci(&pair[0])
+        ));
         if let Some(black_move) = pair.get(1) {
             pgn.push(' ');
-            pgn.push_str(black_move);
+            pgn.push_str(&normalize_logged_uci(black_move));
         }
         pgn.push(' ');
     }
@@ -5577,7 +6275,7 @@ fn build_annotated_pgn(
         if ply % 2 == 0 {
             pgn.push_str(&format!("{}. ", ply / 2 + 1));
         }
-        pgn.push_str(notation);
+        pgn.push_str(&normalize_logged_uci(notation));
 
         let annotation = annotations.get(ply).copied().flatten();
         let score = scores_cp.get(ply).copied().flatten();
@@ -5708,9 +6406,10 @@ mod tests {
     use super::{
         EngineConfig, ExternalEngineProtocol, PlayerConfig, analyze_game_at_depth,
         annotated_move_label, apply_opening_move, board_at_ply, bounded_hash_mb,
-        build_annotated_pgn, build_pgn, bundled_engine_choices, format_tournament_summary,
-        game_summary_label, main_window_settings, puzzle_line_matches, replay_study_game,
-        selected_bundled_engine, starter_puzzles, tournament_directory_name,
+        build_annotated_pgn, build_pgn, bundled_engine_choices, find_logged_move,
+        format_tournament_summary, game_summary_label, main_window_settings, normalize_logged_uci,
+        puzzle_line_matches, replay_study_game, selected_bundled_engine, starter_puzzles,
+        tournament_directory_name,
     };
     use mujrim_study::annotation::MoveAnnotation;
     use mujrim_study::database::{GameMetadata, GameSummary};
@@ -5778,6 +6477,8 @@ mod tests {
             engines: Vec::new(),
             matches: Vec::new(),
             standings: Vec::new(),
+            game_results: Vec::new(),
+            cancelled: false,
             error: None,
         };
         assert_eq!(
@@ -5841,6 +6542,35 @@ mod tests {
         assert_eq!(state.board.side_to_move, types::Color::Black);
         assert_eq!(state.last_move_squares[1].to_string(), "f3");
         assert!(replay_study_game(mujrim_study::opening::START_FEN, &["e2e5".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn replay_and_review_accept_check_mate_uci_suffixes() {
+        let moves = ["e2e4+".to_owned(), "e7e5#".to_owned(), "g1f3!".to_owned()];
+        let state = replay_study_game(mujrim_study::opening::START_FEN, &moves).unwrap();
+        assert_eq!(state.board.side_to_move, types::Color::Black);
+        let board = board_at_ply(mujrim_study::opening::START_FEN, &moves, 2).unwrap();
+        assert_eq!(board.side_to_move, types::Color::White);
+        assert_eq!(normalize_logged_uci("e8e4+"), "e8e4");
+        assert_eq!(
+            find_logged_move(&mut types::Board::new(), "e2e4#")
+                .unwrap()
+                .to_uci(),
+            "e2e4"
+        );
+    }
+
+    #[test]
+    fn build_pgn_strips_check_suffixes_for_portable_export() {
+        let pgn = build_pgn(
+            "White",
+            "Black",
+            &["e2e4+".to_owned(), "e7e5#".to_owned()],
+            "1-0",
+        );
+        assert!(pgn.contains("1. e2e4 e7e5"));
+        assert!(!pgn.contains("e2e4+"));
+        assert!(!pgn.contains("e7e5#"));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! Resource-bounded paired round-robin engine tournaments.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mujrim_protocols::catalog::SearchLimitSupport;
 use mujrim_study::tournament::{
@@ -49,6 +51,8 @@ pub struct TournamentSummary {
     pub engines: Vec<TournamentEngine>,
     pub matches: Vec<MatchSummary>,
     pub standings: Vec<Standing>,
+    pub game_results: Vec<TournamentResult>,
+    pub cancelled: bool,
     pub error: Option<String>,
 }
 
@@ -78,21 +82,67 @@ impl TournamentSummary {
             "engines": self.engines.len(),
             "matches": self.matches.iter().map(MatchSummary::to_json_value).collect::<Vec<_>>(),
             "standings": standings,
+            "cancelled": self.cancelled,
             "error": self.error,
         })
     }
 }
 
+/// Live progress events emitted while a tournament is running.
+#[derive(Clone, Debug)]
+pub enum TournamentEvent {
+    Planned {
+        total_matches: usize,
+        engine_names: Vec<String>,
+    },
+    MatchStarted {
+        index: usize,
+        total: usize,
+        round: usize,
+        white: String,
+        black: String,
+    },
+    MatchFinished {
+        index: usize,
+        total: usize,
+        round: usize,
+        white: String,
+        black: String,
+        white_points: f64,
+        black_points: f64,
+        error: Option<String>,
+        standings: Vec<Standing>,
+        game_results: Vec<TournamentResult>,
+    },
+    Cancelled {
+        standings: Vec<Standing>,
+        game_results: Vec<TournamentResult>,
+    },
+}
+
+pub type TournamentProgress = Arc<dyn Fn(TournamentEvent) + Send + Sync>;
+
 pub fn run_tournament(
     engines: Vec<TournamentEngine>,
+    config: TournamentConfig,
+) -> TournamentSummary {
+    run_tournament_with_control(engines, config, Arc::new(AtomicBool::new(false)), None)
+}
+
+pub fn run_tournament_with_control(
+    engines: Vec<TournamentEngine>,
     mut config: TournamentConfig,
+    cancel: Arc<AtomicBool>,
+    on_event: Option<TournamentProgress>,
 ) -> TournamentSummary {
     config.match_config.concurrency = config.match_config.concurrency.max(1);
     config.match_config.early_stop = false;
+    config.match_config.stop_flag = Some(Arc::clone(&cancel));
     ensure_compatible_time_control(&engines, &mut config.match_config);
     let mut matches = Vec::new();
     let mut game_results = Vec::new();
     let mut error = None;
+    let mut cancelled = false;
 
     if let Some(directory) = config.checkpoint_directory.as_ref()
         && let Err(create_error) = std::fs::create_dir_all(directory)
@@ -102,6 +152,8 @@ pub fn run_tournament(
             engines,
             matches,
             standings: Vec::new(),
+            game_results,
+            cancelled: false,
             error: Some(format!(
                 "failed to create checkpoint directory '{}': {create_error}",
                 directory.display()
@@ -109,19 +161,63 @@ pub fn run_tournament(
         };
     }
 
+    let emit = |event: TournamentEvent| {
+        if let Some(callback) = on_event.as_ref() {
+            callback(event);
+        }
+    };
+
+    let engine_names = engines
+        .iter()
+        .map(|engine| engine.engine.name.clone())
+        .collect::<Vec<_>>();
+
     match config.format {
         TournamentFormat::RoundRobin | TournamentFormat::DoubleRoundRobin => {
             let plan = schedule(engines.len(), config.format);
-            error = execute_plan(&engines, &config, &plan, &mut matches, &mut game_results);
+            emit(TournamentEvent::Planned {
+                total_matches: plan.len(),
+                engine_names: engine_names.clone(),
+            });
+            let outcome = execute_plan(
+                &engines,
+                &config,
+                &plan,
+                &mut matches,
+                &mut game_results,
+                &cancel,
+                &emit,
+            );
+            cancelled = outcome.cancelled;
+            error = outcome.error;
         }
         TournamentFormat::Swiss => {
             let rounds = config.swiss_rounds.unwrap_or_else(|| {
                 (usize::BITS - engines.len().saturating_sub(1).leading_zeros()) as usize + 1
             });
+            let estimated = engines.len() / 2 * rounds.max(1);
+            emit(TournamentEvent::Planned {
+                total_matches: estimated.max(1),
+                engine_names: engine_names.clone(),
+            });
             for round in 1..=rounds.max(1) {
+                if cancel.load(Ordering::Acquire) {
+                    cancelled = true;
+                    break;
+                }
                 let plan = swiss_round(engines.len(), &game_results, round);
-                error = execute_plan(&engines, &config, &plan, &mut matches, &mut game_results);
-                if error.is_some() {
+                let outcome = execute_plan(
+                    &engines,
+                    &config,
+                    &plan,
+                    &mut matches,
+                    &mut game_results,
+                    &cancel,
+                    &emit,
+                );
+                cancelled = outcome.cancelled;
+                error = outcome.error;
+                if cancelled || error.is_some() {
                     break;
                 }
             }
@@ -129,11 +225,29 @@ pub fn run_tournament(
         TournamentFormat::Knockout => {
             let mut participants = (0..engines.len()).collect::<Vec<_>>();
             let mut round = 1;
+            emit(TournamentEvent::Planned {
+                total_matches: engines.len().saturating_sub(1).max(1),
+                engine_names: engine_names.clone(),
+            });
             while participants.len() > 1 {
+                if cancel.load(Ordering::Acquire) {
+                    cancelled = true;
+                    break;
+                }
                 let plan = knockout_round(&participants, round);
                 let match_start = matches.len();
-                error = execute_plan(&engines, &config, &plan, &mut matches, &mut game_results);
-                if error.is_some() {
+                let outcome = execute_plan(
+                    &engines,
+                    &config,
+                    &plan,
+                    &mut matches,
+                    &mut game_results,
+                    &cancel,
+                    &emit,
+                );
+                cancelled = outcome.cancelled;
+                error = outcome.error;
+                if cancelled || error.is_some() {
                     break;
                 }
                 let decisive = plan
@@ -166,13 +280,26 @@ pub fn run_tournament(
         })
         .collect::<Vec<_>>();
     let standings = standings(&entrants, &game_results);
+    if cancelled {
+        emit(TournamentEvent::Cancelled {
+            standings: standings.clone(),
+            game_results: game_results.clone(),
+        });
+    }
     TournamentSummary {
         format: config.format,
         engines,
         matches,
         standings,
+        game_results,
+        cancelled,
         error,
     }
+}
+
+struct PlanOutcome {
+    cancelled: bool,
+    error: Option<String>,
 }
 
 fn execute_plan(
@@ -181,15 +308,36 @@ fn execute_plan(
     plan: &[Pairing],
     matches: &mut Vec<MatchSummary>,
     game_results: &mut Vec<TournamentResult>,
-) -> Option<String> {
+    cancel: &AtomicBool,
+    emit: &dyn Fn(TournamentEvent),
+) -> PlanOutcome {
+    let total = plan.len().max(matches.len().saturating_add(plan.len()));
     for &pairing in plan {
+        if cancel.load(Ordering::Acquire) {
+            return PlanOutcome {
+                cancelled: true,
+                error: None,
+            };
+        }
         let candidate = engines[pairing.white].engine.clone();
         let reference = engines[pairing.black].engine.clone();
+        let index = matches.len() + 1;
+        emit(TournamentEvent::MatchStarted {
+            index,
+            total: total.max(index),
+            round: pairing.round,
+            white: candidate.name.clone(),
+            black: reference.name.clone(),
+        });
         let mut match_config = config.match_config.clone();
         match_config.opening_offset = match_config
             .opening_offset
             .saturating_add(matches.len().saturating_mul(match_config.pairs));
         match_config.reference_elo = engines[pairing.black].established_elo;
+        match_config.stop_flag = Some(Arc::new(AtomicBool::new(false)));
+        if let Some(flag) = config.match_config.stop_flag.as_ref() {
+            match_config.stop_flag = Some(Arc::clone(flag));
+        }
         match_config.checkpoint_path = config.checkpoint_directory.as_ref().map(|directory| {
             directory.join(format!(
                 "{:02}-{}-vs-{}.jsonl",
@@ -199,6 +347,9 @@ fn execute_plan(
             ))
         });
         let summary = run_match(candidate, reference, None, match_config);
+        let white_points = summary.scores.wins as f64 + summary.scores.draws as f64 * 0.5;
+        let games = summary.scores.games() as f64;
+        let black_points = games - white_points;
         append_game_results(pairing, &summary, game_results);
         let match_error = summary.error.as_ref().map(|error| {
             format!(
@@ -206,12 +357,46 @@ fn execute_plan(
                 summary.candidate, summary.reference
             )
         });
+        let entrants = engines
+            .iter()
+            .enumerate()
+            .map(|(idx, engine)| Entrant {
+                id: idx.to_string(),
+                name: engine.engine.name.clone(),
+                seed_elo: engine.established_elo,
+            })
+            .collect::<Vec<_>>();
+        let current_standings = standings(&entrants, game_results);
+        emit(TournamentEvent::MatchFinished {
+            index,
+            total: total.max(index),
+            round: pairing.round,
+            white: summary.candidate.clone(),
+            black: summary.reference.clone(),
+            white_points,
+            black_points,
+            error: match_error.clone(),
+            standings: current_standings,
+            game_results: game_results.clone(),
+        });
         matches.push(summary);
+        if cancel.load(Ordering::Acquire) {
+            return PlanOutcome {
+                cancelled: true,
+                error: match_error,
+            };
+        }
         if match_error.is_some() {
-            return match_error;
+            return PlanOutcome {
+                cancelled: false,
+                error: match_error,
+            };
         }
     }
-    None
+    PlanOutcome {
+        cancelled: false,
+        error: None,
+    }
 }
 
 fn knockout_score(summary: &MatchSummary, participants: &[usize], pairing: Pairing) -> f64 {
@@ -333,5 +518,37 @@ mod tests {
         assert_eq!(config.move_time, None);
         assert_eq!(config.nodes_per_move, 0);
         assert_eq!(config.max_depth, 10);
+    }
+
+    #[test]
+    fn cancel_flag_stops_before_any_match_when_prearmed() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let engines = vec![
+            TournamentEngine {
+                engine: EngineSpec::new(PathBuf::from("alpha.exe")),
+                established_elo: None,
+                search_limits: SearchLimitSupport::STANDARD,
+            },
+            TournamentEngine {
+                engine: EngineSpec::new(PathBuf::from("beta.exe")),
+                established_elo: None,
+                search_limits: SearchLimitSupport::STANDARD,
+            },
+        ];
+        let summary = run_tournament_with_control(
+            engines,
+            TournamentConfig {
+                match_config: MatchConfig {
+                    pairs: 1,
+                    nodes_per_move: 1,
+                    ..MatchConfig::default()
+                },
+                ..TournamentConfig::default()
+            },
+            cancel,
+            None,
+        );
+        assert!(summary.cancelled);
+        assert!(summary.matches.is_empty());
     }
 }

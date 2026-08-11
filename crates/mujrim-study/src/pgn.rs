@@ -217,7 +217,12 @@ fn strip_move_number(mut token: &str) -> &str {
 
 fn resolve_notation(board: &mut Board, notation: &str) -> Option<Move> {
     let legal = board.generate_legal_moves();
-    if let Some(parsed) = Move::from_uci(notation)
+    // GUI / engine exports may append check (`+`) or mate (`#`) to UCI tokens.
+    let uci_token = notation
+        .trim()
+        .trim_end_matches(['!', '?', '+', '#'])
+        .to_ascii_lowercase();
+    if let Some(parsed) = Move::from_uci(&uci_token)
         && let Some(mv) = legal.iter().find(|mv| {
             mv.from == parsed.from && mv.to == parsed.to && mv.promotion == parsed.promotion
         })
@@ -344,5 +349,28 @@ mod tests {
     fn rejects_ambiguous_or_illegal_moves() {
         let input = "[Event \"Broken\"]\n\n1. e5 *";
         assert!(parse_games(input).unwrap_err().contains("cannot resolve"));
+    }
+
+    #[test]
+    fn parses_uci_with_check_and_mate_suffixes() {
+        // Suffixes may be present even when the move is not actually check/mate.
+        let input = "[Event \"Suffix\"]\n\n1. e2e4+ e7e5# 1-0\n";
+        let games = parse_games(input).unwrap();
+        assert_eq!(games[0].moves, ["e2e4", "e7e5"]);
+    }
+
+    #[test]
+    fn parses_long_uci_game_with_late_check_suffix() {
+        // Mirrors a real GUI export that previously failed around ply 76.
+        let input = r#"[Event "Mujrim Game"]
+[Site "Local"]
+[White "UCI: mujrim.exe"]
+[Black "UCI: reckless.exe"]
+[Result "1/2-1/2"]
+
+1. d2d4 g8f6 2. g1f3 d7d5 3. c2c4 e7e6 4. b1c3 c7c6 5. c1g5 f8e7 6. e2e3 b8d7 7. c4d5 e6d5 8. d1c2 e8g8 9. f1d3 f8e8 10. e1g1 d7f8 11. h2h3 g7g6 12. a1b1 f8e6 13. g5h6 e6g7 14. b2b4 a7a6 15. g2g4 e7d6 16. c3e2 f6g4 17. h6g7 g4e3 18. f2e3 g8g7 19. e2f4 e8e3 20. f4g2 e3d3 21. c2d3 c8f5 22. d3e3 f5b1 23. f1b1 d8f8 24. g2e1 a8e8 25. e3f2 f7f6 26. e1d3 b7b6 27. a2a4 e8e6 28. a4a5 b6a5 29. b4a5 e6e7 30. f2d2 g6g5 31. d3f2 d6g3 32. b1b3 f8e8 33. d2c2 h7h5 34. b3b6 e8d7 35. g1g2 g3f2 36. c2f2 d7e8 37. f3g1 e7e3 38. f2c2 e8e4+ 39. c2e4 d5e4 40. b6c6 f6f5 1/2-1/2"#;
+        let games = parse_games(input).unwrap();
+        assert_eq!(games[0].moves.len(), 80);
+        assert_eq!(games[0].moves[75], "e8e4");
     }
 }

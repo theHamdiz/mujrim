@@ -70,6 +70,8 @@ pub struct MatchConfig {
     /// Stop as soon as SPRT accepts a hypothesis. Tournament matches disable
     /// this so every scheduled pairing has an equal sample size.
     pub early_stop: bool,
+    /// Optional external cancel flag observed by match workers.
+    pub stop_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Default for MatchConfig {
@@ -97,6 +99,7 @@ impl Default for MatchConfig {
             reference_elo: None,
             checkpoint_path: None,
             early_stop: true,
+            stop_flag: None,
         }
     }
 }
@@ -809,7 +812,11 @@ pub fn run_match(
     let stopped = Arc::new(AtomicBool::new(
         checkpoint_error.is_some()
             || resumed_pairs >= config.pairs
-            || resumed_decision != SprtDecision::Continue,
+            || resumed_decision != SprtDecision::Continue
+            || config
+                .stop_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire)),
     ));
     let mut initial_results = Vec::with_capacity(config.pairs);
     initial_results.extend(resumed);
@@ -835,6 +842,13 @@ pub fn run_match(
             let mut session_pairs = 0usize;
 
             loop {
+                if config
+                    .stop_flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    stopped.store(true, Ordering::Release);
+                }
                 if stopped.load(Ordering::Acquire) {
                     break;
                 }

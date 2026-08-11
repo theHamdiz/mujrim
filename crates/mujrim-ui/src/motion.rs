@@ -66,6 +66,19 @@ pub fn hub_entrance(progress_ms: u64, duration_ms: u64) -> f32 {
     AnimPace::ease(progress_ms as f32 / duration_ms as f32)
 }
 
+/// Staggered fade/slide progress for sequenced hub panels.
+pub fn hub_stagger(progress_ms: u64, delay_ms: u64, duration_ms: u64) -> f32 {
+    if progress_ms <= delay_ms {
+        return 0.0;
+    }
+    hub_entrance(progress_ms - delay_ms, duration_ms)
+}
+
+/// Vertical slide offset (px) that settles to zero as a panel enters.
+pub fn hub_slide_y(progress: f32, distance: f32) -> f32 {
+    (1.0 - progress.clamp(0.0, 1.0)) * distance
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +100,14 @@ mod tests {
     fn hub_entrance_completes() {
         assert_eq!(hub_entrance(0, 400), 0.0);
         assert_eq!(hub_entrance(400, 400), 1.0);
+    }
+
+    #[test]
+    fn hub_stagger_waits_for_delay() {
+        assert_eq!(hub_stagger(50, 100, 400), 0.0);
+        assert!(hub_stagger(300, 100, 400) > 0.0);
+        assert_eq!(hub_stagger(500, 100, 400), 1.0);
+        assert_eq!(hub_slide_y(0.0, 24.0), 24.0);
+        assert_eq!(hub_slide_y(1.0, 24.0), 0.0);
     }
 }
