@@ -89,6 +89,19 @@ jobs:
             libasound2-dev \
             p7zip-full
 
+      - name: Fetch Stockfish NNUE required for compile-time embed
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p crates/mujrim-eval/resources
+          NET="crates/mujrim-eval/resources/nn-ab28990d4ea3.nnue"
+          if [[ ! -f "$NET" ]]; then
+            curl -fsSL --retry 5 --retry-delay 2 \
+              -o "$NET" \
+              "https://tests.stockfishchess.org/api/nn/nn-ab28990d4ea3.nnue"
+          fi
+          test -s "$NET"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -249,6 +262,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+
+      - name: Fetch Stockfish NNUE required for compile-time embed
+        run: |
+          set -euo pipefail
+          mkdir -p crates/mujrim-eval/resources
+          NET="crates/mujrim-eval/resources/nn-ab28990d4ea3.nnue"
+          if [[ ! -f "$NET" ]]; then
+            curl -fsSL --retry 5 --retry-delay 2 \
+              -o "$NET" \
+              "https://tests.stockfishchess.org/api/nn/nn-ab28990d4ea3.nnue"
+          fi
+          test -s "$NET"
 
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross --locked
