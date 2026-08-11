@@ -642,7 +642,7 @@ impl UciHandler {
 
     /// Responds to `uci` with identification and option list.
     fn handle_uci(&self) {
-        uci_println("id name Mujrim 2.0.0");
+        uci_println("id name Mujrim 1.0.0");
         uci_println("id author Ahmad Hamdi Emara (Egypt)");
         uci_println(&format!(
             "option name Hash type spin default {DEFAULT_HASH_MB} min 1 max {MAX_HASH_MB}"

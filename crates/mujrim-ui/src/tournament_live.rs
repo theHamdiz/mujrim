@@ -45,6 +45,22 @@ pub struct StandingRow {
     pub performance: Option<f64>,
 }
 
+/// In-progress game board for the hybrid live arena.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveGameBoard {
+    pub game_key: String,
+    pub match_index: usize,
+    pub round: usize,
+    pub white: String,
+    pub black: String,
+    pub initial_fen: String,
+    pub moves: Vec<String>,
+    pub last_uci: String,
+    pub score_cp: i32,
+    pub depth: i32,
+    pub nodes: u64,
+}
+
 /// Replayable tournament game for the hub board viewer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayedGame {
@@ -101,10 +117,12 @@ pub struct LiveTournamentSnapshot {
     pub standings: Vec<StandingRow>,
     pub game_results: Vec<TournamentResult>,
     pub played_games: Vec<PlayedGame>,
+    pub live_games: Vec<LiveGameBoard>,
     pub cancelled: bool,
     pub finished: bool,
     pub status_line: String,
     pub error: Option<String>,
+    pub show_results_panel: bool,
 }
 
 impl LiveTournamentSnapshot {
@@ -143,6 +161,64 @@ impl LiveTournamentSnapshot {
 
     pub fn latest_game_id(&self) -> Option<usize> {
         self.played_games.last().map(|game| game.id)
+    }
+
+    pub fn upsert_live_game(&mut self, board: LiveGameBoard) {
+        if let Some(existing) = self
+            .live_games
+            .iter_mut()
+            .find(|game| game.game_key == board.game_key)
+        {
+            *existing = board;
+        } else {
+            self.live_games.push(board);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_ply(
+        &mut self,
+        game_key: &str,
+        ply: usize,
+        uci: String,
+        score_cp: i32,
+        depth: i32,
+        nodes: u64,
+        moves: Vec<String>,
+    ) {
+        if let Some(game) = self
+            .live_games
+            .iter_mut()
+            .find(|game| game.game_key == game_key)
+        {
+            game.moves = moves;
+            game.last_uci = uci;
+            game.score_cp = score_cp;
+            game.depth = depth;
+            game.nodes = nodes;
+            let _ = ply;
+        }
+    }
+
+    pub fn finish_live_game(&mut self, game_key: &str, white_score: f64, moves: Vec<String>) {
+        if let Some(index) = self
+            .live_games
+            .iter()
+            .position(|game| game.game_key == game_key)
+        {
+            let live = self.live_games.remove(index);
+            let id = self.played_games.len();
+            self.played_games.push(PlayedGame {
+                id,
+                match_index: live.match_index,
+                round: live.round,
+                white: live.white,
+                black: live.black,
+                white_score,
+                initial_fen: live.initial_fen,
+                moves,
+            });
+        }
     }
 }
 
@@ -275,6 +351,30 @@ mod tests {
                 .status_line
                 .contains("Cancel requested")
         );
+    }
+
+    #[test]
+    fn live_ply_updates_and_finish_move_to_played() {
+        let mut snap = LiveTournamentSnapshot::default();
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "g1".into(),
+            match_index: 1,
+            round: 1,
+            white: "A".into(),
+            black: "B".into(),
+            initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+            moves: Vec::new(),
+            last_uci: String::new(),
+            score_cp: 0,
+            depth: 0,
+            nodes: 0,
+        });
+        snap.apply_ply("g1", 1, "e2e4".into(), 12, 8, 1000, vec!["e2e4".into()]);
+        assert_eq!(snap.live_games[0].moves.len(), 1);
+        snap.finish_live_game("g1", 1.0, vec!["e2e4".into(), "e7e5".into()]);
+        assert!(snap.live_games.is_empty());
+        assert_eq!(snap.played_games.len(), 1);
+        assert_eq!(snap.played_games[0].white_score, 1.0);
     }
 
     #[test]

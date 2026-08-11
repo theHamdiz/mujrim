@@ -5,9 +5,11 @@ pub mod runner;
 pub mod stats;
 pub mod tournament;
 
-pub use runner::{EngineSpec, MatchConfig, MatchSummary, run_match};
+pub use runner::{
+    EngineSpec, GameProgress, GameProgressEvent, MatchConfig, MatchSummary, run_match,
+};
 pub use tournament::{
-    TournamentConfig, TournamentEngine, TournamentEvent, TournamentGameSnapshot, TournamentProgress,
-    TournamentSummary, games_from_match, games_from_summary, run_tournament,
+    TournamentConfig, TournamentEngine, TournamentEvent, TournamentGameSnapshot,
+    TournamentProgress, TournamentSummary, games_from_match, games_from_summary, run_tournament,
     run_tournament_with_control,
 };

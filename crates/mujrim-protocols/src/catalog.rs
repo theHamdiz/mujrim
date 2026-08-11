@@ -196,12 +196,8 @@ fn runtime_targets() -> Vec<(String, RuntimeCompatibility)> {
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     {
+        // Host-arch only: never auto-select emulated x86_64 binaries on Arm64.
         targets.push(("windows-arm64".to_owned(), RuntimeCompatibility::Native));
-        targets.push((
-            "windows-x86_64-avx2".to_owned(),
-            RuntimeCompatibility::Emulated,
-        ));
-        targets.push(("windows-x86_64".to_owned(), RuntimeCompatibility::Emulated));
     }
 
     targets
@@ -236,7 +232,7 @@ fn push_candidate(candidates: &mut Vec<EngineCandidate>, candidate: EngineCandid
 }
 
 /// Candidate locations in priority order. An explicit path always wins,
-/// followed by native packaged builds and supported emulation fallbacks.
+/// followed by host-native packaged builds (never emulated ISA folders).
 pub fn engine_candidate_details(
     engine_id: &str,
     executable: &Path,
@@ -319,7 +315,11 @@ pub fn discover_engine_details(
     let candidates = engine_candidate_details(engine_id, executable, current_dir, explicit);
     candidates
         .iter()
-        .find(|candidate| candidate.path.is_file())
+        .find(|candidate| {
+            candidate.compatibility == RuntimeCompatibility::Native
+                && candidate.path.is_file()
+                && crate::binary_arch::is_host_native_binary(&candidate.path)
+        })
         .cloned()
         .ok_or_else(|| {
             let searched = candidates
@@ -328,7 +328,7 @@ pub fn discover_engine_details(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "could not find {engine_id} for {} (searched: {searched})",
+                "could not find host-native {engine_id} for {} (searched: {searched})",
                 RuntimePlatform::current().directory_name()
             )
         })
@@ -587,17 +587,16 @@ mod tests {
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     #[test]
-    fn windows_arm64_falls_back_to_x64_avx2_emulation() {
+    fn windows_arm64_auto_detect_skips_emulated_x64_folders() {
         let candidates = engine_candidate_details(
             "obsidian",
             Path::new(r"C:\Mujrim\mujrim.exe"),
             Path::new(r"D:\src\mujrim"),
             None,
         );
-        let fallback = candidates
-            .iter()
-            .find(|candidate| candidate.target_directory == "windows-x86_64-avx2")
-            .unwrap();
-        assert_eq!(fallback.compatibility, RuntimeCompatibility::Emulated);
+        assert!(candidates.iter().all(|candidate| {
+            candidate.compatibility == RuntimeCompatibility::Native
+                && !candidate.target_directory.contains("x86_64")
+        }));
     }
 }

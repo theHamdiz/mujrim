@@ -422,7 +422,7 @@ pub fn download_network(
     }
 
     let client = reqwest::blocking::Client::builder()
-        .user_agent("mujrim-updater/2.0.0")
+        .user_agent("mujrim-updater/1.0.0")
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(600))
         .redirect(reqwest::redirect::Policy::limited(10))

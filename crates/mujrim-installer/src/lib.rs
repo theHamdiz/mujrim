@@ -439,7 +439,7 @@ impl App {
         let subtitle = text("The First Arabian Chess Engine")
             .size(16)
             .color(TEXT_SECONDARY);
-        let version = text("Version 2.0.0").size(14).color(ACCENT_GOLD);
+        let version = text("Version 1.0.0").size(14).color(ACCENT_GOLD);
 
         let payload_info = if embedded::has_payload() {
             let size = downloads::human_bytes(embedded::total_size());

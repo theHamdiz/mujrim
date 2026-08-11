@@ -1,6 +1,6 @@
 [package]
 name = "mujrim-bench-ratings"
-version = "2.0.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Ahmad Hamdi Emara"]
 description = "BK accuracy → approximate CCRL / Lichess-scale ratings (proxy only)"

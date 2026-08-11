@@ -8,7 +8,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub mod binary_arch;
 pub mod catalog;
+
+pub use binary_arch::{BinaryArch, detect_binary_arch, is_host_native_binary};
 
 /// Run a protocol engine directly on the caller's standard streams while
 /// retaining the same kill-on-close and memory protections as managed sessions.
@@ -1635,7 +1638,7 @@ mod tests {
     fn identity_adapter_preserves_search_telemetry_and_bestmove() {
         let input = b"id name Stockfish dev\r\nid author the Stockfish developers\r\noption name Hash type spin default 16 min 1 max 33554432\r\nuciok\r\ninfo depth 18 score cp 31 nodes 500000 nps 900000 pv e2e4 e7e5\r\nbestmove e2e4 ponder e7e5\r\n";
         let adapter = UciIdentityAdapter {
-            name: "Mujrim Elite 2.0.0 [Stockfish-native]",
+            name: "Mujrim Elite 1.0.0 [Stockfish-native]",
             author: "Ahmad Hamdi Emara (Egypt) / Stockfish developers",
         };
         let mut output = Vec::new();
@@ -1643,7 +1646,7 @@ mod tests {
         relay_uci_output(BufReader::new(&input[..]), &mut output, &adapter).unwrap();
 
         let output = String::from_utf8(output).unwrap();
-        assert!(output.starts_with("id name Mujrim Elite 2.0.0 [Stockfish-native]\r\n"));
+        assert!(output.starts_with("id name Mujrim Elite 1.0.0 [Stockfish-native]\r\n"));
         assert!(output.contains("id author Ahmad Hamdi Emara (Egypt) / Stockfish developers\r\n"));
         assert!(output.contains("option name Hash type spin default 16 min 1 max 33554432\r\n"));
         assert!(

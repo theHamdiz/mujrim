@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,10 +20,14 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64
           - os: macos-latest
             name: macOS ARM64
           - os: windows-latest
             name: Windows x86_64
+          - os: windows-11-arm
+            name: Windows ARM64
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
     steps:
@@ -94,11 +98,15 @@ jobs:
               print("uci smoke test failed, output:", file=sys.stderr)
               print(output, file=sys.stderr)
               sys.exit(1)
+          if "Mujrim 1.0.0" not in output:
+              print("uci smoke missing id name Mujrim 1.0.0:", file=sys.stderr)
+              print(output, file=sys.stderr)
+              sys.exit(1)
 
       - name: Test
         run: cargo test --profile release-test --workspace
 
-  # ── Cross-compile check for ARM/MUSL targets ──
+  # ── Cross-compile check for ARM/MUSL engine + updater targets ──
   cross-check:
     runs-on: ubuntu-latest
     strategy:
@@ -120,8 +128,19 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
-      # Only build the CLI engine for cross targets (UI needs native GPU libs)
-      - name: Cross build (engine only)
-        run: cross build --release --target ${{ matrix.target }} -p mujrim
+      # Engine + v60 + updater (rustls). UI needs native GPU libs.
+      - name: Cross build (engine + updater)
+        run: |
+          cross build --release --target ${{ matrix.target }} -p mujrim
+          cross build --release --target ${{ matrix.target }} -p mujrim-native-v60
+          cross build --release --target ${{ matrix.target }} -p mujrim-updater
+
+      - name: Smoke test via cross run (UCI handshake)
+        run: |
+          set -euo pipefail
+          output="$(printf 'uci\nquit\n' | cross run --release --target ${{ matrix.target }} -p mujrim -- uci)"
+          echo "$output"
+          echo "$output" | grep -q 'uciok'
+          echo "$output" | grep -q 'Mujrim 1.0.0'

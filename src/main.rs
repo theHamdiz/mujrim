@@ -46,7 +46,7 @@ fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
     match engine_id {
         "stockfish" => NativeSearchStackProfile {
             engine_id,
-            display_name: "Mujrim Elite 2.0.0",
+            display_name: "Mujrim Elite 1.0.0",
             authors: "Ahmad Hamdi Emara (Egypt)",
             memory_limit_bytes: 1536 * 1024 * 1024,
             max_hash_mb: 1024,
@@ -54,7 +54,7 @@ fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
         },
         "reckless" => NativeSearchStackProfile {
             engine_id,
-            display_name: "Mujrim v60 2.0.0",
+            display_name: "Mujrim v60 1.0.0",
             authors: "Ahmad Hamdi Emara (Egypt)",
             memory_limit_bytes: 1024 * 1024 * 1024,
             max_hash_mb: 768,
@@ -62,7 +62,7 @@ fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
         },
         _ => NativeSearchStackProfile {
             engine_id,
-            display_name: "Mujrim External Search Adapter 2.0.0",
+            display_name: "Mujrim External Search Adapter 1.0.0",
             authors: "Ahmad Hamdi Emara (Egypt) / upstream engine authors",
             memory_limit_bytes: 512 * 1024 * 1024,
             max_hash_mb: 384,
@@ -171,7 +171,7 @@ fn main() {
     types::init();
 
     let matches = Command::new("Mujrim Chess Engine")
-        .version("2.0.0")
+        .version("1.0.0")
         .author("Ahmad Hamdi <contact@hamdiz.me>")
         .about("A high-performance chess engine with NNUE-enhanced evaluation")
         .arg(
@@ -428,8 +428,8 @@ mod tests {
         let reckless = search_stack_profile("reckless");
 
         assert_eq!(stockfish.engine_id, "stockfish");
-        assert_eq!(stockfish.display_name, "Mujrim Elite 2.0.0");
+        assert_eq!(stockfish.display_name, "Mujrim Elite 1.0.0");
         assert_eq!(reckless.engine_id, "reckless");
-        assert_eq!(reckless.display_name, "Mujrim v60 2.0.0");
+        assert_eq!(reckless.display_name, "Mujrim v60 1.0.0");
     }
 }

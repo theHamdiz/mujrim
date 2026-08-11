@@ -45,11 +45,13 @@ Updated: 2026-04-08
 - Replace emoji-based UI icons with professional vector iconography suitable for `iced`.
 
 ## CI/CD Baseline (Required)
-- CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test.
+- CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test (`uciok` + `Mujrim 1.0.0`).
+- Native CI matrix: Linux x86_64 + Linux aarch64 (`ubuntu-24.04-arm`) + macOS ARM64 + Windows x86_64 + Windows ARM64 (`windows-11-arm`).
+- Cross CI/release matrix: Linux `armv7`, `x86_64-musl`, `aarch64-musl` (engine + updater; UCI smoke via `cross run`).
 - Release pipeline must produce artifacts for major platforms, including:
   - macOS `aarch64` + `x86_64` + universal bundle
-  - Linux `x86_64` + `aarch64` (gnu and musl variants)
-  - Windows `x86_64`
+  - Linux `x86_64` + `aarch64` (gnu full with UI; musl engine-only) + `armv7` engine-only
+  - Windows `x86_64` + Windows `aarch64`
 - Every release artifact should contain engine + UI (when supported) + updater + NNUE payload/metadata.
 - Smoke validation in release jobs should verify `mujrim` responds correctly to UCI handshake input.
 

@@ -43,7 +43,34 @@ impl EngineSpec {
     }
 }
 
+/// Live callbacks while a single game is being played.
+pub type GameProgress = Arc<dyn Fn(GameProgressEvent) + Send + Sync>;
+
 #[derive(Clone, Debug)]
+pub enum GameProgressEvent {
+    Started {
+        game_key: String,
+        white: String,
+        black: String,
+        initial_fen: String,
+    },
+    Ply {
+        game_key: String,
+        ply: usize,
+        uci: String,
+        score_cp: i32,
+        depth: i32,
+        nodes: u64,
+        moves: Vec<String>,
+    },
+    Finished {
+        game_key: String,
+        white_score: f64,
+        moves: Vec<String>,
+    },
+}
+
+#[derive(Clone)]
 pub struct MatchConfig {
     pub pairs: usize,
     pub opening_offset: usize,
@@ -72,6 +99,25 @@ pub struct MatchConfig {
     pub early_stop: bool,
     /// Optional external cancel flag observed by match workers.
     pub stop_flag: Option<Arc<AtomicBool>>,
+    /// Optional ply-by-ply progress hook for live tournament boards.
+    pub game_progress: Option<GameProgress>,
+}
+
+impl std::fmt::Debug for MatchConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MatchConfig")
+            .field("pairs", &self.pairs)
+            .field("concurrency", &self.concurrency)
+            .field("nodes_per_move", &self.nodes_per_move)
+            .field("move_time", &self.move_time)
+            .field("max_depth", &self.max_depth)
+            .field("hash_mb", &self.hash_mb)
+            .field("engine_threads", &self.engine_threads)
+            .field("early_stop", &self.early_stop)
+            .field("game_progress", &self.game_progress.as_ref().map(|_| "set"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for MatchConfig {
@@ -100,6 +146,7 @@ impl Default for MatchConfig {
             checkpoint_path: None,
             early_stop: true,
             stop_flag: None,
+            game_progress: None,
         }
     }
 }
@@ -875,7 +922,16 @@ pub fn run_match(
                 let white = {
                     let (candidate_session, reference_session) =
                         sessions.as_mut().expect("sessions initialized above");
-                    play_game(candidate_session, reference_session, opening, true, &config)
+                    play_game(
+                        candidate_session,
+                        reference_session,
+                        opening,
+                        true,
+                        &config,
+                        &candidate.name,
+                        &reference.name,
+                        &format!("pair{index}-cw"),
+                    )
                 };
                 if let Some(message) = resource_limit_detail(&white) {
                     *lock_recover(&error) = Some(message.to_string());
@@ -903,6 +959,9 @@ pub fn run_match(
                         opening,
                         false,
                         &config,
+                        &candidate.name,
+                        &reference.name,
+                        &format!("pair{index}-cb"),
                     )
                 };
                 if let Some(message) = resource_limit_detail(&black) {
@@ -1052,14 +1111,28 @@ fn engine_color(candidate_white: bool, candidate_engine: bool) -> Color {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn play_game(
     candidate: &mut EngineSession,
     reference: &mut EngineSession,
     opening: &Opening,
     candidate_white: bool,
     config: &MatchConfig,
+    candidate_name: &str,
+    reference_name: &str,
+    game_key: &str,
 ) -> GameRecord {
     let started = Instant::now();
+    let (white_name, black_name) = if candidate_white {
+        (candidate_name, reference_name)
+    } else {
+        (reference_name, candidate_name)
+    };
+    let emit = |event: GameProgressEvent| {
+        if let Some(callback) = config.game_progress.as_ref() {
+            callback(event);
+        }
+    };
     let mut board = match opening.board() {
         Ok(board) => board,
         Err(message) => return forfeit(candidate_white, Color::White, message, started.elapsed()),
@@ -1069,9 +1142,28 @@ fn play_game(
     let mut candidate_telemetry = EngineTelemetry::default();
     let mut reference_telemetry = EngineTelemetry::default();
     let mut adjudicator = Adjudicator::new(config);
+    emit(GameProgressEvent::Started {
+        game_key: game_key.to_owned(),
+        white: white_name.to_owned(),
+        black: black_name.to_owned(),
+        initial_fen: opening.initial_fen.clone(),
+    });
+    let emit_done = |record: GameRecord| -> GameRecord {
+        let white_score = if candidate_white {
+            record.outcome.score()
+        } else {
+            1.0 - record.outcome.score()
+        };
+        emit(GameProgressEvent::Finished {
+            game_key: game_key.to_owned(),
+            white_score,
+            moves: record.moves.clone(),
+        });
+        record
+    };
 
     if let Err(message) = candidate.new_game() {
-        return with_moves(
+        return emit_done(with_moves(
             forfeit(
                 candidate_white,
                 engine_color(candidate_white, true),
@@ -1079,10 +1171,10 @@ fn play_game(
                 started.elapsed(),
             ),
             &moves,
-        );
+        ));
     }
     if let Err(message) = reference.new_game() {
-        return with_moves(
+        return emit_done(with_moves(
             forfeit(
                 candidate_white,
                 engine_color(candidate_white, false),
@@ -1090,7 +1182,7 @@ fn play_game(
                 started.elapsed(),
             ),
             &moves,
-        );
+        ));
     }
 
     for ply in moves.len()..config.max_plies {
@@ -1113,7 +1205,7 @@ fn play_game(
         let info = match session.search(&request) {
             Ok(info) => info,
             Err(message) => {
-                return with_moves(
+                return emit_done(with_moves(
                     with_telemetry(
                         forfeit_with_progress(
                             candidate_white,
@@ -1127,7 +1219,7 @@ fn play_game(
                         &reference_telemetry,
                     ),
                     &moves,
-                );
+                ));
             }
         };
         let search_elapsed = search_started.elapsed();
@@ -1143,7 +1235,7 @@ fn play_game(
             -info.score
         };
         if let Some(winner) = adjudicator.observe(white_eval, ply) {
-            return with_moves(
+            return emit_done(with_moves(
                 with_telemetry(
                     finish(
                         candidate_white,
@@ -1157,10 +1249,10 @@ fn play_game(
                     &reference_telemetry,
                 ),
                 &moves,
-            );
+            ));
         }
         if adjudicator.is_draw() {
-            return with_moves(
+            return emit_done(with_moves(
                 with_telemetry(
                     draw_record(
                         candidate_white,
@@ -1173,11 +1265,11 @@ fn play_game(
                     &reference_telemetry,
                 ),
                 &moves,
-            );
+            ));
         }
 
         let Some(mv) = resolve_legal_move(&mut board, &info.best_move) else {
-            return with_moves(
+            return emit_done(with_moves(
                 with_telemetry(
                     forfeit_with_progress(
                         candidate_white,
@@ -1191,14 +1283,23 @@ fn play_game(
                     &reference_telemetry,
                 ),
                 &moves,
-            );
+            ));
         };
         moves.push(mv.to_uci());
         board.make_move(mv);
+        emit(GameProgressEvent::Ply {
+            game_key: game_key.to_owned(),
+            ply: moves.len(),
+            uci: mv.to_uci(),
+            score_cp: white_eval,
+            depth: info.depth,
+            nodes: info.nodes,
+            moves: moves.clone(),
+        });
         let played = ply + 1;
 
         if board.is_checkmate() {
-            return with_moves(
+            return emit_done(with_moves(
                 with_telemetry(
                     finish(
                         candidate_white,
@@ -1212,10 +1313,10 @@ fn play_game(
                     &reference_telemetry,
                 ),
                 &moves,
-            );
+            ));
         }
         if board.is_stalemate() || board.is_draw() {
-            return with_moves(
+            return emit_done(with_moves(
                 with_telemetry(
                     draw_record(
                         candidate_white,
@@ -1228,11 +1329,11 @@ fn play_game(
                     &reference_telemetry,
                 ),
                 &moves,
-            );
+            ));
         }
     }
 
-    with_moves(
+    emit_done(with_moves(
         with_telemetry(
             draw_record(
                 candidate_white,
@@ -1245,7 +1346,7 @@ fn play_game(
             &reference_telemetry,
         ),
         &moves,
-    )
+    ))
 }
 
 fn score_records(pairs: &[PairRecord]) -> ScoreCount {

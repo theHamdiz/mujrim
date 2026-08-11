@@ -269,9 +269,9 @@ pub fn info_plist(app_name: &str, executable: &str, bundle_id: &str) -> String {
     <key>CFBundleIdentifier</key>
     <string>{bundle_id}</string>
     <key>CFBundleVersion</key>
-    <string>2.0.0</string>
+    <string>1.0.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.0</string>
+    <string>1.0.0</string>
     <key>CFBundleExecutable</key>
     <string>{executable}</string>
     <key>CFBundleIconFile</key>

@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0). Leave empty to dry-run package only."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -10,6 +16,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "1"
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && (inputs.tag != '' && inputs.tag || format('dryrun-{0}', github.sha)) || github.ref_name }}
 
 jobs:
   # ══════════════════════════════════════════════════════════════
@@ -21,6 +28,7 @@ jobs:
       matrix:
         include:
           # ── macOS ──
+          # macos-latest is Apple Silicon; macos-13 remains the Intel host image.
           - os: macos-latest
             target: aarch64-apple-darwin
             arch: aarch64
@@ -38,8 +46,14 @@ jobs:
             arch: x86_64
             name: Linux x86_64
             suffix: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            name: Linux ARM64
+            suffix: ""
 
           # ── Windows ──
+          # windows-11-arm ships VS 2022 + ARM64 MSVC toolchains for native builds.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             arch: x86_64-avx2
@@ -127,11 +141,15 @@ jobs:
               print("uci smoke test failed, output:", file=sys.stderr)
               print(output, file=sys.stderr)
               sys.exit(1)
+          if "Mujrim 1.0.0" not in output:
+              print("uci smoke missing id name Mujrim 1.0.0:", file=sys.stderr)
+              print(output, file=sys.stderr)
+              sys.exit(1)
 
       - name: Package binaries
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${RELEASE_TAG}"
           DIR="mujrim-${TAG}-${{ matrix.target }}"
           mkdir -p "$DIR"
 
@@ -177,8 +195,9 @@ jobs:
           path: mujrim-*-${{ matrix.target }}.*
 
   # ══════════════════════════════════════════════════════════════
-  # Cross-compiled builds — engine-only (no GUI, needs no GPU)
-  # For ARM SBCs, Buildroot, embedded Linux, Raspberry Pi, etc.
+  # Cross-compiled builds — engine + updater (no GUI)
+  # For SBCs, Buildroot, Alpine/musl, Raspberry Pi armhf, etc.
+  # Linux aarch64 glibc full (with UI) is built natively above.
   # ══════════════════════════════════════════════════════════════
   build-cross:
     runs-on: ubuntu-latest
@@ -186,11 +205,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── ARM64 Linux (Raspberry Pi 3/4/5, Pine64, etc.) ──
-          - target: aarch64-unknown-linux-gnu
-            arch: aarch64
-            name: Linux ARM64 (aarch64)
-
           # ── ARM32 Linux (Raspberry Pi 2, older SBCs) ──
           - target: armv7-unknown-linux-gnueabihf
             arch: armv7
@@ -219,7 +233,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
       - name: Cross build (engine + updater)
         run: |
@@ -235,9 +249,17 @@ jobs:
           test -f "target/${{ matrix.target }}/release/mujrim-updater"
           cp "target/${{ matrix.target }}/release/mujrim-v60" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}"
 
+      - name: Smoke test via cross run (UCI handshake)
+        run: |
+          set -euo pipefail
+          output="$(printf 'uci\nquit\n' | cross run --release --target ${{ matrix.target }} -p mujrim -- uci)"
+          echo "$output"
+          echo "$output" | grep -q 'uciok'
+          echo "$output" | grep -q 'Mujrim 1.0.0'
+
       - name: Package binaries
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${RELEASE_TAG}"
           DIR="mujrim-${TAG}-${{ matrix.target }}"
           mkdir -p "$DIR"
 
@@ -280,27 +302,60 @@ jobs:
 
       - name: Create universal binary
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          set -euo pipefail
+          TAG="${RELEASE_TAG}"
+          UNI_DIR="mujrim-${TAG}-universal-apple-darwin"
+          mkdir -p "$UNI_DIR"
 
           # Extract both macOS archives
           cd artifacts
-          tar xzf "aarch64-apple-darwin/mujrim-${TAG}-aarch64-apple-darwin.tar.gz" 2>/dev/null || true
-          tar xzf "x86_64-apple-darwin/mujrim-${TAG}-x86_64-apple-darwin.tar.gz" 2>/dev/null || true
+          tar xzf "aarch64-apple-darwin/mujrim-${TAG}-aarch64-apple-darwin.tar.gz"
+          tar xzf "x86_64-apple-darwin/mujrim-${TAG}-x86_64-apple-darwin.tar.gz"
 
           ARM_DIR="mujrim-${TAG}-aarch64-apple-darwin"
           X86_DIR="mujrim-${TAG}-x86_64-apple-darwin"
-          UNI_DIR="../mujrim-${TAG}-universal-apple-darwin"
-          mkdir -p "$UNI_DIR"
 
-          # Lipo each binary
-          for bin in mujrim mujrim-v60 mujrim-ui mujrim-game mujrim-updater mujrim-installer; do
+          # Lipo every shared binary present on both arches.
+          bins=(
+            mujrim
+            mujrim-external
+            mujrim-embedded
+            mujrim-v60
+            mujrim-v60-external
+            mujrim-v60-embedded
+            mujrim-ui
+            mujrim-game
+            mujrim-updater
+            mujrim-installer
+          )
+          for bin in "${bins[@]}"; do
             if [ -f "$ARM_DIR/$bin" ] && [ -f "$X86_DIR/$bin" ]; then
-              lipo -create "$ARM_DIR/$bin" "$X86_DIR/$bin" -output "$UNI_DIR/$bin"
-              echo "✓ Created universal: $bin"
+              lipo -create "$ARM_DIR/$bin" "$X86_DIR/$bin" -output "../$UNI_DIR/$bin"
+              echo "Created universal: $bin"
             elif [ -f "$ARM_DIR/$bin" ]; then
-              cp "$ARM_DIR/$bin" "$UNI_DIR/$bin"
+              cp "$ARM_DIR/$bin" "../$UNI_DIR/$bin"
+              echo "Copied ARM-only: $bin"
+            elif [ -f "$X86_DIR/$bin" ]; then
+              cp "$X86_DIR/$bin" "../$UNI_DIR/$bin"
+              echo "Copied x86-only: $bin"
             fi
           done
+
+          # Arch-suffixed adapter names differ per slice; lipo matching pairs when present.
+          if [ -f "$ARM_DIR/mujrim-v60-aarch64" ] && [ -f "$X86_DIR/mujrim-v60-x86_64" ]; then
+            lipo -create "$ARM_DIR/mujrim-v60-aarch64" "$X86_DIR/mujrim-v60-x86_64" -output "../$UNI_DIR/mujrim-v60-universal"
+          fi
+          if [ -f "$ARM_DIR/mujrim-v10-aarch64" ] && [ -f "$X86_DIR/mujrim-v10-x86_64" ]; then
+            lipo -create "$ARM_DIR/mujrim-v10-aarch64" "$X86_DIR/mujrim-v10-x86_64" -output "../$UNI_DIR/mujrim-v10-universal"
+          fi
+          if [ -f "$ARM_DIR/mujrim-akimbo-aarch64" ] && [ -f "$X86_DIR/mujrim-akimbo-x86_64" ]; then
+            lipo -create "$ARM_DIR/mujrim-akimbo-aarch64" "$X86_DIR/mujrim-akimbo-x86_64" -output "../$UNI_DIR/mujrim-akimbo-universal"
+          fi
+
+          mkdir -p "../$UNI_DIR/nnue"
+          if [ -d "$ARM_DIR/nnue" ]; then
+            cp -R "$ARM_DIR/nnue/." "../$UNI_DIR/nnue/" 2>/dev/null || true
+          fi
           cd ..
 
           cp README.md License.md "$UNI_DIR/" 2>/dev/null || true
@@ -321,6 +376,7 @@ jobs:
     needs: [build-native, build-cross, build-macos-universal]
     runs-on: ubuntu-latest
     name: Publish Release
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     steps:
       - uses: actions/checkout@v4
 
@@ -336,6 +392,7 @@ jobs:
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-assets/ \;
           echo "Release assets:"
           ls -la release-assets/
+          test "$(ls -A release-assets)" 
 
       - name: Generate checksums
         run: |
@@ -346,10 +403,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: release-assets/*
           generate_release_notes: true
           body: |
-            ## Mujrim Chess Engine ${{ github.ref_name }}
+            ## Mujrim Chess Engine ${{ env.RELEASE_TAG }}
 
             ### Downloads
 
@@ -359,8 +417,8 @@ jobs:
             | macOS | Apple Silicon (aarch64) | Full | Engine + GUI + Updater |
             | macOS | Intel (x86_64) | Full | Engine + GUI + Updater |
             | Linux | x86_64 (glibc) | Full | Engine + GUI + Updater |
+            | Linux | ARM64 (glibc) | Full | Engine + GUI + Updater |
             | Linux | x86_64 (static/musl) | Engine | Engine + Updater |
-            | Linux | ARM64 (glibc) | Engine | Engine + Updater |
             | Linux | ARM64 (static/musl) | Engine | Engine + Updater |
             | Linux | ARMv7 (armhf) | Engine | Engine + Updater |
             | Windows | x86_64 | Full | Engine + GUI + Updater |
@@ -371,7 +429,7 @@ jobs:
             ### Install
             ```bash
             # Extract and run
-            tar xzf mujrim-${{ github.ref_name }}-<platform>.tar.gz
+            tar xzf mujrim-${{ env.RELEASE_TAG }}-<platform>.tar.gz
             ./mujrim uci         # UCI engine
             ./mujrim-ui          # GUI
             ./mujrim-updater check  # Check for updates

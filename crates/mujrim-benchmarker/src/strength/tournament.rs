@@ -10,7 +10,7 @@ use mujrim_study::tournament::{
     knockout_round, schedule, standings, swiss_round,
 };
 
-use super::{EngineSpec, MatchConfig, MatchSummary, run_match};
+use super::{EngineSpec, GameProgressEvent, MatchConfig, MatchSummary, run_match};
 
 #[derive(Clone, Debug)]
 pub struct TournamentEngine {
@@ -113,6 +113,28 @@ pub enum TournamentEvent {
         round: usize,
         white: String,
         black: String,
+    },
+    GameStarted {
+        game_key: String,
+        match_index: usize,
+        round: usize,
+        white: String,
+        black: String,
+        initial_fen: String,
+    },
+    PlyPlayed {
+        game_key: String,
+        ply: usize,
+        uci: String,
+        score_cp: i32,
+        depth: i32,
+        nodes: u64,
+        moves: Vec<String>,
+    },
+    GameFinished {
+        game_key: String,
+        white_score: f64,
+        moves: Vec<String>,
     },
     MatchFinished {
         index: usize,
@@ -259,7 +281,7 @@ pub fn run_tournament_with_control(
                 &mut matches,
                 &mut game_results,
                 &cancel,
-                &emit,
+                &on_event,
             );
             cancelled = outcome.cancelled;
             error = outcome.error;
@@ -286,7 +308,7 @@ pub fn run_tournament_with_control(
                     &mut matches,
                     &mut game_results,
                     &cancel,
-                    &emit,
+                    &on_event,
                 );
                 cancelled = outcome.cancelled;
                 error = outcome.error;
@@ -316,7 +338,7 @@ pub fn run_tournament_with_control(
                     &mut matches,
                     &mut game_results,
                     &cancel,
-                    &emit,
+                    &on_event,
                 );
                 cancelled = outcome.cancelled;
                 error = outcome.error;
@@ -382,8 +404,13 @@ fn execute_plan(
     matches: &mut Vec<MatchSummary>,
     game_results: &mut Vec<TournamentResult>,
     cancel: &AtomicBool,
-    emit: &dyn Fn(TournamentEvent),
+    on_event: &Option<TournamentProgress>,
 ) -> PlanOutcome {
+    let emit = |event: TournamentEvent| {
+        if let Some(callback) = on_event.as_ref() {
+            callback(event);
+        }
+    };
     let total = plan.len().max(matches.len().saturating_add(plan.len()));
     for &pairing in plan {
         if cancel.load(Ordering::Acquire) {
@@ -419,6 +446,51 @@ fn execute_plan(
                 safe_name(&reference.name)
             ))
         });
+        let match_index = index;
+        let round = pairing.round;
+        if let Some(callback) = on_event.clone() {
+            match_config.game_progress = Some(Arc::new(move |event| match event {
+                GameProgressEvent::Started {
+                    game_key,
+                    white,
+                    black,
+                    initial_fen,
+                } => callback(TournamentEvent::GameStarted {
+                    game_key,
+                    match_index,
+                    round,
+                    white,
+                    black,
+                    initial_fen,
+                }),
+                GameProgressEvent::Ply {
+                    game_key,
+                    ply,
+                    uci,
+                    score_cp,
+                    depth,
+                    nodes,
+                    moves,
+                } => callback(TournamentEvent::PlyPlayed {
+                    game_key,
+                    ply,
+                    uci,
+                    score_cp,
+                    depth,
+                    nodes,
+                    moves,
+                }),
+                GameProgressEvent::Finished {
+                    game_key,
+                    white_score,
+                    moves,
+                } => callback(TournamentEvent::GameFinished {
+                    game_key,
+                    white_score,
+                    moves,
+                }),
+            }));
+        }
         let summary = run_match(candidate, reference, None, match_config);
         let white_points = summary.scores.wins as f64 + summary.scores.draws as f64 * 0.5;
         let games = summary.scores.games() as f64;

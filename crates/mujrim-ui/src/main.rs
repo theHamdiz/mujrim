@@ -13,7 +13,10 @@ mod motion;
 mod noise;
 mod pieces;
 mod recording;
+mod tournament_arena;
 mod tournament_live;
+mod tournament_results;
+mod tournament_setup;
 mod uci_process;
 
 use std::path::PathBuf;
@@ -361,6 +364,8 @@ struct App {
     selected_tournament_id: Option<String>,
     selected_tournament_game_id: Option<usize>,
     tournament_review_active: bool,
+    tournament_setup: tournament_setup::TournamentSetup,
+    show_tournament_results: bool,
     /// Latest multi-engine analysis arrows for the analysis/review board.
     analysis_arrows: Vec<BoardArrow>,
     analysis_status: String,
@@ -548,6 +553,18 @@ enum Msg {
     QuickTournamentFinished(Box<mujrim_benchmarker::strength::TournamentSummary>),
     SelectTournament(String),
     SelectTournamentGame(usize),
+    ToggleTournamentResults,
+    TournamentEventNameChanged(String),
+    TournamentSiteChanged(String),
+    TournamentConcurrencyChanged(i32),
+    TournamentGamesPerEncounterChanged(i32),
+    TournamentHashChanged(i32),
+    TournamentThreadsChanged(i32),
+    TournamentNodesChanged(i32),
+    TournamentMoveTimeChanged(i32),
+    TournamentDepthChanged(i32),
+    TournamentTimeModeChanged(tournament_setup::TimeMode),
+    TournamentToggleEngine(String),
     EngineCatalogProbed(Vec<EngineMetadata>),
     AnalyzeGame,
     GameAnalysisFinished(Result<Vec<AnalyzedPly>, String>),
@@ -754,6 +771,8 @@ impl Default for App {
             selected_tournament_id: None,
             selected_tournament_game_id: None,
             tournament_review_active: false,
+            tournament_setup: tournament_setup::TournamentSetup::default(),
+            show_tournament_results: false,
             analysis_arrows: Vec::new(),
             analysis_status: "Pick engines and run multi-engine analysis.".to_owned(),
             analysis_engines_selected: vec!["builtin".to_owned()],
@@ -800,6 +819,71 @@ impl App {
         );
         self.status = format!("Tournament game · {}", game.title());
         Ok(())
+    }
+
+    fn load_live_tournament_board(
+        &mut self,
+        live: &tournament_live::LiveGameBoard,
+    ) -> Result<(), String> {
+        if self.tournament_review_active
+            && self.selected_tournament_game_id.is_none()
+            && self.initial_fen == live.initial_fen
+            && self.move_log == live.moves
+        {
+            self.engine_info = format!(
+                "{} (White) vs {} (Black)\nLive · {} · d{} · {} nodes",
+                live.white,
+                live.black,
+                tournament_arena::score_text(live.score_cp),
+                live.depth,
+                live.nodes
+            );
+            return Ok(());
+        }
+        self.invalidate_engine_tasks();
+        self.animation = None;
+        self.active_puzzle = None;
+        self.selected_tournament_game_id = None;
+        self.tournament_review_active = true;
+        self.initial_fen = live.initial_fen.clone();
+        self.move_log = live.moves.clone();
+        self.move_annotations = vec![None; live.moves.len()];
+        self.clear_review_state();
+        let mut state = replay_study_game(&live.initial_fen, &live.moves)?;
+        state.refresh_move_overlays(self.settings.show_last_move, None, &[]);
+        self.game = Some(state);
+        self.engine_info = format!(
+            "{} (White) vs {} (Black)\nLive · {} · d{} · {} nodes",
+            live.white,
+            live.black,
+            tournament_arena::score_text(live.score_cp),
+            live.depth,
+            live.nodes
+        );
+        self.status = format!(
+            "Live · R{} · {} vs {} · ply {}",
+            live.round,
+            live.white,
+            live.black,
+            live.moves.len()
+        );
+        Ok(())
+    }
+
+    fn sync_tournament_arena_board(&mut self) -> Task<Msg> {
+        if self.live_tournament_view.running {
+            let visible = tournament_arena::visible_live_boards(
+                &self.live_tournament_view.live_games,
+                self.tournament_setup.concurrency as usize,
+            );
+            if let Some(live) = visible.last().cloned() {
+                if let Err(error) = self.load_live_tournament_board(&live) {
+                    self.tournament_status = format!("Could not open live board: {error}");
+                }
+                return Task::none();
+            }
+        }
+        self.follow_latest_tournament_game()
     }
 
     fn follow_latest_tournament_game(&mut self) -> Task<Msg> {
@@ -1432,7 +1516,67 @@ impl App {
             }
             Msg::SelectTournamentFormat(format) => {
                 self.tournament_format = format;
+                self.tournament_setup.format = format;
                 self.tournament_status.clear();
+                Task::none()
+            }
+            Msg::TournamentEventNameChanged(value) => {
+                self.tournament_setup.event = value;
+                Task::none()
+            }
+            Msg::TournamentSiteChanged(value) => {
+                self.tournament_setup.site = value;
+                Task::none()
+            }
+            Msg::TournamentConcurrencyChanged(value) => {
+                self.tournament_setup.concurrency = value.clamp(1, 4) as u32;
+                Task::none()
+            }
+            Msg::TournamentGamesPerEncounterChanged(value) => {
+                self.tournament_setup.games_per_encounter = value.max(1) as u32;
+                Task::none()
+            }
+            Msg::TournamentHashChanged(value) => {
+                self.tournament_setup.hash_mb = value.max(1) as u32;
+                Task::none()
+            }
+            Msg::TournamentThreadsChanged(value) => {
+                self.tournament_setup.engine_threads = value.max(1) as u32;
+                Task::none()
+            }
+            Msg::TournamentNodesChanged(value) => {
+                self.tournament_setup.nodes_per_move = value.max(1) as u32;
+                Task::none()
+            }
+            Msg::TournamentMoveTimeChanged(value) => {
+                self.tournament_setup.move_time_ms = value.max(1) as u32;
+                Task::none()
+            }
+            Msg::TournamentDepthChanged(value) => {
+                self.tournament_setup.max_depth = value.max(1);
+                Task::none()
+            }
+            Msg::TournamentTimeModeChanged(mode) => {
+                self.tournament_setup.time_mode = mode;
+                Task::none()
+            }
+            Msg::TournamentToggleEngine(path) => {
+                let path = PathBuf::from(path);
+                if let Some(index) = self
+                    .tournament_setup
+                    .selected_engine_paths
+                    .iter()
+                    .position(|existing| existing == &path)
+                {
+                    self.tournament_setup.selected_engine_paths.remove(index);
+                } else {
+                    self.tournament_setup.selected_engine_paths.push(path);
+                }
+                Task::none()
+            }
+            Msg::ToggleTournamentResults => {
+                self.show_tournament_results = !self.show_tournament_results;
+                self.live_tournament_view.show_results_panel = self.show_tournament_results;
                 Task::none()
             }
             Msg::RunQuickTournament => {
@@ -1442,23 +1586,39 @@ impl App {
                             .to_owned();
                     return Task::none();
                 }
-                let engines =
+                let roster =
                     tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
-                if engines.len() < 2 {
-                    self.tournament_status =
-                        "At least two detected UCI engines are required.".to_owned();
+                if self.tournament_setup.selected_engine_paths.is_empty() {
+                    self.tournament_setup.selected_engine_paths =
+                        roster.iter().map(|engine| engine.path.clone()).collect();
+                }
+                if let Err(error) = self.tournament_setup.validate() {
+                    self.tournament_status = error;
                     return Task::none();
                 }
-                let handle = tournament_live::LiveTournamentHandle::new(self.tournament_format);
+                let engines = roster
+                    .into_iter()
+                    .filter(|engine| {
+                        self.tournament_setup
+                            .selected_engine_paths
+                            .iter()
+                            .any(|path| path == &engine.path)
+                    })
+                    .collect::<Vec<_>>();
+                let handle =
+                    tournament_live::LiveTournamentHandle::new(self.tournament_setup.format);
                 self.live_tournament_view = handle.clone_snapshot();
                 self.live_tournament = Some(handle.clone());
                 self.selected_tournament_game_id = None;
                 self.tournament_review_active = false;
-                self.tournament_status =
-                    "Tournament running — live pairings, boards, and standings update below."
-                        .to_owned();
-                let format = self.tournament_format;
-                Task::perform(run_quick_tournament(engines, format, handle), |summary| {
+                self.show_tournament_results = false;
+                self.tournament_format = self.tournament_setup.format;
+                self.tournament_status = format!(
+                    "Running {} — live boards update move-by-move (concurrency {}).",
+                    self.tournament_setup.event, self.tournament_setup.concurrency
+                );
+                let setup = self.tournament_setup.clone();
+                Task::perform(run_quick_tournament(engines, setup, handle), |summary| {
                     Msg::QuickTournamentFinished(Box::new(summary))
                 })
             }
@@ -1475,11 +1635,12 @@ impl App {
             Msg::TournamentTick(_now) => {
                 if let Some(handle) = &self.live_tournament {
                     self.live_tournament_view = handle.clone_snapshot();
+                    self.live_tournament_view.show_results_panel = self.show_tournament_results;
                     if !self.live_tournament_view.status_line.is_empty() {
                         self.tournament_status = self.live_tournament_view.status_line.clone();
                     }
                     if self.live_tournament_view.running {
-                        return self.follow_latest_tournament_game();
+                        return self.sync_tournament_arena_board();
                     }
                 }
                 Task::none()
@@ -1536,7 +1697,8 @@ impl App {
                         if game.moves.is_empty() {
                             Task::none()
                         } else {
-                            self.status = "Analyzing tournament game for the eval graph…".to_owned();
+                            self.status =
+                                "Analyzing tournament game for the eval graph…".to_owned();
                             Task::perform(
                                 analyze_game(self.initial_fen.clone(), self.move_log.clone()),
                                 Msg::GameAnalysisFinished,
@@ -4185,18 +4347,29 @@ impl App {
 
     fn view_tournament_game_board(&self) -> Element<'_, Msg> {
         let palette = self.settings.board_theme.gui_palette();
-        let Some(game_id) = self.selected_tournament_game_id else {
-            return text("Select a finished game to open the match board.")
-                .size(13)
-                .color(palette.text_secondary)
-                .into();
-        };
-        let Some(played) = self.live_tournament_view.game(game_id) else {
-            return text("Selected tournament game is no longer available.")
-                .size(13)
-                .color(palette.text_secondary)
-                .into();
-        };
+        let live_focus = self
+            .selected_tournament_game_id
+            .is_none()
+            .then(|| {
+                tournament_arena::visible_live_boards(
+                    &self.live_tournament_view.live_games,
+                    self.tournament_setup.concurrency as usize,
+                )
+                .into_iter()
+                .next_back()
+            })
+            .flatten();
+        let played = self
+            .selected_tournament_game_id
+            .and_then(|id| self.live_tournament_view.game(id));
+        if played.is_none() && live_focus.is_none() && !self.tournament_review_active {
+            return text(
+                "Live boards appear here while games run. Select a finished game to replay.",
+            )
+            .size(13)
+            .color(palette.text_secondary)
+            .into();
+        }
         let Some(gs) = self.game.as_ref().filter(|_| self.tournament_review_active) else {
             return text("Loading tournament board…")
                 .size(13)
@@ -4231,23 +4404,43 @@ impl App {
             },
         );
 
+        let title = if let Some(played) = played {
+            played.title()
+        } else if let Some(live) = &live_focus {
+            format!("Live R{} · {} vs {}", live.round, live.white, live.black)
+        } else {
+            "Tournament board".to_owned()
+        };
+        let subtitle = if let Some(played) = played {
+            format!(
+                "White {} · Black {} · {}",
+                played.white,
+                played.black,
+                played.result_label()
+            )
+        } else if let Some(live) = &live_focus {
+            format!(
+                "Last {} · {} · d{} · {} nodes",
+                if live.last_uci.is_empty() {
+                    "—"
+                } else {
+                    live.last_uci.as_str()
+                },
+                tournament_arena::score_text(live.score_cp),
+                live.depth,
+                live.nodes
+            )
+        } else {
+            self.engine_info.clone()
+        };
+        let ply_label = format!("{} plies", self.move_log.len());
+
         let result_panel = container(
             column![
-                text(played.title()).size(16).color(palette.text_primary),
-                text(format!(
-                    "White {} · Black {} · {}",
-                    played.white,
-                    played.black,
-                    played.result_label()
-                ))
-                .size(13)
-                .color(palette.text_secondary),
-                text(format!("{} plies", played.moves.len()))
-                    .size(12)
-                    .color(palette.text_secondary),
-                text(&self.engine_info)
-                    .size(12)
-                    .color(palette.accent_alt),
+                text(title).size(16).color(palette.text_primary),
+                text(subtitle).size(13).color(palette.text_secondary),
+                text(ply_label).size(12).color(palette.text_secondary),
+                text(&self.engine_info).size(12).color(palette.accent_alt),
             ]
             .spacing(4),
         )
@@ -4336,7 +4529,11 @@ impl App {
 
         if self.analysis_scores_cp.iter().any(Option::is_some) {
             side = side
-                .push(text("Eval histogram").size(12).color(palette.text_secondary))
+                .push(
+                    text("Eval histogram")
+                        .size(12)
+                        .color(palette.text_secondary),
+                )
                 .push(
                     container(eval_graph::view(&self.analysis_scores_cp, 96.0))
                         .padding(6)
@@ -4373,109 +4570,171 @@ impl App {
             ));
         }
 
-        row![
-            container(board).width(Length::FillPortion(3)),
-            side,
-        ]
-        .spacing(14)
-        .width(Length::Fill)
-        .into()
+        row![container(board).width(Length::FillPortion(3)), side,]
+            .spacing(14)
+            .width(Length::Fill)
+            .into()
     }
 
     fn view_tournament_hub(&self) -> Element<'_, Msg> {
         let palette = self.settings.board_theme.gui_palette();
         let live = &self.live_tournament_view;
         let running = self.live_tournament.is_some();
+        let setup = &self.tournament_setup;
+        let roster_engines =
+            tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
 
         let mut engines = column![].spacing(6);
-        for engine in &self.bundled_engines {
-            engines = engines.push(
-                row![
-                    text(engine.display_name)
-                        .size(15)
-                        .color(palette.text_primary),
-                    Space::new().width(Length::Fill),
-                    text(bundled_engine_label(engine))
-                        .size(12)
-                        .color(palette.text_secondary),
-                ]
-                .align_y(Alignment::Center),
-            );
-        }
-        for engine in &self.external_engine_catalog {
-            if self
-                .bundled_engines
+        engines = engines.push(
+            text("Host-native UCI engines only (wrong-arch binaries are hidden).")
+                .size(12)
+                .color(palette.text_secondary),
+        );
+        for engine in &roster_engines {
+            let selected = setup
+                .selected_engine_paths
                 .iter()
-                .any(|bundled| bundled.path == std::path::Path::new(&engine.path))
-            {
-                continue;
-            }
+                .any(|path| path == &engine.path);
+            let path_key = engine.path.display().to_string();
             engines = engines.push(
                 row![
-                    text(&engine.name).size(15).color(palette.text_primary),
-                    Space::new().width(Length::Fill),
-                    text(format!("{} · {}", engine.protocol, engine.architecture))
-                        .size(12)
+                    styled_button(
+                        if selected { "Selected" } else { "Select" },
+                        Msg::TournamentToggleEngine(path_key),
+                    ),
+                    text(engine.name.clone())
+                        .size(15)
+                        .color(palette.text_primary)
+                        .width(Length::Fill),
+                    text(engine.path.display().to_string())
+                        .size(11)
                         .color(palette.text_secondary),
                 ]
+                .spacing(8)
                 .align_y(Alignment::Center),
             );
         }
-        if self.bundled_engines.is_empty() && self.external_engine_catalog.is_empty() {
+        if roster_engines.is_empty() {
             engines = engines.push(
-                text("No compatible bundled engines were found.")
+                text("No host-native UCI engines were found beside the app.")
                     .size(13)
                     .color(palette.text_secondary),
             );
         }
         let roster = settings_card(
             iced_fonts::lucide::cpu,
-            "Detected Engine Roster",
-            scrollable(engines).height(Length::Fixed(180.0)).into(),
+            "Players",
+            scrollable(engines).height(Length::Fixed(200.0)).into(),
         );
 
-        let mut controls = column![
-            text("Every pairing swaps colors on the same opening.")
-                .size(13)
-                .color(palette.text_secondary),
+        let mut setup_form = column![
+            text_input("Event name", &setup.event)
+                .on_input(Msg::TournamentEventNameChanged)
+                .width(Length::Fill),
+            text_input("Site (optional)", &setup.site)
+                .on_input(Msg::TournamentSiteChanged)
+                .width(Length::Fill),
             pick_list(
                 TournamentFormat::ALL,
-                Some(self.tournament_format),
+                Some(setup.format),
                 Msg::SelectTournamentFormat,
             )
             .width(Length::Fill),
-            text("Safe preset: 1 worker · 1 thread · 16 MiB hash · 384/768 MiB caps.")
-                .size(12)
+            pick_list(
+                tournament_setup::TimeMode::ALL,
+                Some(setup.time_mode),
+                Msg::TournamentTimeModeChanged,
+            )
+            .width(Length::Fill),
+            config_slider(
+                "Concurrency",
+                setup.concurrency as i32,
+                "",
+                1,
+                4,
+                Msg::TournamentConcurrencyChanged,
+            ),
+            config_slider(
+                "Games / pairing",
+                setup.games_per_encounter as i32,
+                "",
+                1,
+                8,
+                Msg::TournamentGamesPerEncounterChanged,
+            ),
+            config_slider(
+                "Hash",
+                setup.hash_mb as i32,
+                "MiB",
+                1,
+                256,
+                Msg::TournamentHashChanged,
+            ),
+            config_slider(
+                "Threads",
+                setup.engine_threads as i32,
+                "",
+                1,
+                8,
+                Msg::TournamentThreadsChanged,
+            ),
+        ]
+        .spacing(8);
+        setup_form = match setup.time_mode {
+            tournament_setup::TimeMode::Nodes => setup_form.push(config_slider(
+                "Nodes",
+                setup.nodes_per_move as i32,
+                "",
+                100,
+                50_000,
+                Msg::TournamentNodesChanged,
+            )),
+            tournament_setup::TimeMode::MoveTime => setup_form.push(config_slider(
+                "Move time",
+                setup.move_time_ms as i32,
+                "ms",
+                10,
+                5_000,
+                Msg::TournamentMoveTimeChanged,
+            )),
+            tournament_setup::TimeMode::Depth => setup_form.push(config_slider(
+                "Depth",
+                setup.max_depth,
+                "",
+                1,
+                40,
+                Msg::TournamentDepthChanged,
+            )),
+        };
+
+        let mut controls = column![
+            text("CuteChess-style setup · Mujrim theme · live ply boards")
+                .size(13)
                 .color(palette.text_secondary),
+            setup_form,
         ]
         .spacing(10);
+        let mut action_row = row![].spacing(8);
+        action_row = action_row.push(styled_button(
+            if self.show_tournament_results {
+                "Hide results"
+            } else {
+                "Results"
+            },
+            Msg::ToggleTournamentResults,
+        ));
         if running {
-            controls = controls
-                .push(styled_button(
-                    "Cancel tournament safely",
-                    Msg::CancelTournament,
-                ))
-                .push(
-                    text("Cancel waits for the current engine move, then stops new pairings.")
-                        .size(12)
-                        .color(palette.text_secondary),
-                );
+            action_row = action_row.push(styled_button("Cancel safely", Msg::CancelTournament));
         } else {
-            controls = controls.push(styled_button(
-                "Run quick tournament",
-                Msg::RunQuickTournament,
-            ));
+            action_row =
+                action_row.push(styled_button("Start tournament", Msg::RunQuickTournament));
         }
-        controls = controls.push(
+        controls = controls.push(action_row).push(
             text(&self.tournament_status)
                 .size(13)
                 .color(palette.accent_alt),
         );
-        let controls = settings_card(
-            iced_fonts::lucide::trophy,
-            "Tournament Control",
-            controls.into(),
-        );
+        let controls = settings_card(iced_fonts::lucide::trophy, "Setup", controls.into());
 
         let progress_pct = (live.progress_fraction() * 100.0).round() as i32;
         let progress_bar = container(Space::new().width(Length::Fill).height(10.0))
@@ -4517,21 +4776,98 @@ impl App {
             ..Default::default()
         });
 
+        let visible_live =
+            tournament_arena::visible_live_boards(&live.live_games, setup.concurrency as usize);
+        let mut live_tiles = row![].spacing(10);
+        if visible_live.is_empty() {
+            live_tiles = live_tiles.push(
+                text(if running {
+                    "Waiting for the first ply…"
+                } else {
+                    "No live boards — start a tournament to watch moves."
+                })
+                .size(12)
+                .color(palette.text_secondary),
+            );
+        } else {
+            for board in &visible_live {
+                let last = if board.last_uci.is_empty() {
+                    "—".to_owned()
+                } else {
+                    board.last_uci.clone()
+                };
+                live_tiles = live_tiles.push(
+                    container(
+                        column![
+                            text(format!("R{} · #{}", board.round, board.match_index))
+                                .size(11)
+                                .color(palette.text_secondary),
+                            text(format!("{} vs {}", board.white, board.black))
+                                .size(13)
+                                .color(palette.text_primary),
+                            text(format!(
+                                "{} · {} · d{} · ply {}",
+                                last,
+                                tournament_arena::score_text(board.score_cp),
+                                board.depth,
+                                board.moves.len()
+                            ))
+                            .size(11)
+                            .color(palette.accent_alt),
+                        ]
+                        .spacing(4),
+                    )
+                    .padding(10)
+                    .width(Length::Fill)
+                    .style(move |_theme| container::Style {
+                        background: Some(iced::Background::Color(palette.sidebar)),
+                        border: iced::Border {
+                            radius: 10.0.into(),
+                            width: 1.0,
+                            color: palette.border,
+                        },
+                        ..Default::default()
+                    }),
+                );
+            }
+        }
+
+        let finished_strip = tournament_arena::finished_strip(&live.played_games, 12);
+        let mut finished_row = row![].spacing(6);
+        if finished_strip.is_empty() {
+            finished_row = finished_row.push(
+                text("Finished games appear here for one-click replay.")
+                    .size(12)
+                    .color(palette.text_secondary),
+            );
+        } else {
+            for game in &finished_strip {
+                finished_row = finished_row.push(tournament_game_button(
+                    game.title(),
+                    format!("{} plies", game.moves.len()),
+                    game.id,
+                    self.selected_tournament_game_id == Some(game.id),
+                    palette,
+                ));
+            }
+        }
+
         let live_rows = column![
             text(if running {
-                "Live Event"
+                "Arena · Live Boards"
             } else if live.finished {
-                "Latest Results"
+                "Arena · Latest Event"
             } else {
-                "Event Monitor"
+                "Arena"
             })
             .size(16)
             .color(palette.accent_alt),
             text(format!(
-                "{} · {}/{} pairings · {progress_pct}%",
+                "{} · {}/{} pairings · {progress_pct}% · concurrency {}",
                 live.format_label,
                 live.completed_matches,
-                live.total_matches.max(live.completed_matches)
+                live.total_matches.max(live.completed_matches),
+                setup.concurrency
             ))
             .size(13)
             .color(palette.text_secondary),
@@ -4542,6 +4878,8 @@ impl App {
             text(&live.status_line)
                 .size(13)
                 .color(palette.text_secondary),
+            live_tiles.width(Length::Fill),
+            scrollable(finished_row).height(Length::Fixed(72.0)),
         ]
         .spacing(8);
 
@@ -4593,8 +4931,7 @@ impl App {
             }
         }
 
-        let mut match_col =
-            column![text("Games").size(14).color(palette.text_primary)].spacing(4);
+        let mut match_col = column![text("Games").size(14).color(palette.text_primary)].spacing(4);
         if !live.finished_matches.is_empty() {
             match_col = match_col.push(
                 text("Pairing scores")
@@ -4602,11 +4939,8 @@ impl App {
                     .color(palette.text_secondary),
             );
             for row in live.finished_matches.iter().rev().take(8) {
-                match_col = match_col.push(
-                    text(row.label())
-                        .size(11)
-                        .color(palette.text_secondary),
-                );
+                match_col =
+                    match_col.push(text(row.label()).size(11).color(palette.text_secondary));
             }
             match_col = match_col.push(Space::new().height(6)).push(
                 text("Open a game board")
@@ -4637,16 +4971,26 @@ impl App {
             }
         }
 
-        let live_card = settings_card(
-            iced_fonts::lucide::activity,
-            "Live Board & Results",
-            column![
-                live_rows,
-                Space::new().height(8),
-                self.view_tournament_game_board(),
-                Space::new().height(8),
+        let mut arena_body = column![
+            live_rows,
+            Space::new().height(8),
+            self.view_tournament_game_board(),
+        ]
+        .spacing(8);
+        if tournament_results::panel_open(live, self.show_tournament_results) {
+            let standings_body = if tournament_results::standings_ready(&live.standings) {
+                standings_col
+            } else {
+                column![
+                    text("Standings appear after the first finished pairing.")
+                        .size(12)
+                        .color(palette.text_secondary)
+                ]
+                .spacing(4)
+            };
+            arena_body = arena_body.push(Space::new().height(8)).push(
                 row![
-                    container(scrollable(standings_col).height(Length::Fixed(220.0)))
+                    container(scrollable(standings_body).height(Length::Fixed(220.0)))
                         .width(Length::FillPortion(3))
                         .padding(8)
                         .style(move |_theme| container::Style {
@@ -4673,10 +5017,15 @@ impl App {
                         }),
                 ]
                 .width(Length::Fill),
-            ]
-            .spacing(8)
-            .into(),
-        );
+            );
+        } else {
+            arena_body = arena_body.push(
+                text("Open Results for standings and the full game table.")
+                    .size(12)
+                    .color(palette.text_secondary),
+            );
+        }
+        let live_card = settings_card(iced_fonts::lucide::activity, "Arena", arena_body.into());
 
         let selected = self
             .selected_tournament_id
@@ -4811,10 +5160,10 @@ impl App {
         );
 
         let content = column![
-            text("Engine Tournaments")
+            text("Tournament Studio")
                 .size(30)
                 .color(palette.text_primary),
-            text("Watch games on the board as they finish, cancel safely between moves, and reopen standings.")
+            text("Setup engines and time controls, watch up to four live boards move-by-move, then open Results when you want standings.")
                 .size(14)
                 .color(palette.text_secondary),
             row![roster, controls].spacing(16).width(Length::Fill),
@@ -5991,7 +6340,7 @@ fn collect_engine_executables(root: &std::path::Path, depth: usize, output: &mut
         let path = entry.path();
         if path.is_dir() {
             collect_engine_executables(&path, depth + 1, output);
-        } else if is_engine_executable(&path) {
+        } else if is_engine_executable(&path) && mujrim_protocols::is_host_native_binary(&path) {
             output.push(path);
         }
         if output.len() >= 64 {
@@ -6106,6 +6455,9 @@ fn tournament_engine_roster(
 ) -> Vec<QuickTournamentEngine> {
     let mut roster = Vec::new();
     for engine in bundled {
+        if !mujrim_protocols::is_host_native_binary(&engine.path) {
+            continue;
+        }
         roster.push(QuickTournamentEngine {
             name: engine.display_name.to_owned(),
             path: engine.path.clone(),
@@ -6115,6 +6467,7 @@ fn tournament_engine_roster(
     for engine in discovered {
         let path = PathBuf::from(&engine.path);
         if engine.protocol.eq_ignore_ascii_case("UCI")
+            && mujrim_protocols::is_host_native_binary(&path)
             && !roster.iter().any(|existing| existing.path == path)
         {
             roster.push(QuickTournamentEngine {
@@ -6129,17 +6482,18 @@ fn tournament_engine_roster(
 
 async fn run_quick_tournament(
     engines: Vec<QuickTournamentEngine>,
-    format: TournamentFormat,
+    setup: tournament_setup::TournamentSetup,
     handle: tournament_live::LiveTournamentHandle,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     let cancel = Arc::clone(&handle.cancel);
     let snapshot = Arc::clone(&handle.snapshot);
+    let format = setup.format;
     let worker = std::thread::Builder::new()
         .name("mujrim-tournament".to_owned())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             use mujrim_benchmarker::strength::{
-                EngineSpec, MatchConfig, TournamentConfig, TournamentEngine, TournamentEvent,
+                EngineSpec, TournamentConfig, TournamentEngine, TournamentEvent,
                 TournamentProgress, run_tournament_with_control,
             };
 
@@ -6188,6 +6542,49 @@ async fn run_quick_tournament(
                                 "Playing {index}/{total} · Round {round} · {white} vs {black}"
                             );
                         }
+                        TournamentEvent::GameStarted {
+                            game_key,
+                            match_index,
+                            round,
+                            white,
+                            black,
+                            initial_fen,
+                        } => {
+                            guard.upsert_live_game(tournament_live::LiveGameBoard {
+                                game_key,
+                                match_index,
+                                round,
+                                white: white.clone(),
+                                black: black.clone(),
+                                initial_fen,
+                                moves: Vec::new(),
+                                last_uci: String::new(),
+                                score_cp: 0,
+                                depth: 0,
+                                nodes: 0,
+                            });
+                            guard.current_round = round;
+                            guard.current_white = white;
+                            guard.current_black = black;
+                        }
+                        TournamentEvent::PlyPlayed {
+                            game_key,
+                            ply,
+                            uci,
+                            score_cp,
+                            depth,
+                            nodes,
+                            moves,
+                        } => {
+                            guard.apply_ply(&game_key, ply, uci, score_cp, depth, nodes, moves);
+                        }
+                        TournamentEvent::GameFinished {
+                            game_key,
+                            white_score,
+                            moves,
+                        } => {
+                            guard.finish_live_game(&game_key, white_score, moves);
+                        }
                         TournamentEvent::MatchFinished {
                             index,
                             total,
@@ -6217,7 +6614,13 @@ async fn run_quick_tournament(
                             guard.standings =
                                 tournament_live::standing_rows(&guard.engine_names, &standings);
                             guard.game_results = game_results;
-                            guard.append_games(games);
+                            let already_live = guard
+                                .played_games
+                                .iter()
+                                .any(|game| game.match_index == index);
+                            if !already_live {
+                                guard.append_games(games);
+                            }
                             guard.current_white.clear();
                             guard.current_black.clear();
                             guard.status_line = if let Some(error) = error {
@@ -6245,31 +6648,19 @@ async fn run_quick_tournament(
                     }
                 }
             });
-            let match_config = MatchConfig {
-                pairs: 1,
-                concurrency: 1,
-                nodes_per_move: 2_000,
-                hash_mb: 16,
-                engine_threads: 1,
-                max_engine_memory_mb: 384,
-                max_match_memory_mb: 768,
-                session_pairs: 1,
-                max_plies: 160,
-                early_stop: false,
-                checkpoint_path: None,
-                stop_flag: Some(Arc::clone(&cancel)),
-                ..MatchConfig::default()
-            };
+            let mut match_config = setup.to_match_config();
+            match_config.stop_flag = Some(Arc::clone(&cancel));
             let summary = run_tournament_with_control(
                 roster,
                 TournamentConfig {
                     match_config,
                     format,
+                    swiss_rounds: matches!(format, TournamentFormat::Swiss)
+                        .then_some(setup.swiss_rounds.max(1) as usize),
                     checkpoint_directory: study_database_path().parent().map(|path| {
                         path.join("tournaments")
                             .join(tournament_directory_name(format))
                     }),
-                    ..TournamentConfig::default()
                 },
                 cancel,
                 Some(progress),

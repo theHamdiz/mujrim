@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::action::ToolAction;
 use crate::process::{output, run};
-use mujrim_protocols::catalog::{
-    adapter_binary_stem, arch_token_from_rustc_target, host_packaging_arch,
-};
+use mujrim_protocols::catalog::{adapter_binary_stem, host_packaging_arch};
 
 /// All distributable binaries produced by the workspace.
 const BINS: &[&str] = &[
@@ -15,18 +13,16 @@ const BINS: &[&str] = &[
     "mujrim-updater",
 ];
 
-/// Binaries that require host system libraries (EGL, OpenGL, windowing, or
-/// native TLS/OpenSSL) and cannot be cross-compiled for non-host Linux.
-const HOST_ONLY_BINS: &[&str] = &["mujrim-ui", "mujrim-updater"];
+/// Binaries that require host GPU/windowing libraries and cannot be
+/// cross-compiled for non-host Linux (iced/EGL/OpenGL).
+const HOST_ONLY_BINS: &[&str] = &["mujrim-ui"];
 
-/// Packages to `--exclude` when cross-compiling for Linux aarch64.
-/// mujrim-ui: depends on EGL/OpenGL (iced).
-/// mujrim-updater: depends on OpenSSL (reqwest/native-tls).
-const CROSS_EXCLUDE_LINUX: &[&str] = &["mujrim-ui", "mujrim-updater"];
+/// Packages to `--exclude` when cross-compiling for Linux.
+/// mujrim-ui depends on EGL/OpenGL (iced). Updater uses rustls and can cross.
+const CROSS_EXCLUDE_LINUX: &[&str] = &["mujrim-ui"];
 
 /// Packages to `--exclude` when cross-compiling for Windows/macOS.
-/// Only mujrim-ui (iced) — the updater works fine on Windows (schannel)
-/// and macOS (Security.framework).
+/// Only mujrim-ui (iced).
 const CROSS_EXCLUDE_OTHER: &[&str] = &["mujrim-ui"];
 
 /// Packages that are dev-only and never distributed.
@@ -828,6 +824,7 @@ mod tests {
 
     #[test]
     fn adapter_snapshot_stems_never_include_native() {
+        use mujrim_protocols::catalog::arch_token_from_rustc_target;
         let arch = arch_token_from_rustc_target("x86_64-pc-windows-msvc");
         for adapter in ["mujrim-v60", "mujrim-v10", "mujrim-akimbo"] {
             let stem = adapter_binary_stem(adapter, &arch);

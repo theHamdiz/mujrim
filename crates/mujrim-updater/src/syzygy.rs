@@ -126,7 +126,7 @@ pub fn download_tables(
         .map_err(|e| format!("Failed to create directory {}: {e}", dest_dir.display()))?;
 
     let client = reqwest::blocking::Client::builder()
-        .user_agent("mujrim-updater/2.0.0")
+        .user_agent("mujrim-updater/1.0.0")
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;

@@ -260,7 +260,7 @@ impl XBoardHandler {
     }
 
     fn send_features(&self) {
-        xboard_println("feature myname=\"Mujrim 2.0.0\"");
+        xboard_println("feature myname=\"Mujrim 1.0.0\"");
         xboard_println("feature setboard=1");
         xboard_println("feature ping=1");
         xboard_println("feature usermove=1");

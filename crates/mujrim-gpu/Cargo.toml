@@ -1,6 +1,6 @@
 [package]
 name = "mujrim-gpu"
-version = "2.0.0"
+version = "1.0.0"
 edition = "2024"
 description = "GPU/NPU auto-detection and compute backends for Mujrim"
 

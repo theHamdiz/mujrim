@@ -60,3 +60,6 @@ sprt/results.pgn
 # Packaged foreign engine binaries/trees (runtime download / local packaging only)
 /engines/
 /dist/engines/
+
+# Local Windows cross SDK cache (cargo-xwin / packaging helpers)
+.xwin-cache/

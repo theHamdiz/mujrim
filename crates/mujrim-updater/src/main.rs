@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// GitHub repository owner and name.
 const REPO_OWNER: &str = "theHamdiz";
 const REPO_NAME: &str = "mujrim";
-const VERSION: &str = "2.0.0";
+const VERSION: &str = "1.0.0";
 
 /// All components (binaries) that can be updated.
 const COMPONENTS: &[&str] = &[
@@ -381,7 +381,7 @@ fn cmd_update(component: &str) {
     println!();
 
     if component == "all" {
-        // Try platform archive first (e.g., mujrim-v2.0.0-x86_64-apple-darwin.tar.gz)
+        // Try platform archive first (e.g., mujrim-v1.0.0-x86_64-apple-darwin.tar.gz)
         let platform = current_platform_tag();
         let archive = release.assets.iter().find(|a| {
             let n = a.name.to_lowercase();

@@ -32,7 +32,7 @@ pub fn run_play(depth: i32) {
     let mut board = Board::new();
 
     println!("╔══════════════════════════════════════╗");
-    println!("║   Mujrim Chess Engine v2.0.0        ║");
+    println!("║   Mujrim Chess Engine v1.0.0        ║");
     println!("║   You play as White                  ║");
     println!("║   Enter moves in UCI format (e2e4)   ║");
     println!("║   Type 'quit' to exit                ║");
@@ -275,7 +275,7 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
     use std::time::Duration;
 
     println!("╔══════════════════════════════════════════════╗");
-    println!("║       Mujrim Benchmark Suite v2.0.0        ║");
+    println!("║       Mujrim Benchmark Suite v1.0.0        ║");
     println!("║       Bratko-Kopec Test (24 positions)      ║");
     println!("╚══════════════════════════════════════════════╝");
     println!();
