@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
+mujrim-protocols = { path = "../mujrim-protocols" }
 mujrim-updater = { path = "../mujrim-updater" }
 dirs = "6.0.0"
 serde = { version = "1.0.228", features = ["derive"] }

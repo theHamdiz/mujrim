@@ -13,6 +13,10 @@ network = "v60-7f587dfb"
 [lib]
 crate-type = ["rlib"]
 
+[[bin]]
+name = "mujrim-v60"
+path = "src/main.rs"
+
 [features]
 default = []
 syzygy = []

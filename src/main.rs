@@ -27,9 +27,9 @@ const EXTERNAL_BACKENDS: &[&str] = &[
     "plentychess",
     "obsidian",
     "reckless",
-    "akimbo",
     "ethereal",
 ];
+const MUJRIM_ADAPTERS: &[&str] = &["mujrim-v60", "mujrim-v10", "mujrim-akimbo"];
 const NATIVE_PASSTHROUGH_MARKER: &str = "MUJRIM_NATIVE_PASSTHROUGH_ACTIVE";
 
 #[derive(Clone, Copy)]
@@ -60,14 +60,6 @@ fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
             max_hash_mb: 768,
             max_threads: 8,
         },
-        "akimbo" => NativeSearchStackProfile {
-            engine_id,
-            display_name: "Mujrim Akimbo Adapter 2.0.0",
-            authors: "Ahmad Hamdi Emara (Egypt) / Akimbo authors",
-            memory_limit_bytes: 512 * 1024 * 1024,
-            max_hash_mb: 384,
-            max_threads: 8,
-        },
         _ => NativeSearchStackProfile {
             engine_id,
             display_name: "Mujrim External Search Adapter 2.0.0",
@@ -79,22 +71,42 @@ fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
     }
 }
 
+fn resolve_backend_engine_id(backend: &str) -> Option<&'static str> {
+    match backend {
+        "native" | "v60" => Some("mujrim-v60"),
+        "v10" => Some("mujrim-v10"),
+        "akimbo" => Some("mujrim-akimbo"),
+        other => EXTERNAL_BACKENDS
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == other),
+    }
+}
+
 fn passthrough_engine_id(
     backend: &str,
     uci_mode: bool,
     native_passthrough_active: bool,
-) -> Option<&str> {
+) -> Option<&'static str> {
     if !uci_mode || backend == "universal" || (backend == "native" && native_passthrough_active) {
         return None;
     }
-    if backend == "native" {
-        return Some("mujrim-v60");
-    }
-    EXTERNAL_BACKENDS.contains(&backend).then_some(backend)
+    resolve_backend_engine_id(backend)
 }
 
 fn fallback_engine_id(backend: &str, explicit_path: bool) -> Option<&'static str> {
-    (!explicit_path && matches!(backend, "stockfish" | "native")).then_some("mujrim-v60")
+    if explicit_path {
+        return None;
+    }
+    match backend {
+        "stockfish" => Some("mujrim-v10"),
+        "reckless" => Some("mujrim-v60"),
+        _ => None,
+    }
+}
+
+fn is_mujrim_adapter(engine_id: &str) -> bool {
+    MUJRIM_ADAPTERS.contains(&engine_id)
 }
 
 fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Result<(), String> {
@@ -113,13 +125,13 @@ fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Res
     } else {
         &[]
     };
-    let status = if engine_id == "mujrim-v60" {
-        mujrim_protocols::run_passthrough_with_environment(
-            &engine,
-            &[],
-            environment,
-            Some(512 * 1024 * 1024),
-        )?
+    let status = if is_mujrim_adapter(engine_id) {
+        let memory_limit = match engine_id {
+            "mujrim-v10" => Some(1536 * 1024 * 1024),
+            "mujrim-v60" => Some(1024 * 1024 * 1024),
+            _ => Some(512 * 1024 * 1024),
+        };
+        mujrim_protocols::run_passthrough_with_environment(&engine, &[], environment, memory_limit)?
     } else {
         let profile = search_stack_profile(
             EXTERNAL_BACKENDS
@@ -164,6 +176,8 @@ fn main() {
                 .long("backend")
                 .value_parser([
                     "native",
+                    "v60",
+                    "v10",
                     "universal",
                     "stockfish",
                     "plentychess",
@@ -174,7 +188,7 @@ fn main() {
                 ])
                 .default_value("stockfish")
                 .global(true)
-                .help("Search backend to expose over UCI"),
+                .help("Search backend to expose over UCI (v60/v10/akimbo prefer Mujrim adapters)"),
         )
         .arg(
             Arg::new("engine-path")
@@ -337,25 +351,40 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXTERNAL_BACKENDS, fallback_engine_id, passthrough_engine_id, search_stack_profile,
+        EXTERNAL_BACKENDS, MUJRIM_ADAPTERS, fallback_engine_id, is_mujrim_adapter,
+        passthrough_engine_id, search_stack_profile,
     };
 
     #[test]
     fn every_bundled_engine_is_available_as_a_backend() {
-        assert_eq!(EXTERNAL_BACKENDS.len(), 6);
+        assert_eq!(EXTERNAL_BACKENDS.len(), 5);
         for engine in mujrim_protocols::catalog::BUNDLED_ENGINES {
             assert!(
-                matches!(engine.0, "mujrim" | "mujrim-v60")
-                    || EXTERNAL_BACKENDS.contains(&engine.0)
+                matches!(
+                    engine.0,
+                    "mujrim" | "mujrim-v60" | "mujrim-v10" | "mujrim-akimbo" | "akimbo"
+                ) || EXTERNAL_BACKENDS.contains(&engine.0)
             );
         }
     }
 
     #[test]
-    fn uci_backends_route_to_matching_native_search_stacks() {
+    fn uci_backends_prefer_mujrim_adapter_aliases() {
         assert_eq!(
             passthrough_engine_id("native", true, false),
             Some("mujrim-v60")
+        );
+        assert_eq!(
+            passthrough_engine_id("v60", true, false),
+            Some("mujrim-v60")
+        );
+        assert_eq!(
+            passthrough_engine_id("v10", true, false),
+            Some("mujrim-v10")
+        );
+        assert_eq!(
+            passthrough_engine_id("akimbo", true, false),
+            Some("mujrim-akimbo")
         );
         assert_eq!(
             passthrough_engine_id("stockfish", true, false),
@@ -367,6 +396,7 @@ mod tests {
         );
         assert_eq!(passthrough_engine_id("universal", true, false), None);
         assert_eq!(passthrough_engine_id("native", true, true), None);
+        assert!(MUJRIM_ADAPTERS.iter().all(|id| is_mujrim_adapter(id)));
     }
 
     #[test]
@@ -377,23 +407,21 @@ mod tests {
 
     #[test]
     fn packaged_default_falls_back_without_masking_explicit_path_errors() {
-        assert_eq!(fallback_engine_id("stockfish", false), Some("mujrim-v60"));
-        assert_eq!(fallback_engine_id("native", false), Some("mujrim-v60"));
+        assert_eq!(fallback_engine_id("stockfish", false), Some("mujrim-v10"));
+        assert_eq!(fallback_engine_id("reckless", false), Some("mujrim-v60"));
+        assert_eq!(fallback_engine_id("native", false), None);
+        assert_eq!(fallback_engine_id("akimbo", false), None);
         assert_eq!(fallback_engine_id("stockfish", true), None);
-        assert_eq!(fallback_engine_id("reckless", false), None);
     }
 
     #[test]
     fn native_stack_profiles_keep_search_and_evaluation_paired() {
         let stockfish = search_stack_profile("stockfish");
         let reckless = search_stack_profile("reckless");
-        let akimbo = search_stack_profile("akimbo");
 
         assert_eq!(stockfish.engine_id, "stockfish");
         assert_eq!(stockfish.display_name, "Mujrim Elite 2.0.0");
         assert_eq!(reckless.engine_id, "reckless");
         assert_eq!(reckless.display_name, "Mujrim v60 2.0.0");
-        assert_eq!(akimbo.engine_id, "akimbo");
-        assert!(akimbo.display_name.contains("Akimbo"));
     }
 }

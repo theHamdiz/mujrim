@@ -1,5 +1,9 @@
+use std::fs;
+use std::path::Path;
+
 use crate::action::ToolAction;
 use crate::process::run;
+use mujrim_protocols::catalog::{adapter_binary_stem, host_packaging_arch};
 
 const PORTABLE_BUILD_ENV: &[(&str, &str)] = &[("CARGO_BUILD_JOBS", "1")];
 
@@ -9,8 +13,10 @@ pub enum BuildVariant {
     Akimbo,
     Stockfish,
     Reckless,
-    NativeV60,
-    NativeV60Embedded,
+    #[value(alias = "native-v60")]
+    V60,
+    #[value(alias = "native-v60-embedded", alias = "v60-embedded")]
+    V60Embedded,
     Benchmark,
     Embedded,
     Minimal,
@@ -27,13 +33,14 @@ impl ToolAction for BuildVariantAction {
         match self.variant {
             BuildVariant::List => {
                 println!(
-                    "build variants: full, akimbo, stockfish, reckless, native-v60, native-v60-embedded, benchmark, embedded, minimal"
+                    "build variants: full, akimbo, stockfish, reckless, v60, v60-embedded, benchmark, embedded, minimal"
                 );
                 Ok(())
             }
             _ => {
                 let args = variant_args(&self.variant);
-                run("cargo", &args, PORTABLE_BUILD_ENV)
+                run("cargo", &args, PORTABLE_BUILD_ENV)?;
+                snapshot_variant_dist_name(&self.variant)
             }
         }
     }
@@ -69,7 +76,7 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "--features",
             "xboard,book,nnue,simd,reckless-nnue",
         ],
-        BuildVariant::NativeV60 => vec![
+        BuildVariant::V60 => vec![
             "build",
             "--release",
             "-p",
@@ -77,7 +84,7 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "--features",
             "syzygy",
         ],
-        BuildVariant::NativeV60Embedded => vec![
+        BuildVariant::V60Embedded => vec![
             "build",
             "--release",
             "-p",
@@ -114,6 +121,50 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
         ],
         BuildVariant::List => Vec::new(),
     }
+}
+
+fn variant_dist_mapping(variant: &BuildVariant) -> Option<(&'static str, &'static str)> {
+    match variant {
+        BuildVariant::V60 | BuildVariant::V60Embedded => Some(("mujrim-v60", "mujrim-v60")),
+        BuildVariant::Stockfish => Some(("mujrim", "mujrim-v10")),
+        BuildVariant::Akimbo => Some(("mujrim", "mujrim-akimbo")),
+        _ => None,
+    }
+}
+
+fn snapshot_variant_dist_name(variant: &BuildVariant) -> Result<(), String> {
+    let Some((source_stem, adapter_id)) = variant_dist_mapping(variant) else {
+        return Ok(());
+    };
+    let arch = host_packaging_arch();
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let source = Path::new("target")
+        .join("release")
+        .join(format!("{source_stem}{suffix}"));
+    let destination_stem = adapter_binary_stem(adapter_id, &arch);
+    let destination = Path::new("target")
+        .join("release")
+        .join(format!("{destination_stem}{suffix}"));
+    fs::copy(&source, &destination).map_err(|error| {
+        format!(
+            "failed to snapshot {} as {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    if adapter_id != source_stem {
+        let alias = Path::new("target")
+            .join("release")
+            .join(format!("{adapter_id}{suffix}"));
+        fs::copy(&source, &alias).map_err(|error| {
+            format!(
+                "failed to snapshot {} as {}: {error}",
+                source.display(),
+                alias.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -153,8 +204,8 @@ mod tests {
             BuildVariant::Akimbo,
             BuildVariant::Stockfish,
             BuildVariant::Reckless,
-            BuildVariant::NativeV60,
-            BuildVariant::NativeV60Embedded,
+            BuildVariant::V60,
+            BuildVariant::V60Embedded,
             BuildVariant::Benchmark,
             BuildVariant::Embedded,
         ] {
@@ -192,9 +243,9 @@ mod tests {
     }
 
     #[test]
-    fn native_v60_targets_the_static_search_adapter() {
+    fn v60_targets_the_static_search_adapter() {
         assert_eq!(
-            variant_args(&BuildVariant::NativeV60),
+            variant_args(&BuildVariant::V60),
             [
                 "build",
                 "--release",
@@ -219,7 +270,7 @@ mod tests {
         assert!(engine_features.contains("reckless-nnue"));
 
         assert_eq!(
-            variant_args(&BuildVariant::NativeV60Embedded),
+            variant_args(&BuildVariant::V60Embedded),
             [
                 "build",
                 "--release",
@@ -229,5 +280,24 @@ mod tests {
                 "syzygy,embedded-network"
             ]
         );
+    }
+
+    #[test]
+    fn dist_mapping_uses_arch_suffixed_adapter_names() {
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::V60),
+            Some(("mujrim-v60", "mujrim-v60"))
+        );
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::Stockfish),
+            Some(("mujrim", "mujrim-v10"))
+        );
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::Akimbo),
+            Some(("mujrim", "mujrim-akimbo"))
+        );
+        let stem = adapter_binary_stem("mujrim-v10", "x86_64");
+        assert_eq!(stem, "mujrim-v10-x86_64");
+        assert!(!stem.contains("native"));
     }
 }

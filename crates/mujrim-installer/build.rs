@@ -23,18 +23,18 @@ const PAYLOADS: &[(&str, &str, &str, bool, &str)] = &[
         "Self-contained Mujrim engine with Akimbo, Stockfish, and v60 NNUE payloads",
     ),
     (
-        "Mujrim Native v60 Engine (external network)",
+        "Mujrim v60 Engine (external network)",
         "mujrim-v60-external",
         "release/mujrim-v60-external",
         false,
-        "Lean native v60 engine with runtime fingerprint discovery",
+        "Lean Mujrim v60 engine with runtime fingerprint discovery",
     ),
     (
-        "Mujrim Native v60 Engine (embedded network)",
+        "Mujrim v60 Engine (embedded network)",
         "mujrim-v60-embedded",
         "release/mujrim-v60-embedded",
         false,
-        "Self-contained native v60 tournament engine",
+        "Self-contained Mujrim v60 tournament engine",
     ),
     (
         "Mujrim UI",

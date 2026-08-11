@@ -5339,6 +5339,7 @@ version = "2.0.0"
 dependencies = [
  "clap",
  "dirs",
+ "mujrim-protocols",
  "mujrim-search",
  "mujrim-types",
  "mujrim-updater",

@@ -51,7 +51,7 @@ pub trait NativeSearchAdapter {
 pub struct V60SearchAdapter;
 
 impl NativeSearchAdapter for V60SearchAdapter {
-    const ENGINE_NAME: &'static str = "Mujrim Native-v60";
+    const ENGINE_NAME: &'static str = "Mujrim v60";
     const NETWORK_ID: &'static str = "v60-7f587dfb";
     const ENGINE_AUTHOR: &'static str =
         "Ahmad Hamdi Emara (Egypt); Reckless contributors Arseniy Surkov, Shahin M. Shahin, and Styx";
@@ -75,7 +75,7 @@ mod adapter_tests {
 
     #[test]
     fn v60_adapter_metadata_is_stable() {
-        assert_eq!(V60SearchAdapter::ENGINE_NAME, "Mujrim Native-v60");
+        assert_eq!(V60SearchAdapter::ENGINE_NAME, "Mujrim v60");
         assert_eq!(V60SearchAdapter::NETWORK_ID, "v60-7f587dfb");
         assert!(V60SearchAdapter::ENGINE_AUTHOR.contains("Egypt"));
         assert!(V60SearchAdapter::ENGINE_AUTHOR.contains("Reckless contributors"));

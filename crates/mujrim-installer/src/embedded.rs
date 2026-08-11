@@ -32,11 +32,11 @@ pub const BINARIES: &[EmbeddedBinary] = &[
         description: "Mujrim architecture-aware UCI engine",
     },
     EmbeddedBinary {
-        name: "Mujrim Native v60 Engine",
+        name: "Mujrim v60 Engine",
         filename: "mujrim-v60",
         data: &[],
         create_shortcut: false,
-        description: "Mujrim self-contained native v60 fallback engine",
+        description: "Mujrim self-contained v60 fallback engine",
     },
     EmbeddedBinary {
         name: "Mujrim UI",

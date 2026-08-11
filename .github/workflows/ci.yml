@@ -56,10 +56,15 @@ jobs:
 
           suffix = ".exe" if os.name == "nt" else ""
           release = Path("target/release")
-          shutil.copy2(
-              release / f"mujrim-native-v60{suffix}",
-              release / f"mujrim-v60{suffix}",
-          )
+          source = release / f"mujrim-v60{suffix}"
+          if not source.exists():
+              raise SystemExit(f"missing v60 adapter binary: {source}")
+          # Keep an explicit arch-suffixed dist name for packaged layouts.
+          import platform
+          arch = platform.machine().lower().replace("amd64", "x86_64").replace("arm64", "aarch64")
+          if os.name == "nt" and arch == "x86_64":
+              arch = "x86_64-avx2"
+          shutil.copy2(source, release / f"mujrim-v60-{arch}{suffix}")
 
       - name: Smoke test (UCI handshake)
         shell: python

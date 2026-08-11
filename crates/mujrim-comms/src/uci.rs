@@ -233,8 +233,7 @@ impl UciHandler {
         #[cfg(not(feature = "book"))]
         let has_book = false;
 
-        let eval_network: Arc<ActiveNetwork> =
-            Arc::new(eval::nnue::default_embedded_network());
+        let eval_network: Arc<ActiveNetwork> = Arc::new(eval::nnue::default_embedded_network());
 
         let preset = eval_network.search_profile().as_str();
         let mut engine = SearchEngine::new(DEFAULT_HASH_MB, DEFAULT_THREADS);

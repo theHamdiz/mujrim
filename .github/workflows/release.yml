@@ -23,26 +23,31 @@ jobs:
           # ── macOS ──
           - os: macos-latest
             target: aarch64-apple-darwin
+            arch: aarch64
             name: macOS ARM64 (Apple Silicon)
             suffix: ""
           - os: macos-13
             target: x86_64-apple-darwin
+            arch: x86_64
             name: macOS x86_64 (Intel)
             suffix: ""
 
           # ── Linux ──
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            arch: x86_64
             name: Linux x86_64
             suffix: ""
 
           # ── Windows ──
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            arch: x86_64-avx2
             name: Windows x86_64
             suffix: ".exe"
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            arch: aarch64
             name: Windows ARM64
             suffix: ".exe"
 
@@ -65,11 +70,16 @@ jobs:
           cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer --target ${{ matrix.target }}
           cargo build --release -p mujrim-native-v60 --features syzygy --target ${{ matrix.target }}
           cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-native-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-external${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-external${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,stockfish-nnue --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v10-${{ matrix.arch }}${{ matrix.suffix }}"
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,akimbo-nnue --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-akimbo-${{ matrix.arch }}${{ matrix.suffix }}"
           cargo build --release -p mujrim --features embedded-networks --target ${{ matrix.target }}
           cargo build --release -p mujrim-native-v60 --features syzygy,embedded-network --target ${{ matrix.target }}
           cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-embedded${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-native-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-embedded${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-embedded${{ matrix.suffix }}"
           cargo build --release -p mujrim-ui --target ${{ matrix.target }}
           cargo build --release -p mujrim-game --target ${{ matrix.target }}
           cargo build --release -p mujrim-installer --features embed --target ${{ matrix.target }}
@@ -77,15 +87,17 @@ jobs:
       - name: Prepare standalone fallback alias
         shell: python
         run: |
-          import shutil
           from pathlib import Path
 
           suffix = "${{ matrix.suffix }}"
+          arch = "${{ matrix.arch }}"
           release = Path("target/${{ matrix.target }}/release")
-          shutil.copy2(
-              release / f"mujrim-native-v60{suffix}",
-              release / f"mujrim-v60{suffix}",
-          )
+          source = release / f"mujrim-v60{suffix}"
+          if not source.exists():
+              raise SystemExit(f"missing v60 adapter binary: {source}")
+          arch_named = release / f"mujrim-v60-{arch}{suffix}"
+          if not arch_named.exists():
+              raise SystemExit(f"missing arch-suffixed adapter binary: {arch_named}")
 
       - name: Smoke test (UCI handshake)
         shell: python
@@ -130,6 +142,9 @@ jobs:
           cp "target/${{ matrix.target }}/release/mujrim-v60-embedded${{ matrix.suffix }}" "$DIR/mujrim-v60-embedded${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "$DIR/mujrim${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "$DIR/mujrim-v60${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v10-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-v10-${{ matrix.arch }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-akimbo-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-akimbo-${{ matrix.arch }}${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-ui${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
           cp "target/${{ matrix.target }}/release/mujrim-game${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
           cp "target/${{ matrix.target }}/release/mujrim-installer${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
@@ -144,7 +159,7 @@ jobs:
 
           # Copy docs
           cp README.md License.md "$DIR/" 2>/dev/null || true
-          cp crates/mujrim-native-v60/LICENSE "$DIR/LICENSE-native-v60" 2>/dev/null || true
+          cp crates/mujrim-native-v60/LICENSE "$DIR/LICENSE-v60" 2>/dev/null || true
           cp crates/mujrim-ui/assets/pieces/ATTRIBUTION.md "$DIR/PIECE-SETS-ATTRIBUTION.md"
           cp crates/mujrim-ui/assets/pieces/LICENSE-LILA.md "$DIR/LICENSE-LILA.md"
 
@@ -173,17 +188,21 @@ jobs:
         include:
           # ── ARM64 Linux (Raspberry Pi 3/4/5, Pine64, etc.) ──
           - target: aarch64-unknown-linux-gnu
+            arch: aarch64
             name: Linux ARM64 (aarch64)
 
           # ── ARM32 Linux (Raspberry Pi 2, older SBCs) ──
           - target: armv7-unknown-linux-gnueabihf
+            arch: armv7
             name: Linux ARMv7 (armhf)
 
           # ── Static MUSL builds (Buildroot, Alpine, any Linux) ──
           - target: x86_64-unknown-linux-musl
+            arch: x86_64
             name: Linux x86_64 (static/musl)
 
           - target: aarch64-unknown-linux-musl
+            arch: aarch64
             name: Linux ARM64 (static/musl)
 
     name: ${{ matrix.name }}
@@ -212,8 +231,9 @@ jobs:
         shell: bash
         run: |
           test -f "target/${{ matrix.target }}/release/mujrim"
-          test -f "target/${{ matrix.target }}/release/mujrim-native-v60"
+          test -f "target/${{ matrix.target }}/release/mujrim-v60"
           test -f "target/${{ matrix.target }}/release/mujrim-updater"
+          cp "target/${{ matrix.target }}/release/mujrim-v60" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}"
 
       - name: Package binaries
         run: |
@@ -222,7 +242,8 @@ jobs:
           mkdir -p "$DIR"
 
           cp "target/${{ matrix.target }}/release/mujrim" "$DIR/mujrim"
-          cp "target/${{ matrix.target }}/release/mujrim-native-v60" "$DIR/mujrim-v60"
+          cp "target/${{ matrix.target }}/release/mujrim-v60" "$DIR/mujrim-v60"
+          cp "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}" "$DIR/mujrim-v60-${{ matrix.arch }}"
           cp "target/${{ matrix.target }}/release/mujrim-updater" "$DIR/" 2>/dev/null || true
           mkdir -p "$DIR/nnue"
           cp "crates/mujrim-eval/resources/networks.json" "$DIR/nnue/" 2>/dev/null || true
@@ -230,7 +251,7 @@ jobs:
             cp -R "nnue/." "$DIR/nnue/" 2>/dev/null || true
           fi
           cp README.md License.md "$DIR/" 2>/dev/null || true
-          cp crates/mujrim-native-v60/LICENSE "$DIR/LICENSE-native-v60" 2>/dev/null || true
+          cp crates/mujrim-native-v60/LICENSE "$DIR/LICENSE-v60" 2>/dev/null || true
           cp crates/mujrim-ui/assets/pieces/ATTRIBUTION.md "$DIR/PIECE-SETS-ATTRIBUTION.md"
           cp crates/mujrim-ui/assets/pieces/LICENSE-LILA.md "$DIR/LICENSE-LILA.md"
 

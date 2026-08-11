@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crate::action::ToolAction;
 use crate::process::{output, run};
+use mujrim_protocols::catalog::{
+    adapter_binary_stem, arch_token_from_rustc_target, host_packaging_arch,
+};
 
 /// All distributable binaries produced by the workspace.
 const BINS: &[&str] = &[
@@ -179,8 +182,40 @@ fn build_native() -> Result<(), String> {
         ],
         &environment,
     )?;
-    snapshot_native_engine("mujrim", "mujrim-external")?;
-    snapshot_native_engine("mujrim-native-v60", "mujrim-v60-external")?;
+    let arch = host_packaging_arch();
+    snapshot_engine("mujrim", "mujrim-external")?;
+    snapshot_engine("mujrim-v60", "mujrim-v60-external")?;
+    snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,stockfish-nnue",
+        ],
+        &environment,
+    )?;
+    snapshot_engine("mujrim", "mujrim-v10-external")?;
+    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-v10", &arch))?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,akimbo-nnue",
+        ],
+        &environment,
+    )?;
+    snapshot_engine("mujrim", "mujrim-akimbo-external")?;
+    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-akimbo", &arch))?;
     run(
         "cargo",
         &[
@@ -205,8 +240,8 @@ fn build_native() -> Result<(), String> {
         ],
         &environment,
     )?;
-    snapshot_native_engine("mujrim", "mujrim-embedded")?;
-    snapshot_native_engine("mujrim-native-v60", "mujrim-v60-embedded")?;
+    snapshot_engine("mujrim", "mujrim-embedded")?;
+    snapshot_engine("mujrim-v60", "mujrim-v60-embedded")?;
     run(
         "cargo",
         &["build", "--release", "-p", "mujrim-ui"],
@@ -233,7 +268,7 @@ fn build_native() -> Result<(), String> {
     Ok(())
 }
 
-fn snapshot_native_engine(source_stem: &str, destination_stem: &str) -> Result<(), String> {
+fn snapshot_engine(source_stem: &str, destination_stem: &str) -> Result<(), String> {
     let suffix = std::env::consts::EXE_SUFFIX;
     let source = Path::new("target")
         .join("release")
@@ -788,6 +823,20 @@ mod tests {
                     directory: "x86_64",
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn adapter_snapshot_stems_never_include_native() {
+        let arch = arch_token_from_rustc_target("x86_64-pc-windows-msvc");
+        for adapter in ["mujrim-v60", "mujrim-v10", "mujrim-akimbo"] {
+            let stem = adapter_binary_stem(adapter, &arch);
+            assert!(!stem.contains("native"), "{stem}");
+            assert!(stem.ends_with(&format!("-{arch}")), "{stem}");
+        }
+        assert_eq!(
+            adapter_binary_stem("mujrim-v60", "x86_64-avx2"),
+            "mujrim-v60-x86_64-avx2"
         );
     }
 }
