@@ -11,6 +11,9 @@ Updated: 2026-04-08
 - Prefer modular, trait-based designs with no unnecessary runtime overhead.
 
 ## Current State
+- Multi-adapter in-process engine: Stockfish / Reckless / Akimbo / Mujrim HCE each bind eval + matching search via `EvalSearchAdapter`.
+- Product surfaces: `--backend universal` (selectable), `--backend mujrim-hce` (classical HCE), `--backend v60`/`v10`/`akimbo` (packaged adapters), external upstream passthrough.
+- Do not use “native” as an engine/backend product name (`RuntimeCompatibility::Native` is host-ISA packaging only).
 - A structured AI-agent tool surface is implemented in `mujrim-tooling`.
 - Entry point: `mujrim-tooling agent`.
 - Output contract: JSON (machine-readable for agent orchestration).

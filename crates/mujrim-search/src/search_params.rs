@@ -212,7 +212,8 @@ impl SearchParams {
     /// Parameters tuned for Stockfish NNUE networks.
     ///
     /// Stockfish-inspired baselines with **tighter pruning depth caps** so tactical tests lose
-    /// fewer quiet lines to LMP / SEE / futility; revisit with SPRT on long games if needed.
+    /// fewer quiet lines to LMP / SEE / futility. NMP uses the same base reduction as Reckless
+    /// so shallow searches still leave real child depth (native SF's R=7 collapses our AB tree).
     pub fn stockfish() -> Self {
         Self {
             // Razoring — identical to Akimbo (both use SF formula)
@@ -229,9 +230,9 @@ impl SearchParams {
             futility_improving_bonus: 46,
             futility_depth_limit: 8,
 
-            // Null-move pruning — SF: R = 7 + depth/3; start one ply later than SF default.
-            nmp_depth_min: 4,
-            nmp_base: 7,
+            // Null-move pruning — share Reckless/Akimbo R base; keep SF depth divisor.
+            nmp_depth_min: 3,
+            nmp_base: 5,
             nmp_depth_div: 3,
             nmp_eval_div: 200,
             nmp_eval_max: 3,
@@ -258,7 +259,7 @@ impl SearchParams {
             nmp_min_verif_depth: 17,
             nmp_verif_frac: 12,
 
-            aspiration_window: 32,
+            aspiration_window: 10,
 
             delta_margin: 400,
             max_qs_ply: 16,
@@ -303,14 +304,27 @@ impl SearchParams {
         params
     }
 
+    /// Parameters for classical Mujrim HCE (no NNUE).
+    ///
+    /// StockLike-oriented pruning with a slightly wider aspiration window than
+    /// Reckless so shallow classical searches remain stable.
+    pub fn mujrim_hce() -> Self {
+        let mut params = Self::akimbo();
+        params.aspiration_window = 16;
+        params.futility_depth_limit = 6;
+        params.nmp_depth_min = 3;
+        params
+    }
+
     /// Select the best preset for a given network type.
     ///
     /// # Arguments
-    /// - `preset_name`: One of `"akimbo"`, `"stockfish"`, `"reckless"`, or a custom name.
+    /// - `preset_name`: One of `"akimbo"`, `"stockfish"`, `"reckless"`, `"mujrim-hce"`, or a custom name.
     pub fn for_preset(preset_name: &str) -> Self {
         match preset_name {
             "stockfish" => Self::stockfish(),
             "reckless" => Self::reckless(),
+            "mujrim-hce" | "hce" => Self::mujrim_hce(),
             _ => Self::akimbo(),
         }
     }
@@ -323,7 +337,7 @@ impl SearchParams {
     #[must_use]
     pub fn for_preset_with_repo_tuning(preset_name: &str) -> Self {
         let base = Self::for_preset(preset_name);
-        if preset_name == "stockfish" {
+        if preset_name == "stockfish" || matches!(preset_name, "mujrim-hce" | "hce") {
             return base;
         }
         if let Some(path) = std::env::var_os("MUJRIM_TUNING_FILE") {
@@ -548,17 +562,17 @@ mod tests {
     #[test]
     fn test_stockfish_preset() {
         let p = SearchParams::stockfish();
-        assert_eq!(p.nmp_base, 7);
+        assert_eq!(p.nmp_base, 5);
         assert_eq!(p.nmp_depth_div, 3);
-        assert_eq!(p.null_move_r(12, 300, 200), 7 + 4); // 11
+        assert_eq!(p.null_move_r(12, 300, 200), 5 + 4); // 9
         assert_eq!(p.futility_depth_limit, 8);
         assert_eq!(p.hist_prune_margin, -3826);
-        assert_eq!(p.nmp_depth_min, 4);
+        assert_eq!(p.nmp_depth_min, 3);
         assert_eq!(p.lmp_depth_limit, 6);
         assert_eq!(p.se_depth_min, 6);
         assert_eq!(p.max_qs_ply, 16);
         assert_eq!(p.se_double_ext_margin, 22);
-        assert_eq!(p.aspiration_window, 32);
+        assert_eq!(p.aspiration_window, 10);
     }
 
     #[test]
@@ -585,7 +599,8 @@ mod tests {
         let sf = SearchParams::for_preset("stockfish");
         let reckless = SearchParams::for_preset("reckless");
         assert_eq!(akimbo.nmp_base, 5);
-        assert_eq!(sf.nmp_base, 7);
+        assert_eq!(sf.nmp_base, 5);
+        assert_eq!(sf.aspiration_window, 10);
         assert_eq!(reckless.aspiration_window, 10);
 
         // Unknown preset falls back to akimbo

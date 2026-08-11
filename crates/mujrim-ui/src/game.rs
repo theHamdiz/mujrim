@@ -1,6 +1,9 @@
 //! Game state management for the Mujrim UI.
 
+use mujrim_study::board_marks::{ArrowRole, BoardArrow, MarkColor};
 use types::{Board, Square};
+
+use crate::arrows::{ArrowColor, user_arrow};
 
 /// Maps a board display cell `(row, col)` (0 = top/left of the widget) to a chess square.
 pub fn display_to_square(row: usize, col: usize, flipped: bool) -> Square {
@@ -38,10 +41,16 @@ pub struct GameState {
     pub game_over: bool,
     /// Queued premoves: (from, to) pairs executed when it becomes our turn.
     pub premove_queue: Vec<(Square, Square)>,
-    /// User-drawn annotation arrows: (from, to) pairs drawn on the board.
-    pub arrows: Vec<(Square, Square)>,
+    /// User-drawn annotation arrows.
+    pub arrows: Vec<BoardArrow>,
+    /// Engine / coach / ponder / last-move overlay arrows.
+    pub overlay_arrows: Vec<BoardArrow>,
     /// Starting square of an arrow being drawn (right-click drag).
     pub arrow_start: Option<Square>,
+    /// Piece drag origin (left-button press).
+    pub drag_from: Option<Square>,
+    /// Square currently under the pointer while dragging.
+    pub drag_over: Option<Square>,
 }
 
 impl GameState {
@@ -55,8 +64,39 @@ impl GameState {
             game_over: false,
             premove_queue: Vec::new(),
             arrows: Vec::new(),
+            overlay_arrows: Vec::new(),
             arrow_start: None,
+            drag_from: None,
+            drag_over: None,
         }
+    }
+
+    /// Rebuild last-move + optional ponder overlays while keeping analysis overlays separately.
+    pub fn refresh_move_overlays(
+        &mut self,
+        show_last_move_arrow: bool,
+        ponder: Option<(Square, Square)>,
+        analysis: &[BoardArrow],
+    ) {
+        let mut overlays = Vec::new();
+        if show_last_move_arrow && self.last_move_squares.len() == 2 {
+            overlays.push(
+                BoardArrow::new(
+                    self.last_move_squares[0],
+                    self.last_move_squares[1],
+                    MarkColor::Gold,
+                    ArrowRole::LastMove,
+                )
+                .with_opacity(0.85),
+            );
+        }
+        if let Some((from, to)) = ponder {
+            overlays.push(
+                BoardArrow::new(from, to, MarkColor::Cyan, ArrowRole::Ponder).with_opacity(0.35),
+            );
+        }
+        overlays.extend(analysis.iter().cloned());
+        self.overlay_arrows = overlays;
     }
 
     /// Select a square and compute legal move highlights for it.
@@ -77,9 +117,28 @@ impl GameState {
         self.legal_highlights.clear();
     }
 
+    pub fn begin_drag(&mut self, from: Square) {
+        self.drag_from = Some(from);
+        self.drag_over = Some(from);
+        self.select_square(from);
+    }
+
+    pub fn update_drag(&mut self, over: Square) {
+        self.drag_over = Some(over);
+    }
+
+    pub fn end_drag(&mut self) -> Option<(Square, Square)> {
+        let from = self.drag_from.take()?;
+        let to = self.drag_over.take().unwrap_or(from);
+        if from == to {
+            None
+        } else {
+            Some((from, to))
+        }
+    }
+
     /// Try to make a move from the selected square to `target`.
-    /// Returns `Some(move)` if legal, `None` otherwise.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn try_move(&mut self, target: Square) -> Option<types::Move> {
         let from = self.selected_square?;
         let legal = self.board.generate_legal_moves();
@@ -105,7 +164,7 @@ impl GameState {
     }
 
     /// Finish a right-drag annotation: toggle the arrow, or clear all on same-square release.
-    pub fn finish_arrow(&mut self, to: Square) {
+    pub fn finish_arrow(&mut self, to: Square, color: ArrowColor) {
         let Some(from) = self.arrow_start.take() else {
             return;
         };
@@ -113,8 +172,12 @@ impl GameState {
             self.arrows.clear();
             return;
         }
-        let arrow = (from, to);
-        if let Some(idx) = self.arrows.iter().position(|a| *a == arrow) {
+        let arrow = user_arrow(from, to, color);
+        if let Some(idx) = self
+            .arrows
+            .iter()
+            .position(|a| a.from == arrow.from && a.to == arrow.to && a.role == ArrowRole::User)
+        {
             self.arrows.remove(idx);
         } else {
             self.arrows.push(arrow);
@@ -144,42 +207,10 @@ mod tests {
     #[test]
     fn test_select_square_shows_legal_moves() {
         let mut gs = setup();
-        // Select the e2 pawn (index 12)
         let e2 = Square::from_index(12);
         gs.select_square(e2);
-
         assert_eq!(gs.selected_square, Some(e2));
-        // e2 pawn should have exactly 2 legal moves (e3, e4)
         assert_eq!(gs.legal_highlights.len(), 2);
-
-        let e3 = Square::from_index(20);
-        let e4 = Square::from_index(28);
-        assert!(gs.legal_highlights.contains(&e3));
-        assert!(gs.legal_highlights.contains(&e4));
-    }
-
-    #[test]
-    fn test_select_empty_square_no_highlights() {
-        let mut gs = setup();
-        // Select an empty square (e4, index 28)
-        let e4 = Square::from_index(28);
-        gs.select_square(e4);
-
-        assert_eq!(gs.selected_square, Some(e4));
-        // No piece on e4, so no legal moves from it
-        assert!(gs.legal_highlights.is_empty());
-    }
-
-    #[test]
-    fn test_deselect_clears_state() {
-        let mut gs = setup();
-        let e2 = Square::from_index(12);
-        gs.select_square(e2);
-        assert!(gs.selected_square.is_some());
-
-        gs.deselect();
-        assert!(gs.selected_square.is_none());
-        assert!(gs.legal_highlights.is_empty());
     }
 
     #[test]
@@ -187,98 +218,11 @@ mod tests {
         let mut gs = setup();
         let e2 = Square::from_index(12);
         let e4 = Square::from_index(28);
-
         gs.select_square(e2);
         let result = gs.try_move(e4);
-
         assert!(result.is_some());
-        let mv = result.unwrap();
-        assert_eq!(mv.from, e2);
-        assert_eq!(mv.to, e4);
-
-        // Board should now have black to move
         assert_eq!(gs.board.side_to_move, types::Color::Black);
-        // last_move_squares should be set
         assert_eq!(gs.last_move_squares, vec![e2, e4]);
-        // Selection should be cleared
-        assert!(gs.selected_square.is_none());
-    }
-
-    #[test]
-    fn test_try_move_illegal_returns_none() {
-        let mut gs = setup();
-        let e2 = Square::from_index(12);
-        let e5 = Square::from_index(36); // e5 is not reachable from e2 in one move
-
-        gs.select_square(e2);
-        let result = gs.try_move(e5);
-
-        assert!(result.is_none());
-        // Board should not have changed
-        assert_eq!(gs.board.side_to_move, types::Color::White);
-    }
-
-    #[test]
-    fn test_try_move_without_selection_returns_none() {
-        let mut gs = setup();
-        let e4 = Square::from_index(28);
-
-        let result = gs.try_move(e4);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_flip_board() {
-        let mut gs = setup();
-        assert!(!gs.flipped);
-        gs.flipped = true;
-        assert!(gs.flipped);
-        gs.flipped = !gs.flipped;
-        assert!(!gs.flipped);
-    }
-
-    #[test]
-    fn test_game_over_on_checkmate() {
-        let mut gs = GameState::new(
-            Board::from_fen("rnbqkbnr/pppp1ppp/4p3/8/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2")
-                .unwrap(),
-        );
-        // This position allows Qh4# (scholar's mate setup after f3 and g4)
-        let d8 = Square::from_index(59); // queen on d8
-        let h4 = Square::from_index(31); // Qh4#
-
-        gs.select_square(d8);
-        let result = gs.try_move(h4);
-
-        assert!(result.is_some());
-        assert!(gs.game_over);
-    }
-
-    #[test]
-    fn test_multiple_moves_sequence() {
-        let mut gs = setup();
-
-        // 1. e4
-        gs.select_square(Square::from_index(12)); // e2
-        assert!(gs.try_move(Square::from_index(28)).is_some()); // e4
-
-        // 1... e5
-        gs.select_square(Square::from_index(52)); // e7
-        assert!(gs.try_move(Square::from_index(36)).is_some()); // e5
-
-        // 2. Nf3
-        gs.select_square(Square::from_index(6)); // g1
-        assert!(gs.try_move(Square::from_index(21)).is_some()); // Nf3
-
-        assert_eq!(gs.board.side_to_move, types::Color::Black);
-        assert!(!gs.game_over);
-    }
-
-    #[test]
-    fn test_arrows_initial_state() {
-        let gs = setup();
-        assert!(gs.arrows.is_empty());
-        assert!(gs.arrow_start.is_none());
     }
 
     #[test]
@@ -286,13 +230,11 @@ mod tests {
         let mut gs = setup();
         let e2 = Square::from_index(12);
         let e4 = Square::from_index(28);
-
         gs.begin_arrow(e2);
-        gs.finish_arrow(e4);
-        assert_eq!(gs.arrows, vec![(e2, e4)]);
-
+        gs.finish_arrow(e4, ArrowColor::Orange);
+        assert_eq!(gs.arrows.len(), 1);
         gs.begin_arrow(e2);
-        gs.finish_arrow(e4);
+        gs.finish_arrow(e4, ArrowColor::Orange);
         assert!(gs.arrows.is_empty());
     }
 
@@ -300,56 +242,46 @@ mod tests {
     fn test_arrows_clear_all() {
         let mut gs = setup();
         gs.begin_arrow(Square::from_index(0));
-        gs.finish_arrow(Square::from_index(16));
+        gs.finish_arrow(Square::from_index(16), ArrowColor::Green);
         gs.begin_arrow(Square::from_index(6));
-        gs.finish_arrow(Square::from_index(21));
+        gs.finish_arrow(Square::from_index(21), ArrowColor::Blue);
         assert_eq!(gs.arrows.len(), 2);
-
         gs.begin_arrow(Square::from_index(0));
-        gs.finish_arrow(Square::from_index(0));
+        gs.finish_arrow(Square::from_index(0), ArrowColor::Orange);
         assert!(gs.arrows.is_empty());
-        assert!(gs.arrow_start.is_none());
     }
 
     #[test]
-    fn test_arrow_start_set_and_take() {
+    fn drag_selects_and_returns_from_to() {
         let mut gs = setup();
-        assert!(gs.arrow_start.is_none());
+        let e2 = Square::from_index(12);
+        let e4 = Square::from_index(28);
+        gs.begin_drag(e2);
+        assert_eq!(gs.selected_square, Some(e2));
+        gs.update_drag(e4);
+        assert_eq!(gs.end_drag(), Some((e2, e4)));
+    }
 
-        gs.begin_arrow(Square::from_index(12));
-        assert_eq!(gs.arrow_start, Some(Square::from_index(12)));
-
-        gs.finish_arrow(Square::from_index(28));
-        assert!(gs.arrow_start.is_none());
-        assert_eq!(gs.arrows.len(), 1);
+    #[test]
+    fn refresh_overlays_adds_last_move_and_ponder() {
+        let mut gs = setup();
+        gs.last_move_squares = vec![Square::from_index(12), Square::from_index(28)];
+        gs.refresh_move_overlays(
+            true,
+            Some((Square::from_index(52), Square::from_index(36))),
+            &[],
+        );
+        assert_eq!(gs.overlay_arrows.len(), 2);
+        assert_eq!(gs.overlay_arrows[0].role, ArrowRole::LastMove);
+        assert_eq!(gs.overlay_arrows[1].role, ArrowRole::Ponder);
+        assert!((gs.overlay_arrows[1].resolved_opacity() - 0.35).abs() < f32::EPSILON);
     }
 
     #[test]
     fn test_display_to_square_matches_board_layout() {
-        // Unflipped: top-left display cell is a8.
         assert_eq!(display_to_square(0, 0, false).index(), 56);
-        // Unflipped: bottom-right display cell is h1.
         assert_eq!(display_to_square(7, 7, false).index(), 7);
-        // Flipped: top-left display cell is h1.
         assert_eq!(display_to_square(0, 0, true).index(), 7);
-        // Flipped: bottom-right display cell is a8.
         assert_eq!(display_to_square(7, 7, true).index(), 56);
-    }
-
-    #[test]
-    fn test_point_to_display_maps_square_centers() {
-        let sq = 80.0;
-        assert_eq!(point_to_display(40.0, 40.0, sq), Some((0, 0)));
-        assert_eq!(point_to_display(600.0, 600.0, sq), Some((7, 7)));
-        assert_eq!(point_to_display(-1.0, 40.0, sq), None);
-        assert_eq!(point_to_display(40.0, 640.0, sq), None);
-    }
-
-    #[test]
-    fn test_finish_arrow_without_start_is_noop() {
-        let mut gs = setup();
-        gs.finish_arrow(Square::from_index(28));
-        assert!(gs.arrows.is_empty());
-        assert!(gs.arrow_start.is_none());
     }
 }

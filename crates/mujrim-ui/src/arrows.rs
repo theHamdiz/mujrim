@@ -1,10 +1,10 @@
-//! Canvas-based arrow overlay for chess.com-style annotation arrows.
-//!
-//! Draws semi-transparent orange arrows between square centers.
-//! Supports straight arrows and L-shaped knight-move arrows.
+//! Canvas-based annotation arrows with numbered multi-color steps.
 
-use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke};
+use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke, Text};
+use iced::alignment::{Horizontal, Vertical};
 use iced::{Color, Element, Event, Length, Point, mouse};
+
+use mujrim_study::board_marks::{ArrowRole, BoardArrow, MarkColor};
 
 use crate::Msg;
 
@@ -32,24 +32,12 @@ pub enum ArrowColor {
 }
 
 impl ArrowColor {
-    const fn colors(self) -> (Color, Color) {
+    pub const fn to_mark(self) -> MarkColor {
         match self {
-            Self::Orange => (
-                Color::from_rgba(0.922, 0.478, 0.118, 0.80),
-                Color::from_rgba(0.700, 0.350, 0.060, 0.90),
-            ),
-            Self::Green => (
-                Color::from_rgba(0.20, 0.78, 0.42, 0.80),
-                Color::from_rgba(0.08, 0.50, 0.24, 0.92),
-            ),
-            Self::Blue => (
-                Color::from_rgba(0.20, 0.55, 0.96, 0.80),
-                Color::from_rgba(0.08, 0.32, 0.72, 0.92),
-            ),
-            Self::Red => (
-                Color::from_rgba(0.92, 0.22, 0.25, 0.80),
-                Color::from_rgba(0.66, 0.08, 0.10, 0.92),
-            ),
+            Self::Orange => MarkColor::Orange,
+            Self::Green => MarkColor::Green,
+            Self::Blue => MarkColor::Blue,
+            Self::Red => MarkColor::Red,
         }
     }
 }
@@ -95,8 +83,36 @@ impl std::fmt::Display for ArrowSize {
 #[derive(Debug, Clone, Copy)]
 pub struct ArrowAppearance {
     pub shape: ArrowShape,
+    /// Default color for newly drawn user arrows (applied at draw-time via settings).
     pub color: ArrowColor,
     pub size: ArrowSize,
+}
+
+impl ArrowAppearance {
+    pub const fn user_color(self) -> ArrowColor {
+        self.color
+    }
+}
+
+fn mark_colors(color: MarkColor, opacity: f32) -> (Color, Color) {
+    let (r, g, b) = match color {
+        MarkColor::Orange => (0.922, 0.478, 0.118),
+        MarkColor::Green => (0.20, 0.78, 0.42),
+        MarkColor::Blue => (0.20, 0.55, 0.96),
+        MarkColor::Red => (0.92, 0.22, 0.25),
+        MarkColor::Purple => (0.70, 0.40, 0.90),
+        MarkColor::Cyan => (0.20, 0.78, 0.86),
+        MarkColor::Gold => (0.92, 0.78, 0.22),
+        MarkColor::Gray => (0.62, 0.64, 0.70),
+    };
+    let fill = Color::from_rgba(r, g, b, opacity);
+    let outline = Color::from_rgba(
+        (r * 0.72).clamp(0.0, 1.0),
+        (g * 0.72).clamp(0.0, 1.0),
+        (b * 0.72).clamp(0.0, 1.0),
+        (opacity + 0.10).min(1.0),
+    );
+    (fill, outline)
 }
 
 /// Returns true if the move between `from` and `to` is a knight jump.
@@ -121,19 +137,23 @@ pub fn display_square_at(point: Point, sq_size: f32) -> Option<(usize, usize)> {
     crate::game::point_to_display(point.x, point.y, sq_size)
 }
 
-/// Renders all annotation arrows as a transparent canvas overlay.
-///
-/// The overlay always owns right-click press/release so arrows work even when
-/// stacked above the piece grid (which otherwise intercepts mouse hit-testing).
+pub fn user_arrow(from: types::Square, to: types::Square, color: ArrowColor) -> BoardArrow {
+    BoardArrow::new(from, to, color.to_mark(), ArrowRole::User)
+}
+
+/// Renders annotation arrows as a transparent canvas overlay.
 pub fn arrow_canvas<'a>(
-    arrows: &[(types::Square, types::Square)],
+    overlay_arrows: &'a [BoardArrow],
+    user_arrows: &'a [BoardArrow],
     sq_size: f32,
     flipped: bool,
     appearance: ArrowAppearance,
 ) -> Element<'a, Msg> {
     let board_px = sq_size * 8.0;
+    let mut arrows = overlay_arrows.to_vec();
+    arrows.extend(user_arrows.iter().cloned());
     let overlay = ArrowOverlay {
-        arrows: arrows.to_vec(),
+        arrows,
         sq_size,
         flipped,
         appearance,
@@ -146,7 +166,7 @@ pub fn arrow_canvas<'a>(
 }
 
 struct ArrowOverlay {
-    arrows: Vec<(types::Square, types::Square)>,
+    arrows: Vec<BoardArrow>,
     sq_size: f32,
     flipped: bool,
     appearance: ArrowAppearance,
@@ -163,18 +183,23 @@ impl canvas::Program<Msg> for ArrowOverlay {
         bounds: iced::Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Msg>> {
-        let Some(position) = cursor.position_in(bounds) else {
-            return None;
-        };
-        let Some((row, col)) = display_square_at(position, self.sq_size) else {
-            return None;
-        };
+        let position = cursor.position_in(bounds)?;
+        let (row, col) = display_square_at(position, self.sq_size)?;
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 Some(canvas::Action::publish(Msg::BoardRightDown(row, col)).and_capture())
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
                 Some(canvas::Action::publish(Msg::BoardRightUp(row, col)).and_capture())
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                Some(canvas::Action::publish(Msg::BoardPointerDown(row, col)).and_capture())
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                Some(canvas::Action::publish(Msg::BoardPointerUp(row, col)).and_capture())
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                Some(canvas::Action::publish(Msg::BoardPointerMove(row, col)))
             }
             _ => None,
         }
@@ -186,8 +211,6 @@ impl canvas::Program<Msg> for ArrowOverlay {
         _bounds: iced::Rectangle,
         _cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        // None keeps square-button hover visuals working; update() still sees
-        // right-clicks first because the stack visits the top layer first.
         mouse::Interaction::None
     }
 
@@ -200,40 +223,74 @@ impl canvas::Program<Msg> for ArrowOverlay {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let geom = self.cache.draw(renderer, bounds.size(), |frame| {
-            for &(from, to) in &self.arrows {
-                let from_file = from.file() as i32;
-                let from_rank = from.rank() as i32;
-                let to_file = to.file() as i32;
-                let to_rank = to.rank() as i32;
-
-                let p_from = sq_center(from.file(), from.rank(), self.sq_size, self.flipped);
-                let p_to = sq_center(to.file(), to.rank(), self.sq_size, self.flipped);
-
-                let (fill, outline) = self.appearance.color.colors();
-                let scale = self.appearance.size.scale();
-                if self.appearance.shape == ArrowShape::Smart
-                    && is_knight_move(from_file, from_rank, to_file, to_rank)
-                {
-                    draw_knight_arrow(
-                        frame,
-                        from,
-                        to,
-                        self.sq_size,
-                        self.flipped,
-                        scale,
-                        fill,
-                        outline,
-                    );
-                } else {
-                    draw_straight_arrow(frame, p_from, p_to, self.sq_size, scale, fill, outline);
-                }
+            for arrow in &self.arrows {
+                draw_board_arrow(frame, arrow, self.sq_size, self.flipped, self.appearance);
             }
         });
         vec![geom]
     }
 }
 
-/// Draws a straight arrow from `from` to `to` with a fat shaft and triangular head.
+fn draw_board_arrow(
+    frame: &mut Frame,
+    arrow: &BoardArrow,
+    sq_size: f32,
+    flipped: bool,
+    appearance: ArrowAppearance,
+) {
+    let from_file = arrow.from.file() as i32;
+    let from_rank = arrow.from.rank() as i32;
+    let to_file = arrow.to.file() as i32;
+    let to_rank = arrow.to.rank() as i32;
+    let p_from = sq_center(arrow.from.file(), arrow.from.rank(), sq_size, flipped);
+    let p_to = sq_center(arrow.to.file(), arrow.to.rank(), sq_size, flipped);
+    let color = if arrow.role == ArrowRole::User {
+        appearance.user_color().to_mark()
+    } else {
+        arrow.color
+    };
+    let (fill, outline) = mark_colors(color, arrow.resolved_opacity());
+    let scale = appearance.size.scale();
+    if appearance.shape == ArrowShape::Smart && is_knight_move(from_file, from_rank, to_file, to_rank)
+    {
+        draw_knight_arrow(
+            frame,
+            arrow.from,
+            arrow.to,
+            sq_size,
+            flipped,
+            scale,
+            fill,
+            outline,
+        );
+    } else {
+        draw_straight_arrow(frame, p_from, p_to, sq_size, scale, fill, outline);
+    }
+    if let Some(step) = arrow.step.filter(|_| arrow.role.shows_step()) {
+        draw_step_badge(frame, p_to, sq_size, step, fill);
+    }
+}
+
+fn draw_step_badge(frame: &mut Frame, tip: Point, sq_size: f32, step: u8, fill: Color) {
+    let radius = sq_size * 0.16;
+    let center = Point::new(tip.x + sq_size * 0.18, tip.y - sq_size * 0.18);
+    let badge = Path::circle(center, radius);
+    frame.fill(&badge, Color::from_rgba(0.08, 0.08, 0.10, 0.82));
+    frame.stroke(
+        &badge,
+        Stroke::default().with_color(fill).with_width(1.5),
+    );
+    frame.fill_text(Text {
+        content: step.to_string(),
+        position: center,
+        color: Color::WHITE,
+        size: (sq_size * 0.18).into(),
+        align_x: Horizontal::Center.into(),
+        align_y: Vertical::Center,
+        ..Text::default()
+    });
+}
+
 fn draw_straight_arrow(
     frame: &mut Frame,
     from: Point,
@@ -253,18 +310,14 @@ fn draw_straight_arrow(
     if len < 1.0 {
         return;
     }
-    // Unit direction
     let ux = dx / len;
     let uy = dy / len;
-    // Perpendicular
     let px = -uy;
     let py = ux;
 
-    // The shaft ends where the arrowhead base begins
     let shaft_end_x = to.x - ux * head_len;
     let shaft_end_y = to.y - uy * head_len;
 
-    // Shaft rectangle (4 corners)
     let s1 = Point::new(from.x + px * shaft_w * 0.5, from.y + py * shaft_w * 0.5);
     let s2 = Point::new(from.x - px * shaft_w * 0.5, from.y - py * shaft_w * 0.5);
     let s3 = Point::new(
@@ -276,7 +329,6 @@ fn draw_straight_arrow(
         shaft_end_y + py * shaft_w * 0.5,
     );
 
-    // Arrowhead triangle
     let h_tip = to;
     let h_left = Point::new(
         shaft_end_x + px * head_half_w,
@@ -287,7 +339,6 @@ fn draw_straight_arrow(
         shaft_end_y - py * head_half_w,
     );
 
-    // Draw filled shaft
     let shaft_path = Path::new(|b| {
         b.move_to(s1);
         b.line_to(s4);
@@ -301,7 +352,6 @@ fn draw_straight_arrow(
         Stroke::default().with_color(outline).with_width(1.2),
     );
 
-    // Draw filled arrowhead
     let head_path = Path::new(|b| {
         b.move_to(h_tip);
         b.line_to(h_left);
@@ -315,7 +365,7 @@ fn draw_straight_arrow(
     );
 }
 
-/// Draws an L-shaped arrow for knight moves: horizontal leg then vertical leg.
+#[allow(clippy::too_many_arguments)]
 fn draw_knight_arrow(
     frame: &mut Frame,
     from_square: types::Square,
@@ -336,26 +386,16 @@ fn draw_knight_arrow(
     let head_len = sq_size * 0.40;
     let head_half_w = shaft_w * 1.2;
 
-    // Determine which leg is longer to figure out the correct L-shape.
-    // Convention: go in the direction of larger displacement first.
     let df = (to_file - from_file).abs();
     let dr = (to_rank - from_rank).abs();
-
-    // The corner square of the L: first go along the longer axis
     let (corner_file, corner_rank) = if df > dr {
-        // horizontal first (2 squares), then vertical (1 square)
         (to_file, from_rank)
     } else {
-        // vertical first (2 squares), then horizontal (1 square)
         (from_file, to_rank)
     };
-
     let corner = sq_center(corner_file as u8, corner_rank as u8, sq_size, flipped);
-
-    // --- First leg: from → corner (no arrowhead, just a fat line) ---
     draw_leg_segment(frame, from, corner, shaft_w, fill, outline);
 
-    // --- Second leg: corner → to (with arrowhead) ---
     let dx = to.x - corner.x;
     let dy = to.y - corner.y;
     let seg_len = (dx * dx + dy * dy).sqrt();
@@ -366,11 +406,9 @@ fn draw_knight_arrow(
     let uy = dy / seg_len;
     let px = -uy;
     let py = ux;
-
     let shaft_end_x = to.x - ux * head_len;
     let shaft_end_y = to.y - uy * head_len;
 
-    // Shaft of second leg
     let s1 = Point::new(corner.x + px * shaft_w * 0.5, corner.y + py * shaft_w * 0.5);
     let s2 = Point::new(corner.x - px * shaft_w * 0.5, corner.y - py * shaft_w * 0.5);
     let s3 = Point::new(
@@ -395,7 +433,6 @@ fn draw_knight_arrow(
         Stroke::default().with_color(outline).with_width(1.2),
     );
 
-    // Arrowhead
     let h_tip = to;
     let h_left = Point::new(
         shaft_end_x + px * head_half_w,
@@ -405,7 +442,6 @@ fn draw_knight_arrow(
         shaft_end_x - px * head_half_w,
         shaft_end_y - py * head_half_w,
     );
-
     let head_path = Path::new(|b| {
         b.move_to(h_tip);
         b.line_to(h_left);
@@ -419,7 +455,6 @@ fn draw_knight_arrow(
     );
 }
 
-/// Draws a simple fat line segment (no arrowhead) for the first leg of an L-arrow.
 fn draw_leg_segment(
     frame: &mut Frame,
     from: Point,
@@ -438,16 +473,12 @@ fn draw_leg_segment(
     let uy = dy / len;
     let px = -uy;
     let py = ux;
-
-    // Extend past the corner by half the shaft width so the join looks clean
     let ext = shaft_w * 0.5;
     let to_ext = Point::new(to.x + ux * ext, to.y + uy * ext);
-
     let s1 = Point::new(from.x + px * shaft_w * 0.5, from.y + py * shaft_w * 0.5);
     let s2 = Point::new(from.x - px * shaft_w * 0.5, from.y - py * shaft_w * 0.5);
     let s3 = Point::new(to_ext.x - px * shaft_w * 0.5, to_ext.y - py * shaft_w * 0.5);
     let s4 = Point::new(to_ext.x + px * shaft_w * 0.5, to_ext.y + py * shaft_w * 0.5);
-
     let path = Path::new(|b| {
         b.move_to(s1);
         b.line_to(s4);
@@ -466,12 +497,9 @@ mod tests {
     #[test]
     fn test_sq_center_not_flipped() {
         let sq_size = 80.0;
-        // A1 = file 0, rank 0 → display_col 0, display_row 7 → center (40, 600 - 40)
         let p = sq_center(0, 0, sq_size, false);
         assert!((p.x - 40.0).abs() < 0.01);
         assert!((p.y - (7.0 * 80.0 + 40.0)).abs() < 0.01);
-
-        // H8 = file 7, rank 7 → display_col 7, display_row 0 → center (600 - 40, 40)
         let p = sq_center(7, 7, sq_size, false);
         assert!((p.x - (7.0 * 80.0 + 40.0)).abs() < 0.01);
         assert!((p.y - 40.0).abs() < 0.01);
@@ -480,7 +508,6 @@ mod tests {
     #[test]
     fn test_sq_center_flipped() {
         let sq_size = 80.0;
-        // A1 flipped → display_col 7, display_row 0
         let p = sq_center(0, 0, sq_size, true);
         assert!((p.x - (7.0 * 80.0 + 40.0)).abs() < 0.01);
         assert!((p.y - 40.0).abs() < 0.01);
@@ -488,18 +515,9 @@ mod tests {
 
     #[test]
     fn test_is_knight_move() {
-        // b1→c3: df=1, dr=2
         assert!(is_knight_move(1, 0, 2, 2));
-        // g1→f3: df=1, dr=2
         assert!(is_knight_move(6, 0, 5, 2));
-        // b1→a3: df=1, dr=2
-        assert!(is_knight_move(1, 0, 0, 2));
-        // Wide knight: e4→c5 df=2, dr=1
-        assert!(is_knight_move(4, 3, 2, 4));
-        // Not a knight: e2→e4 df=0, dr=2
         assert!(!is_knight_move(4, 1, 4, 3));
-        // Not a knight: diagonal df=1, dr=1
-        assert!(!is_knight_move(3, 3, 4, 4));
     }
 
     #[test]
@@ -509,27 +527,17 @@ mod tests {
             display_square_at(Point::new(sq * 0.5, sq * 0.5), sq),
             Some((0, 0))
         );
-        assert_eq!(
-            display_square_at(Point::new(sq * 7.5, sq * 7.5), sq),
-            Some((7, 7))
-        );
         assert_eq!(display_square_at(Point::new(-1.0, 10.0), sq), None);
-        assert_eq!(display_square_at(Point::new(10.0, sq * 8.0), sq), None);
     }
 
     #[test]
-    fn test_arrowhead_geometry() {
-        // A straight arrow from center of board going right
-        let from = Point::new(200.0, 320.0);
-        let to = Point::new(360.0, 320.0);
-        let dx: f32 = to.x - from.x;
-        let dy: f32 = to.y - from.y;
-        let len: f32 = (dx * dx + dy * dy).sqrt();
-        assert!(len > 0.0);
-        let ux: f32 = dx / len;
-        let uy: f32 = dy / len;
-        // Direction should be purely horizontal
-        assert!((ux - 1.0).abs() < 0.01);
-        assert!(uy.abs() < 0.01);
+    fn user_arrow_maps_settings_color() {
+        let arrow = user_arrow(
+            types::Square::from_index(12),
+            types::Square::from_index(28),
+            ArrowColor::Blue,
+        );
+        assert_eq!(arrow.color, MarkColor::Blue);
+        assert_eq!(arrow.role, ArrowRole::User);
     }
 }

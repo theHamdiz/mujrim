@@ -15,6 +15,9 @@ pub const BUNDLED_ENGINES: &[(&str, &str)] = &[
     ("ethereal", "Ethereal"),
 ];
 
+/// In-process classical evaluator + HCE search stack (not a separate binary).
+pub const MUJRIM_HCE_DISPLAY_NAME: &str = "Mujrim HCE";
+
 /// Mujrim adapter ids that ship as `mujrim-*-{arch}` under `bin/{os-arch}/`.
 pub const ARCH_SUFFIXED_ADAPTERS: &[&str] = &["mujrim-v60", "mujrim-v10", "mujrim-akimbo"];
 
@@ -579,6 +582,7 @@ mod tests {
                 .iter()
                 .any(|(_, display)| display.to_ascii_lowercase().contains("native"))
         );
+        assert_eq!(MUJRIM_HCE_DISPLAY_NAME, "Mujrim HCE");
     }
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]

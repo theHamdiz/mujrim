@@ -2,12 +2,14 @@
 #![allow(unexpected_cfgs)]
 //! Mujrim GUI — premium chess interface.
 
+mod analysis;
 mod arrows;
 mod audio;
 mod board_view;
 mod eval_graph;
 mod game;
 mod gif_export;
+mod motion;
 mod noise;
 mod pieces;
 mod recording;
@@ -24,12 +26,16 @@ use mujrim_protocols::catalog::{
     DiscoveredEngine, RuntimeCompatibility, discover_bundled_engines_from_environment,
 };
 use mujrim_study::annotation::{AnnotationContext, MoveAnnotation};
+use mujrim_study::board_marks::BoardArrow;
 use mujrim_study::database::{EngineMetadata, GameMetadata, GameQuery, GameSummary, StudyDatabase};
+use mujrim_study::gambit::{self, GambitLesson};
 use mujrim_study::opening::OpeningExplorer;
-use mujrim_study::tournament::TournamentFormat;
+use mujrim_study::tournament::{Entrant, TournamentFormat, TournamentResult};
+use mujrim_study::tournament_store::StoredTournament;
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
-use std::time::{Duration, Instant};
+use motion::AnimPace;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pieces::PieceAssets;
 use uci_process::ExternalEngineProtocol;
@@ -216,6 +222,14 @@ struct AppSettings {
     arrow_shape: arrows::ArrowShape,
     arrow_color: arrows::ArrowColor,
     arrow_size: arrows::ArrowSize,
+    /// Enable interpolated piece slide overlays.
+    piece_slide: bool,
+    /// Enable hub / modal entrance motion.
+    system_motion: bool,
+    /// Draw last-move as a solid arrow in addition to square tint.
+    last_move_arrow: bool,
+    /// Draw ponder suggestion as a translucent arrow.
+    ponder_arrow: bool,
 }
 
 impl Default for AppSettings {
@@ -240,6 +254,10 @@ impl Default for AppSettings {
             arrow_shape: arrows::ArrowShape::Smart,
             arrow_color: arrows::ArrowColor::Orange,
             arrow_size: arrows::ArrowSize::Normal,
+            piece_slide: true,
+            system_motion: true,
+            last_move_arrow: true,
+            ponder_arrow: true,
         }
     }
 }
@@ -335,6 +353,16 @@ struct App {
     tuning_status: String,
     tournament_format: TournamentFormat,
     tournament_status: String,
+    stored_tournaments: Vec<StoredTournament>,
+    /// Latest multi-engine analysis arrows for the analysis/review board.
+    analysis_arrows: Vec<BoardArrow>,
+    analysis_status: String,
+    analysis_engines_selected: Vec<String>,
+    analysis_multipv: i32,
+    ponder_hint: Option<(types::Square, types::Square)>,
+    active_gambit: Option<&'static GambitLesson>,
+    gambit_ply: usize,
+    hub_opened_at: Instant,
 }
 
 /// State of an in-progress piece move animation.
@@ -394,6 +422,7 @@ enum Screen {
     Playing,
     Study,
     Tournaments,
+    Analysis,
 }
 
 /// Tab within the options modal.
@@ -495,6 +524,12 @@ impl std::fmt::Display for PlayerConfig {
     }
 }
 
+type EngineMoveOk = (
+    types::Move,
+    String,
+    Option<(types::Square, types::Square)>,
+);
+
 #[derive(Debug, Clone)]
 enum Msg {
     SelectMode(GameMode),
@@ -502,14 +537,22 @@ enum Msg {
     OpenHome,
     OpenStudy,
     OpenTournaments,
+    OpenAnalysis,
     SelectTournamentFormat(TournamentFormat),
     RunQuickTournament,
     QuickTournamentFinished(String),
     EngineCatalogProbed(Vec<EngineMetadata>),
     AnalyzeGame,
     GameAnalysisFinished(Result<Vec<AnalyzedPly>, String>),
+    RunMultiEngineAnalysis,
+    MultiEngineAnalysisFinished(analysis::AnalysisSnapshot),
+    ToggleAnalysisEngine(String),
+    SetAnalysisMultiPv(i32),
     ViewPly(usize),
     ReturnToLivePosition,
+    StartGambitLesson(String),
+    GambitStep(i32),
+    RefreshTournamentHistory,
     LoadWhiteUciEngine,
     LoadWhiteXboardEngine,
     LoadBlackUciEngine,
@@ -519,7 +562,7 @@ enum Msg {
     SelectBundledWhite(BundledEngineChoice),
     SelectBundledBlack(BundledEngineChoice),
     BoardClick(usize, usize),
-    EngineMove(u64, Result<(types::Move, String), String>),
+    EngineMove(u64, Result<EngineMoveOk, String>),
     NewGame,
     FlipBoard,
     Resign,
@@ -586,6 +629,13 @@ enum Msg {
     SetArrowSize(arrows::ArrowSize),
     BoardRightDown(usize, usize),
     BoardRightUp(usize, usize),
+    BoardPointerDown(usize, usize),
+    BoardPointerMove(usize, usize),
+    BoardPointerUp(usize, usize),
+    SetPieceSlide(bool),
+    SetSystemMotion(bool),
+    SetLastMoveArrow(bool),
+    SetPonderArrow(bool),
     // Tools panel
     SwitchOptionsTab(OptionsTab),
     SelectSyzygyPieceSet(updater::syzygy::SyzygyPieceSet),
@@ -625,6 +675,10 @@ impl Default for App {
         let external_engine_catalog = study_database
             .as_ref()
             .and_then(|database| database.engine_catalog().ok())
+            .unwrap_or_default();
+        let stored_tournaments = study_database
+            .as_ref()
+            .and_then(|database| database.list_tournaments().ok())
             .unwrap_or_default();
         Self {
             screen: Screen::Menu,
@@ -686,6 +740,15 @@ impl Default for App {
             tuning_status: String::new(),
             tournament_format: TournamentFormat::RoundRobin,
             tournament_status: String::new(),
+            stored_tournaments,
+            analysis_arrows: Vec::new(),
+            analysis_status: "Pick engines and run multi-engine analysis.".to_owned(),
+            analysis_engines_selected: vec!["builtin".to_owned()],
+            analysis_multipv: 2,
+            ponder_hint: None,
+            active_gambit: None,
+            gambit_ply: 0,
+            hub_opened_at: Instant::now(),
         }
     }
 }
@@ -823,6 +886,101 @@ impl App {
             .map_or_else(Vec::new, |store| store.due(today_day(), 100));
     }
 
+    fn refresh_tournament_history(&mut self) {
+        self.stored_tournaments = self
+            .study_database
+            .as_ref()
+            .and_then(|database| database.list_tournaments().ok())
+            .unwrap_or_default();
+    }
+
+    fn sync_board_overlays(&mut self) {
+        let show_last = self.settings.last_move_arrow;
+        let ponder = if self.settings.ponder_arrow {
+            self.ponder_hint
+        } else {
+            None
+        };
+        let analysis = self.analysis_arrows.clone();
+        if let Some(gs) = self.game.as_mut() {
+            gs.refresh_move_overlays(show_last, ponder, &analysis);
+        }
+    }
+
+    fn run_multi_engine_analysis_task(&self) -> Task<Msg> {
+        let fen = self
+            .review_board
+            .as_ref()
+            .or_else(|| self.game.as_ref().map(|gs| &gs.board))
+            .map(|board| board.to_fen())
+            .unwrap_or_else(|| self.initial_fen.clone());
+        let mut engines = Vec::new();
+        if self
+            .analysis_engines_selected
+            .iter()
+            .any(|id| id == "builtin")
+        {
+            engines.push(analysis::AnalysisEngineSpec {
+                id: "builtin".into(),
+                name: "Mujrim".into(),
+                path: None,
+                protocol: ExternalEngineProtocol::Uci,
+                builtin: true,
+            });
+        }
+        for bundled in &self.bundled_engines {
+            let id = bundled.path.to_string_lossy().into_owned();
+            if self.analysis_engines_selected.iter().any(|selected| selected == &id) {
+                engines.push(analysis::AnalysisEngineSpec {
+                    id: id.clone(),
+                    name: bundled.display_name.to_owned(),
+                    path: Some(bundled.path.clone()),
+                    protocol: ExternalEngineProtocol::Uci,
+                    builtin: false,
+                });
+            }
+        }
+        for external in &self.external_engine_catalog {
+            if self
+                .analysis_engines_selected
+                .iter()
+                .any(|selected| selected == &external.path)
+            {
+                let protocol = if external.protocol.eq_ignore_ascii_case("xboard") {
+                    ExternalEngineProtocol::Xboard
+                } else {
+                    ExternalEngineProtocol::Uci
+                };
+                engines.push(analysis::AnalysisEngineSpec {
+                    id: external.path.clone(),
+                    name: external.name.clone(),
+                    path: Some(PathBuf::from(&external.path)),
+                    protocol,
+                    builtin: false,
+                });
+            }
+        }
+        let request = analysis::AnalysisRequest {
+            fen,
+            depth: self.engine_cfg.max_depth.max(1),
+            movetime: Duration::from_millis((self.engine_cfg.time_per_move.max(1) * 1000) as u64),
+            hash_mb: bounded_hash_mb(self.engine_cfg.hash_mb),
+            threads: self.engine_cfg.threads.max(1) as usize,
+            multipv: self.analysis_multipv.max(1) as u32,
+            engines,
+            max_pv_plies: 6,
+        };
+        let depth = request.depth;
+        Task::perform(
+            async move {
+                analysis::run_multi_engine_analysis(request, move |fen, _depth| {
+                    builtin_analysis_line(fen, depth)
+                })
+            },
+            Msg::MultiEngineAnalysisFinished,
+        )
+    }
+
     /// Start a move animation (call BEFORE applying the move to the board).
     fn start_animation(
         &mut self,
@@ -845,15 +1003,17 @@ impl App {
                     }
                 }
 
-                // Capture animation duration depends on style
-                let anim_duration = if is_capture {
+                let pace = AnimPace::from_setting(self.settings.anim_speed);
+                let anim_duration = if !self.settings.piece_slide {
+                    Duration::from_millis(1)
+                } else if is_capture {
                     match self.settings.capture_anim_style {
-                        CaptureAnimStyle::Instant => Duration::from_millis(50),
-                        CaptureAnimStyle::Explosion => Duration::from_millis(350),
-                        CaptureAnimStyle::Fire => Duration::from_millis(400),
+                        CaptureAnimStyle::Instant => pace.capture_instant(),
+                        CaptureAnimStyle::Explosion => pace.capture_explosion(),
+                        CaptureAnimStyle::Fire => pace.capture_fire(),
                     }
                 } else {
-                    Duration::from_millis(150)
+                    pace.quiet_move()
                 };
 
                 self.animation = Some(AnimationState {
@@ -886,6 +1046,7 @@ impl App {
             gs.last_move_squares = vec![anim.mv.from, anim.mv.to];
             // Clear drawing arrows on any move
             gs.arrows.clear();
+            self.analysis_arrows.clear();
             gs.board.make_move(anim.mv);
             // Chess notation: append check (+) or checkmate (#)
             let mut notation = anim.mv.to_uci();
@@ -991,10 +1152,51 @@ impl App {
             }
 
             if anim.trigger_engine_after && !is_next_human && !gs.game_over {
+                self.sync_board_overlays();
                 return self.trigger_engine_move();
             }
         }
+        self.sync_board_overlays();
         Task::none()
+    }
+
+    fn persist_tournament_summary(&mut self, summary: &str) {
+        let Some(database) = self.study_database.as_mut() else {
+            return;
+        };
+        let roster = tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
+        if roster.len() < 2 {
+            return;
+        }
+        let entrants = roster
+            .iter()
+            .enumerate()
+            .map(|(index, engine)| Entrant {
+                id: format!("engine-{index}"),
+                name: engine.name.clone(),
+                seed_elo: None,
+            })
+            .collect::<Vec<_>>();
+        let id = format!(
+            "t-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let tournament = StoredTournament {
+            id,
+            name: format!("{} quick tournament", self.tournament_format),
+            format: self.tournament_format,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            status: summary.to_owned(),
+            entrants,
+            results: Vec::<TournamentResult>::new(),
+        };
+        let _ = database.save_tournament(&tournament);
     }
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
@@ -1021,6 +1223,7 @@ impl App {
             }
             Msg::OpenHome => {
                 self.invalidate_engine_tasks();
+                self.hub_opened_at = Instant::now();
                 self.screen = Screen::Menu;
                 Task::none()
             }
@@ -1034,6 +1237,106 @@ impl App {
             }
             Msg::OpenTournaments => {
                 self.screen = Screen::Tournaments;
+                self.refresh_tournament_history();
+                Task::none()
+            }
+            Msg::OpenAnalysis => {
+                if self.game.is_none() {
+                    let mut gs = game::GameState::new(types::Board::new());
+                    if self.settings.auto_flip_black {
+                        gs.flipped = false;
+                    }
+                    self.game = Some(gs);
+                    self.move_log.clear();
+                    self.move_annotations.clear();
+                    self.clear_review_state();
+                    self.initial_fen = mujrim_study::opening::START_FEN.to_owned();
+                }
+                self.screen = Screen::Analysis;
+                Task::none()
+            }
+            Msg::RefreshTournamentHistory => {
+                self.refresh_tournament_history();
+                Task::none()
+            }
+            Msg::StartGambitLesson(id) => {
+                if let Some(lesson) = gambit::find_gambit(&id) {
+                    self.active_gambit = Some(lesson);
+                    self.gambit_ply = lesson.key_ply.min(lesson.moves.len());
+                    if let Ok(fen) = lesson.fen_after_plies(self.gambit_ply)
+                        && let Ok(board) = types::Board::from_fen(&fen)
+                    {
+                        let mut gs = game::GameState::new(board);
+                        if let Ok(arrows) = lesson.coaching_arrows(self.gambit_ply.max(1)) {
+                            gs.overlay_arrows = arrows;
+                        }
+                        self.game = Some(gs);
+                        self.initial_fen = fen;
+                        self.move_log = lesson.moves[..self.gambit_ply]
+                            .iter()
+                            .map(|mv| (*mv).to_owned())
+                            .collect();
+                        self.move_annotations = vec![None; self.move_log.len()];
+                        self.clear_review_state();
+                        self.screen = Screen::Analysis;
+                        self.status = format!("Gambit: {} ({})", lesson.name, lesson.eco);
+                    }
+                }
+                Task::none()
+            }
+            Msg::GambitStep(delta) => {
+                if let Some(lesson) = self.active_gambit {
+                    let next = (self.gambit_ply as i32 + delta)
+                        .clamp(0, lesson.moves.len() as i32) as usize;
+                    self.gambit_ply = next;
+                    if let Ok(fen) = lesson.fen_after_plies(next)
+                        && let Ok(board) = types::Board::from_fen(&fen)
+                    {
+                        if let Some(gs) = self.game.as_mut() {
+                            gs.board = board;
+                            gs.overlay_arrows =
+                                lesson.coaching_arrows(next.max(1)).unwrap_or_default();
+                        }
+                        self.initial_fen = fen;
+                        self.move_log = lesson.moves[..next]
+                            .iter()
+                            .map(|mv| (*mv).to_owned())
+                            .collect();
+                        self.move_annotations = vec![None; self.move_log.len()];
+                    }
+                }
+                Task::none()
+            }
+            Msg::ToggleAnalysisEngine(id) => {
+                if let Some(index) = self
+                    .analysis_engines_selected
+                    .iter()
+                    .position(|existing| existing == &id)
+                {
+                    self.analysis_engines_selected.remove(index);
+                } else {
+                    self.analysis_engines_selected.push(id);
+                }
+                Task::none()
+            }
+            Msg::SetAnalysisMultiPv(value) => {
+                self.analysis_multipv = value.clamp(1, 5);
+                Task::none()
+            }
+            Msg::RunMultiEngineAnalysis => self.run_multi_engine_analysis_task(),
+            Msg::MultiEngineAnalysisFinished(snapshot) => {
+                let consensus = snapshot
+                    .consensus
+                    .as_deref()
+                    .unwrap_or("no consensus");
+                self.analysis_status = format!(
+                    "{} · {} opinions",
+                    snapshot.status,
+                    snapshot.analysis.opinions.len()
+                );
+                self.analysis_arrows = snapshot.arrows.clone();
+                self.sync_board_overlays();
+                self.status = format!("Analysis ready · consensus {consensus}");
                 Task::none()
             }
             Msg::SelectTournamentFormat(format) => {
@@ -1057,7 +1360,9 @@ impl App {
                 )
             }
             Msg::QuickTournamentFinished(summary) => {
+                self.persist_tournament_summary(&summary);
                 self.tournament_status = summary;
+                self.refresh_tournament_history();
                 Task::none()
             }
             Msg::EngineCatalogProbed(engines) => {
@@ -1295,7 +1600,7 @@ impl App {
                     return Task::none();
                 }
                 match result {
-                    Ok((mv, info)) => {
+                    Ok((mv, info, ponder)) => {
                         self.engine_move_retries = 1;
                         let legal = self.game.as_mut().is_some_and(|game| {
                             game.board.generate_legal_moves().iter().any(|candidate| {
@@ -1310,6 +1615,7 @@ impl App {
                             uci_process::cancel_all_pondering();
                             return Task::none();
                         }
+                        self.ponder_hint = ponder;
                         self.start_animation(mv, Some(info), true);
                         Task::none()
                     }
@@ -1683,7 +1989,7 @@ impl App {
             Msg::ToggleBGM => {
                 let track = match self.screen {
                     Screen::Menu | Screen::Study | Screen::Tournaments => audio::BgmTrack::Menu,
-                    Screen::Playing => audio::BgmTrack::Game,
+                    Screen::Playing | Screen::Analysis => audio::BgmTrack::Game,
                 };
                 if let Some(ref mut sound) = self.sound {
                     self.bgm_on = sound.toggle_bgm(track);
@@ -1992,11 +2298,77 @@ impl App {
                     && let Some(ref mut gs) = self.game
                 {
                     let to = game::display_to_square(row, col, gs.flipped);
-                    gs.finish_arrow(to);
+                    gs.finish_arrow(to, self.settings.arrow_color);
                 } else if let Some(ref mut gs) = self.game {
                     // Release outside an armed drag should not leave a stale start.
                     gs.arrow_start = None;
                 }
+                Task::none()
+            }
+            Msg::BoardPointerDown(row, col) => {
+                if let Some(ref mut gs) = self.game {
+                    let sq = game::display_to_square(row, col, gs.flipped);
+                    if gs.board.piece_on(sq).is_some() {
+                        gs.begin_drag(sq);
+                        Task::none()
+                    } else {
+                        self.update(Msg::BoardClick(row, col))
+                    }
+                } else {
+                    Task::none()
+                }
+            }
+            Msg::BoardPointerMove(row, col) => {
+                if let Some(ref mut gs) = self.game
+                    && gs.drag_from.is_some()
+                {
+                    let sq = game::display_to_square(row, col, gs.flipped);
+                    gs.update_drag(sq);
+                }
+                Task::none()
+            }
+            Msg::BoardPointerUp(row, col) => {
+                let drag = self.game.as_mut().and_then(|gs| {
+                    if gs.drag_from.is_some() {
+                        let sq = game::display_to_square(row, col, gs.flipped);
+                        gs.update_drag(sq);
+                        gs.end_drag()
+                    } else {
+                        None
+                    }
+                });
+                if let Some((from, to)) = drag {
+                    if let Some(gs) = self.game.as_mut() {
+                        gs.select_square(from);
+                    }
+                    let flipped = self.game.as_ref().is_some_and(|g| g.flipped);
+                    let display_row = if flipped { to.rank() } else { 7 - to.rank() } as usize;
+                    let display_col = if flipped { 7 - to.file() } else { to.file() } as usize;
+                    self.update(Msg::BoardClick(display_row, display_col))
+                } else {
+                    self.update(Msg::BoardClick(row, col))
+                }
+            }
+            Msg::SetPieceSlide(value) => {
+                self.settings.piece_slide = value;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetSystemMotion(value) => {
+                self.settings.system_motion = value;
+                self.settings.save();
+                Task::none()
+            }
+            Msg::SetLastMoveArrow(value) => {
+                self.settings.last_move_arrow = value;
+                self.settings.save();
+                self.sync_board_overlays();
+                Task::none()
+            }
+            Msg::SetPonderArrow(value) => {
+                self.settings.ponder_arrow = value;
+                self.settings.save();
+                self.sync_board_overlays();
                 Task::none()
             }
             Msg::SwitchOptionsTab(tab) => {
@@ -2162,7 +2534,7 @@ impl App {
                 .any(|m| m.from == book_move.from && m.to == book_move.to)
             {
                 return Task::perform(
-                    async move { Ok((book_move, String::from("Book move"))) },
+                    async move { Ok((book_move, String::from("Book move"), None)) },
                     move |result| Msg::EngineMove(generation, result),
                 );
             }
@@ -2182,7 +2554,7 @@ impl App {
             async move {
                 let handle = std::thread::Builder::new()
                     .stack_size(8 * 1024 * 1024)
-                    .spawn(move || -> Result<(types::Move, String), String> {
+                    .spawn(move || -> Result<EngineMoveOk, String> {
                         types::init();
                         match side_player {
                             PlayerConfig::Human => {
@@ -2198,7 +2570,7 @@ impl App {
                                     std::time::Duration::from_secs(time_secs),
                                     max_depth,
                                 )?;
-                                Ok((mv, info))
+                                Ok((mv, info, None))
                             }
                             PlayerConfig::External { path, protocol } => {
                                 let fen = board_clone.to_fen();
@@ -2229,7 +2601,16 @@ impl App {
                                             info.best_move
                                         )
                                     })?;
-                                Ok((mv, format!("{protocol} {}", info.telemetry())))
+                                let ponder_sq = info.ponder_move.as_deref().and_then(|ponder_uci| {
+                                    let mut predicted = board_clone.clone();
+                                    predicted.make_move(mv);
+                                    predicted
+                                        .generate_legal_moves()
+                                        .into_iter()
+                                        .find(|candidate| candidate.to_uci() == ponder_uci)
+                                        .map(|ponder_mv| (ponder_mv.from, ponder_mv.to))
+                                });
+                                Ok((mv, format!("{protocol} {}", info.telemetry()), ponder_sq))
                             }
                         }
                     })
@@ -2249,6 +2630,7 @@ impl App {
             Screen::Playing => self.view_game(),
             Screen::Study => self.view_study_hub(),
             Screen::Tournaments => self.view_tournament_hub(),
+            Screen::Analysis => self.view_analysis(),
         };
 
         // Wrap in options modal overlay if open
@@ -2324,24 +2706,31 @@ impl App {
         ]
         .spacing(3)
         .align_y(Alignment::Center);
-        if !matches!(self.screen, Screen::Playing) {
+        if !matches!(self.screen, Screen::Playing | Screen::Analysis) {
             actions = actions
+                .push(pill_button(
+                    lucide_icon(iced_fonts::lucide::search),
+                    "Analyze",
+                    pal,
+                    matches!(self.screen, Screen::Analysis),
+                    Msg::OpenAnalysis,
+                ))
                 .push(pill_button(
                     lucide_icon(iced_fonts::lucide::database),
                     "Study",
                     pal,
-                    false,
+                    matches!(self.screen, Screen::Study),
                     Msg::OpenStudy,
                 ))
                 .push(pill_button(
                     lucide_icon(iced_fonts::lucide::trophy),
                     "Tournaments",
                     pal,
-                    false,
+                    matches!(self.screen, Screen::Tournaments),
                     Msg::OpenTournaments,
                 ));
         }
-        if matches!(self.screen, Screen::Playing) {
+        if matches!(self.screen, Screen::Playing | Screen::Analysis) {
             actions = actions
                 .push(pill_button(
                     lucide_icon(iced_fonts::lucide::camera),
@@ -2523,16 +2912,40 @@ impl App {
     // ══════════════════════════════════════════════════════════
     fn view_menu(&self) -> Element<'_, Msg> {
         let pal = self.settings.board_theme.gui_palette();
+        let entrance = if self.settings.system_motion {
+            motion::hub_entrance(self.hub_opened_at.elapsed().as_millis() as u64, 700)
+        } else {
+            1.0
+        };
         let logo_img: Image<iced::widget::image::Handle> =
-            Image::new(self.logo.clone()).width(100).height(100);
+            Image::new(self.logo.clone()).width(128).height(128);
 
-        let title = text("Mujrim Chess")
-            .size(42)
-            .color(pal.text_primary)
+        let title = text("MUJRIM")
+            .size(64)
+            .color(Color::from_rgba(
+                pal.text_primary.r,
+                pal.text_primary.g,
+                pal.text_primary.b,
+                entrance,
+            ))
             .font(CURIOUS_FONT);
-        let subtitle = text("The First Arabian Chess Engine")
-            .size(16)
+        let subtitle = text("Play · Analyze · Prepare · Compete")
+            .size(18)
+            .color(Color::from_rgba(
+                pal.accent_alt.r,
+                pal.accent_alt.g,
+                pal.accent_alt.b,
+                0.55 + 0.45 * entrance,
+            ));
+        let tagline = text("A full desktop chess studio for every UCI engine on your machine.")
+            .size(14)
             .color(pal.text_secondary);
+        let quick_actions = row![
+            styled_button("Analyze Position", Msg::OpenAnalysis),
+            styled_button("Open Study", Msg::OpenStudy),
+            styled_button("Engine Tournament", Msg::OpenTournaments),
+        ]
+        .spacing(10);
 
         // ── Left column: Game Setup ──
         let mode_picker = pick_list(
@@ -2809,17 +3222,22 @@ impl App {
             row![left_card, Space::new().width(20), right_card].align_y(Alignment::Start);
 
         let menu_content = column![
-            Space::new().height(20),
+            Space::new().height(28),
             logo_img,
-            Space::new().height(4),
+            Space::new().height(6),
             title,
             subtitle,
-            Space::new().height(20),
+            tagline,
+            Space::new().height(12),
+            quick_actions,
+            Space::new().height(18),
             two_cols,
             Space::new().height(20),
             start_btn,
             Space::new().height(8),
-            text("v2.0").size(11).color(pal.text_secondary),
+            text("Studio v2 · multi-engine ready")
+                .size(11)
+                .color(pal.text_secondary),
         ]
         .spacing(4)
         .align_x(Alignment::Center)
@@ -2898,13 +3316,16 @@ impl App {
                 show_coords: self.settings.show_coords,
                 coord_position: self.settings.coord_position,
                 capture_anim_style: self.settings.capture_anim_style,
-                arrows: &gs.arrows,
+                overlay_arrows: &gs.overlay_arrows,
+                user_arrows: &gs.arrows,
                 arrow_appearance: arrows::ArrowAppearance {
                     shape: self.settings.arrow_shape,
                     color: self.settings.arrow_color,
                     size: self.settings.arrow_size,
                 },
                 display_board: self.review_board.as_ref(),
+                show_legal_moves: self.settings.show_legal_moves,
+                show_last_move: self.settings.show_last_move,
             },
         );
         let board_total = sq_size * 8.0;
@@ -3043,6 +3464,11 @@ impl App {
             .push(Space::new().height(8))
             .push(text("Engine").size(13).color(pal.text_secondary))
             .push(engine_panel);
+        if matches!(self.screen, Screen::Analysis) {
+            side_content = side_content
+                .push(Space::new().height(10))
+                .push(scrollable(self.analysis_sidebar_panel(pal)).height(Length::Fill));
+        }
         if let Some(item) = &self.active_puzzle {
             let solved = puzzle_line_matches(&self.move_log, &item.puzzle.solution);
             let mut controls = column![
@@ -3296,14 +3722,47 @@ impl App {
             .spacing(9)
             .into(),
         );
+        let mut gambit_rows = column![].spacing(6);
+        for lesson in gambit::catalog() {
+            let id = lesson.id.to_owned();
+            gambit_rows = gambit_rows.push(
+                row![
+                    column![
+                        text(format!("{} ({})", lesson.name, lesson.eco))
+                            .size(14)
+                            .color(palette.text_primary),
+                        text(lesson.summary)
+                            .size(12)
+                            .color(palette.text_secondary),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    styled_button("Learn", Msg::StartGambitLesson(id)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        let gambits = settings_card(
+            iced_fonts::lucide::swords,
+            "Gambit Laboratory",
+            column![
+                text("Interactive lines with numbered coaching arrows.")
+                    .size(13)
+                    .color(palette.text_secondary),
+                scrollable(gambit_rows).height(Length::Fixed(220.0)),
+            ]
+            .spacing(9)
+            .into(),
+        );
         let content = column![
             text("Study Workspace").size(30).color(palette.text_primary),
-            text("A focused home for games, coaching, openings, and training material.")
+            text("Games, coaching, openings, gambits, and training — interactive everywhere.")
                 .size(14)
                 .color(palette.text_secondary),
             library,
             row![coaching, training].spacing(16).width(Length::Fill),
-            opening,
+            row![opening, gambits].spacing(16).width(Length::Fill),
             text(&self.status).size(13).color(palette.accent_alt),
         ]
         .spacing(16)
@@ -3313,6 +3772,129 @@ impl App {
             self.view_title_bar(),
             scrollable(content).height(Length::Fill)
         ]
+        .into()
+    }
+
+    fn view_analysis(&self) -> Element<'_, Msg> {
+        // Analysis reuses the interactive board chrome and injects studio controls
+        // into the game sidebar via `analysis_sidebar_panel`.
+        if self.game.is_some() {
+            self.view_game()
+        } else {
+            let palette = self.settings.board_theme.gui_palette();
+            column![
+                self.view_title_bar(),
+                container(self.analysis_sidebar_panel(palette)).padding(24),
+            ]
+            .into()
+        }
+    }
+
+    fn analysis_sidebar_panel(&self, palette: board_view::GuiPalette) -> Element<'_, Msg> {
+        let mut engine_toggles = column![].spacing(6);
+        let builtin_on = self
+            .analysis_engines_selected
+            .iter()
+            .any(|id| id == "builtin");
+        engine_toggles = engine_toggles.push(settings_row(
+            "Mujrim (built-in)",
+            toggler(builtin_on)
+                .on_toggle(|_| Msg::ToggleAnalysisEngine("builtin".into()))
+                .size(18)
+                .into(),
+        ));
+        for engine in &self.bundled_engines {
+            let id = engine.path.to_string_lossy().into_owned();
+            let on = self.analysis_engines_selected.iter().any(|s| s == &id);
+            engine_toggles = engine_toggles.push(settings_row(
+                engine.display_name,
+                toggler(on)
+                    .on_toggle(move |_| Msg::ToggleAnalysisEngine(id.clone()))
+                    .size(18)
+                    .into(),
+            ));
+        }
+        for engine in &self.external_engine_catalog {
+            let id = engine.path.clone();
+            let on = self.analysis_engines_selected.iter().any(|s| s == &id);
+            let name = engine.name.clone();
+            engine_toggles = engine_toggles.push(settings_row(
+                name.as_str(),
+                toggler(on)
+                    .on_toggle(move |_| Msg::ToggleAnalysisEngine(id.clone()))
+                    .size(18)
+                    .into(),
+            ));
+        }
+        let mut opinion_lines = column![].spacing(4);
+        for arrow in self.analysis_arrows.iter().take(12) {
+            let label = arrow
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("{}→{}", arrow.from, arrow.to));
+            opinion_lines = opinion_lines.push(
+                text(format!("{}. {label}", arrow.step.unwrap_or(0)))
+                    .size(12)
+                    .color(palette.text_secondary),
+            );
+        }
+        if self.analysis_arrows.is_empty() {
+            opinion_lines = opinion_lines.push(
+                text("No multi-engine arrows yet.")
+                    .size(12)
+                    .color(palette.text_secondary),
+            );
+        }
+        let gambit_controls: Element<'_, Msg> = if let Some(lesson) = self.active_gambit {
+            column![
+                text(format!("{} · {}", lesson.name, lesson.eco))
+                    .size(14)
+                    .color(palette.accent_alt),
+                text(lesson.summary).size(12).color(palette.text_secondary),
+                row![
+                    styled_button("◀ Step", Msg::GambitStep(-1)),
+                    text(format!("Ply {}", self.gambit_ply))
+                        .size(13)
+                        .color(palette.text_primary),
+                    styled_button("Step ▶", Msg::GambitStep(1)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(8)
+            .into()
+        } else {
+            text("Load a gambit from Study for stepped coaching arrows.")
+                .size(12)
+                .color(palette.text_secondary)
+                .into()
+        };
+        column![
+            text("Multi-Engine Studio")
+                .size(16)
+                .color(palette.text_primary),
+            text(&self.analysis_status)
+                .size(12)
+                .color(palette.text_secondary),
+            config_slider(
+                "MultiPV",
+                self.analysis_multipv,
+                "",
+                1,
+                5,
+                Msg::SetAnalysisMultiPv,
+            ),
+            engine_toggles,
+            styled_button("Run Multi-Engine Analysis", Msg::RunMultiEngineAnalysis),
+            styled_button("Review Current Game", Msg::AnalyzeGame),
+            text("Engine PV arrows")
+                .size(13)
+                .color(palette.text_primary),
+            opinion_lines,
+            text("Gambit coach").size(13).color(palette.text_primary),
+            gambit_controls,
+        ]
+        .spacing(8)
         .into()
     }
 
@@ -3388,14 +3970,47 @@ impl App {
             .spacing(10)
             .into(),
         );
+        let mut history = column![].spacing(6);
+        if self.stored_tournaments.is_empty() {
+            history = history.push(
+                text("No saved tournaments yet.")
+                    .size(13)
+                    .color(palette.text_secondary),
+            );
+        } else {
+            for tournament in self.stored_tournaments.iter().take(8) {
+                history = history.push(
+                    column![
+                        text(&tournament.name)
+                            .size(14)
+                            .color(palette.text_primary),
+                        text(&tournament.status)
+                            .size(12)
+                            .color(palette.text_secondary),
+                    ]
+                    .spacing(2),
+                );
+            }
+        }
+        let history_card = settings_card(
+            iced_fonts::lucide::history,
+            "Saved Results",
+            column![
+                history,
+                styled_button("Refresh history", Msg::RefreshTournamentHistory),
+            ]
+            .spacing(10)
+            .into(),
+        );
         let content = column![
             text("Engine Tournaments")
                 .size(30)
                 .color(palette.text_primary),
-            text("Architecture-aware management, reproducible pairings, resumable checkpoints, standings, and Elo estimates.")
+            text("Organize engine events, persist standings in the study database, and reopen prior results.")
                 .size(14)
                 .color(palette.text_secondary),
             row![roster, controls].spacing(16).width(Length::Fill),
+            history_card,
         ]
         .spacing(16)
         .padding(24)
@@ -3424,11 +4039,7 @@ impl App {
         )
         .width(160);
 
-        let anim_label = match s.anim_speed {
-            0 => "Fast",
-            2 => "Slow",
-            _ => "Normal",
-        };
+        let anim_label = AnimPace::from_setting(s.anim_speed).label();
 
         let capture_anim_picker = pick_list(
             vec![
@@ -3607,6 +4218,34 @@ impl App {
                     "Draw Arrows",
                     toggler(s.draw_arrows)
                         .on_toggle(Msg::SetDrawArrows)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Last-Move Arrow",
+                    toggler(s.last_move_arrow)
+                        .on_toggle(Msg::SetLastMoveArrow)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Ponder Arrow",
+                    toggler(s.ponder_arrow)
+                        .on_toggle(Msg::SetPonderArrow)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "Piece Slide",
+                    toggler(s.piece_slide)
+                        .on_toggle(Msg::SetPieceSlide)
+                        .size(18)
+                        .into(),
+                ),
+                settings_row(
+                    "System Motion",
+                    toggler(s.system_motion)
+                        .on_toggle(Msg::SetSystemMotion)
                         .size(18)
                         .into(),
                 ),
@@ -4977,6 +5616,22 @@ async fn pick_nnue_file() -> Option<String> {
 
 /// Persistent built-in search so consecutive GUI moves reuse TT / history,
 /// matching how CuteChess keeps an engine process alive across moves.
+fn builtin_analysis_line(fen: &str, depth: i32) -> Result<(String, i32, Vec<String>), String> {
+    types::init();
+    let mut board = types::Board::from_fen(fen)?;
+    let (mv, _info) = builtin_engine_search(
+        &mut board,
+        64,
+        1,
+        true,
+        None,
+        Duration::from_millis(250),
+        depth.max(1),
+    )?;
+    // Reconstruct a short PV by searching once; expose best move as the PV head.
+    Ok((mv.to_uci(), 0, vec![mv.to_uci()]))
+}
+
 fn builtin_engine_search(
     board: &mut types::Board,
     hash_mb: usize,

@@ -103,6 +103,7 @@ pub struct ExternalSearchConfig {
     pub eval_file: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn query_best_move(
     engine_path: &str,
     protocol: ExternalEngineProtocol,

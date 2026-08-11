@@ -30,7 +30,7 @@ const EXTERNAL_BACKENDS: &[&str] = &[
     "ethereal",
 ];
 const MUJRIM_ADAPTERS: &[&str] = &["mujrim-v60", "mujrim-v10", "mujrim-akimbo"];
-const NATIVE_PASSTHROUGH_MARKER: &str = "MUJRIM_NATIVE_PASSTHROUGH_ACTIVE";
+const V60_PASSTHROUGH_MARKER: &str = "MUJRIM_V60_PASSTHROUGH_ACTIVE";
 
 #[derive(Clone, Copy)]
 struct NativeSearchStackProfile {
@@ -73,7 +73,7 @@ fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
 
 fn resolve_backend_engine_id(backend: &str) -> Option<&'static str> {
     match backend {
-        "native" | "v60" => Some("mujrim-v60"),
+        "v60" => Some("mujrim-v60"),
         "v10" => Some("mujrim-v10"),
         "akimbo" => Some("mujrim-akimbo"),
         other => EXTERNAL_BACKENDS
@@ -86,9 +86,12 @@ fn resolve_backend_engine_id(backend: &str) -> Option<&'static str> {
 fn passthrough_engine_id(
     backend: &str,
     uci_mode: bool,
-    native_passthrough_active: bool,
+    v60_passthrough_active: bool,
 ) -> Option<&'static str> {
-    if !uci_mode || backend == "universal" || (backend == "native" && native_passthrough_active) {
+    if !uci_mode
+        || matches!(backend, "universal" | "mujrim-hce")
+        || (backend == "v60" && v60_passthrough_active)
+    {
         return None;
     }
     resolve_backend_engine_id(backend)
@@ -121,7 +124,7 @@ fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Res
         explicit_path.map(PathBuf::as_path),
     )?;
     let environment: &[(&str, &str)] = if engine_id == "mujrim-v60" {
-        &[(NATIVE_PASSTHROUGH_MARKER, "1")]
+        &[(V60_PASSTHROUGH_MARKER, "1")]
     } else {
         &[]
     };
@@ -138,7 +141,7 @@ fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Res
                 .iter()
                 .copied()
                 .find(|candidate| *candidate == engine_id)
-                .ok_or_else(|| format!("unsupported native search stack '{engine_id}'"))?,
+                .ok_or_else(|| format!("unsupported external search stack '{engine_id}'"))?,
         );
         debug_assert_eq!(profile.engine_id, engine_id);
         let adapter = mujrim_protocols::BoundedUciIdentityAdapter {
@@ -175,10 +178,10 @@ fn main() {
             Arg::new("backend")
                 .long("backend")
                 .value_parser([
-                    "native",
                     "v60",
                     "v10",
                     "universal",
+                    "mujrim-hce",
                     "stockfish",
                     "plentychess",
                     "obsidian",
@@ -188,7 +191,9 @@ fn main() {
                 ])
                 .default_value("stockfish")
                 .global(true)
-                .help("Search backend to expose over UCI (v60/v10/akimbo prefer Mujrim adapters)"),
+                .help(
+                    "Search backend to expose over UCI (v60/v10/akimbo prefer Mujrim adapters; mujrim-hce is in-process HCE)",
+                ),
         )
         .arg(
             Arg::new("engine-path")
@@ -280,7 +285,7 @@ fn main() {
     let backend = matches
         .get_one::<String>("backend")
         .map_or("stockfish", String::as_str);
-    let passthrough_active = std::env::var_os(NATIVE_PASSTHROUGH_MARKER).is_some();
+    let passthrough_active = std::env::var_os(V60_PASSTHROUGH_MARKER).is_some();
     if let Some(engine_id) = passthrough_engine_id(backend, uci_mode, passthrough_active) {
         match run_external_backend(engine_id, matches.get_one::<PathBuf>("engine-path")) {
             Ok(()) => return,
@@ -307,7 +312,7 @@ fn main() {
 
     match matches.subcommand() {
         Some(("uci", _)) => {
-            commands::run_uci();
+            commands::run_uci(backend);
         }
         Some(("xboard", _)) => {
             #[cfg(feature = "xboard")]
@@ -343,7 +348,7 @@ fn main() {
             commands::run_bench(depth, time_ms);
         }
         _ => {
-            commands::run_uci();
+            commands::run_uci(backend);
         }
     }
 }
@@ -371,10 +376,6 @@ mod tests {
     #[test]
     fn uci_backends_prefer_mujrim_adapter_aliases() {
         assert_eq!(
-            passthrough_engine_id("native", true, false),
-            Some("mujrim-v60")
-        );
-        assert_eq!(
             passthrough_engine_id("v60", true, false),
             Some("mujrim-v60")
         );
@@ -395,13 +396,20 @@ mod tests {
             Some("reckless")
         );
         assert_eq!(passthrough_engine_id("universal", true, false), None);
-        assert_eq!(passthrough_engine_id("native", true, true), None);
+        assert_eq!(passthrough_engine_id("mujrim-hce", true, false), None);
+        assert_eq!(passthrough_engine_id("v60", true, true), None);
         assert!(MUJRIM_ADAPTERS.iter().all(|id| is_mujrim_adapter(id)));
     }
 
     #[test]
+    fn native_backend_alias_is_removed() {
+        assert_eq!(passthrough_engine_id("native", true, false), None);
+        assert_eq!(fallback_engine_id("native", false), None);
+    }
+
+    #[test]
     fn non_uci_commands_keep_the_in_process_implementation() {
-        assert_eq!(passthrough_engine_id("native", false, false), None);
+        assert_eq!(passthrough_engine_id("v60", false, false), None);
         assert_eq!(passthrough_engine_id("stockfish", false, false), None);
     }
 
@@ -409,13 +417,13 @@ mod tests {
     fn packaged_default_falls_back_without_masking_explicit_path_errors() {
         assert_eq!(fallback_engine_id("stockfish", false), Some("mujrim-v10"));
         assert_eq!(fallback_engine_id("reckless", false), Some("mujrim-v60"));
-        assert_eq!(fallback_engine_id("native", false), None);
+        assert_eq!(fallback_engine_id("mujrim-hce", false), None);
         assert_eq!(fallback_engine_id("akimbo", false), None);
         assert_eq!(fallback_engine_id("stockfish", true), None);
     }
 
     #[test]
-    fn native_stack_profiles_keep_search_and_evaluation_paired() {
+    fn external_stack_profiles_keep_search_and_evaluation_paired() {
         let stockfish = search_stack_profile("stockfish");
         let reckless = search_stack_profile("reckless");
 

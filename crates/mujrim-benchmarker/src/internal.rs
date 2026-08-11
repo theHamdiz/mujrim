@@ -48,15 +48,20 @@ pub type ProgressCallback = Box<dyn Fn(usize, usize, &PositionResult) + Send>;
 
 /// Install the evaluator + search stack that belong together.
 ///
-/// Explicit EvalPreset names always load the matching embedded network before
-/// applying search parameters. A bare `set_params_for_preset("stockfish")` on top
-/// of Reckless is the historical NPS / strength mismatch.
+/// Explicit EvalPreset names always install the matching adapter (network +
+/// search). A bare `set_params_for_preset("stockfish")` on top of Reckless is
+/// the historical NPS / strength mismatch.
 fn configure_engine_eval(
     engine: &mut SearchEngine,
     eval_preset: &str,
     eval_file: Option<&std::path::Path>,
     quiet: bool,
 ) {
+    if matches!(eval_preset, "mujrim-hce" | "hce") {
+        let _ = search::install_adapter(engine, "mujrim-hce");
+        return;
+    }
+
     if let Some(path) = eval_file {
         match load_network(path) {
             Ok(network) => engine.set_nnue_network(network),
@@ -65,6 +70,9 @@ fn configure_engine_eval(
                 path.display()
             ),
         }
+    } else if matches!(eval_preset, "stockfish" | "reckless" | "akimbo") {
+        let _ = search::install_adapter(engine, eval_preset);
+        return;
     } else if let Some(network) = eval::nnue::embedded_network_for_preset(eval_preset) {
         engine.set_nnue_network(network);
     } else {
@@ -206,14 +214,14 @@ mod tests {
     fn stockfish_eval_preset_installs_stockfish_network_and_params() {
         let mut engine = SearchEngine::new(4, 1);
         configure_engine_eval(&mut engine, "stockfish", None, true);
-        assert_eq!(engine.params().nmp_base, 7);
+        assert_eq!(engine.params().nmp_base, 5);
         assert_eq!(
             engine.nnue_info().format,
             eval::nnue::NetworkFormat::Stockfish
         );
         assert_eq!(
             engine.network_profile(),
-            eval::nnue::NnueSearchProfile::Stockfish
+            Some(eval::nnue::NnueSearchProfile::Stockfish)
         );
     }
 

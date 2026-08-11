@@ -10,6 +10,36 @@ use crate::policy::{
 };
 use crate::search_params::SearchParams;
 
+/// Evaluator family bound to a search stack (NNUE profile or Mujrim HCE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvalMode {
+    Nnue(NnueSearchProfile),
+    MujrimHce,
+}
+
+impl EvalMode {
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nnue(profile) => profile.as_str(),
+            Self::MujrimHce => "mujrim-hce",
+        }
+    }
+
+    #[inline]
+    pub const fn is_reckless_nnue(self) -> bool {
+        matches!(self, Self::Nnue(NnueSearchProfile::Reckless))
+    }
+
+    #[inline]
+    pub const fn nnue_profile(self) -> Option<NnueSearchProfile> {
+        match self {
+            Self::Nnue(profile) => Some(profile),
+            Self::MujrimHce => None,
+        }
+    }
+}
+
 /// Explicit construction-time policy overlays used by the benchmark harness.
 /// The evaluator's parameter profile remains intact so an experiment changes
 /// exactly one search component unless `RecklessPolicies` is requested.
@@ -70,12 +100,12 @@ impl SearchExperiment {
 /// Composition happens when a network is selected; node-level calls still use
 /// allocation-free enum dispatch.
 pub trait SearchStackProfile {
-    fn network_profile(&self) -> NnueSearchProfile;
+    fn eval_mode(&self) -> EvalMode;
     fn parameters(&self) -> SearchParams;
     fn policies(&self) -> SearchPolicies;
 
     fn compose(&self) -> SearchStack {
-        SearchStack::new(self.network_profile(), self.parameters(), self.policies())
+        SearchStack::new(self.eval_mode(), self.parameters(), self.policies())
     }
 }
 
@@ -132,21 +162,17 @@ impl SearchPolicies {
 
 #[derive(Clone)]
 pub struct SearchStack {
-    network_profile: NnueSearchProfile,
+    eval_mode: EvalMode,
     pub params: SearchParams,
     pub(crate) lmr_table: Arc<[[i32; 128]; 128]>,
     pub(crate) policies: SearchPolicies,
 }
 
 impl SearchStack {
-    fn new(
-        network_profile: NnueSearchProfile,
-        params: SearchParams,
-        policies: SearchPolicies,
-    ) -> Self {
+    fn new(eval_mode: EvalMode, params: SearchParams, policies: SearchPolicies) -> Self {
         let lmr_table = params.build_lmr_table();
         Self {
-            network_profile,
+            eval_mode,
             params,
             lmr_table,
             policies,
@@ -169,6 +195,7 @@ impl SearchStack {
         match name {
             "stockfish" => StockfishSearchProfile.compose(),
             "reckless" => RecklessSearchProfile.compose(),
+            "mujrim-hce" | "hce" => MujrimHceSearchProfile.compose(),
             "reckless-full-lmr" => {
                 let mut stack = AkimboSearchProfile.compose();
                 stack.policies.lmr = LmrDispatch::RecklessFull;
@@ -198,16 +225,22 @@ impl SearchStack {
     }
 
     #[inline]
-    pub const fn network_profile(&self) -> NnueSearchProfile {
-        self.network_profile
+    pub const fn eval_mode(&self) -> EvalMode {
+        self.eval_mode
+    }
+
+    /// NNUE family when active; `None` for Mujrim HCE.
+    #[inline]
+    pub const fn network_profile(&self) -> Option<NnueSearchProfile> {
+        self.eval_mode.nnue_profile()
     }
 }
 
 pub struct AkimboSearchProfile;
 
 impl SearchStackProfile for AkimboSearchProfile {
-    fn network_profile(&self) -> NnueSearchProfile {
-        NnueSearchProfile::Akimbo
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::Akimbo)
     }
 
     fn parameters(&self) -> SearchParams {
@@ -222,8 +255,8 @@ impl SearchStackProfile for AkimboSearchProfile {
 pub struct StockfishSearchProfile;
 
 impl SearchStackProfile for StockfishSearchProfile {
-    fn network_profile(&self) -> NnueSearchProfile {
-        NnueSearchProfile::Stockfish
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::Stockfish)
     }
 
     fn parameters(&self) -> SearchParams {
@@ -238,8 +271,8 @@ impl SearchStackProfile for StockfishSearchProfile {
 pub struct RecklessSearchProfile;
 
 impl SearchStackProfile for RecklessSearchProfile {
-    fn network_profile(&self) -> NnueSearchProfile {
-        NnueSearchProfile::Reckless
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::Reckless)
     }
 
     fn parameters(&self) -> SearchParams {
@@ -251,6 +284,23 @@ impl SearchStackProfile for RecklessSearchProfile {
     }
 }
 
+/// Classical (HCE) evaluator with a StockLike search skeleton.
+pub struct MujrimHceSearchProfile;
+
+impl SearchStackProfile for MujrimHceSearchProfile {
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::MujrimHce
+    }
+
+    fn parameters(&self) -> SearchParams {
+        SearchParams::mujrim_hce()
+    }
+
+    fn policies(&self) -> SearchPolicies {
+        SearchPolicies::stock_like()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,8 +308,11 @@ mod tests {
     #[test]
     fn stockfish_stack_is_composed_as_one_coherent_unit() {
         let stack = SearchStack::for_network(NnueSearchProfile::Stockfish);
-        assert_eq!(stack.network_profile(), NnueSearchProfile::Stockfish);
-        assert_eq!(stack.params.nmp_base, 7);
+        assert_eq!(
+            stack.eval_mode(),
+            EvalMode::Nnue(NnueSearchProfile::Stockfish)
+        );
+        assert_eq!(stack.params.nmp_base, 5);
         assert!(matches!(stack.policies.lmr, LmrDispatch::StockLike));
         assert!(matches!(stack.policies.lmp, LmpDispatch::StockLike));
         assert!(matches!(
@@ -270,9 +323,20 @@ mod tests {
     }
 
     #[test]
+    fn mujrim_hce_stack_is_classical_stocklike() {
+        let stack = SearchStack::for_preset_name("mujrim-hce");
+        assert_eq!(stack.eval_mode(), EvalMode::MujrimHce);
+        assert!(stack.network_profile().is_none());
+        assert_eq!(stack.policies.move_ordering, MoveOrderingProfile::StockLike);
+    }
+
+    #[test]
     fn reckless_stack_cannot_mix_in_stocklike_policies() {
         let stack = SearchStack::for_network(NnueSearchProfile::Reckless);
-        assert_eq!(stack.network_profile(), NnueSearchProfile::Reckless);
+        assert_eq!(
+            stack.eval_mode(),
+            EvalMode::Nnue(NnueSearchProfile::Reckless)
+        );
         assert!(matches!(stack.policies.lmr, LmrDispatch::RecklessFull));
         assert!(matches!(stack.policies.lmp, LmpDispatch::Reckless));
         assert!(matches!(
@@ -296,12 +360,12 @@ mod tests {
 
     #[test]
     fn experiment_overlays_one_stockfish_component_without_replacing_parameters() {
-        let mut stack = SearchStack::for_network(NnueSearchProfile::Stockfish);
-        let stockfish_nmp = stack.params.nmp_base;
+        let mut stack = SearchStack::for_network(NnueSearchProfile::Akimbo);
+        let akimbo_nmp = stack.params.nmp_base;
         stack.apply_experiment(SearchExperiment::RecklessLmp);
 
-        assert_eq!(stack.network_profile(), NnueSearchProfile::Stockfish);
-        assert_eq!(stack.params.nmp_base, stockfish_nmp);
+        assert_eq!(stack.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Akimbo));
+        assert_eq!(stack.params.nmp_base, akimbo_nmp);
         assert!(matches!(stack.policies.lmp, LmpDispatch::Reckless));
         assert!(matches!(stack.policies.lmr, LmrDispatch::StockLike));
         assert_eq!(stack.policies.move_ordering, MoveOrderingProfile::StockLike);

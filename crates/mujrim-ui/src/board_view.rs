@@ -12,7 +12,10 @@
 use iced::widget::{Svg, button, column, container, row, stack, text};
 use iced::{Alignment, Color, Element, Length};
 
+use mujrim_study::board_marks::BoardArrow;
+
 use crate::game::GameState;
+use crate::motion::AnimPace;
 use crate::pieces::{PieceAssets, PieceSet};
 use crate::{CaptureAnimStyle, CoordPosition, Msg};
 
@@ -258,10 +261,13 @@ pub struct BoardViewOptions<'a> {
     pub coord_position: CoordPosition,
     pub capture_anim_style: CaptureAnimStyle,
     pub piece_set: PieceSet,
-    pub arrows: &'a [(types::Square, types::Square)],
+    pub overlay_arrows: &'a [BoardArrow],
+    pub user_arrows: &'a [BoardArrow],
     pub arrow_appearance: crate::arrows::ArrowAppearance,
     /// Optional immutable review position. The live game state remains intact.
     pub display_board: Option<&'a types::Board>,
+    pub show_legal_moves: bool,
+    pub show_last_move: bool,
 }
 
 fn piece_view<'a>(
@@ -293,9 +299,12 @@ pub fn view_board<'a>(
         coord_position,
         capture_anim_style,
         piece_set,
-        arrows,
+        overlay_arrows,
+        user_arrows,
         arrow_appearance,
         display_board,
+        show_legal_moves,
+        show_last_move,
     } = options;
     let board = display_board.unwrap_or(&gs.board);
     let colors = theme.colors();
@@ -335,8 +344,8 @@ pub fn view_board<'a>(
 
             let is_light = (rank + file) % 2 != 0;
             let is_selected = gs.selected_square == Some(sq);
-            let is_highlight = gs.legal_highlights.contains(&sq);
-            let is_last_move = gs.last_move_squares.contains(&sq);
+            let is_highlight = show_legal_moves && gs.legal_highlights.contains(&sq);
+            let is_last_move = show_last_move && gs.last_move_squares.contains(&sq);
             let is_premove_from = gs.premove_queue.iter().any(|(from, _)| *from == sq);
             let is_premove_to = gs.premove_queue.iter().any(|(_, to)| *to == sq);
 
@@ -605,18 +614,75 @@ pub fn view_board<'a>(
         })
         .into();
 
-    // Arrow canvas sits above the piece grid and owns right-click press/release
-    // (see arrows::ArrowOverlay::update). Left clicks are not captured and fall
-    // through to the square buttons. The overlay is always present so the first
-    // arrow can be drawn even when the list is still empty.
+    // Arrow canvas sits above the piece grid and owns pointer press/release for
+    // drag-drop + annotation arrows (see arrows::ArrowOverlay::update).
     let board_px = sq_size * 8.0;
-    let board_elem: Element<'a, Msg> = stack![
-        board_elem,
-        crate::arrows::arrow_canvas(arrows, sq_size, gs.flipped, arrow_appearance),
-    ]
-    .width(Length::Fixed(board_px))
-    .height(Length::Fixed(board_px))
-    .into();
+    let board_elem: Element<'a, Msg> = if let Some(anim) = anim {
+        let eased = AnimPace::ease(anim.progress);
+        let from = crate::arrows::sq_center(
+            anim.from_sq.file(),
+            anim.from_sq.rank(),
+            sq_size,
+            gs.flipped,
+        );
+        let to =
+            crate::arrows::sq_center(anim.to_sq.file(), anim.to_sq.rank(), sq_size, gs.flipped);
+        let x = from.x + (to.x - from.x) * eased - sq_size * 0.5;
+        let y = from.y + (to.y - from.y) * eased - sq_size * 0.5;
+        let piece_sz = if anim._piece == types::Piece::Pawn {
+            piece_sz_pawn
+        } else {
+            piece_sz_normal
+        };
+        let floating = container(piece_view(
+            assets,
+            piece_set,
+            anim._piece,
+            anim._color,
+            piece_sz,
+            1.0,
+        ))
+        .width(sq_size)
+        .height(sq_size);
+        let floating_layer = container(
+            container(floating).padding(iced::Padding {
+                top: y.max(0.0),
+                right: 0.0,
+                bottom: 0.0,
+                left: x.max(0.0),
+            }),
+        )
+        .width(Length::Fixed(board_px))
+        .height(Length::Fixed(board_px));
+        stack![
+            board_elem,
+            crate::arrows::arrow_canvas(
+                overlay_arrows,
+                user_arrows,
+                sq_size,
+                gs.flipped,
+                arrow_appearance
+            ),
+            floating_layer,
+        ]
+        .width(Length::Fixed(board_px))
+        .height(Length::Fixed(board_px))
+        .into()
+    } else {
+        stack![
+            board_elem,
+            crate::arrows::arrow_canvas(
+                overlay_arrows,
+                user_arrows,
+                sq_size,
+                gs.flipped,
+                arrow_appearance
+            ),
+        ]
+        .width(Length::Fixed(board_px))
+        .height(Length::Fixed(board_px))
+        .into()
+    };
 
     if show_coords && coord_position == CoordPosition::Outside {
         let coord_label_color = colors.coord_color(true);

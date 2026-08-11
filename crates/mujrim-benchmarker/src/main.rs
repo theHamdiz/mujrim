@@ -121,11 +121,11 @@ enum Commands {
         #[arg(long)]
         tui: bool,
 
-        /// Runtime NNUE preset (`auto`, `akimbo`, `stockfish`, `reckless`).
+        /// Runtime eval adapter (`auto`, `akimbo`, `stockfish`, `reckless`, `mujrim-hce`).
         #[arg(
             long,
             default_value = "auto",
-            value_parser = ["auto", "akimbo", "stockfish", "reckless"]
+            value_parser = ["auto", "akimbo", "stockfish", "reckless", "mujrim-hce"]
         )]
         eval_preset: String,
 
@@ -215,11 +215,11 @@ enum Commands {
         #[arg(short, long)]
         positions: Option<PathBuf>,
 
-        /// Runtime NNUE preset (`auto`, `akimbo`, `stockfish`, `reckless`).
+        /// Runtime eval adapter (`auto`, `akimbo`, `stockfish`, `reckless`, `mujrim-hce`).
         #[arg(
             long,
             default_value = "auto",
-            value_parser = ["auto", "akimbo", "stockfish", "reckless"]
+            value_parser = ["auto", "akimbo", "stockfish", "reckless", "mujrim-hce"]
         )]
         eval_preset: String,
 

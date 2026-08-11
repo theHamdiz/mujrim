@@ -14,7 +14,7 @@ const BK23_EXPECTED: &[&str] = &["f2f4"];
 
 fn assert_expected(got: &str, expected: &[&str], label: &str, score: i32, nodes: u64) {
     assert!(
-        expected.iter().any(|m| *m == got),
+        expected.contains(&got),
         "{label}: expected one of {expected:?}, got {got} (score={score}, nodes={nodes})"
     );
 }

@@ -51,3 +51,12 @@ crates/mujrim-installer/target/*
 # SPRT test results
 sprt/results.pgn
 /dist/**
+
+# Local scratch / downloaded third-party engine trees
+.tmp*/
+.tmp-*
+.tmp*
+
+# Packaged foreign engine binaries/trees (runtime download / local packaging only)
+/engines/
+/dist/engines/

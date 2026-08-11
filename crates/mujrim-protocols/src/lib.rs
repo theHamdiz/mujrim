@@ -550,6 +550,15 @@ impl SearchRequest {
     }
 }
 
+/// One MultiPV / alternate line captured during a search.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MultiPvLine {
+    pub multipv: u32,
+    pub score: i32,
+    pub depth: i32,
+    pub pv: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SearchInfo {
     pub best_move: String,
@@ -565,6 +574,10 @@ pub struct SearchInfo {
     pub current_move: Option<String>,
     pub current_move_number: u32,
     pub pv: Vec<String>,
+    /// Latest multipv index seen on an info line (1-based; 0 means unspecified).
+    pub multipv: u32,
+    /// Accumulated MultiPV lines for the active search, keyed by multipv rank.
+    pub multipv_lines: Vec<MultiPvLine>,
     pub message: Option<String>,
 }
 
@@ -1087,9 +1100,31 @@ impl UciDriver {
                         info.current_move_number = v;
                     }
                 }
+                "multipv" => {
+                    if let Some(v) = tokens.next().and_then(|value| value.parse().ok()) {
+                        info.multipv = v;
+                    }
+                }
                 "pv" => {
                     info.pv.clear();
                     info.pv.extend(tokens.map(ToOwned::to_owned));
+                    let rank = if info.multipv == 0 { 1 } else { info.multipv };
+                    let line = MultiPvLine {
+                        multipv: rank,
+                        score: info.score,
+                        depth: info.depth,
+                        pv: info.pv.clone(),
+                    };
+                    if let Some(existing) = info
+                        .multipv_lines
+                        .iter_mut()
+                        .find(|entry| entry.multipv == rank)
+                    {
+                        *existing = line;
+                    } else {
+                        info.multipv_lines.push(line);
+                    }
+                    info.multipv_lines.sort_by_key(|entry| entry.multipv);
                     break;
                 }
                 "string" => {
@@ -1370,6 +1405,25 @@ mod tests {
         assert_eq!(info.current_move.as_deref(), Some("e2e4"));
         assert_eq!(info.current_move_number, 4);
         assert_eq!(info.pv, ["e2e4", "e7e5"]);
+    }
+
+    #[test]
+    fn test_uci_info_line_accumulates_multipv() {
+        let drv = UciDriver;
+        let mut info = SearchInfo::default();
+        drv.parse_info_line(
+            "info depth 10 multipv 1 score cp 30 pv e2e4 e7e5",
+            &mut info,
+        );
+        drv.parse_info_line(
+            "info depth 10 multipv 2 score cp 20 pv d2d4 d7d5",
+            &mut info,
+        );
+        assert_eq!(info.multipv_lines.len(), 2);
+        assert_eq!(info.multipv_lines[0].multipv, 1);
+        assert_eq!(info.multipv_lines[0].pv, ["e2e4", "e7e5"]);
+        assert_eq!(info.multipv_lines[1].multipv, 2);
+        assert_eq!(info.multipv_lines[1].score, 20);
     }
 
     #[test]

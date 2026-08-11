@@ -105,6 +105,7 @@ impl StudyDatabase {
                  );",
             )
             .map_err(|error| format!("failed to initialize SQLite engine catalog: {error}"))?;
+        crate::tournament_store::ensure_schema(&sqlite)?;
         let mut database = Self {
             root,
             games: BTreeMap::new(),
@@ -167,6 +168,26 @@ impl StudyDatabase {
             .map_err(|error| format!("failed to read engine catalog: {error}"))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("invalid engine catalog row: {error}"))
+    }
+
+    pub fn save_tournament(
+        &mut self,
+        tournament: &crate::tournament_store::StoredTournament,
+    ) -> Result<(), String> {
+        crate::tournament_store::save_tournament(&self.sqlite, tournament)
+    }
+
+    pub fn list_tournaments(
+        &self,
+    ) -> Result<Vec<crate::tournament_store::StoredTournament>, String> {
+        crate::tournament_store::list_tournaments(&self.sqlite)
+    }
+
+    pub fn load_tournament(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::tournament_store::StoredTournament>, String> {
+        crate::tournament_store::load_tournament(&self.sqlite, id)
     }
 
     pub fn import_pgn(&mut self, metadata: GameMetadata, pgn: &str) -> Result<String, String> {

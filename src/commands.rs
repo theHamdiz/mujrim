@@ -10,8 +10,12 @@ use search::SearchEngine;
 use types::{Board, Color};
 
 /// Runs the UCI protocol loop.
-pub fn run_uci() {
-    let mut handler = UciHandler::new();
+pub fn run_uci(backend: &str) {
+    let mut handler = if backend == "mujrim-hce" {
+        UciHandler::with_adapter("mujrim-hce")
+    } else {
+        UciHandler::new()
+    };
     handler.run();
 }
 

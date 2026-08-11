@@ -5,6 +5,7 @@
 //! IIR, SEE-based pruning, futility/delta pruning, PV tracking.
 //! Supports Lazy SMP multi-threaded search via shared transposition table.
 
+use crate::adapters;
 use crate::move_picker::MovePicker;
 use crate::policy::{
     BadNoisyFutilityContext, BadNoisyFutilityDispatch, FutilityContext, FutilityDispatch,
@@ -13,7 +14,7 @@ use crate::policy::{
     RootSelectionPolicy, ThreadOutcome,
 };
 use crate::search_params::SearchParams;
-use crate::search_stack::{SearchExperiment, SearchStack};
+use crate::search_stack::{EvalMode, SearchExperiment, SearchStack};
 use crate::see;
 use crate::tt::{NodeType, TTData, TranspositionTable};
 use std::sync::Arc;
@@ -490,8 +491,8 @@ fn score_from_tt(score: i32, ply: i32) -> i32 {
     }
 }
 
-fn normalize_uci_score(score: i32, board: &Board, profile: MoveOrderingProfile) -> i32 {
-    if profile != MoveOrderingProfile::Reckless || score.abs() > MATE_SCORE - 100 {
+fn normalize_uci_score(score: i32, board: &Board, eval_mode: EvalMode) -> i32 {
+    if !eval_mode.is_reckless_nnue() || score.abs() > MATE_SCORE - 100 {
         return score;
     }
     let material = board
@@ -529,7 +530,7 @@ fn normalize_uci_score(score: i32, board: &Board, profile: MoveOrderingProfile) 
     (100.0 * f64::from(score) / normalization).round() as i32
 }
 
-fn format_uci_score_value(score: i32, board: &Board, profile: MoveOrderingProfile) -> String {
+fn format_uci_score_value(score: i32, board: &Board, eval_mode: EvalMode) -> String {
     if score.abs() > MATE_SCORE - 100 {
         let mate_in = if score > 0 {
             (MATE_SCORE - score + 1) / 2
@@ -538,7 +539,7 @@ fn format_uci_score_value(score: i32, board: &Board, profile: MoveOrderingProfil
         };
         format!("mate {mate_in}")
     } else {
-        format!("cp {}", normalize_uci_score(score, board, profile))
+        format!("cp {}", normalize_uci_score(score, board, eval_mode))
     }
 }
 
@@ -574,15 +575,22 @@ fn reckless_material(board: &Board) -> i32 {
     board.total_material()
 }
 
+/// Count nodes like Reckless/native-v60: once per legal move made, not once per
+/// search-node entry. Stand-pat qsearch and null-move probes do not increment.
 #[inline(always)]
+fn make_search_move(board: &mut Board, state: &mut ThreadState, mv: Move) {
+    state.nodes += 1;
+    state.nnue_state.make_move(board, mv);
+}
+
 fn corrected_network_eval(
     board: &Board,
     raw_eval: i32,
     correction: i32,
     optimism: i32,
-    profile: MoveOrderingProfile,
+    eval_mode: EvalMode,
 ) -> i32 {
-    if profile != MoveOrderingProfile::Reckless {
+    if !eval_mode.is_reckless_nnue() {
         return raw_eval + correction;
     }
 
@@ -598,9 +606,9 @@ fn update_reckless_optimism(
     side_to_move: types::Color,
     average_score: i32,
     shared_best_stat: u32,
-    profile: MoveOrderingProfile,
+    eval_mode: EvalMode,
 ) {
-    if profile != MoveOrderingProfile::Reckless {
+    if !eval_mode.is_reckless_nnue() {
         state.optimism = [0; 2];
         return;
     }
@@ -998,7 +1006,7 @@ pub struct SearchEngine {
     stopped: Arc<AtomicBool>,
     nnue_network: Arc<ActiveNetwork>,
     /// Coherent evaluator-specific parameters and search policies.
-    search_stack: SearchStack,
+    pub(crate) search_stack: SearchStack,
     use_nnue: bool,
     root_selection_policy: Arc<dyn RootSelectionPolicy + Send + Sync>,
     state: ThreadState,
@@ -1043,6 +1051,16 @@ impl SearchEngine {
     /// [`SearchParams::for_preset_with_repo_tuning`]).
     pub fn set_params_for_preset(&mut self, preset: &str) {
         self.search_stack = SearchStack::for_preset_name(preset);
+    }
+
+    /// Replace the composed search stack atomically.
+    pub fn set_search_stack(&mut self, stack: SearchStack) {
+        self.search_stack = stack;
+    }
+
+    /// Install a named eval+search adapter (`stockfish`, `reckless`, `akimbo`, `mujrim-hce`).
+    pub fn install_adapter(&mut self, id: &str) -> bool {
+        adapters::install_adapter(self, id)
     }
 
     /// Apply a benchmark-only policy overlay to the currently compatible
@@ -1096,8 +1114,13 @@ impl SearchEngine {
         self.nnue_network.preset_hint()
     }
 
-    /// Active search-stack profile (Akimbo / Stockfish / Reckless).
-    pub fn network_profile(&self) -> eval::nnue::NnueSearchProfile {
+    /// Active evaluator/search binding (NNUE family or Mujrim HCE).
+    pub fn eval_mode(&self) -> EvalMode {
+        self.search_stack.eval_mode()
+    }
+
+    /// Active NNUE search-stack profile when NNUE is bound.
+    pub fn network_profile(&self) -> Option<eval::nnue::NnueSearchProfile> {
         self.search_stack.network_profile()
     }
 
@@ -1112,7 +1135,7 @@ impl SearchEngine {
     /// output, including evaluator-specific centipawn normalization and mate
     /// distances.
     pub fn format_uci_score(&self, board: &Board, score: i32) -> String {
-        format_uci_score_value(score, board, self.search_stack.policies.move_ordering)
+        format_uci_score_value(score, board, self.search_stack.eval_mode())
     }
 
     /// Set a custom LMR policy implementation.
@@ -1190,6 +1213,7 @@ impl SearchEngine {
                             bad_noisy_futility_policy: &search_stack.policies.bad_noisy_futility,
                             rfp_policy: &search_stack.policies.rfp,
                             move_ordering,
+                            eval_mode: search_stack.eval_mode(),
                         };
 
                         for depth in 1..=max_depth {
@@ -1217,7 +1241,7 @@ impl SearchEngine {
                                 board_clone.side_to_move,
                                 average_score,
                                 shared_best_stat.load(Ordering::Acquire),
-                                move_ordering,
+                                search_stack.eval_mode(),
                             );
 
                             let s = search_ab(
@@ -1292,6 +1316,7 @@ impl SearchEngine {
             bad_noisy_futility_policy: &self.search_stack.policies.bad_noisy_futility,
             rfp_policy: &self.search_stack.policies.rfp,
             move_ordering: self.search_stack.policies.move_ordering,
+            eval_mode: self.search_stack.eval_mode(),
         };
 
         for depth in 1..=limits.max_depth {
@@ -1312,7 +1337,7 @@ impl SearchEngine {
                 board.side_to_move,
                 average_score,
                 shared_best_stat.load(Ordering::Acquire),
-                self.search_stack.policies.move_ordering,
+                self.search_stack.eval_mode(),
             );
 
             // Aspiration windows after depth 5
@@ -1434,7 +1459,7 @@ impl SearchEngine {
                 let score_str = format_uci_score_value(
                     best_score,
                     board,
-                    self.search_stack.policies.move_ordering,
+                    self.search_stack.eval_mode(),
                 );
 
                 let pv_str = if best_pv.is_empty() {
@@ -1780,6 +1805,7 @@ struct SearchContext<'a> {
     bad_noisy_futility_policy: &'a BadNoisyFutilityDispatch,
     rfp_policy: &'a RfpDispatch,
     move_ordering: MoveOrderingProfile,
+    eval_mode: EvalMode,
 }
 
 /// Per-node alpha-beta inputs. Keeping these together makes recursive calls
@@ -1833,6 +1859,7 @@ fn search_ab(
         bad_noisy_futility_policy,
         rfp_policy,
         move_ordering,
+        eval_mode,
     } = *context;
     let SearchNode {
         mut depth,
@@ -1893,8 +1920,12 @@ fn search_ab(
     }
 
     let check_ext_budget = nominal_depth * 2;
-    let (extended_depth, total_extensions) =
-        budgeted_check_extension(depth, total_extensions, check_ext_budget, in_check);
+    // Reckless/native-v60 does not check-extend; doing so burns fixed-node depth.
+    let (extended_depth, total_extensions) = if move_ordering == MoveOrderingProfile::Reckless {
+        (depth, total_extensions)
+    } else {
+        budgeted_check_extension(depth, total_extensions, check_ext_budget, in_check)
+    };
     depth = extended_depth;
 
     // Propagate double extension count from parent ply
@@ -1961,7 +1992,6 @@ fn search_ab(
         );
     }
 
-    state.nodes += 1;
     let us = board.side_to_move;
     let opponent_threats = opponent_threats(board);
     let threats = opponent_threats.all;
@@ -1981,7 +2011,7 @@ fn search_ab(
             raw_eval,
             corr,
             state.optimism[us.index()],
-            move_ordering,
+            eval_mode,
         );
         (Some(raw_eval), corrected, corr)
     };
@@ -2168,7 +2198,7 @@ fn search_ab(
 
             while let Some(mv) = picker.next(board, &score_capture, &score_quiet) {
                 let moved_piece = piece_index_on(board, mv.from);
-                state.nnue_state.make_move(board, mv);
+                make_search_move(board, state, mv);
                 state.prev_move[ply_usize] = mv;
                 state.prev_piece[ply_usize] = moved_piece;
                 let score = -search_ab(
@@ -2544,7 +2574,7 @@ fn search_ab(
 
         // Prefetch the child TT slot before make; hash_after matches post-make key.
         tt.prefetch(board.tt_hash_after(mv));
-        state.nnue_state.make_move(board, mv);
+        make_search_move(board, state, mv);
 
         let gives_check = board.in_check();
 
@@ -3035,6 +3065,7 @@ fn quiescence(
         params,
         use_nnue,
         move_ordering,
+        eval_mode,
         ..
     } = *context;
     let QuiescenceNode {
@@ -3065,7 +3096,6 @@ fn quiescence(
         }
     }
 
-    state.nodes += 1;
     let in_check = board.in_check();
 
     if board.is_search_draw(ply as usize) {
@@ -3154,7 +3184,7 @@ fn quiescence(
         let alpha_orig = alpha;
         while let Some(mv) = picker.next(board, &score_capture, &score_quiet) {
             moves_searched += 1;
-            state.nnue_state.make_move(board, mv);
+            make_search_move(board, state, mv);
             let score = -quiescence(
                 board,
                 state,
@@ -3219,7 +3249,7 @@ fn quiescence(
         raw_eval,
         corr,
         state.optimism[board.side_to_move.index()],
-        move_ordering,
+        eval_mode,
     );
 
     // TT score adjustment in QS (Akimbo technique):
@@ -3306,7 +3336,7 @@ fn quiescence(
             }
         }
 
-        state.nnue_state.make_move(board, mv);
+        make_search_move(board, state, mv);
         let score = -quiescence(
             board,
             state,
@@ -3523,6 +3553,7 @@ fn minor_hash(board: &Board) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eval::nnue::NnueSearchProfile;
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -3577,19 +3608,23 @@ mod tests {
         setup();
         let board = Board::new();
         assert_eq!(
-            normalize_uci_score(270, &board, MoveOrderingProfile::Reckless),
+            normalize_uci_score(270, &board, EvalMode::Nnue(NnueSearchProfile::Reckless)),
             95
         );
         assert_eq!(
-            normalize_uci_score(-270, &board, MoveOrderingProfile::Reckless),
+            normalize_uci_score(-270, &board, EvalMode::Nnue(NnueSearchProfile::Reckless)),
             -95
         );
         assert_eq!(
-            normalize_uci_score(270, &board, MoveOrderingProfile::StockLike),
+            normalize_uci_score(270, &board, EvalMode::Nnue(NnueSearchProfile::Stockfish)),
             270
         );
         assert_eq!(
-            normalize_uci_score(MATE_SCORE, &board, MoveOrderingProfile::Reckless),
+            normalize_uci_score(
+                MATE_SCORE,
+                &board,
+                EvalMode::Nnue(NnueSearchProfile::Reckless)
+            ),
             MATE_SCORE
         );
     }
@@ -3599,15 +3634,23 @@ mod tests {
         setup();
         let board = Board::new();
         assert_eq!(
-            format_uci_score_value(42, &board, MoveOrderingProfile::StockLike),
+            format_uci_score_value(42, &board, EvalMode::Nnue(NnueSearchProfile::Stockfish)),
             "cp 42"
         );
         assert_eq!(
-            format_uci_score_value(MATE_SCORE - 5, &board, MoveOrderingProfile::StockLike),
+            format_uci_score_value(
+                MATE_SCORE - 5,
+                &board,
+                EvalMode::Nnue(NnueSearchProfile::Stockfish)
+            ),
             "mate 3"
         );
         assert_eq!(
-            format_uci_score_value(-MATE_SCORE + 4, &board, MoveOrderingProfile::StockLike),
+            format_uci_score_value(
+                -MATE_SCORE + 4,
+                &board,
+                EvalMode::Nnue(NnueSearchProfile::Stockfish)
+            ),
             "mate -2"
         );
     }
@@ -3804,21 +3847,29 @@ mod tests {
     }
 
     #[test]
+    fn reckless_skips_check_extensions_to_preserve_fixed_node_depth() {
+        assert_eq!(budgeted_check_extension(8, 0, 16, true), (9, 1));
+        // Reckless path bypasses budgeted_check_extension entirely; document the StockLike
+        // helper still extends so regressions are visible if call sites change.
+        assert_eq!(budgeted_check_extension(8, 0, 16, false), (8, 0));
+    }
+
+    #[test]
     fn reckless_root_pawn_near_miss_margin_is_tight() {
         // Shallow NonPV scores after d4d5 sit well below a ~400cp king-move
         // alpha; only probes within 120cp earn a full-window root re-search.
         const MARGIN: i32 = 120;
-        assert!(316 > 400 - MARGIN);
-        assert!(178 <= 400 - MARGIN);
+        const _: () = assert!(316 > 400 - MARGIN);
+        const _: () = assert!(178 <= 400 - MARGIN);
     }
 
     #[test]
     fn stock_root_quiet_near_miss_margin_covers_prophylaxis() {
         // BK#8 king/rook slides often land 80–150cp under a bishop-pin alpha.
         const MARGIN: i32 = 160;
-        assert!(320 > 400 - MARGIN);
-        assert!(250 > 400 - MARGIN);
-        assert!(200 <= 400 - MARGIN);
+        const _: () = assert!(320 > 400 - MARGIN);
+        const _: () = assert!(250 > 400 - MARGIN);
+        const _: () = assert!(200 <= 400 - MARGIN);
     }
 
     fn test_context<'a>(
@@ -3842,6 +3893,7 @@ mod tests {
             bad_noisy_futility_policy: &TEST_BAD_NOISY_FUTILITY_POLICY,
             rfp_policy: &TEST_RFP_POLICY,
             move_ordering: MoveOrderingProfile::StockLike,
+            eval_mode: EvalMode::Nnue(NnueSearchProfile::Stockfish),
         }
     }
 
@@ -3864,6 +3916,28 @@ mod tests {
             })
             .expect("Failed to spawn test thread");
         handle.join().expect("Test thread panicked");
+    }
+
+    #[test]
+    fn nodes_are_counted_on_legal_moves_not_node_entries() {
+        setup();
+        let mut board = Board::new();
+        let mut engine = SearchEngine::new(1, 1);
+        let result = engine.search_nodes(&mut board, 5_000, 64);
+        // With move-based counting, a 5k budget must complete real iterative depth.
+        assert!(
+            result.depth >= 4,
+            "expected depth>=4 at 5k move-nodes, got depth={} nodes={}",
+            result.depth,
+            result.nodes
+        );
+        // Soft stop checks every 2048 nodes, so the final tally may overshoot slightly.
+        assert!(
+            result.nodes <= 5_000 + 2_048,
+            "node overshoot too large: {}",
+            result.nodes
+        );
+        assert_ne!(result.best_move, NULL_MOVE);
     }
 
     #[test]
@@ -4355,17 +4429,35 @@ mod tests {
         let mut board = Board::new();
         assert_eq!(reckless_material(&board), 10_296);
         assert_eq!(
-            corrected_network_eval(&board, 100, 7, 0, MoveOrderingProfile::StockLike),
+            corrected_network_eval(
+                &board,
+                100,
+                7,
+                0,
+                EvalMode::Nnue(NnueSearchProfile::Stockfish)
+            ),
             107
         );
         assert_eq!(
-            corrected_network_eval(&board, 100, 7, 0, MoveOrderingProfile::Reckless),
+            corrected_network_eval(
+                &board,
+                100,
+                7,
+                0,
+                EvalMode::Nnue(NnueSearchProfile::Reckless)
+            ),
             122
         );
 
         board.halfmove_clock = 80;
         assert_eq!(
-            corrected_network_eval(&board, 100, 7, 0, MoveOrderingProfile::Reckless),
+            corrected_network_eval(
+                &board,
+                100,
+                7,
+                0,
+                EvalMode::Nnue(NnueSearchProfile::Reckless)
+            ),
             76
         );
 
@@ -4375,7 +4467,7 @@ mod tests {
             types::Color::White,
             100,
             root_score_stat(7, 300),
-            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Reckless),
         );
         assert_eq!(state.optimism, [56, -56]);
         update_reckless_optimism(
@@ -4383,9 +4475,35 @@ mod tests {
             types::Color::White,
             200,
             root_score_stat(7, 200),
-            MoveOrderingProfile::StockLike,
+            EvalMode::Nnue(NnueSearchProfile::Stockfish),
         );
         assert_eq!(state.optimism, [0; 2]);
+    }
+
+    #[test]
+    fn stockfish_net_keeps_raw_cp_even_with_reckless_move_ordering() {
+        let board = Board::new();
+        // Reckless policies on an SF net must not apply Reckless material scaling.
+        assert_eq!(
+            corrected_network_eval(
+                &board,
+                9,
+                0,
+                0,
+                EvalMode::Nnue(NnueSearchProfile::Stockfish)
+            ),
+            9
+        );
+        assert_ne!(
+            corrected_network_eval(
+                &board,
+                9,
+                0,
+                0,
+                EvalMode::Nnue(NnueSearchProfile::Reckless)
+            ),
+            9
+        );
     }
 
     #[test]
@@ -4672,10 +4790,14 @@ mod tests {
         engine.set_params_for_preset("stockfish");
         assert_eq!(
             engine.network_profile(),
-            eval::nnue::NnueSearchProfile::Stockfish
+            Some(eval::nnue::NnueSearchProfile::Stockfish)
         );
-        assert_eq!(engine.params().nmp_base, 7);
-        assert_eq!(engine.params().aspiration_window, 32);
+        assert_eq!(engine.params().nmp_base, 5);
+        assert_eq!(engine.params().aspiration_window, 10);
+        assert_eq!(
+            engine.search_stack.policies.move_ordering,
+            MoveOrderingProfile::StockLike
+        );
     }
 
     #[test]

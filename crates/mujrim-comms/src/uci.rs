@@ -12,7 +12,7 @@ use eval::nnue::{ActiveNetwork, NnueNetworkSource, enabled_network_formats, load
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
 use search::engine::{SearchLimits, SearchResult};
-use search::{SearchEngine, SearchExperiment};
+use search::{SearchEngine, SearchExperiment, install_adapter};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -235,10 +235,8 @@ impl UciHandler {
 
         let eval_network: Arc<ActiveNetwork> = Arc::new(eval::nnue::default_embedded_network());
 
-        let preset = eval_network.search_profile().as_str();
         let mut engine = SearchEngine::new(DEFAULT_HASH_MB, DEFAULT_THREADS);
         engine.set_nnue_network_source(Arc::clone(&eval_network));
-        engine.set_params_for_preset(preset);
         engine.set_use_nnue(true);
         Self {
             board: Board::new(),
@@ -261,6 +259,24 @@ impl UciHandler {
             search_experiment: SearchExperiment::None,
             eval_file: None,
         }
+    }
+
+    /// Start UCI with a named eval+search adapter already installed.
+    pub fn with_adapter(adapter_id: &str) -> Self {
+        let mut handler = Self::new();
+        match adapter_id {
+            "mujrim-hce" | "hce" => {
+                handler.eval_preset = "mujrim-hce".to_string();
+                handler.use_nnue = false;
+            }
+            "stockfish" | "reckless" | "akimbo" => {
+                handler.eval_preset = adapter_id.to_string();
+                handler.use_nnue = true;
+            }
+            _ => return handler,
+        }
+        handler.reconfigure_engine(false);
+        handler
     }
 
     /// Main UCI loop — reads from stdin, writes to stdout.
@@ -353,7 +369,7 @@ impl UciHandler {
                     self.abort_running_search(&mut running, false);
                     // Non-standard but useful: print the static evaluation
                     let classical = eval::evaluate(&self.board);
-                    uci_println(&format!("info string Classical eval: {classical}cp"));
+                    uci_println(&format!("info string Mujrim HCE eval: {classical}cp"));
                     let mut state = eval::NNUEState::with_network(Arc::clone(&self.eval_network));
                     let nnue_score = state.evaluate(&self.board);
                     uci_println(&format!("info string NNUE eval: {nnue_score}cp"));
@@ -644,7 +660,7 @@ impl UciHandler {
             self.advertised_eval_file()
         ));
         uci_println(
-            "option name EvalPreset type combo default auto var auto var akimbo var stockfish var reckless",
+            "option name EvalPreset type combo default auto var auto var akimbo var stockfish var reckless var mujrim-hce",
         );
         uci_println(&format!(
             "option name SearchExperiment type combo default none{}",
@@ -734,9 +750,7 @@ impl UciHandler {
             }
             "usennue" => {
                 self.use_nnue = value == "true";
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.set_use_nnue(self.use_nnue);
-                }
+                self.reconfigure_engine(false);
                 if self.debug_mode {
                     eprintln!("info string UseNNUE set to {}", self.use_nnue);
                 }
@@ -757,15 +771,21 @@ impl UciHandler {
                 let preset = value.to_lowercase();
                 if matches!(
                     preset.as_str(),
-                    "auto" | "akimbo" | "stockfish" | "reckless"
+                    "auto" | "akimbo" | "stockfish" | "reckless" | "mujrim-hce" | "hce"
                 ) {
-                    if preset != "auto"
+                    let preset = if preset == "hce" {
+                        "mujrim-hce".to_string()
+                    } else {
+                        preset
+                    };
+                    if matches!(preset.as_str(), "akimbo" | "stockfish" | "reckless")
                         && let Err(error) = self.set_eval_file(&format!("embedded:{preset}"))
                     {
                         eprintln!("info string EvalPreset error: {error}");
                         return;
                     }
                     self.eval_preset = preset;
+                    self.use_nnue = self.eval_preset != "mujrim-hce";
                     self.reconfigure_engine(false);
                     let active = self.active_preset_name();
                     eprintln!(
@@ -1170,33 +1190,47 @@ impl UciHandler {
             "akimbo" => "akimbo",
             "stockfish" => "stockfish",
             "reckless" => "reckless",
+            "mujrim-hce" | "hce" => "mujrim-hce",
             _ => self.eval_network.search_profile().as_str(),
         }
     }
 
     fn advertised_eval_file(&self) -> String {
+        if matches!(self.eval_preset.as_str(), "mujrim-hce" | "hce") || !self.use_nnue {
+            return "mujrim-hce".to_string();
+        }
         format!("embedded:{}", self.eval_network.search_profile().as_str())
     }
 
     fn reconfigure_engine(&mut self, resize_hash: bool) {
+        let use_hce = !self.use_nnue || matches!(self.eval_preset.as_str(), "mujrim-hce" | "hce");
         let preset = self.active_preset_name();
+        let experiment = self.search_experiment;
+        let network = Arc::clone(&self.eval_network);
+
+        let apply = |engine: &mut SearchEngine| {
+            if use_hce {
+                let _ = install_adapter(engine, "mujrim-hce");
+            } else if matches!(preset, "stockfish" | "reckless" | "akimbo") {
+                let _ = install_adapter(engine, preset);
+            } else {
+                engine.set_nnue_network_source(network);
+                engine.set_use_nnue(true);
+            }
+            engine.set_search_experiment(experiment);
+        };
+
         if let Some(engine) = self.engine.as_mut() {
             if resize_hash {
                 engine.resize_tt(self.hash_mb);
             }
             engine.num_threads = self.num_threads;
-            engine.set_nnue_network_source(Arc::clone(&self.eval_network));
-            engine.set_params_for_preset(preset);
-            engine.set_search_experiment(self.search_experiment);
-            engine.set_use_nnue(self.use_nnue);
+            apply(engine);
             return;
         }
 
         let mut engine = SearchEngine::new(self.hash_mb, self.num_threads);
-        engine.set_nnue_network_source(Arc::clone(&self.eval_network));
-        engine.set_params_for_preset(preset);
-        engine.set_search_experiment(self.search_experiment);
-        engine.set_use_nnue(self.use_nnue);
+        apply(&mut engine);
         self.engine = Some(engine);
     }
 
@@ -1243,6 +1277,7 @@ impl UciHandler {
         self.eval_file = source;
         self.eval_network = Arc::new(network);
         self.eval_preset = "auto".to_string();
+        self.use_nnue = true;
         self.reconfigure_engine(false);
     }
 }
@@ -1250,6 +1285,7 @@ impl UciHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use search::EvalMode;
 
     #[cfg(feature = "stockfish-nnue")]
     #[test]
@@ -1486,7 +1522,7 @@ mod tests {
             handler.eval_network.info().format,
             eval::nnue::NetworkFormat::Stockfish
         );
-        assert_eq!(handler.engine.as_ref().unwrap().params().nmp_base, 7);
+        assert_eq!(handler.engine.as_ref().unwrap().params().nmp_base, 5);
     }
 
     #[test]
@@ -1616,7 +1652,7 @@ mod tests {
             &handler.engine.as_ref().unwrap().tt
         ));
         assert_eq!(handler.eval_preset, "stockfish");
-        assert_eq!(handler.engine.as_ref().unwrap().params().nmp_base, 7);
+        assert_eq!(handler.engine.as_ref().unwrap().params().nmp_base, 5);
     }
 
     #[test]
@@ -1624,8 +1660,40 @@ mod tests {
         let mut handler = UciHandler::new();
         handler.handle_setoption(&["name", "UseNNUE", "value", "false"]);
         assert!(!handler.engine.as_ref().unwrap().use_nnue());
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::MujrimHce
+        );
         handler.handle_setoption(&["name", "UseNNUE", "value", "true"]);
         assert!(handler.engine.as_ref().unwrap().use_nnue());
+        assert_ne!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::MujrimHce
+        );
+    }
+
+    #[test]
+    fn mujrim_hce_evalpreset_installs_hce_adapter() {
+        let mut handler = UciHandler::new();
+        handler.handle_setoption(&["name", "EvalPreset", "value", "mujrim-hce"]);
+        assert_eq!(handler.eval_preset, "mujrim-hce");
+        assert!(!handler.use_nnue);
+        assert!(!handler.engine.as_ref().unwrap().use_nnue());
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::MujrimHce
+        );
+    }
+
+    #[test]
+    fn with_adapter_starts_on_mujrim_hce() {
+        let handler = UciHandler::with_adapter("mujrim-hce");
+        assert_eq!(handler.eval_preset, "mujrim-hce");
+        assert!(!handler.use_nnue);
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::MujrimHce
+        );
     }
 
     #[test]
