@@ -381,10 +381,13 @@ if (-not $PackageOnly) {
 }
 
 # Ensure third-party engines exist under dist/engines/<id>/bin/<arch>/ before filtering.
-$stockfishProbe = Join-Path $Dist "engines\stockfish\bin"
 $vendorScript = Join-Path $PSScriptRoot "vendor-tournament-engines.ps1"
-if ((Test-Path $vendorScript) -and -not (Test-Path $stockfishProbe)) {
-    Write-Host "==> Vendoring tournament engines into dist/engines"
+$requiredEngines = @("stockfish", "reckless", "plentychess", "obsidian", "akimbo", "ethereal")
+$missingEngines = @($requiredEngines | Where-Object {
+        -not (Test-Path (Join-Path $Dist "engines\$_\bin"))
+    })
+if ((Test-Path $vendorScript) -and $missingEngines.Count -gt 0) {
+    Write-Host "==> Vendoring tournament engines into dist/engines (missing: $($missingEngines -join ', '))"
     try {
         & $vendorScript
     } catch {
