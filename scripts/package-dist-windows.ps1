@@ -289,7 +289,13 @@ function Bundle-MingwRuntime([string]$Directory) {
     }
 }
 
-function Package-Arch([string]$Triple, [string]$ArchDir, [string[]]$EngineArchDirs, [bool]$TopLevelAlso) {
+function Package-Arch(
+    [string]$Triple,
+    [string]$ArchDir,
+    [string[]]$EngineArchDirs,
+    [string[]]$MujrimArchDirs,
+    [bool]$TopLevelAlso
+) {
     Write-Host "==> Packaging $ArchDir from $Triple"
     $out = Join-Path $Dist $ArchDir
     if (Test-Path $out) {
@@ -312,6 +318,7 @@ function Package-Arch([string]$Triple, [string]$ArchDir, [string[]]$EngineArchDi
     Copy-Tree (Join-Path $Dist "assets") (Join-Path $out "assets")
     Copy-Tree (Join-Path $Dist "books") (Join-Path $out "books")
     Copy-Tree (Join-Path $Dist "nnue") (Join-Path $out "nnue")
+    # Third-party + foreign-ISA bins (e.g. x64 engines next to ARM UI for Prism).
     Filter-Engines (Join-Path $Dist "engines") (Join-Path $out "engines") $EngineArchDirs
 
     $mujrimVariants = @(
@@ -332,9 +339,8 @@ function Package-Arch([string]$Triple, [string]$ArchDir, [string[]]$EngineArchDi
         elseif ($name -eq "mujrim-v60.exe") { $minBytes = 40MB; $maxBytes = 120MB }
         Assert-EngineSize $src $minBytes $maxBytes "$name (release/$Triple)"
     }
-    # Refresh every engine-arch alias for this package (e.g. x86_64 + x86_64-avx2).
-    # Filter-Engines may have copied stale mujrim bins into non-primary slots.
-    foreach ($engineArch in $EngineArchDirs) {
+    # Only stamp mujrim products into arches matching this build's PE machine.
+    foreach ($engineArch in $MujrimArchDirs) {
         $mujrimEngineBin = Join-Path $out "engines\mujrim\bin\$engineArch"
         Ensure-Dir $mujrimEngineBin
         Get-ChildItem $mujrimEngineBin -File -Filter "mujrim*.exe" -ErrorAction SilentlyContinue |
@@ -450,13 +456,15 @@ if ((Test-Path $vendorScript) -and $missingEngines.Count -gt 0) {
 Package-Arch `
     -Triple "aarch64-pc-windows-msvc" `
     -ArchDir "windows-aarch64" `
-    -EngineArchDirs @("windows-aarch64", "windows-arm64") `
+    -EngineArchDirs @("windows-aarch64", "windows-arm64", "windows-x86_64-avx2", "windows-x86_64") `
+    -MujrimArchDirs @("windows-aarch64", "windows-arm64") `
     -TopLevelAlso ($hostArch -eq "Arm64")
 
 Package-Arch `
     -Triple $x64Triple `
     -ArchDir "windows-x86_64" `
     -EngineArchDirs @("windows-x86_64-avx2", "windows-x86_64") `
+    -MujrimArchDirs @("windows-x86_64-avx2", "windows-x86_64") `
     -TopLevelAlso ($hostArch -ne "Arm64")
 
 Write-Host "==> Dist dual-arch packaging complete"

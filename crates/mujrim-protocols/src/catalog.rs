@@ -200,7 +200,7 @@ fn search_limit_support(engine_id: &str) -> SearchLimitSupport {
 
 fn runtime_targets() -> Vec<(String, RuntimeCompatibility)> {
     let current = RuntimePlatform::current();
-    let mut targets = Vec::with_capacity(4);
+    let mut targets = Vec::with_capacity(6);
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     if std::arch::is_x86_feature_detected!("avx2") {
@@ -214,8 +214,13 @@ fn runtime_targets() -> Vec<(String, RuntimeCompatibility)> {
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     {
-        // Host-arch only: never auto-select emulated x86_64 binaries on Arm64.
         targets.push(("windows-arm64".to_owned(), RuntimeCompatibility::Native));
+        // Prism/WoA can run x64 tournament engines; prefer native ARM builds first.
+        targets.push((
+            "windows-x86_64-avx2".to_owned(),
+            RuntimeCompatibility::Emulated,
+        ));
+        targets.push(("windows-x86_64".to_owned(), RuntimeCompatibility::Emulated));
     }
 
     targets
@@ -375,13 +380,16 @@ pub fn discover_engine_details(
     explicit: Option<&Path>,
 ) -> Result<EngineCandidate, String> {
     let candidates = engine_candidate_details(engine_id, executable, current_dir, explicit);
-    candidates
-        .iter()
-        .find(|candidate| {
-            candidate.compatibility == RuntimeCompatibility::Native
-                && candidate.path.is_file()
-                && crate::binary_arch::is_host_native_binary(&candidate.path)
-        })
+    let native = candidates.iter().find(|candidate| {
+        candidate.compatibility == RuntimeCompatibility::Native
+            && candidate.path.is_file()
+            && crate::binary_arch::is_host_native_binary(&candidate.path)
+    });
+    let emulated = candidates.iter().find(|candidate| {
+        candidate.compatibility == RuntimeCompatibility::Emulated && candidate.path.is_file()
+    });
+    native
+        .or(emulated)
         .cloned()
         .ok_or_else(|| {
             let searched = candidates
@@ -390,7 +398,7 @@ pub fn discover_engine_details(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "could not find host-native {} for {} (searched: {searched})",
+                "could not find {} for {} (searched: {searched})",
                 canonical_engine_id(engine_id),
                 RuntimePlatform::current().directory_name()
             )
@@ -658,16 +666,49 @@ mod tests {
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
     #[test]
-    fn windows_arm64_auto_detect_skips_emulated_x64_folders() {
+    fn windows_arm64_lists_x64_engine_folders_as_emulated() {
         let candidates = engine_candidate_details(
             "obsidian",
             Path::new("C:/Mujrim/mujrim.exe"),
             Path::new("D:/src/mujrim"),
             None,
         );
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate.target_directory.contains("x86_64")
+                    && candidate.compatibility == RuntimeCompatibility::Emulated
+            }),
+            "expected emulated x64 candidates, got {candidates:?}"
+        );
         assert!(candidates.iter().all(|candidate| {
             !candidate.target_directory.contains("x86_64")
-                || candidate.compatibility != RuntimeCompatibility::Native
+                || candidate.compatibility == RuntimeCompatibility::Emulated
         }));
+    }
+
+    #[test]
+    fn dist_ui_discovers_local_native_mujrim_engines_when_present() {
+        let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dist/mujrim-ui.exe");
+        let cwd = match ui.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => return,
+        };
+        if !ui.is_file() {
+            return;
+        }
+        let found = discover_bundled_engines(&ui, &cwd);
+        let ids: Vec<&str> = found.iter().map(|engine| engine.id).collect();
+        for id in [
+            "mujrim-elite",
+            "mujrim-external",
+            "mujrim-v60",
+            "mujrim-ak",
+            "stockfish",
+        ] {
+            assert!(
+                ids.contains(&id),
+                "missing {id} beside dist UI; discovered {ids:?}"
+            );
+        }
     }
 }
