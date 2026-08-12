@@ -126,8 +126,8 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
 fn variant_dist_mapping(variant: &BuildVariant) -> Option<(&'static str, &'static str)> {
     match variant {
         BuildVariant::V60 | BuildVariant::V60Embedded => Some(("mujrim-v60", "mujrim-v60")),
-        BuildVariant::Stockfish => Some(("mujrim", "mujrim-v10")),
-        BuildVariant::Akimbo => Some(("mujrim", "mujrim-akimbo")),
+        BuildVariant::Stockfish | BuildVariant::Embedded => Some(("mujrim", "mujrim-elite")),
+        BuildVariant::Akimbo => Some(("mujrim", "mujrim-ak")),
         _ => None,
     }
 }
@@ -283,21 +283,21 @@ mod tests {
     }
 
     #[test]
-    fn dist_mapping_uses_arch_suffixed_adapter_names() {
+    fn dist_mapping_uses_product_engine_names() {
         assert_eq!(
             variant_dist_mapping(&BuildVariant::V60),
             Some(("mujrim-v60", "mujrim-v60"))
         );
         assert_eq!(
             variant_dist_mapping(&BuildVariant::Stockfish),
-            Some(("mujrim", "mujrim-v10"))
+            Some(("mujrim", "mujrim-elite"))
         );
         assert_eq!(
             variant_dist_mapping(&BuildVariant::Akimbo),
-            Some(("mujrim", "mujrim-akimbo"))
+            Some(("mujrim", "mujrim-ak"))
         );
-        let stem = adapter_binary_stem("mujrim-v10", "x86_64");
-        assert_eq!(stem, "mujrim-v10-x86_64");
-        assert!(!stem.contains("native"));
+        assert_eq!(adapter_binary_stem("mujrim-v10", "x86_64"), "mujrim-elite");
+        assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
+        assert!(!adapter_binary_stem("mujrim-v60", "x86_64").contains("native"));
     }
 }

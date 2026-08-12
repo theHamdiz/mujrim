@@ -2,11 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
+/// Product engines shipped beside the UI under `engines/mujrim/bin/<os-arch>/`:
+/// - `mujrim-elite` — Stockfish NNUE embedded
+/// - `mujrim-external` — loads/discovers NNUE at runtime
+/// - `mujrim-v60` — Reckless NNUE embedded
+/// - `mujrim-ak` — Akimbo NNUE embedded
 pub const BUNDLED_ENGINES: &[(&str, &str)] = &[
-    ("mujrim", "Mujrim Elite"),
+    ("mujrim-elite", "Mujrim Elite"),
+    ("mujrim-external", "Mujrim External"),
     ("mujrim-v60", "Mujrim v60"),
-    ("mujrim-v10", "Mujrim v10"),
-    ("mujrim-akimbo", "Mujrim Akimbo"),
+    ("mujrim-ak", "Mujrim Akimbo"),
     ("stockfish", "Stockfish"),
     ("plentychess", "PlentyChess"),
     ("obsidian", "Obsidian"),
@@ -18,8 +23,13 @@ pub const BUNDLED_ENGINES: &[(&str, &str)] = &[
 /// In-process classical evaluator + HCE search stack (not a separate binary).
 pub const MUJRIM_HCE_DISPLAY_NAME: &str = "Mujrim HCE";
 
-/// Mujrim adapter ids that ship as `mujrim-*-{arch}` under `bin/{os-arch}/`.
-pub const ARCH_SUFFIXED_ADAPTERS: &[&str] = &["mujrim-v60", "mujrim-v10", "mujrim-akimbo"];
+/// Legacy / alternate ids that still resolve to a product binary.
+const ENGINE_ID_ALIASES: &[(&str, &str)] = &[
+    ("mujrim", "mujrim-elite"),
+    ("mujrim-embedded", "mujrim-elite"),
+    ("mujrim-v10", "mujrim-elite"),
+    ("mujrim-akimbo", "mujrim-ak"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeCompatibility {
@@ -81,9 +91,22 @@ impl RuntimePlatform {
     }
 }
 
-/// True for Mujrim adapter binaries that include an arch token in dist names.
+/// Canonical product id for discovery (`mujrim` → `mujrim-elite`).
+pub fn canonical_engine_id(engine_id: &str) -> &str {
+    ENGINE_ID_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == engine_id)
+        .map(|(_, canonical)| *canonical)
+        .unwrap_or(engine_id)
+}
+
+/// True for Mujrim adapter binaries that historically included an arch token.
+/// Product dist names are unsuffixed (`mujrim-v60.exe` inside `bin/<os-arch>/`).
 pub fn is_arch_suffixed_adapter(engine_id: &str) -> bool {
-    ARCH_SUFFIXED_ADAPTERS.contains(&engine_id)
+    matches!(
+        canonical_engine_id(engine_id),
+        "mujrim-v60" | "mujrim-ak" | "mujrim-elite"
+    )
 }
 
 /// Strip the OS prefix from a runtime target directory (`windows-x86_64-avx2` → `x86_64-avx2`).
@@ -129,9 +152,9 @@ pub fn host_packaging_arch() -> String {
     arch_token_from_platform(RuntimePlatform::current())
 }
 
-/// Dist / display stem for a Mujrim adapter: `mujrim-v60-x86_64-avx2`.
-pub fn adapter_binary_stem(adapter_id: &str, arch: &str) -> String {
-    format!("{adapter_id}-{arch}")
+/// Dist stem for a Mujrim product binary. Product names are fixed; arch lives in the folder.
+pub fn adapter_binary_stem(adapter_id: &str, _arch: &str) -> String {
+    canonical_engine_id(adapter_id).to_owned()
 }
 
 fn normalize_arch_token(token: &str) -> String {
@@ -153,27 +176,22 @@ fn with_exe_suffix(stem: &str) -> String {
 }
 
 fn executable_filename(engine_id: &str) -> String {
-    with_exe_suffix(engine_id)
+    with_exe_suffix(canonical_engine_id(engine_id))
 }
 
-fn packaged_executable_filename(engine_id: &str, target_directory: &str) -> String {
-    if is_arch_suffixed_adapter(engine_id) {
-        let arch = arch_token_from_target_directory(target_directory);
-        with_exe_suffix(&adapter_binary_stem(engine_id, &arch))
-    } else {
-        executable_filename(engine_id)
-    }
+fn packaged_executable_filename(engine_id: &str, _target_directory: &str) -> String {
+    executable_filename(engine_id)
 }
 
 fn package_directory(engine_id: &str) -> &str {
-    match engine_id {
-        "mujrim-v60" | "mujrim-v10" | "mujrim-akimbo" => "mujrim",
+    match canonical_engine_id(engine_id) {
+        "mujrim-elite" | "mujrim-external" | "mujrim-v60" | "mujrim-ak" => "mujrim",
         other => other,
     }
 }
 
 fn search_limit_support(engine_id: &str) -> SearchLimitSupport {
-    if engine_id == "ethereal" {
+    if canonical_engine_id(engine_id) == "ethereal" || engine_id == "ethereal" {
         SearchLimitSupport::DEPTH_ONLY
     } else {
         SearchLimitSupport::STANDARD
@@ -231,6 +249,26 @@ fn push_candidate(candidates: &mut Vec<EngineCandidate>, candidate: EngineCandid
     }
 }
 
+fn legacy_filename_aliases(engine_id: &str) -> Vec<String> {
+    match canonical_engine_id(engine_id) {
+        "mujrim-elite" => vec![
+            with_exe_suffix("mujrim"),
+            with_exe_suffix("mujrim-embedded"),
+            with_exe_suffix("mujrim-v10"),
+        ],
+        "mujrim-ak" => vec![
+            with_exe_suffix("mujrim-akimbo"),
+            with_exe_suffix("mujrim-akimbo-external"),
+        ],
+        "mujrim-v60" => vec![
+            with_exe_suffix("mujrim-v60-embedded"),
+            with_exe_suffix("mujrim-v60-external"),
+        ],
+        "mujrim-external" => vec![with_exe_suffix("mujrim-external")],
+        _ => Vec::new(),
+    }
+}
+
 /// Candidate locations in priority order. An explicit path always wins,
 /// followed by host-native packaged builds (never emulated ISA folders).
 pub fn engine_candidate_details(
@@ -239,8 +277,9 @@ pub fn engine_candidate_details(
     current_dir: &Path,
     explicit: Option<&Path>,
 ) -> Vec<EngineCandidate> {
-    let flat_filename = executable_filename(engine_id);
-    let mut candidates = Vec::with_capacity(20);
+    let product_id = canonical_engine_id(engine_id);
+    let flat_filename = executable_filename(product_id);
+    let mut candidates = Vec::with_capacity(24);
     if let Some(path) = explicit {
         push_candidate(
             &mut candidates,
@@ -260,13 +299,11 @@ pub fn engine_candidate_details(
                 compatibility: RuntimeCompatibility::Native,
             },
         );
-        if is_arch_suffixed_adapter(engine_id) {
-            let host_arch = host_packaging_arch();
+        for alias in legacy_filename_aliases(product_id) {
             push_candidate(
                 &mut candidates,
                 EngineCandidate {
-                    path: executable_dir
-                        .join(with_exe_suffix(&adapter_binary_stem(engine_id, &host_arch))),
+                    path: executable_dir.join(alias),
                     target_directory: "adjacent".to_owned(),
                     compatibility: RuntimeCompatibility::Native,
                 },
@@ -275,9 +312,9 @@ pub fn engine_candidate_details(
     }
     for root in engine_roots(executable, current_dir) {
         for (target_directory, compatibility) in runtime_targets() {
-            let filename = packaged_executable_filename(engine_id, &target_directory);
+            let filename = packaged_executable_filename(product_id, &target_directory);
             let path = root
-                .join(package_directory(engine_id))
+                .join(package_directory(product_id))
                 .join("bin")
                 .join(&target_directory)
                 .join(filename);
@@ -285,10 +322,24 @@ pub fn engine_candidate_details(
                 &mut candidates,
                 EngineCandidate {
                     path,
-                    target_directory,
+                    target_directory: target_directory.clone(),
                     compatibility,
                 },
             );
+            for alias in legacy_filename_aliases(product_id) {
+                push_candidate(
+                    &mut candidates,
+                    EngineCandidate {
+                        path: root
+                            .join(package_directory(product_id))
+                            .join("bin")
+                            .join(&target_directory)
+                            .join(alias),
+                        target_directory: target_directory.clone(),
+                        compatibility,
+                    },
+                );
+            }
         }
     }
     candidates
@@ -328,7 +379,8 @@ pub fn discover_engine_details(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "could not find host-native {engine_id} for {} (searched: {searched})",
+                "could not find host-native {} for {} (searched: {searched})",
+                canonical_engine_id(engine_id),
                 RuntimePlatform::current().directory_name()
             )
         })
@@ -374,7 +426,6 @@ pub fn discover_bundled_engines_from_environment() -> Result<Vec<DiscoveredEngin
 mod tests {
     use super::*;
 
-    // Use forward slashes so Path parent/join semantics work on Linux/macOS CI hosts too.
     #[test]
     fn explicit_engine_path_has_priority() {
         let candidates = engine_candidates(
@@ -441,16 +492,16 @@ mod tests {
     }
 
     #[test]
-    fn mujrim_adapters_use_arch_suffixed_packaged_filenames() {
-        assert_eq!(BUNDLED_ENGINES[1], ("mujrim-v60", "Mujrim v60"));
-        assert_eq!(BUNDLED_ENGINES[2], ("mujrim-v10", "Mujrim v10"));
-        assert_eq!(BUNDLED_ENGINES[3], ("mujrim-akimbo", "Mujrim Akimbo"));
+    fn mujrim_product_binaries_use_fixed_names_in_arch_folders() {
+        assert_eq!(BUNDLED_ENGINES[0], ("mujrim-elite", "Mujrim Elite"));
+        assert_eq!(BUNDLED_ENGINES[1], ("mujrim-external", "Mujrim External"));
+        assert_eq!(BUNDLED_ENGINES[2], ("mujrim-v60", "Mujrim v60"));
+        assert_eq!(BUNDLED_ENGINES[3], ("mujrim-ak", "Mujrim Akimbo"));
 
         let target = RuntimePlatform::current().directory_name();
-        let arch = arch_token_from_target_directory(&target);
-        for adapter in ["mujrim-v60", "mujrim-v10", "mujrim-akimbo"] {
+        for product in ["mujrim-elite", "mujrim-external", "mujrim-v60", "mujrim-ak"] {
             let candidates = engine_candidates(
-                adapter,
+                product,
                 Path::new("C:/Mujrim/mujrim-ui.exe"),
                 Path::new("D:/src/mujrim"),
                 None,
@@ -460,7 +511,7 @@ mod tests {
                 .join("mujrim")
                 .join("bin")
                 .join(&target)
-                .join(with_exe_suffix(&adapter_binary_stem(adapter, &arch)));
+                .join(with_exe_suffix(product));
             assert!(
                 candidates.contains(&expected),
                 "missing {expected:?} in {candidates:?}"
@@ -523,35 +574,10 @@ mod tests {
     }
 
     #[test]
-    fn adapter_binary_stem_matches_dist_scheme() {
-        assert_eq!(
-            adapter_binary_stem("mujrim-v60", "x86_64-avx2"),
-            "mujrim-v60-x86_64-avx2"
-        );
-        assert_eq!(
-            adapter_binary_stem("mujrim-v10", "aarch64"),
-            "mujrim-v10-aarch64"
-        );
-        assert_eq!(
-            adapter_binary_stem("mujrim-akimbo", "x86_64"),
-            "mujrim-akimbo-x86_64"
-        );
-    }
-
-    #[test]
-    fn filename_mapping_for_packaged_adapters() {
-        assert_eq!(
-            packaged_executable_filename("mujrim-v60", "windows-x86_64-avx2"),
-            with_exe_suffix("mujrim-v60-x86_64-avx2")
-        );
-        assert_eq!(
-            packaged_executable_filename("mujrim-v10", "linux-aarch64"),
-            with_exe_suffix("mujrim-v10-aarch64")
-        );
-        assert_eq!(
-            packaged_executable_filename("mujrim-akimbo", "darwin-x86_64"),
-            with_exe_suffix("mujrim-akimbo-x86_64")
-        );
+    fn adapter_binary_stem_is_product_id() {
+        assert_eq!(adapter_binary_stem("mujrim-v60", "x86_64-avx2"), "mujrim-v60");
+        assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
+        assert_eq!(adapter_binary_stem("mujrim", "x86_64"), "mujrim-elite");
     }
 
     #[test]
@@ -579,9 +605,11 @@ mod tests {
         assert!(ids.contains(&"stockfish"));
         assert!(ids.contains(&"akimbo"));
         assert!(ids.contains(&"reckless"));
+        assert!(ids.contains(&"mujrim-elite"));
+        assert!(ids.contains(&"mujrim-external"));
         assert!(ids.contains(&"mujrim-v60"));
-        assert!(ids.contains(&"mujrim-v10"));
-        assert!(ids.contains(&"mujrim-akimbo"));
+        assert!(ids.contains(&"mujrim-ak"));
+        assert!(!ids.contains(&"mujrim-v10"));
         assert!(!ids.iter().any(|id| id.contains("native")));
         assert!(
             !BUNDLED_ENGINES
@@ -601,8 +629,8 @@ mod tests {
             None,
         );
         assert!(candidates.iter().all(|candidate| {
-            candidate.compatibility == RuntimeCompatibility::Native
-                && !candidate.target_directory.contains("x86_64")
+            !candidate.target_directory.contains("x86_64")
+                || candidate.compatibility != RuntimeCompatibility::Native
         }));
     }
 }

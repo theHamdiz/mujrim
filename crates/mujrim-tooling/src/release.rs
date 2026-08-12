@@ -179,51 +179,8 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     let arch = host_packaging_arch();
+    // Product set: elite / external / v60 / ak (no duplicate external+embedded pairs).
     snapshot_engine("mujrim", "mujrim-external")?;
-    snapshot_engine("mujrim-v60", "mujrim-v60-external")?;
-    snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
-    run(
-        "cargo",
-        &[
-            "build",
-            "--release",
-            "-p",
-            "mujrim",
-            "--no-default-features",
-            "--features",
-            "xboard,book,nnue,simd,stockfish-nnue",
-        ],
-        &environment,
-    )?;
-    snapshot_engine("mujrim", "mujrim-v10-external")?;
-    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-v10", &arch))?;
-    run(
-        "cargo",
-        &[
-            "build",
-            "--release",
-            "-p",
-            "mujrim",
-            "--no-default-features",
-            "--features",
-            "xboard,book,nnue,simd,akimbo-nnue",
-        ],
-        &environment,
-    )?;
-    snapshot_engine("mujrim", "mujrim-akimbo-external")?;
-    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-akimbo", &arch))?;
-    run(
-        "cargo",
-        &[
-            "build",
-            "--release",
-            "-p",
-            "mujrim",
-            "--features",
-            "embedded-networks",
-        ],
-        &environment,
-    )?;
     run(
         "cargo",
         &[
@@ -236,8 +193,34 @@ fn build_native() -> Result<(), String> {
         ],
         &environment,
     )?;
-    snapshot_engine("mujrim", "mujrim-embedded")?;
-    snapshot_engine("mujrim-v60", "mujrim-v60-embedded")?;
+    snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,akimbo-nnue,embedded-networks",
+        ],
+        &environment,
+    )?;
+    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-ak", &arch))?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--features",
+            "embedded-networks",
+        ],
+        &environment,
+    )?;
+    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-elite", &arch))?;
     run(
         "cargo",
         &["build", "--release", "-p", "mujrim-ui"],
@@ -823,17 +806,15 @@ mod tests {
     }
 
     #[test]
-    fn adapter_snapshot_stems_never_include_native() {
+    fn adapter_snapshot_stems_are_product_ids() {
         use mujrim_protocols::catalog::arch_token_from_rustc_target;
         let arch = arch_token_from_rustc_target("x86_64-pc-windows-msvc");
-        for adapter in ["mujrim-v60", "mujrim-v10", "mujrim-akimbo"] {
+        for adapter in ["mujrim-v60", "mujrim-elite", "mujrim-ak"] {
             let stem = adapter_binary_stem(adapter, &arch);
             assert!(!stem.contains("native"), "{stem}");
-            assert!(stem.ends_with(&format!("-{arch}")), "{stem}");
+            assert_eq!(stem, adapter);
         }
-        assert_eq!(
-            adapter_binary_stem("mujrim-v60", "x86_64-avx2"),
-            "mujrim-v60-x86_64-avx2"
-        );
+        assert_eq!(adapter_binary_stem("mujrim-v10", "x86_64-avx2"), "mujrim-elite");
+        assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
     }
 }

@@ -29,7 +29,7 @@ const EXTERNAL_BACKENDS: &[&str] = &[
     "reckless",
     "ethereal",
 ];
-const MUJRIM_ADAPTERS: &[&str] = &["mujrim-v60", "mujrim-v10", "mujrim-akimbo"];
+const MUJRIM_ADAPTERS: &[&str] = &["mujrim-elite", "mujrim-external", "mujrim-v60", "mujrim-ak"];
 const V60_PASSTHROUGH_MARKER: &str = "MUJRIM_V60_PASSTHROUGH_ACTIVE";
 
 #[derive(Clone, Copy)]
@@ -74,8 +74,9 @@ fn search_stack_profile(engine_id: &'static str) -> NativeSearchStackProfile {
 fn resolve_backend_engine_id(backend: &str) -> Option<&'static str> {
     match backend {
         "v60" => Some("mujrim-v60"),
-        "v10" => Some("mujrim-v10"),
-        "akimbo" => Some("mujrim-akimbo"),
+        "v10" | "elite" => Some("mujrim-elite"),
+        "akimbo" | "ak" => Some("mujrim-ak"),
+        "external" => Some("mujrim-external"),
         other => EXTERNAL_BACKENDS
             .iter()
             .copied()
@@ -102,7 +103,7 @@ fn fallback_engine_id(backend: &str, explicit_path: bool) -> Option<&'static str
         return None;
     }
     match backend {
-        "stockfish" => Some("mujrim-v10"),
+        "stockfish" => Some("mujrim-elite"),
         "reckless" => Some("mujrim-v60"),
         _ => None,
     }
@@ -130,7 +131,7 @@ fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Res
     };
     let status = if is_mujrim_adapter(engine_id) {
         let memory_limit = match engine_id {
-            "mujrim-v10" => Some(1536 * 1024 * 1024),
+            "mujrim-elite" | "mujrim-v10" => Some(1536 * 1024 * 1024),
             "mujrim-v60" => Some(1024 * 1024 * 1024),
             _ => Some(512 * 1024 * 1024),
         };
@@ -370,7 +371,11 @@ mod tests {
             assert!(
                 matches!(
                     engine.0,
-                    "mujrim" | "mujrim-v60" | "mujrim-v10" | "mujrim-akimbo" | "akimbo"
+                    "mujrim-elite"
+                        | "mujrim-external"
+                        | "mujrim-v60"
+                        | "mujrim-ak"
+                        | "akimbo"
                 ) || EXTERNAL_BACKENDS.contains(&engine.0)
             );
         }
@@ -384,11 +389,11 @@ mod tests {
         );
         assert_eq!(
             passthrough_engine_id("v10", true, false),
-            Some("mujrim-v10")
+            Some("mujrim-elite")
         );
         assert_eq!(
             passthrough_engine_id("akimbo", true, false),
-            Some("mujrim-akimbo")
+            Some("mujrim-ak")
         );
         assert_eq!(
             passthrough_engine_id("stockfish", true, false),
@@ -418,7 +423,7 @@ mod tests {
 
     #[test]
     fn packaged_default_falls_back_without_masking_explicit_path_errors() {
-        assert_eq!(fallback_engine_id("stockfish", false), Some("mujrim-v10"));
+        assert_eq!(fallback_engine_id("stockfish", false), Some("mujrim-elite"));
         assert_eq!(fallback_engine_id("reckless", false), Some("mujrim-v60"));
         assert_eq!(fallback_engine_id("mujrim-hce", false), None);
         assert_eq!(fallback_engine_id("akimbo", false), None);

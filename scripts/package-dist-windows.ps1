@@ -210,7 +210,8 @@ function Build-Core([string]$Triple) {
 }
 
 function Build-Variants([string]$Triple) {
-    Write-Host "==> Building Mujrim engine variants for $Triple"
+    Write-Host "==> Building Mujrim product engines for $Triple"
+    Write-Host "  product set: mujrim-elite, mujrim-external, mujrim-v60, mujrim-ak"
     $env:CARGO_BUILD_JOBS = "1"
     $release = Join-Path $TargetDir "$Triple\release"
     Ensure-Dir $release
@@ -221,27 +222,28 @@ function Build-Variants([string]$Triple) {
         Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
     }
 
-    # Embedded main engine.
+    # mujrim-elite: Stockfish NNUE embedded
     cargo build --release --target $Triple -p mujrim --features embedded-networks
-    if ($LASTEXITCODE -ne 0) { throw "embedded mujrim build failed for $Triple" }
-    Copy-Item -Force (Join-Path $release "mujrim.exe") (Join-Path $release "mujrim-embedded.exe")
+    if ($LASTEXITCODE -ne 0) { throw "mujrim-elite build failed for $Triple" }
+    Copy-Item -Force (Join-Path $release "mujrim.exe") (Join-Path $release "mujrim-elite.exe")
 
-    # Default / external main engine.
+    # mujrim-external: discovers/loads NNUE at runtime
     cargo build --release --target $Triple -p mujrim
-    if ($LASTEXITCODE -ne 0) { throw "default mujrim build failed for $Triple" }
+    if ($LASTEXITCODE -ne 0) { throw "mujrim-external build failed for $Triple" }
     Copy-Item -Force (Join-Path $release "mujrim.exe") (Join-Path $release "mujrim-external.exe")
 
-    # v60 adapters.
-    cargo build --release --target $Triple -p mujrim-native-v60 --features syzygy
-    if ($LASTEXITCODE -ne 0) { throw "v60 build failed for $Triple" }
-    Copy-Item -Force (Join-Path $release "mujrim-v60.exe") (Join-Path $release "mujrim-v60-external.exe")
-
+    # mujrim-v60: Reckless NNUE embedded
     cargo build --release --target $Triple -p mujrim-native-v60 --features "syzygy,embedded-network"
-    if ($LASTEXITCODE -ne 0) { throw "v60 embedded build failed for $Triple" }
-    Copy-Item -Force (Join-Path $release "mujrim-v60.exe") (Join-Path $release "mujrim-v60-embedded.exe")
+    if ($LASTEXITCODE -ne 0) { throw "mujrim-v60 build failed for $Triple" }
+    # mujrim-native-v60 already emits mujrim-v60.exe
 
-    cargo build --release --target $Triple -p mujrim-native-v60 --features syzygy
-    if ($LASTEXITCODE -ne 0) { throw "v60 restore build failed for $Triple" }
+    # mujrim-ak: Akimbo NNUE embedded
+    cargo build --release --target $Triple -p mujrim --no-default-features --features "xboard,book,nnue,simd,akimbo-nnue,embedded-networks"
+    if ($LASTEXITCODE -ne 0) { throw "mujrim-ak build failed for $Triple" }
+    Copy-Item -Force (Join-Path $release "mujrim.exe") (Join-Path $release "mujrim-ak.exe")
+
+    # Restore a plain mujrim.exe (external) as the top-level engine binary.
+    Copy-Item -Force (Join-Path $release "mujrim-external.exe") (Join-Path $release "mujrim.exe")
 }
 
 function Bundle-MingwRuntime([string]$Directory) {
@@ -285,22 +287,33 @@ function Package-Arch([string]$Triple, [string]$ArchDir, [string[]]$EngineArchDi
     $primaryEngineArch = $EngineArchDirs[0]
     $mujrimEngineBin = Join-Path $out "engines\mujrim\bin\$primaryEngineArch"
     Ensure-Dir $mujrimEngineBin
+    # Wipe legacy duplicate names from prior packaging runs.
+    if (Test-Path $mujrimEngineBin) {
+        Get-ChildItem $mujrimEngineBin -File -Filter "mujrim*.exe" -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+    }
     $mujrimVariants = @(
-        "mujrim.exe",
+        "mujrim-elite.exe",
         "mujrim-external.exe",
-        "mujrim-embedded.exe",
         "mujrim-v60.exe",
-        "mujrim-v60-external.exe",
-        "mujrim-v60-embedded.exe"
+        "mujrim-ak.exe"
     )
     foreach ($name in $mujrimVariants) {
         $src = Join-Path $release $name
-        if (Test-Path $src) {
-            Assert-PeMachine $src $expected "$name/$Triple"
-            Copy-File $src (Join-Path $mujrimEngineBin $name)
+        if (-not (Test-Path $src)) {
+            throw "missing product engine $name under $release"
         }
+        Assert-PeMachine $src $expected "$name/$Triple"
+        Copy-File $src (Join-Path $mujrimEngineBin $name)
     }
-    Copy-File (Join-Path $release "mujrim.exe") (Join-Path $mujrimEngineBin "mujrim.exe")
+    # Keep shared dist/engines/mujrim tree in sync for this arch.
+    $sharedMujrimBin = Join-Path $Dist "engines\mujrim\bin\$primaryEngineArch"
+    Ensure-Dir $sharedMujrimBin
+    Get-ChildItem $sharedMujrimBin -File -Filter "mujrim*.exe" -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+    foreach ($name in $mujrimVariants) {
+        Copy-File (Join-Path $release $name) (Join-Path $sharedMujrimBin $name)
+    }
 
     # For gnullvm builds, ship runtime DLLs next to every exe directory as a safety net
     # (static link should remove the need, but missing DLLs produce 0xc000007b).
