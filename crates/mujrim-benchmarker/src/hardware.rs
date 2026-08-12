@@ -116,19 +116,19 @@ fn detect_simd_features() -> Vec<String> {
 fn detect_gpu() -> String {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = std::process::Command::new("lspci").output() {
-            if let Ok(stdout) = String::from_utf8(output.stdout) {
-                let gpus: Vec<String> = stdout
-                    .lines()
-                    .filter(|l| {
-                        let lower = l.to_lowercase();
-                        lower.contains("vga") || lower.contains("3d") || lower.contains("display")
-                    })
-                    .filter_map(|l| l.split(": ").nth(1).map(|s| s.trim().to_string()))
-                    .collect();
-                if !gpus.is_empty() {
-                    return gpus.join("; ");
-                }
+        if let Ok(output) = std::process::Command::new("lspci").output()
+            && let Ok(stdout) = String::from_utf8(output.stdout)
+        {
+            let gpus: Vec<String> = stdout
+                .lines()
+                .filter(|l| {
+                    let lower = l.to_lowercase();
+                    lower.contains("vga") || lower.contains("3d") || lower.contains("display")
+                })
+                .filter_map(|l| l.split(": ").nth(1).map(|s| s.trim().to_string()))
+                .collect();
+            if !gpus.is_empty() {
+                return gpus.join("; ");
             }
         }
         // Fallback: sysfs
@@ -158,16 +158,15 @@ fn detect_gpu() -> String {
         if let Ok(output) = std::process::Command::new("system_profiler")
             .args(["SPDisplaysDataType"])
             .output()
+            && let Ok(stdout) = String::from_utf8(output.stdout)
         {
-            if let Ok(stdout) = String::from_utf8(output.stdout) {
-                let gpu_model = stdout
-                    .lines()
-                    .find(|l| l.contains("Chipset Model"))
-                    .and_then(|l| l.split(':').nth(1))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
-                return gpu_model;
-            }
+            let gpu_model = stdout
+                .lines()
+                .find(|l| l.contains("Chipset Model"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            return gpu_model;
         }
         "N/A".into()
     }

@@ -87,6 +87,7 @@ jobs:
             libxcursor-dev \
             libxrandr-dev \
             libasound2-dev \
+            libudev-dev \
             p7zip-full
 
       - name: Fetch Stockfish NNUE required for compile-time embed
@@ -295,8 +296,9 @@ jobs:
       - name: Smoke test via cross run (UCI handshake)
         run: |
           set -euo pipefail
-          # MUJRIM_UCI_SMOKE avoids stdin (cross/qemu guests often have no usable pipe).
-          output="$(MUJRIM_UCI_SMOKE=1 cross run --release --target ${{ matrix.target }} -p mujrim -- uci 2>&1)"
+          # Forward smoke env into the cross container/qemu guest.
+          export CROSS_CONTAINER_OPTS="${CROSS_CONTAINER_OPTS:-} -e MUJRIM_UCI_SMOKE=1"
+          output="$(cross run --release --target ${{ matrix.target }} -p mujrim -- uci 2>&1)"
           echo "$output"
           echo "$output" | grep -q 'uciok'
           echo "$output" | grep -q 'Mujrim 1.0.0'
