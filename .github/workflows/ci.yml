@@ -53,7 +53,8 @@ jobs:
             libxcursor-dev \
             libxrandr-dev \
             libasound2-dev \
-            libudev-dev
+            libudev-dev \
+            libpipewire-0.3-dev
 
       - name: Fetch Stockfish NNUE required for compile-time embed
         shell: bash
