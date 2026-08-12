@@ -61,9 +61,9 @@ impl TournamentSummary {
         let standings = self
             .standings
             .iter()
-            .map(|standing| {
-                let engine = &self.engines[standing.entrant];
-                serde_json::json!({
+            .filter_map(|standing| {
+                let engine = self.engines.get(standing.entrant)?;
+                Some(serde_json::json!({
                     "engine": engine.engine.name,
                     "played": standing.played,
                     "wins": standing.wins,
@@ -74,7 +74,7 @@ impl TournamentSummary {
                     "performance_elo": standing.performance.map(|rating| rating.elo),
                     "performance_elo_95_low": standing.performance.map(|rating| rating.lower_95),
                     "performance_elo_95_high": standing.performance.map(|rating| rating.upper_95),
-                })
+                }))
             })
             .collect::<Vec<_>>();
         serde_json::json!({

@@ -50,6 +50,32 @@ impl MoveAnnotation {
             Self::Blunder => "Blunder",
         }
     }
+
+    /// Chess.com Game Review badge fill colors (RGB 0–255).
+    ///
+    /// Sourced from chess.com's classification palette used on destination-square
+    /// markers (Brilliant teal, Great blue, Best/Excellent green, Book brown,
+    /// Inaccuracy yellow, Mistake orange, Blunder red).
+    pub const fn chess_com_rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Aura => (27, 172, 166),       // Brilliant teal, brighter family
+            Self::Brilliant => (27, 172, 166),  // #1BACA6
+            Self::Great => (92, 139, 176),      // #5C8BB0
+            Self::Best => (150, 188, 75),       // #96BC4B
+            Self::Excellent => (129, 182, 76),  // #81B64C
+            Self::Good => (149, 183, 118),      // #95B776
+            Self::Ok => (160, 160, 160),        // muted neutral
+            Self::Book => (210, 166, 121),      // #D2A679
+            Self::Novelty => (210, 166, 121),   // book-family brown
+            Self::Inaccuracy => (247, 198, 49), // #F7C631
+            Self::Mistake => (230, 143, 50),    // #E68F32
+            Self::Blunder => (224, 40, 40),     // #E02828
+        }
+    }
+
+    pub const fn shows_board_badge(self) -> bool {
+        !matches!(self, Self::Ok)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -147,6 +173,21 @@ mod tests {
         assert_eq!(MoveAnnotation::Mistake.symbol(), "?");
         assert_eq!(MoveAnnotation::Inaccuracy.symbol(), "?!");
         assert_eq!(MoveAnnotation::Novelty.symbol(), "N");
+    }
+
+    #[test]
+    fn chess_com_badge_colors_match_review_palette() {
+        assert_eq!(MoveAnnotation::Brilliant.chess_com_rgb(), (27, 172, 166));
+        assert_eq!(MoveAnnotation::Great.chess_com_rgb(), (92, 139, 176));
+        assert_eq!(MoveAnnotation::Best.chess_com_rgb(), (150, 188, 75));
+        assert_eq!(MoveAnnotation::Excellent.chess_com_rgb(), (129, 182, 76));
+        assert_eq!(MoveAnnotation::Good.chess_com_rgb(), (149, 183, 118));
+        assert_eq!(MoveAnnotation::Book.chess_com_rgb(), (210, 166, 121));
+        assert_eq!(MoveAnnotation::Inaccuracy.chess_com_rgb(), (247, 198, 49));
+        assert_eq!(MoveAnnotation::Mistake.chess_com_rgb(), (230, 143, 50));
+        assert_eq!(MoveAnnotation::Blunder.chess_com_rgb(), (224, 40, 40));
+        assert!(!MoveAnnotation::Ok.shows_board_badge());
+        assert!(MoveAnnotation::Brilliant.shows_board_badge());
     }
 
     #[test]

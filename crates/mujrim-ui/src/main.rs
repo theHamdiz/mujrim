@@ -12,6 +12,7 @@ mod gif_export;
 mod motion;
 mod noise;
 mod pieces;
+mod premove;
 mod recording;
 mod tournament_arena;
 mod tournament_live;
@@ -1319,9 +1320,8 @@ impl App {
             };
 
             if is_next_human && !gs.premove_queue.is_empty() && self.settings.premoves_enabled {
-                let (from, to) = gs.premove_queue.remove(0);
-                let legal = gs.board.generate_legal_moves();
-                if let Some(mv) = legal.iter().find(|m| m.from == from && m.to == to).copied() {
+                let queued = gs.premove_queue.remove(0);
+                if let Some(mv) = premove::resolve_legal(&mut gs.board, queued) {
                     gs.deselect();
                     // Determine if engine plays after this premove
                     let is_next_next_human = match gs.board.side_to_move {
@@ -1330,10 +1330,9 @@ impl App {
                     };
                     self.start_animation(mv, None, !is_next_next_human);
                     return Task::none();
-                } else {
-                    // Premove was illegal — clear queue
-                    gs.premove_queue.clear();
                 }
+                // Illegal in the live position — drop the rest (chess.com behavior).
+                gs.clear_premoves();
             }
 
             if anim.trigger_engine_after && !is_next_human && !gs.game_over {
@@ -1625,6 +1624,18 @@ impl App {
                             .any(|path| path == &engine.path)
                     })
                     .collect::<Vec<_>>();
+                let selected_count = engines.len();
+                let engines = match preflight_tournament_engines(engines) {
+                    Ok(engines) => engines,
+                    Err(error) => {
+                        self.tournament_status = error;
+                        return Task::none();
+                    }
+                };
+                let skipped = selected_count.saturating_sub(engines.len());
+                // Keep selection aligned with engines that actually launched.
+                self.tournament_setup.selected_engine_paths =
+                    engines.iter().map(|engine| engine.path.clone()).collect();
                 let handle =
                     tournament_live::LiveTournamentHandle::new(self.tournament_setup.format);
                 self.live_tournament_view = handle.clone_snapshot();
@@ -1636,11 +1647,21 @@ impl App {
                 self.tournament_setup_drag = None;
                 self.tournament_setup.concurrency = 1;
                 self.tournament_format = self.tournament_setup.format;
-                self.tournament_status = format!(
-                    "Running {} — {} · one full board, real clocks.",
-                    self.tournament_setup.event,
-                    self.tournament_setup.time_control.label()
-                );
+                self.tournament_status = if skipped == 0 {
+                    format!(
+                        "Running {} — {} · {} engines · one full board, real clocks.",
+                        self.tournament_setup.event,
+                        self.tournament_setup.time_control.label(),
+                        engines.len()
+                    )
+                } else {
+                    format!(
+                        "Running {} — {} · {} engines (skipped {skipped} that failed preflight) · one full board, real clocks.",
+                        self.tournament_setup.event,
+                        self.tournament_setup.time_control.label(),
+                        engines.len()
+                    )
+                };
                 let setup = self.tournament_setup.clone();
                 Task::perform(run_quick_tournament(engines, setup, handle), |summary| {
                     Msg::QuickTournamentFinished(Box::new(summary))
@@ -1927,20 +1948,42 @@ impl App {
                         types::Color::Black => matches!(self.black_player, PlayerConfig::Human),
                     };
                     if !is_human {
-                        // Queue premove if enabled
+                        // Chess.com-style premove / multi-premove while the opponent thinks.
                         if self.settings.premoves_enabled {
+                            let human = gs.board.side_to_move.opponent();
                             let clicked_sq = game::display_to_square(row, col, gs.flipped);
-                            if let Some(from) = gs.selected_square {
-                                // Queue the premove
-                                if !self.settings.multi_premoves {
-                                    gs.premove_queue.clear();
+                            if gs.selected_square.is_some() {
+                                if gs.queue_premove(
+                                    clicked_sq,
+                                    human,
+                                    self.settings.multi_premoves,
+                                ) {
+                                    self.status = if self.settings.multi_premoves {
+                                        format!(
+                                            "Premoves queued ({}/{}).",
+                                            gs.premove_queue.len(),
+                                            premove::MAX_PREMOVES
+                                        )
+                                    } else {
+                                        "Premove queued.".to_owned()
+                                    };
+                                } else if premove::can_select_for_premove(
+                                    &gs.board,
+                                    &gs.premove_queue,
+                                    human,
+                                    clicked_sq,
+                                ) {
+                                    gs.select_premove_square(clicked_sq, human);
+                                } else {
+                                    gs.deselect();
                                 }
-                                gs.premove_queue.push((from, clicked_sq));
-                                gs.deselect();
-                            } else {
-                                // Select for premove
-                                gs.selected_square = Some(clicked_sq);
-                                gs.legal_highlights.clear();
+                            } else if premove::can_select_for_premove(
+                                &gs.board,
+                                &gs.premove_queue,
+                                human,
+                                clicked_sq,
+                            ) {
+                                gs.select_premove_square(clicked_sq, human);
                             }
                         }
                         return Task::none();
@@ -2689,11 +2732,17 @@ impl App {
                 Task::none()
             }
             Msg::BoardRightDown(row, col) => {
-                if self.settings.draw_arrows
-                    && let Some(ref mut gs) = self.game
-                {
-                    let from = game::display_to_square(row, col, gs.flipped);
-                    gs.begin_arrow(from);
+                if let Some(ref mut gs) = self.game {
+                    // Chess.com: right-click cancels the entire premove queue.
+                    if !gs.premove_queue.is_empty() {
+                        gs.clear_premoves();
+                        self.status = "Premoves cancelled.".to_owned();
+                        return Task::none();
+                    }
+                    if self.settings.draw_arrows {
+                        let from = game::display_to_square(row, col, gs.flipped);
+                        gs.begin_arrow(from);
+                    }
                 }
                 Task::none()
             }
@@ -2712,8 +2761,33 @@ impl App {
             Msg::BoardPointerDown(row, col) => {
                 if let Some(ref mut gs) = self.game {
                     let sq = game::display_to_square(row, col, gs.flipped);
-                    if gs.board.piece_on(sq).is_some() {
-                        gs.begin_drag(sq);
+                    let is_human = match gs.board.side_to_move {
+                        types::Color::White => matches!(self.white_player, PlayerConfig::Human),
+                        types::Color::Black => matches!(self.black_player, PlayerConfig::Human),
+                    };
+                    let human = if is_human {
+                        gs.board.side_to_move
+                    } else {
+                        gs.board.side_to_move.opponent()
+                    };
+                    let piece_present = if is_human {
+                        gs.board.piece_on(sq).is_some()
+                    } else {
+                        premove::can_select_for_premove(
+                            &gs.board,
+                            &gs.premove_queue,
+                            human,
+                            sq,
+                        )
+                    };
+                    if piece_present {
+                        if is_human {
+                            gs.begin_drag(sq);
+                        } else {
+                            gs.select_premove_square(sq, human);
+                            gs.drag_from = Some(sq);
+                            gs.drag_over = Some(sq);
+                        }
                         Task::none()
                     } else {
                         self.update(Msg::BoardClick(row, col))
@@ -3826,6 +3900,12 @@ impl App {
                 display_board: self.review_board.as_ref(),
                 show_legal_moves: self.settings.show_legal_moves,
                 show_last_move: self.settings.show_last_move,
+                annotation_badge: review_annotation_badge(
+                    &self.initial_fen,
+                    &self.move_log,
+                    self.review_ply,
+                    &self.move_annotations,
+                ),
             },
         );
         let board_total = sq_size * 8.0;
@@ -4475,6 +4555,12 @@ impl App {
                 display_board: self.review_board.as_ref(),
                 show_legal_moves: false,
                 show_last_move: self.settings.show_last_move,
+                annotation_badge: review_annotation_badge(
+                    &self.initial_fen,
+                    &self.move_log,
+                    self.review_ply,
+                    &self.move_annotations,
+                ),
             },
         );
 
@@ -6030,6 +6116,27 @@ fn find_logged_move(board: &mut types::Board, notation: &str) -> Option<types::M
         .copied()
 }
 
+/// Destination-square badge for the ply under review (chess.com Game Review style).
+fn review_annotation_badge(
+    initial_fen: &str,
+    moves: &[String],
+    review_ply: Option<usize>,
+    annotations: &[Option<MoveAnnotation>],
+) -> Option<(types::Square, MoveAnnotation)> {
+    let ply = review_ply.filter(|ply| *ply > 0)?;
+    let annotation = annotations.get(ply - 1).copied().flatten()?;
+    if !annotation.shows_board_badge() {
+        return None;
+    }
+    let mut board = types::Board::from_fen(initial_fen).ok()?;
+    for notation in moves.iter().take(ply - 1) {
+        let mv = find_logged_move(&mut board, notation)?;
+        board.make_move(mv);
+    }
+    let played = find_logged_move(&mut board, moves.get(ply - 1)?)?;
+    Some((played.to, annotation))
+}
+
 fn replay_study_game(initial_fen: &str, moves: &[String]) -> Result<game::GameState, String> {
     types::init();
     let mut state = game::GameState::new(types::Board::from_fen(initial_fen)?);
@@ -6446,214 +6553,21 @@ async fn run_quick_tournament(
         .name("mujrim-tournament".to_owned())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            use mujrim_benchmarker::strength::{
-                EngineSpec, TournamentConfig, TournamentEngine, TournamentEvent,
-                TournamentProgress, run_tournament_with_control,
-            };
-
-            let roster: Vec<TournamentEngine> = engines
-                .into_iter()
-                .map(|engine| {
-                    let mut spec = EngineSpec::new(engine.path.clone());
-                    spec.name = engine.name;
-                    spec.uci_options =
-                        uci_process::uci_resource_options(&engine.path, false, true, None);
-                    TournamentEngine {
-                        engine: spec,
-                        established_elo: None,
-                        search_limits: engine.search_limits,
-                    }
-                })
-                .collect();
-            let initial_clock_ms = setup.time_control.match_clock().initial.as_millis() as u64;
-            let progress: TournamentProgress = Arc::new({
-                let snapshot = Arc::clone(&snapshot);
-                move |event: TournamentEvent| {
-                    let Ok(mut guard) = snapshot.lock() else {
-                        return;
-                    };
-                    match event {
-                        TournamentEvent::Planned {
-                            total_matches,
-                            engine_names,
-                        } => {
-                            guard.total_matches = total_matches;
-                            guard.engine_names = engine_names;
-                            guard.status_line =
-                                format!("Scheduled {total_matches} pairings. Starting…");
-                        }
-                        TournamentEvent::MatchStarted {
-                            index,
-                            total,
-                            round,
-                            white,
-                            black,
-                        } => {
-                            guard.total_matches = total.max(guard.total_matches);
-                            guard.current_round = round;
-                            guard.current_white = white.clone();
-                            guard.current_black = black.clone();
-                            guard.status_line = format!(
-                                "Playing {index}/{total} · Round {round} · {white} vs {black}"
-                            );
-                        }
-                        TournamentEvent::GameStarted {
-                            game_key,
-                            match_index,
-                            round,
-                            white,
-                            black,
-                            initial_fen,
-                        } => {
-                            guard.upsert_live_game(tournament_live::LiveGameBoard {
-                                game_key,
-                                match_index,
-                                round,
-                                white: white.clone(),
-                                black: black.clone(),
-                                initial_fen,
-                                moves: Vec::new(),
-                                last_uci: String::new(),
-                                score_cp: 0,
-                                depth: 0,
-                                nodes: 0,
-                                white_clock_ms: Some(initial_clock_ms),
-                                black_clock_ms: Some(initial_clock_ms),
-                            });
-                            guard.current_round = round;
-                            guard.current_white = white;
-                            guard.current_black = black;
-                        }
-                        TournamentEvent::PlyPlayed {
-                            game_key,
-                            ply,
-                            uci,
-                            score_cp,
-                            depth,
-                            nodes,
-                            moves,
-                            white_clock_ms,
-                            black_clock_ms,
-                        } => {
-                            guard.apply_ply(
-                                &game_key,
-                                ply,
-                                uci,
-                                score_cp,
-                                depth,
-                                nodes,
-                                moves,
-                                white_clock_ms,
-                                black_clock_ms,
-                            );
-                        }
-                        TournamentEvent::GameFinished {
-                            game_key,
-                            white_score,
-                            moves,
-                        } => {
-                            guard.finish_live_game(&game_key, white_score, moves);
-                        }
-                        TournamentEvent::MatchFinished {
-                            index,
-                            total,
-                            round,
-                            white,
-                            black,
-                            white_points,
-                            black_points,
-                            error,
-                            standings,
-                            game_results,
-                            games,
-                        } => {
-                            guard.completed_matches = index;
-                            guard.total_matches = total.max(guard.total_matches);
-                            guard
-                                .finished_matches
-                                .push(tournament_live::FinishedMatchRow {
-                                    index,
-                                    round,
-                                    white: white.clone(),
-                                    black: black.clone(),
-                                    white_points,
-                                    black_points,
-                                    error: error.clone(),
-                                });
-                            guard.standings =
-                                tournament_live::standing_rows(&guard.engine_names, &standings);
-                            guard.game_results = game_results;
-                            let already_live = guard
-                                .played_games
-                                .iter()
-                                .any(|game| game.match_index == index);
-                            if !already_live {
-                                guard.append_games(games);
-                            }
-                            guard.current_white.clear();
-                            guard.current_black.clear();
-                            guard.status_line = if let Some(error) = error {
-                                format!("Match {index}/{total} stopped: {error}")
-                            } else {
-                                format!(
-                                    "Finished {index}/{total} · {white} {} {}",
-                                    tournament_live::score_label(white_points, black_points),
-                                    black
-                                )
-                            };
-                        }
-                        TournamentEvent::Cancelled {
-                            standings,
-                            game_results,
-                        } => {
-                            guard.cancelled = true;
-                            guard.running = false;
-                            guard.standings =
-                                tournament_live::standing_rows(&guard.engine_names, &standings);
-                            guard.game_results = game_results;
-                            guard.status_line =
-                                "Tournament cancelled. Partial standings are available.".to_owned();
-                        }
-                    }
-                }
-            });
-            let mut match_config = setup.to_match_config();
-            match_config.stop_flag = Some(Arc::clone(&cancel));
-            let summary = run_tournament_with_control(
-                roster,
-                TournamentConfig {
-                    match_config,
-                    format,
-                    swiss_rounds: matches!(format, TournamentFormat::Swiss)
-                        .then_some(setup.swiss_rounds.max(1) as usize),
-                    checkpoint_directory: study_database_path().parent().map(|path| {
-                        path.join("tournaments")
-                            .join(tournament_directory_name(format))
-                    }),
-                },
-                cancel,
-                Some(progress),
-            );
-            if let Ok(mut guard) = snapshot.lock() {
-                guard.running = false;
-                guard.finished = true;
-                guard.cancelled = summary.cancelled;
-                guard.error = summary.error.clone();
-                let names = summary
-                    .engines
-                    .iter()
-                    .map(|engine| engine.engine.name.clone())
-                    .collect::<Vec<_>>();
-                guard.engine_names = names.clone();
-                guard.standings = tournament_live::standing_rows(&names, &summary.standings);
-                guard.game_results = summary.game_results.clone();
-                let games = mujrim_benchmarker::strength::games_from_summary(&summary);
-                if guard.played_games.len() < games.len() {
-                    guard.played_games.clear();
-                    guard.append_games(games);
-                }
-            }
-            summary
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_quick_tournament_body(engines, setup, cancel, snapshot)
+            }))
+            .unwrap_or_else(|_| mujrim_benchmarker::strength::TournamentSummary {
+                format,
+                engines: Vec::new(),
+                matches: Vec::new(),
+                standings: Vec::new(),
+                game_results: Vec::new(),
+                cancelled: false,
+                error: Some(
+                    "Tournament worker panicked. The UI stayed up — check engine compatibility (Arm64/Prism) and try fewer engines."
+                        .to_owned(),
+                ),
+            })
         });
     match worker {
         Ok(worker) => match worker.join() {
@@ -6680,6 +6594,223 @@ async fn run_quick_tournament(
     }
 }
 
+fn run_quick_tournament_body(
+    engines: Vec<QuickTournamentEngine>,
+    setup: tournament_setup::TournamentSetup,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    snapshot: Arc<std::sync::Mutex<tournament_live::LiveTournamentSnapshot>>,
+) -> mujrim_benchmarker::strength::TournamentSummary {
+    use mujrim_benchmarker::strength::{
+        EngineSpec, TournamentConfig, TournamentEngine, TournamentEvent, TournamentProgress,
+        run_tournament_with_control,
+    };
+
+    let format = setup.format;
+    let roster: Vec<TournamentEngine> = engines
+        .into_iter()
+        .map(|engine| {
+            let mut spec = EngineSpec::new(engine.path.clone());
+            spec.name = engine.name;
+            spec.uci_options =
+                uci_process::uci_resource_options(&engine.path, false, true, None);
+            TournamentEngine {
+                engine: spec,
+                established_elo: None,
+                search_limits: engine.search_limits,
+            }
+        })
+        .collect();
+    let initial_clock_ms = setup.time_control.match_clock().initial.as_millis() as u64;
+    let progress: TournamentProgress = Arc::new({
+        let snapshot = Arc::clone(&snapshot);
+        move |event: TournamentEvent| {
+            let Ok(mut guard) = snapshot.lock() else {
+                return;
+            };
+            match event {
+                TournamentEvent::Planned {
+                    total_matches,
+                    engine_names,
+                } => {
+                    guard.total_matches = total_matches;
+                    guard.engine_names = engine_names;
+                    guard.status_line =
+                        format!("Scheduled {total_matches} pairings. Starting…");
+                }
+                TournamentEvent::MatchStarted {
+                    index,
+                    total,
+                    round,
+                    white,
+                    black,
+                } => {
+                    guard.total_matches = total.max(guard.total_matches);
+                    guard.current_round = round;
+                    guard.current_white = white.clone();
+                    guard.current_black = black.clone();
+                    guard.status_line = format!(
+                        "Playing {index}/{total} · Round {round} · {white} vs {black}"
+                    );
+                }
+                TournamentEvent::GameStarted {
+                    game_key,
+                    match_index,
+                    round,
+                    white,
+                    black,
+                    initial_fen,
+                } => {
+                    guard.upsert_live_game(tournament_live::LiveGameBoard {
+                        game_key,
+                        match_index,
+                        round,
+                        white: white.clone(),
+                        black: black.clone(),
+                        initial_fen,
+                        moves: Vec::new(),
+                        last_uci: String::new(),
+                        score_cp: 0,
+                        depth: 0,
+                        nodes: 0,
+                        white_clock_ms: Some(initial_clock_ms),
+                        black_clock_ms: Some(initial_clock_ms),
+                    });
+                    guard.current_round = round;
+                    guard.current_white = white;
+                    guard.current_black = black;
+                }
+                TournamentEvent::PlyPlayed {
+                    game_key,
+                    ply,
+                    uci,
+                    score_cp,
+                    depth,
+                    nodes,
+                    moves,
+                    white_clock_ms,
+                    black_clock_ms,
+                } => {
+                    guard.apply_ply(
+                        &game_key,
+                        ply,
+                        uci,
+                        score_cp,
+                        depth,
+                        nodes,
+                        moves,
+                        white_clock_ms,
+                        black_clock_ms,
+                    );
+                }
+                TournamentEvent::GameFinished {
+                    game_key,
+                    white_score,
+                    moves,
+                } => {
+                    guard.finish_live_game(&game_key, white_score, moves);
+                }
+                TournamentEvent::MatchFinished {
+                    index,
+                    total,
+                    round,
+                    white,
+                    black,
+                    white_points,
+                    black_points,
+                    error,
+                    standings,
+                    game_results,
+                    games,
+                } => {
+                    guard.completed_matches = index;
+                    guard.total_matches = total.max(guard.total_matches);
+                    guard
+                        .finished_matches
+                        .push(tournament_live::FinishedMatchRow {
+                            index,
+                            round,
+                            white: white.clone(),
+                            black: black.clone(),
+                            white_points,
+                            black_points,
+                            error: error.clone(),
+                        });
+                    guard.standings =
+                        tournament_live::standing_rows(&guard.engine_names, &standings);
+                    guard.game_results = game_results;
+                    let already_live = guard
+                        .played_games
+                        .iter()
+                        .any(|game| game.match_index == index);
+                    if !already_live {
+                        guard.append_games(games);
+                    }
+                    guard.current_white.clear();
+                    guard.current_black.clear();
+                    guard.status_line = if let Some(error) = error {
+                        format!("Match {index}/{total} stopped: {error}")
+                    } else {
+                        format!(
+                            "Finished {index}/{total} · {white} {} {}",
+                            tournament_live::score_label(white_points, black_points),
+                            black
+                        )
+                    };
+                }
+                TournamentEvent::Cancelled {
+                    standings,
+                    game_results,
+                } => {
+                    guard.cancelled = true;
+                    guard.running = false;
+                    guard.standings =
+                        tournament_live::standing_rows(&guard.engine_names, &standings);
+                    guard.game_results = game_results;
+                    guard.status_line =
+                        "Tournament cancelled. Partial standings are available.".to_owned();
+                }
+            }
+        }
+    });
+    let mut match_config = setup.to_match_config();
+    match_config.stop_flag = Some(Arc::clone(&cancel));
+    let summary = run_tournament_with_control(
+        roster,
+        TournamentConfig {
+            match_config,
+            format,
+            swiss_rounds: matches!(format, TournamentFormat::Swiss)
+                .then_some(setup.swiss_rounds.max(1) as usize),
+            checkpoint_directory: study_database_path().parent().map(|path| {
+                path.join("tournaments")
+                    .join(tournament_directory_name(format))
+            }),
+        },
+        cancel,
+        Some(progress),
+    );
+    if let Ok(mut guard) = snapshot.lock() {
+        guard.running = false;
+        guard.finished = true;
+        guard.cancelled = summary.cancelled;
+        guard.error = summary.error.clone();
+        let names = summary
+            .engines
+            .iter()
+            .map(|engine| engine.engine.name.clone())
+            .collect::<Vec<_>>();
+        guard.engine_names = names.clone();
+        guard.standings = tournament_live::standing_rows(&names, &summary.standings);
+        guard.game_results = summary.game_results.clone();
+        let games = mujrim_benchmarker::strength::games_from_summary(&summary);
+        if guard.played_games.len() < games.len() {
+            guard.played_games.clear();
+            guard.append_games(games);
+        }
+    }
+    summary
+}
+
 fn tournament_directory_name(format: TournamentFormat) -> &'static str {
     match format {
         TournamentFormat::RoundRobin => "round-robin",
@@ -6695,17 +6826,20 @@ fn format_tournament_summary(summary: &mujrim_benchmarker::strength::TournamentS
         .iter()
         .take(3)
         .enumerate()
-        .map(|(rank, standing)| {
+        .filter_map(|(rank, standing)| {
+            let name = summary
+                .engines
+                .get(standing.entrant)
+                .map(|engine| engine.engine.name.as_str())?;
             let rating = standing.performance.map_or_else(
                 || "rating pending".to_owned(),
                 |estimate| format!("{:.0} Elo", estimate.elo),
             );
-            format!(
-                "{}. {} — {:.1} points, {rating}",
+            Some(format!(
+                "{}. {name} — {:.1} points, {rating}",
                 rank + 1,
-                summary.engines[standing.entrant].engine.name,
                 standing.points
-            )
+            ))
         })
         .collect::<Vec<_>>()
         .join("  ·  ");
@@ -6714,6 +6848,46 @@ fn format_tournament_summary(summary: &mujrim_benchmarker::strength::TournamentS
     } else {
         format!("{} · {podium}", summary.format)
     }
+}
+
+/// Probe each selected engine before a tournament so Arm64/Prism spawn failures
+/// never take down the UI mid-event.
+fn preflight_tournament_engines(
+    engines: Vec<QuickTournamentEngine>,
+) -> Result<Vec<QuickTournamentEngine>, String> {
+    use mujrim_protocols::{EngineSession, ProtocolKind};
+
+    const PREFLIGHT_MEMORY: u64 = 256 * 1024 * 1024;
+    let mut healthy = Vec::with_capacity(engines.len());
+    let mut failures = Vec::new();
+    for engine in engines {
+        match EngineSession::spawn_with_args_and_memory_limit(
+            &engine.path,
+            &[],
+            ProtocolKind::Uci,
+            Some(PREFLIGHT_MEMORY),
+        ) {
+            Ok(_session) => healthy.push(engine),
+            Err(error) => failures.push(format!("{} ({})", engine.name, error)),
+        }
+    }
+    if healthy.len() < 2 {
+        let detail = if failures.is_empty() {
+            "need at least two engines that can start".to_owned()
+        } else {
+            format!(
+                "only {} ready; failed: {}",
+                healthy.len(),
+                failures.join("; ")
+            )
+        };
+        return Err(format!("Tournament preflight failed — {detail}"));
+    }
+    if !failures.is_empty() {
+        // Keep going with healthy engines; surface skips in the status via Err only when <2.
+        let _ = failures;
+    }
+    Ok(healthy)
 }
 
 async fn analyze_game(initial_fen: String, moves: Vec<String>) -> Result<Vec<AnalyzedPly>, String> {
@@ -7118,8 +7292,8 @@ mod tests {
         annotated_move_label, apply_opening_move, board_at_ply, bounded_hash_mb,
         build_annotated_pgn, build_pgn, bundled_engine_choices, engine_path_rank, find_logged_move,
         format_tournament_summary, game_summary_label, main_window_settings, normalize_logged_uci,
-        puzzle_line_matches, replay_study_game, selected_bundled_engine, starter_puzzles,
-        tournament_directory_name,
+        puzzle_line_matches, replay_study_game, review_annotation_badge, selected_bundled_engine,
+        starter_puzzles, tournament_directory_name,
     };
     use mujrim_study::annotation::MoveAnnotation;
     use mujrim_study::database::{GameMetadata, GameSummary};
@@ -7208,6 +7382,54 @@ mod tests {
         assert_eq!(
             format_tournament_summary(&summary),
             "Swiss finished without completed games."
+        );
+    }
+
+    #[test]
+    fn tournament_summary_ignores_out_of_range_standings() {
+        let summary = mujrim_benchmarker::strength::TournamentSummary {
+            format: TournamentFormat::RoundRobin,
+            engines: Vec::new(),
+            matches: Vec::new(),
+            standings: vec![mujrim_study::tournament::Standing {
+                entrant: 99,
+                played: 0,
+                wins: 0,
+                draws: 0,
+                losses: 0,
+                points: 0.0,
+                performance: None,
+            }],
+            game_results: Vec::new(),
+            cancelled: false,
+            error: None,
+        };
+        assert_eq!(
+            format_tournament_summary(&summary),
+            "Round robin finished without completed games."
+        );
+    }
+
+    #[test]
+    fn review_badge_uses_destination_square_and_classification() {
+        types::init();
+        let badge = review_annotation_badge(
+            mujrim_study::opening::START_FEN,
+            &["e2e4".to_owned()],
+            Some(1),
+            &[Some(MoveAnnotation::Brilliant)],
+        )
+        .expect("badge");
+        assert_eq!(badge.0, types::Square::from_index(28));
+        assert_eq!(badge.1, MoveAnnotation::Brilliant);
+        assert!(
+            review_annotation_badge(
+                mujrim_study::opening::START_FEN,
+                &["e2e4".to_owned()],
+                Some(1),
+                &[Some(MoveAnnotation::Ok)],
+            )
+            .is_none()
         );
     }
 

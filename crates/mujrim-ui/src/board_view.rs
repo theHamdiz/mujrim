@@ -9,9 +9,10 @@
 //! - Drawing arrows overlay
 //! - Move animation overlay with capture effects (instant or explosion)
 
-use iced::widget::{Svg, button, column, container, row, stack, text};
+use iced::widget::{Space, Svg, button, column, container, row, stack, text};
 use iced::{Alignment, Color, Element, Length};
 
+use mujrim_study::annotation::MoveAnnotation;
 use mujrim_study::board_marks::BoardArrow;
 
 use crate::game::GameState;
@@ -268,6 +269,8 @@ pub struct BoardViewOptions<'a> {
     pub display_board: Option<&'a types::Board>,
     pub show_legal_moves: bool,
     pub show_last_move: bool,
+    /// Chess.com-style classification badge on the move's destination square.
+    pub annotation_badge: Option<(types::Square, MoveAnnotation)>,
 }
 
 fn piece_view<'a>(
@@ -283,6 +286,66 @@ fn piece_view<'a>(
         .height(size)
         .opacity(opacity)
         .into()
+}
+
+fn annotation_badge_stack<'a>(
+    cell_content: Element<'a, Msg>,
+    annotation: MoveAnnotation,
+    sq_size: f32,
+) -> Element<'a, Msg> {
+    let (r, g, b) = annotation.chess_com_rgb();
+    let badge_size = (sq_size * 0.38).clamp(12.0, 28.0);
+    let font_size = (badge_size * 0.48).clamp(8.0, 13.0);
+    let symbol = annotation.symbol();
+    let label = if symbol.is_empty() {
+        annotation.label().chars().next().unwrap_or('•').to_string()
+    } else {
+        symbol.to_owned()
+    };
+    let badge = container(
+        text(label)
+            .size(font_size)
+            .color(Color::WHITE)
+            .center(),
+    )
+    .center_x(badge_size)
+    .center_y(badge_size)
+    .width(badge_size)
+    .height(badge_size)
+    .style(move |_theme| container::Style {
+        background: Some(iced::Background::Color(Color::from_rgb8(r, g, b))),
+        border: iced::Border {
+            radius: (badge_size * 0.5).into(),
+            width: 1.5,
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.92),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: iced::Vector::new(0.0, 1.0),
+            blur_radius: 2.0,
+        },
+        ..Default::default()
+    });
+    let badge_row = row![
+        Space::new().width(Length::Fill),
+        column![badge, Space::new().height(Length::Fill)]
+            .height(Length::Fill)
+            .align_x(Alignment::End),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding([2, 2]);
+    stack![
+        container(cell_content)
+            .width(sq_size)
+            .height(sq_size)
+            .center_x(sq_size)
+            .center_y(sq_size),
+        badge_row,
+    ]
+    .width(sq_size)
+    .height(sq_size)
+    .into()
 }
 
 /// Renders the chess board as an 8x8 grid with dynamic square size.
@@ -305,8 +368,21 @@ pub fn view_board<'a>(
         display_board,
         show_legal_moves,
         show_last_move,
+        annotation_badge,
     } = options;
-    let board = display_board.unwrap_or(&gs.board);
+    let live_board = display_board.unwrap_or(&gs.board);
+    // Chess.com multi-premove: show pieces after the queued human chain (ghosted where changed).
+    let projected_owned = if display_board.is_none() && !gs.premove_queue.is_empty() {
+        let human = gs
+            .premove_queue
+            .first()
+            .and_then(|pm| live_board.piece_on(pm.from).map(|(_, color)| color))
+            .unwrap_or_else(|| live_board.side_to_move.opponent());
+        Some(gs.projected_premove_board(human))
+    } else {
+        None
+    };
+    let board = projected_owned.as_ref().unwrap_or(live_board);
     let colors = theme.colors();
     let dot_size = sq_size * 0.28;
     let dot_radius = sq_size * 0.14;
@@ -346,8 +422,10 @@ pub fn view_board<'a>(
             let is_selected = gs.selected_square == Some(sq);
             let is_highlight = show_legal_moves && gs.legal_highlights.contains(&sq);
             let is_last_move = show_last_move && gs.last_move_squares.contains(&sq);
-            let is_premove_from = gs.premove_queue.iter().any(|(from, _)| *from == sq);
-            let is_premove_to = gs.premove_queue.iter().any(|(_, to)| *to == sq);
+            let is_premove_from = gs.premove_queue.iter().any(|pm| pm.from == sq);
+            let is_premove_to = gs.premove_queue.iter().any(|pm| pm.to == sq);
+            let is_premove_ghost = projected_owned.is_some()
+                && (live_board.piece_on(sq) != board.piece_on(sq));
 
             // Capture flash effect — vivid orange/red for Explosion, warm glow for Fire
             let capture_flash = match capture_anim_style {
@@ -489,10 +567,13 @@ pub fn view_board<'a>(
                         } else {
                             piece_sz_normal
                         };
-                        container(piece_view(assets, piece_set, piece, color, piece_sz, 1.0))
-                            .center_x(sq_size)
-                            .center_y(sq_size)
-                            .into()
+                        let opacity = if is_premove_ghost { 0.72 } else { 1.0 };
+                        container(piece_view(
+                            assets, piece_set, piece, color, piece_sz, opacity,
+                        ))
+                        .center_x(sq_size)
+                        .center_y(sq_size)
+                        .into()
                     } else if is_highlight {
                         let dot_br: iced::border::Radius = dot_radius.into();
                         container(container(text("")).width(dot_size).height(dot_size).style(
@@ -520,6 +601,15 @@ pub fn view_board<'a>(
             // Coordinate labels inside the board (only if show_inside_coords)
             let has_rank_label = show_inside_coords && display_col == 0;
             let has_file_label = show_inside_coords && display_row == 7;
+
+            let badge = annotation_badge.filter(|(target, ann)| {
+                *target == sq && ann.shows_board_badge()
+            });
+            let cell_content = if let Some((_, annotation)) = badge {
+                annotation_badge_stack(cell_content, annotation, sq_size)
+            } else {
+                cell_content
+            };
 
             let cell_with_coords: Element<'a, Msg> = if has_rank_label || has_file_label {
                 let mut overlay_col = column![].width(sq_size).height(sq_size);

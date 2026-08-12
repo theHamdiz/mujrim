@@ -1,9 +1,10 @@
 //! Game state management for the Mujrim UI.
 
 use mujrim_study::board_marks::{ArrowRole, BoardArrow, MarkColor};
-use types::{Board, Square};
+use types::{Board, Color, Square};
 
 use crate::arrows::{ArrowColor, user_arrow};
+use crate::premove::{self, MAX_PREMOVES, Premove};
 
 /// Maps a board display cell `(row, col)` (0 = top/left of the widget) to a chess square.
 pub fn display_to_square(row: usize, col: usize, flipped: bool) -> Square {
@@ -39,8 +40,8 @@ pub struct GameState {
     pub flipped: bool,
     /// Whether the game is over.
     pub game_over: bool,
-    /// Queued premoves: (from, to) pairs executed when it becomes our turn.
-    pub premove_queue: Vec<(Square, Square)>,
+    /// Queued chess.com-style premoves executed when it becomes our turn.
+    pub premove_queue: Vec<Premove>,
     /// User-drawn annotation arrows.
     pub arrows: Vec<BoardArrow>,
     /// Engine / coach / ponder / last-move overlay arrows.
@@ -115,6 +116,54 @@ impl GameState {
     pub fn deselect(&mut self) {
         self.selected_square = None;
         self.legal_highlights.clear();
+    }
+
+    /// Board after applying the queued premove chain for `human`.
+    pub fn projected_premove_board(&self, human: Color) -> Board {
+        premove::projected_board(&self.board, &self.premove_queue, human)
+    }
+
+    /// Select a piece for the next premove on the projected board.
+    pub fn select_premove_square(&mut self, sq: Square, human: Color) {
+        self.selected_square = Some(sq);
+        self.legal_highlights = premove::premove_destinations(
+            &self.board,
+            &self.premove_queue,
+            human,
+            sq,
+        );
+    }
+
+    /// Queue a premove to `target` from the current selection.
+    pub fn queue_premove(
+        &mut self,
+        target: Square,
+        human: Color,
+        allow_multi: bool,
+    ) -> bool {
+        let Some(from) = self.selected_square else {
+            return false;
+        };
+        let Some(entry) =
+            premove::make_premove(&self.board, &self.premove_queue, human, from, target)
+        else {
+            return false;
+        };
+        if !allow_multi {
+            self.premove_queue.clear();
+        }
+        if self.premove_queue.len() >= MAX_PREMOVES {
+            self.deselect();
+            return false;
+        }
+        self.premove_queue.push(entry);
+        self.deselect();
+        true
+    }
+
+    pub fn clear_premoves(&mut self) {
+        self.premove_queue.clear();
+        self.deselect();
     }
 
     pub fn begin_drag(&mut self, from: Square) {
@@ -279,5 +328,22 @@ mod tests {
         assert_eq!(display_to_square(7, 7, false).index(), 7);
         assert_eq!(display_to_square(0, 0, true).index(), 7);
         assert_eq!(display_to_square(7, 7, true).index(), 56);
+    }
+
+    #[test]
+    fn multi_premove_queue_uses_projected_piece() {
+        let mut gs = setup();
+        let e2 = Square::from_index(12);
+        let e4 = Square::from_index(28);
+        let g1 = Square::from_index(6);
+        let f3 = Square::from_index(21);
+        gs.select_premove_square(e2, Color::White);
+        assert!(gs.queue_premove(e4, Color::White, true));
+        gs.select_premove_square(g1, Color::White);
+        assert!(gs.queue_premove(f3, Color::White, true));
+        assert_eq!(gs.premove_queue.len(), 2);
+        let projected = gs.projected_premove_board(Color::White);
+        assert!(projected.piece_on(e4).is_some());
+        assert!(projected.piece_on(f3).is_some());
     }
 }
