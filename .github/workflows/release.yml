@@ -89,6 +89,7 @@ jobs:
             libasound2-dev \
             libudev-dev \
             libpipewire-0.3-dev \
+            libgbm-dev \
             p7zip-full
 
       - name: Fetch Stockfish NNUE required for compile-time embed
