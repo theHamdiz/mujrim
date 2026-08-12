@@ -495,21 +495,21 @@ pub fn run_bench(depth: i32, time_ms: Option<u64>) {
 #[cfg(target_os = "linux")]
 fn detect_linux_gpu() -> String {
     // Try lspci first (most reliable)
-    if let Ok(output) = std::process::Command::new("lspci").output() {
-        if let Ok(stdout) = String::from_utf8(output.stdout) {
-            let mut gpus = Vec::new();
-            for line in stdout.lines() {
-                let lower = line.to_lowercase();
-                if lower.contains("vga") || lower.contains("3d") || lower.contains("display") {
-                    // Extract the device description (everything after the first ': ')
-                    if let Some(desc) = line.split(": ").nth(1) {
-                        gpus.push(desc.trim().to_string());
-                    }
+    if let Ok(output) = std::process::Command::new("lspci").output()
+        && let Ok(stdout) = String::from_utf8(output.stdout)
+    {
+        let mut gpus = Vec::new();
+        for line in stdout.lines() {
+            let lower = line.to_lowercase();
+            if lower.contains("vga") || lower.contains("3d") || lower.contains("display") {
+                // Extract the device description (everything after the first ': ')
+                if let Some(desc) = line.split(": ").nth(1) {
+                    gpus.push(desc.trim().to_string());
                 }
             }
-            if !gpus.is_empty() {
-                return gpus.join("; ");
-            }
+        }
+        if !gpus.is_empty() {
+            return gpus.join("; ");
         }
     }
 
