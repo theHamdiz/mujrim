@@ -209,9 +209,30 @@ function Build-Core([string]$Triple) {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $Triple" }
 }
 
+function Snapshot-ReleaseExe([string]$ReleaseDir, [string]$DestName) {
+    $src = Join-Path $ReleaseDir "mujrim.exe"
+    $dest = Join-Path $ReleaseDir $DestName
+    $tmp = Join-Path $ReleaseDir ("_" + $DestName + ".tmp")
+    if (Test-Path $tmp) { Remove-Item -Force $tmp }
+    Copy-Item -Force $src $tmp
+    if (Test-Path $dest) { Remove-Item -Force $dest }
+    Move-Item -Force $tmp $dest
+}
+
+function Assert-EngineSize([string]$Path, [long]$MinBytes, [long]$MaxBytes, [string]$Label) {
+    if (-not (Test-Path $Path)) { throw "missing $Label at $Path" }
+    $size = (Get-Item $Path).Length
+    if ($size -lt $MinBytes -or $size -gt $MaxBytes) {
+        throw ("{0} size {1:N1} MB out of expected range [{2:N1}, {3:N1}] MB" -f `
+            $Label, ($size / 1MB), ($MinBytes / 1MB), ($MaxBytes / 1MB))
+    }
+    Write-Host ("  {0}: {1:N1} MB" -f $Label, ($size / 1MB))
+}
+
 function Build-Variants([string]$Triple) {
     Write-Host "==> Building Mujrim product engines for $Triple"
     Write-Host "  product set: mujrim-elite, mujrim-external, mujrim-v60, mujrim-ak"
+    Write-Host "  note: never add embedded-networks on top of default features (that embeds every net)"
     $env:CARGO_BUILD_JOBS = "1"
     $release = Join-Path $TargetDir "$Triple\release"
     Ensure-Dir $release
@@ -222,28 +243,37 @@ function Build-Variants([string]$Triple) {
         Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
     }
 
-    # mujrim-elite: Stockfish NNUE embedded
-    cargo build --release --target $Triple -p mujrim --features embedded-networks
+    # mujrim-elite: ONLY Stockfish NNUE embedded (~91 MB payload)
+    cargo build --release --target $Triple -p mujrim --no-default-features `
+        --features "xboard,book,nnue,simd,stockfish-nnue,embedded-networks"
     if ($LASTEXITCODE -ne 0) { throw "mujrim-elite build failed for $Triple" }
-    Copy-Item -Force (Join-Path $release "mujrim.exe") (Join-Path $release "mujrim-elite.exe")
+    Snapshot-ReleaseExe $release "mujrim-elite.exe"
+    # Engine + SF net ≈ 95–170 MB depending on arch/link.
+    Assert-EngineSize (Join-Path $release "mujrim-elite.exe") 80MB 200MB "mujrim-elite"
 
-    # mujrim-external: discovers/loads NNUE at runtime
-    cargo build --release --target $Triple -p mujrim
+    # mujrim-external: NO embedded networks — discovers/loads NNUE at runtime.
+    cargo build --release --target $Triple -p mujrim --no-default-features `
+        --features "xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue"
     if ($LASTEXITCODE -ne 0) { throw "mujrim-external build failed for $Triple" }
-    Copy-Item -Force (Join-Path $release "mujrim.exe") (Join-Path $release "mujrim-external.exe")
+    Snapshot-ReleaseExe $release "mujrim-external.exe"
+    # Must stay far below an embedded Stockfish payload.
+    Assert-EngineSize (Join-Path $release "mujrim-external.exe") 1MB 40MB "mujrim-external"
 
-    # mujrim-v60: Reckless NNUE embedded
+    # mujrim-v60: Reckless NNUE embedded (~60 MB payload)
     cargo build --release --target $Triple -p mujrim-native-v60 --features "syzygy,embedded-network"
     if ($LASTEXITCODE -ne 0) { throw "mujrim-v60 build failed for $Triple" }
-    # mujrim-native-v60 already emits mujrim-v60.exe
+    Assert-EngineSize (Join-Path $release "mujrim-v60.exe") 40MB 120MB "mujrim-v60"
 
-    # mujrim-ak: Akimbo NNUE embedded
-    cargo build --release --target $Triple -p mujrim --no-default-features --features "xboard,book,nnue,simd,akimbo-nnue,embedded-networks"
+    # mujrim-ak: ONLY Akimbo NNUE embedded (~6 MB payload)
+    cargo build --release --target $Triple -p mujrim --no-default-features `
+        --features "xboard,book,nnue,simd,akimbo-nnue,embedded-networks"
     if ($LASTEXITCODE -ne 0) { throw "mujrim-ak build failed for $Triple" }
-    Copy-Item -Force (Join-Path $release "mujrim.exe") (Join-Path $release "mujrim-ak.exe")
+    Snapshot-ReleaseExe $release "mujrim-ak.exe"
+    Assert-EngineSize (Join-Path $release "mujrim-ak.exe") 1MB 40MB "mujrim-ak"
 
-    # Restore a plain mujrim.exe (external) as the top-level engine binary.
+    # Top-level mujrim.exe matches external (no embedded net).
     Copy-Item -Force (Join-Path $release "mujrim-external.exe") (Join-Path $release "mujrim.exe")
+    Assert-EngineSize (Join-Path $release "mujrim.exe") 1MB 40MB "mujrim.exe (external alias)"
 }
 
 function Bundle-MingwRuntime([string]$Directory) {
@@ -284,14 +314,6 @@ function Package-Arch([string]$Triple, [string]$ArchDir, [string[]]$EngineArchDi
     Copy-Tree (Join-Path $Dist "nnue") (Join-Path $out "nnue")
     Filter-Engines (Join-Path $Dist "engines") (Join-Path $out "engines") $EngineArchDirs
 
-    $primaryEngineArch = $EngineArchDirs[0]
-    $mujrimEngineBin = Join-Path $out "engines\mujrim\bin\$primaryEngineArch"
-    Ensure-Dir $mujrimEngineBin
-    # Wipe legacy duplicate names from prior packaging runs.
-    if (Test-Path $mujrimEngineBin) {
-        Get-ChildItem $mujrimEngineBin -File -Filter "mujrim*.exe" -ErrorAction SilentlyContinue |
-            Remove-Item -Force
-    }
     $mujrimVariants = @(
         "mujrim-elite.exe",
         "mujrim-external.exe",
@@ -304,22 +326,39 @@ function Package-Arch([string]$Triple, [string]$ArchDir, [string[]]$EngineArchDi
             throw "missing product engine $name under $release"
         }
         Assert-PeMachine $src $expected "$name/$Triple"
-        Copy-File $src (Join-Path $mujrimEngineBin $name)
+        $minBytes = 1MB
+        $maxBytes = 40MB
+        if ($name -eq "mujrim-elite.exe") { $minBytes = 80MB; $maxBytes = 200MB }
+        elseif ($name -eq "mujrim-v60.exe") { $minBytes = 40MB; $maxBytes = 120MB }
+        Assert-EngineSize $src $minBytes $maxBytes "$name (release/$Triple)"
     }
-    # Keep shared dist/engines/mujrim tree in sync for this arch.
-    $sharedMujrimBin = Join-Path $Dist "engines\mujrim\bin\$primaryEngineArch"
-    Ensure-Dir $sharedMujrimBin
-    Get-ChildItem $sharedMujrimBin -File -Filter "mujrim*.exe" -ErrorAction SilentlyContinue |
-        Remove-Item -Force
-    foreach ($name in $mujrimVariants) {
-        Copy-File (Join-Path $release $name) (Join-Path $sharedMujrimBin $name)
+    # Refresh every engine-arch alias for this package (e.g. x86_64 + x86_64-avx2).
+    # Filter-Engines may have copied stale mujrim bins into non-primary slots.
+    foreach ($engineArch in $EngineArchDirs) {
+        $mujrimEngineBin = Join-Path $out "engines\mujrim\bin\$engineArch"
+        Ensure-Dir $mujrimEngineBin
+        Get-ChildItem $mujrimEngineBin -File -Filter "mujrim*.exe" -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+        foreach ($name in $mujrimVariants) {
+            Copy-File (Join-Path $release $name) (Join-Path $mujrimEngineBin $name)
+        }
+        $sharedMujrimBin = Join-Path $Dist "engines\mujrim\bin\$engineArch"
+        Ensure-Dir $sharedMujrimBin
+        Get-ChildItem $sharedMujrimBin -File -Filter "mujrim*.exe" -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+        foreach ($name in $mujrimVariants) {
+            Copy-File (Join-Path $release $name) (Join-Path $sharedMujrimBin $name)
+        }
+        if ($Triple -eq "x86_64-pc-windows-gnullvm") {
+            Bundle-MingwRuntime $mujrimEngineBin
+            Bundle-MingwRuntime $sharedMujrimBin
+        }
     }
 
     # For gnullvm builds, ship runtime DLLs next to every exe directory as a safety net
     # (static link should remove the need, but missing DLLs produce 0xc000007b).
     if ($Triple -eq "x86_64-pc-windows-gnullvm") {
         Bundle-MingwRuntime $out
-        Bundle-MingwRuntime $mujrimEngineBin
         $imports = Get-PeImports (Join-Path $out "mujrim.exe")
         if ($imports -contains "libunwind.dll") {
             Write-Host "  warning: mujrim.exe still imports libunwind.dll; bundled runtime DLLs beside binaries"

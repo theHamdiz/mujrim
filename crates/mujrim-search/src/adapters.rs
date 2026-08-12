@@ -15,11 +15,14 @@ pub trait EvalSearchAdapter: Send + Sync {
     fn install(&self, engine: &mut SearchEngine);
 }
 
+#[cfg(feature = "stockfish-nnue")]
 pub struct StockfishAdapter;
+#[cfg(feature = "reckless-nnue")]
 pub struct RecklessAdapter;
 pub struct AkimboAdapter;
 pub struct MujrimHceAdapter;
 
+#[cfg(feature = "stockfish-nnue")]
 impl EvalSearchAdapter for StockfishAdapter {
     fn id(&self) -> &'static str {
         "stockfish"
@@ -39,6 +42,7 @@ impl EvalSearchAdapter for StockfishAdapter {
     }
 }
 
+#[cfg(feature = "reckless-nnue")]
 impl EvalSearchAdapter for RecklessAdapter {
     fn id(&self) -> &'static str {
         "reckless"
@@ -97,7 +101,9 @@ impl EvalSearchAdapter for MujrimHceAdapter {
 /// Resolve a stable adapter id (`stockfish`, `reckless`, `akimbo`, `mujrim-hce` / `hce`).
 pub fn adapter_for_id(id: &str) -> Option<&'static dyn EvalSearchAdapter> {
     match id {
+        #[cfg(feature = "stockfish-nnue")]
         "stockfish" => Some(&StockfishAdapter),
+        #[cfg(feature = "reckless-nnue")]
         "reckless" => Some(&RecklessAdapter),
         "akimbo" => Some(&AkimboAdapter),
         "mujrim-hce" | "hce" => Some(&MujrimHceAdapter),
@@ -126,6 +132,7 @@ mod tests {
     use crate::policy::MoveOrderingProfile;
     use crate::search_stack::EvalMode;
 
+    #[cfg(feature = "stockfish-nnue")]
     #[test]
     fn stockfish_adapter_pairs_stockfish_net_with_stocklike_stack() {
         let mut engine = SearchEngine::new(1, 1);
@@ -141,6 +148,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "reckless-nnue")]
     #[test]
     fn reckless_adapter_pairs_reckless_net_with_reckless_stack() {
         let mut engine = SearchEngine::new(1, 1);
@@ -185,7 +193,9 @@ mod tests {
 
     #[test]
     fn adapter_ids_are_stable() {
+        #[cfg(feature = "stockfish-nnue")]
         assert_eq!(StockfishAdapter.id(), "stockfish");
+        #[cfg(feature = "reckless-nnue")]
         assert_eq!(RecklessAdapter.id(), "reckless");
         assert_eq!(AkimboAdapter.id(), "akimbo");
         assert_eq!(MujrimHceAdapter.id(), "mujrim-hce");

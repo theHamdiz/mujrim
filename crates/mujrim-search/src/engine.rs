@@ -30,6 +30,24 @@ use eval::nnue::{
     ActiveNetwork, NNUEState, NnueNetworkInfo, NnueNetworkSource, default_embedded_network,
 };
 
+#[cfg(test)]
+fn ensure_test_nnue_discovery_path() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // Search tests compile eval without embedded-networks; point discovery at
+        // the checked-in network payloads so adapters can construct engines.
+        let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("mujrim-eval")
+            .join("resources");
+        // SAFETY: test-only, called once before any engine threads start.
+        unsafe {
+            std::env::set_var("MUJRIM_NNUE", resources);
+        }
+    });
+}
+
 /// Infinity score sentinel.
 const INF: i32 = 30_000;
 /// Checkmate score base (mate in N = MATE_SCORE - N).
@@ -1022,6 +1040,8 @@ impl Default for SearchEngine {
 impl SearchEngine {
     /// Creates a new search engine with the given TT size and thread count.
     pub fn new(tt_size_mb: usize, num_threads: usize) -> Self {
+        #[cfg(test)]
+        ensure_test_nnue_discovery_path();
         let embedded = default_embedded_network();
         let search_stack = SearchStack::for_network(embedded.search_profile());
         let nnue_network: Arc<ActiveNetwork> = Arc::new(embedded);

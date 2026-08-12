@@ -258,8 +258,10 @@ impl NNUEState {
             ActiveNetwork::ExternalAkimbo { .. } => {}
         }
 
-        let NnueNetworkParameters::Akimbo(net) = self.source.parameters() else {
-            unreachable!("non-Akimbo backends are handled above")
+        let net = match self.source.parameters() {
+            NnueNetworkParameters::Akimbo(net) => net,
+            #[cfg(any(feature = "stockfish-nnue", feature = "reckless-nnue"))]
+            _ => unreachable!("non-Akimbo backends are handled above"),
         };
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();
@@ -469,8 +471,10 @@ impl NNUEState {
             ActiveNetwork::Embedded | ActiveNetwork::ExternalAkimbo { .. } => {}
         }
 
-        let NnueNetworkParameters::Akimbo(net) = self.source.parameters() else {
-            unreachable!("non-Akimbo backends are handled above")
+        let net = match self.source.parameters() {
+            NnueNetworkParameters::Akimbo(net) => net,
+            #[cfg(any(feature = "stockfish-nnue", feature = "reckless-nnue"))]
+            _ => unreachable!("non-Akimbo backends are handled above"),
         };
         let w_king = board.king_square(Color::White).index();
         let b_king = board.king_square(Color::Black).index();

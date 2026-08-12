@@ -179,7 +179,21 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     let arch = host_packaging_arch();
-    // Product set: elite / external / v60 / ak (no duplicate external+embedded pairs).
+    // Product set: elite / external / v60 / ak
+    // Never enable embedded-networks on top of default features — that embeds every net.
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue",
+        ],
+        &environment,
+    )?;
     snapshot_engine("mujrim", "mujrim-external")?;
     run(
         "cargo",
@@ -187,13 +201,14 @@ fn build_native() -> Result<(), String> {
             "build",
             "--release",
             "-p",
-            "mujrim-native-v60",
+            "mujrim",
+            "--no-default-features",
             "--features",
-            "syzygy,embedded-network",
+            "xboard,book,nnue,simd,stockfish-nnue,embedded-networks",
         ],
         &environment,
     )?;
-    snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
+    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-elite", &arch))?;
     run(
         "cargo",
         &[
@@ -214,13 +229,15 @@ fn build_native() -> Result<(), String> {
             "build",
             "--release",
             "-p",
-            "mujrim",
+            "mujrim-native-v60",
             "--features",
-            "embedded-networks",
+            "syzygy,embedded-network",
         ],
         &environment,
     )?;
-    snapshot_engine("mujrim", &adapter_binary_stem("mujrim-elite", &arch))?;
+    snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
+    // Leave mujrim.exe as the lean external (no embedded net).
+    snapshot_engine("mujrim-external", "mujrim")?;
     run(
         "cargo",
         &["build", "--release", "-p", "mujrim-ui"],

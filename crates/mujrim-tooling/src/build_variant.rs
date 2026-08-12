@@ -56,7 +56,7 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,akimbo-nnue",
+            "xboard,book,nnue,simd,akimbo-nnue,embedded-networks",
         ],
         BuildVariant::Stockfish => vec![
             "build",
@@ -65,7 +65,7 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,stockfish-nnue",
+            "xboard,book,nnue,simd,stockfish-nnue,embedded-networks",
         ],
         BuildVariant::Reckless => vec![
             "build",
@@ -299,5 +299,26 @@ mod tests {
         assert_eq!(adapter_binary_stem("mujrim-v10", "x86_64"), "mujrim-elite");
         assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
         assert!(!adapter_binary_stem("mujrim-v60", "x86_64").contains("native"));
+    }
+
+    #[test]
+    fn product_embedded_variants_do_not_unify_every_net() {
+        let elite = variant_args(&BuildVariant::Stockfish)
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
+            .unwrap();
+        assert!(elite.contains("stockfish-nnue"));
+        assert!(elite.contains("embedded-networks"));
+        assert!(!elite.contains("akimbo-nnue"));
+        assert!(!elite.contains("reckless-nnue"));
+
+        let ak = variant_args(&BuildVariant::Akimbo)
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
+            .unwrap();
+        assert!(ak.contains("akimbo-nnue"));
+        assert!(ak.contains("embedded-networks"));
+        assert!(!ak.contains("stockfish-nnue"));
+        assert!(!ak.contains("reckless-nnue"));
     }
 }

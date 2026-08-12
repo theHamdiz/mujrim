@@ -20,7 +20,8 @@ iced = { version = "0.14", features = ["canvas", "image", "svg", "tokio"] }
 iced_fonts = { version = "0.3", features = ["lucide"] }
 types = { package = "mujrim-types", path = "../mujrim-types" }
 search = { package = "mujrim-search", path = "../mujrim-search" }
-eval = { package = "mujrim-eval", path = "../mujrim-eval", features = ["embedded-networks"] }
+# GUI loads nets from dist/nnue at runtime — do not unify embedded-networks into the workspace.
+eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, features = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue"] }
 rfd = "0.15"
 image = "0.25"
 rand = "0.9"

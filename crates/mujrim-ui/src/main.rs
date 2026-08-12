@@ -19,7 +19,7 @@ mod tournament_results;
 mod tournament_setup;
 mod uci_process;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1736,6 +1736,31 @@ impl App {
                 }
             }
             Msg::EngineCatalogProbed(engines) => {
+                let bundled_paths: std::collections::HashSet<_> = self
+                    .bundled_engines
+                    .iter()
+                    .map(|engine| engine.path.clone())
+                    .collect();
+                let bundled_stems: std::collections::HashSet<_> = self
+                    .bundled_engines
+                    .iter()
+                    .filter_map(|engine| {
+                        engine
+                            .path
+                            .file_stem()
+                            .map(|stem| stem.to_string_lossy().into_owned())
+                    })
+                    .chain(self.bundled_engines.iter().map(|engine| engine.id.to_owned()))
+                    .collect();
+                let engines: Vec<_> = engines
+                    .into_iter()
+                    .filter(|engine| {
+                        let path = PathBuf::from(&engine.path);
+                        !bundled_paths.contains(&path)
+                            && !bundled_stems.contains(&engine.name)
+                            && path_is_under_local_engines(&path)
+                    })
+                    .collect();
                 for engine in &engines {
                     if let Some(database) = self.study_database.as_mut() {
                         let _ = database.upsert_engine(engine);
@@ -4814,7 +4839,7 @@ impl App {
 
         let mut engines = column![].spacing(6);
         engines = engines.push(
-            text("Only engines found on disk for this host architecture are listed.")
+            text("Only engines under this UI's local engines/ folder (host architecture) are listed.")
                 .size(12)
                 .color(palette.text_secondary),
         );
@@ -6102,30 +6127,35 @@ async fn probe_adjacent_engines() -> Vec<EngineMetadata> {
         .name("mujrim-engine-discovery".to_owned())
         .stack_size(2 * 1024 * 1024)
         .spawn(|| {
+            // Only the engines/ folder beside the UI binary — never parent/cwd/dist trees.
+            let Some(root) = std::env::current_exe()
+                .ok()
+                .as_ref()
+                .and_then(|exe| mujrim_protocols::catalog::local_engines_root(exe))
+            else {
+                return Vec::new();
+            };
+            if !root.is_dir() {
+                return Vec::new();
+            }
+
             let mut candidates = Vec::new();
-            let mut roots = Vec::new();
-            if let Ok(executable) = std::env::current_exe()
-                && let Some(directory) = executable.parent()
-            {
-                roots.push(directory.join("engines"));
-                if let Some(parent) = directory.parent() {
-                    roots.push(parent.join("engines"));
-                }
-            }
-            if let Ok(current) = std::env::current_dir() {
-                roots.push(current.join("engines"));
-                roots.push(current.join("dist").join("engines"));
-            }
-            roots.sort();
-            roots.dedup();
-            for root in roots {
-                collect_engine_executables(&root, 0, &mut candidates);
-                if candidates.len() >= 64 {
-                    break;
-                }
-            }
-            candidates.sort();
-            candidates.dedup();
+            collect_engine_executables(&root, 0, &mut candidates);
+            let preferred = preferred_engine_arch_folders();
+            candidates.sort_by(|left, right| {
+                engine_path_rank(left, &preferred)
+                    .cmp(&engine_path_rank(right, &preferred))
+                    .then_with(|| left.cmp(right))
+            });
+            // Keep one host-native binary per file stem (drops aarch64/arm64 duplicates).
+            let mut seen_stems = std::collections::HashSet::new();
+            candidates.retain(|path| {
+                let stem = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                seen_stems.insert(stem)
+            });
             candidates.truncate(64);
 
             candidates
@@ -6136,6 +6166,35 @@ async fn probe_adjacent_engines() -> Vec<EngineMetadata> {
         .ok()
         .and_then(|worker| worker.join().ok())
         .unwrap_or_default()
+}
+
+fn preferred_engine_arch_folders() -> Vec<String> {
+    let mut folders = Vec::with_capacity(4);
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        folders.push("windows-x86_64-avx2".to_owned());
+    }
+    folders.push(format!(
+        "{}-{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        folders.push("windows-arm64".to_owned());
+    }
+    folders
+}
+
+fn engine_path_rank(path: &std::path::Path, preferred: &[String]) -> usize {
+    path.components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .find_map(|component| {
+            preferred
+                .iter()
+                .position(|folder| folder.eq_ignore_ascii_case(component))
+        })
+        .unwrap_or(usize::MAX)
 }
 
 fn collect_engine_executables(root: &std::path::Path, depth: usize, output: &mut Vec<PathBuf>) {
@@ -6258,13 +6317,36 @@ fn seed_training(store: &mut TrainingStore) -> Result<usize, String> {
     Ok(added)
 }
 
+fn path_is_under_local_engines(path: &Path) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(root) = mujrim_protocols::catalog::local_engines_root(&exe) else {
+        return false;
+    };
+    path.starts_with(&root)
+}
+
 fn tournament_engine_roster(
     bundled: &[DiscoveredEngine],
     discovered: &[EngineMetadata],
 ) -> Vec<QuickTournamentEngine> {
     let mut roster = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut seen_stems = std::collections::HashSet::new();
     for engine in bundled {
-        if !engine.path.is_file() || !mujrim_protocols::is_host_native_binary(&engine.path) {
+        if !engine.path.is_file()
+            || !mujrim_protocols::is_host_native_binary(&engine.path)
+            || !path_is_under_local_engines(&engine.path)
+        {
+            continue;
+        }
+        let stem = engine
+            .path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| engine.id.to_owned());
+        if !seen_paths.insert(engine.path.clone()) || !seen_stems.insert(stem) {
             continue;
         }
         roster.push(QuickTournamentEngine {
@@ -6275,10 +6357,16 @@ fn tournament_engine_roster(
     }
     for engine in discovered {
         let path = PathBuf::from(&engine.path);
+        let stem = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| engine.name.clone());
         if engine.protocol.eq_ignore_ascii_case("UCI")
             && path.is_file()
             && mujrim_protocols::is_host_native_binary(&path)
-            && !roster.iter().any(|existing| existing.path == path)
+            && path_is_under_local_engines(&path)
+            && seen_paths.insert(path.clone())
+            && seen_stems.insert(stem)
         {
             roster.push(QuickTournamentEngine {
                 name: engine.name.clone(),
@@ -6972,7 +7060,7 @@ mod tests {
     use super::{
         EngineConfig, ExternalEngineProtocol, PlayerConfig, analyze_game_at_depth,
         annotated_move_label, apply_opening_move, board_at_ply, bounded_hash_mb,
-        build_annotated_pgn, build_pgn, bundled_engine_choices, find_logged_move,
+        build_annotated_pgn, build_pgn, bundled_engine_choices, engine_path_rank, find_logged_move,
         format_tournament_summary, game_summary_label, main_window_settings, normalize_logged_uci,
         puzzle_line_matches, replay_study_game, selected_bundled_engine, starter_puzzles,
         tournament_directory_name,
@@ -7025,6 +7113,20 @@ mod tests {
         )
         .expect("bundled engine should be selected");
         assert_eq!(selected, choices[0]);
+    }
+
+    #[test]
+    fn engine_path_rank_prefers_primary_host_arch_folder() {
+        let preferred = vec![
+            "windows-aarch64".to_owned(),
+            "windows-arm64".to_owned(),
+        ];
+        let primary = PathBuf::from(
+            r"C:\Mujrim\engines\mujrim\bin\windows-aarch64\mujrim-elite.exe",
+        );
+        let alias =
+            PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-arm64\mujrim-elite.exe");
+        assert!(engine_path_rank(&primary, &preferred) < engine_path_rank(&alias, &preferred));
     }
 
     #[test]

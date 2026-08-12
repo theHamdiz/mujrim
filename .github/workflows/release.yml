@@ -115,19 +115,18 @@ jobs:
 
       - name: Build optimized release
         run: |
-          cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer --target ${{ matrix.target }}
-          cargo build --release -p mujrim-native-v60 --features syzygy --target ${{ matrix.target }}
+          # Workspace tools first, then product engines last (so defaults don't overwrite).
+          cargo build --release --workspace --exclude mujrim --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer --target ${{ matrix.target }}
+          # Product engines: never enable embedded-networks on top of default features.
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue --target ${{ matrix.target }}
           cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-external${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
-          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,stockfish-nnue --target ${{ matrix.target }}
-          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v10-${{ matrix.arch }}${{ matrix.suffix }}"
-          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,akimbo-nnue --target ${{ matrix.target }}
-          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-akimbo-${{ matrix.arch }}${{ matrix.suffix }}"
-          cargo build --release -p mujrim --features embedded-networks --target ${{ matrix.target }}
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,stockfish-nnue,embedded-networks --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-elite${{ matrix.suffix }}"
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,akimbo-nnue,embedded-networks --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-ak${{ matrix.suffix }}"
           cargo build --release -p mujrim-native-v60 --features syzygy,embedded-network --target ${{ matrix.target }}
-          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-embedded${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-embedded${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}"
           cargo build --release -p mujrim-ui --target ${{ matrix.target }}
           cargo build --release -p mujrim-game --target ${{ matrix.target }}
           cargo build --release -p mujrim-installer --features embed --target ${{ matrix.target }}
@@ -187,16 +186,13 @@ jobs:
           DIR="mujrim-${TAG}-${{ matrix.target }}"
           mkdir -p "$DIR"
 
-          # Ship lean runtime-network and self-contained tournament variants.
+          # Product set: elite (SF net), external (no net), v60 (Reckless), ak (Akimbo).
           cp "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}" "$DIR/mujrim-external${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-embedded${{ matrix.suffix }}" "$DIR/mujrim-embedded${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-v60-external${{ matrix.suffix }}" "$DIR/mujrim-v60-external${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-v60-embedded${{ matrix.suffix }}" "$DIR/mujrim-v60-embedded${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-elite${{ matrix.suffix }}" "$DIR/mujrim-elite${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-ak${{ matrix.suffix }}" "$DIR/mujrim-ak${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "$DIR/mujrim${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "$DIR/mujrim-v60${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-v10-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-v10-${{ matrix.arch }}${{ matrix.suffix }}"
-          cp "target/${{ matrix.target }}/release/mujrim-akimbo-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-akimbo-${{ matrix.arch }}${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-ui${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
           cp "target/${{ matrix.target }}/release/mujrim-game${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
           cp "target/${{ matrix.target }}/release/mujrim-installer${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
@@ -367,10 +363,9 @@ jobs:
           bins=(
             mujrim
             mujrim-external
-            mujrim-embedded
+            mujrim-elite
+            mujrim-ak
             mujrim-v60
-            mujrim-v60-external
-            mujrim-v60-embedded
             mujrim-ui
             mujrim-game
             mujrim-updater
@@ -392,12 +387,6 @@ jobs:
           # Arch-suffixed adapter names differ per slice; lipo matching pairs when present.
           if [ -f "$ARM_DIR/mujrim-v60-aarch64" ] && [ -f "$X86_DIR/mujrim-v60-x86_64" ]; then
             lipo -create "$ARM_DIR/mujrim-v60-aarch64" "$X86_DIR/mujrim-v60-x86_64" -output "../$UNI_DIR/mujrim-v60-universal"
-          fi
-          if [ -f "$ARM_DIR/mujrim-v10-aarch64" ] && [ -f "$X86_DIR/mujrim-v10-x86_64" ]; then
-            lipo -create "$ARM_DIR/mujrim-v10-aarch64" "$X86_DIR/mujrim-v10-x86_64" -output "../$UNI_DIR/mujrim-v10-universal"
-          fi
-          if [ -f "$ARM_DIR/mujrim-akimbo-aarch64" ] && [ -f "$X86_DIR/mujrim-akimbo-x86_64" ]; then
-            lipo -create "$ARM_DIR/mujrim-akimbo-aarch64" "$X86_DIR/mujrim-akimbo-x86_64" -output "../$UNI_DIR/mujrim-akimbo-universal"
           fi
 
           mkdir -p "../$UNI_DIR/nnue"

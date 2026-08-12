@@ -1,10 +1,25 @@
 //! Runtime NNUE network selection.
 
 use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(
+    not(feature = "embedded-networks"),
+    feature = "stockfish-nnue",
+    feature = "reckless-nnue"
+))]
+use std::fs::File;
+#[cfg(any(
+    not(feature = "embedded-networks"),
+    feature = "stockfish-nnue",
+    feature = "reckless-nnue"
+))]
+use std::io::Read;
+#[cfg(any(
+    not(feature = "embedded-networks"),
+    feature = "stockfish-nnue",
+    feature = "reckless-nnue"
+))]
 use sha2::{Digest, Sha256};
 
 use super::network::{HIDDEN, NUM_BUCKETS, Network, net};
@@ -517,6 +532,11 @@ fn collect_network_files(directory: &Path, depth: usize, output: &mut Vec<PathBu
     }
 }
 
+#[cfg(any(
+    not(feature = "embedded-networks"),
+    feature = "stockfish-nnue",
+    feature = "reckless-nnue"
+))]
 fn file_sha256(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();

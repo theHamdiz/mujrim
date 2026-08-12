@@ -221,23 +221,34 @@ fn runtime_targets() -> Vec<(String, RuntimeCompatibility)> {
     targets
 }
 
-fn engine_roots(executable: &Path, current_dir: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(4);
+/// Engine roots searched for packaged binaries.
+///
+/// UI/product discovery is local-only: `<exe_dir>/engines`. When the executable
+/// itself lives under a packaged `engines/<id>/bin/<arch>/` tree (CLI adapters),
+/// that `engines` ancestor is also included so siblings remain discoverable.
+/// Parent folders, cwd, and `dist/engines` are intentionally not searched — those
+/// caused duplicate Mujrim entries across arch alias folders.
+fn engine_roots(executable: &Path, _current_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::with_capacity(2);
     if let Some(executable_dir) = executable.parent() {
-        roots.push(executable_dir.join("engines"));
-        if let Some(parent) = executable_dir.parent() {
-            roots.push(parent.join("engines"));
-        }
+        let local = executable_dir.join("engines");
+        roots.push(local);
         if let Some(packaged_root) = executable_dir
             .ancestors()
             .find(|path| path.file_name().is_some_and(|name| name == "engines"))
         {
-            roots.push(packaged_root.to_path_buf());
+            let packaged_root = packaged_root.to_path_buf();
+            if !roots.iter().any(|root| root == &packaged_root) {
+                roots.push(packaged_root);
+            }
         }
     }
-    roots.push(current_dir.join("dist").join("engines"));
-    roots.push(current_dir.join("engines"));
     roots
+}
+
+/// Local engines directory beside an executable (`<exe_dir>/engines`), if any.
+pub fn local_engines_root(executable: &Path) -> Option<PathBuf> {
+    executable.parent().map(|dir| dir.join("engines"))
 }
 
 fn push_candidate(candidates: &mut Vec<EngineCandidate>, candidate: EngineCandidate) {
@@ -596,6 +607,32 @@ mod tests {
         assert!(
             candidates.iter().any(|candidate| candidate == &expected),
             "missing {expected:?} in {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn engine_roots_are_local_to_executable_engines_dir() {
+        let roots = engine_roots(
+            Path::new("C:/Mujrim/windows-aarch64/mujrim-ui.exe"),
+            Path::new("D:/src/mujrim"),
+        );
+        assert_eq!(
+            roots,
+            vec![PathBuf::from("C:/Mujrim/windows-aarch64/engines")]
+        );
+        assert!(
+            !roots.iter().any(|root| root.ends_with("dist/engines")
+                || root == Path::new("D:/src/mujrim/engines")
+                || root == Path::new("C:/Mujrim/engines")),
+            "must not search parent/cwd/dist engine trees: {roots:?}"
+        );
+    }
+
+    #[test]
+    fn local_engines_root_is_beside_executable() {
+        assert_eq!(
+            local_engines_root(Path::new("C:/Mujrim/mujrim-ui.exe")),
+            Some(PathBuf::from("C:/Mujrim/engines"))
         );
     }
 
