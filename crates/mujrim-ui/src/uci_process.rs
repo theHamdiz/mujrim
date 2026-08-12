@@ -143,6 +143,7 @@ pub fn query_best_move(
         depth,
         movetime: Some(movetime),
         node_limit: None,
+        clock: None,
     };
     let result = run_cached_search(&mut pool[index], &request, search.ponder, cancel_epoch);
     if result.is_err() {
@@ -363,6 +364,7 @@ fn run_cached_search(
             depth: request.depth,
             movetime: None,
             node_limit: None,
+            clock: None,
         };
         if engine.session.start_ponder(&ponder_request).is_ok() {
             engine.predicted_fen = Some(predicted_fen);

@@ -191,6 +191,7 @@ fn search_external_engine(
         depth,
         movetime: Some(Duration::from_millis(time_limit_ms.max(1))),
         node_limit: None,
+        clock: None,
     })?;
     let best_move = find_legal_uci_move(board, &info.best_move).ok_or_else(|| {
         format!(

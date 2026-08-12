@@ -29,6 +29,7 @@ fn ponder_request(nodes: u64) -> SearchRequest {
         depth: 64,
         movetime: None,
         node_limit: Some(nodes),
+        clock: None,
     }
 }
 

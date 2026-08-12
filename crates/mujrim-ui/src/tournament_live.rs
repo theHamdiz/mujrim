@@ -45,7 +45,7 @@ pub struct StandingRow {
     pub performance: Option<f64>,
 }
 
-/// In-progress game board for the hybrid live arena.
+/// In-progress game board for the live arena.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveGameBoard {
     pub game_key: String,
@@ -59,6 +59,8 @@ pub struct LiveGameBoard {
     pub score_cp: i32,
     pub depth: i32,
     pub nodes: u64,
+    pub white_clock_ms: Option<u64>,
+    pub black_clock_ms: Option<u64>,
 }
 
 /// Replayable tournament game for the hub board viewer.
@@ -185,6 +187,8 @@ impl LiveTournamentSnapshot {
         depth: i32,
         nodes: u64,
         moves: Vec<String>,
+        white_clock_ms: Option<u64>,
+        black_clock_ms: Option<u64>,
     ) {
         if let Some(game) = self
             .live_games
@@ -196,6 +200,12 @@ impl LiveTournamentSnapshot {
             game.score_cp = score_cp;
             game.depth = depth;
             game.nodes = nodes;
+            if white_clock_ms.is_some() {
+                game.white_clock_ms = white_clock_ms;
+            }
+            if black_clock_ms.is_some() {
+                game.black_clock_ms = black_clock_ms;
+            }
             let _ = ply;
         }
     }
@@ -292,6 +302,16 @@ pub fn result_label(white_score: f64) -> &'static str {
     }
 }
 
+pub fn format_clock_ms(ms: Option<u64>) -> String {
+    let Some(ms) = ms else {
+        return "--:--".to_owned();
+    };
+    let total_secs = ms / 1000;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{mins}:{secs:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +331,8 @@ mod tests {
         assert_eq!(score_label(1.5, 0.5), "1.5–0.5");
         assert_eq!(result_label(1.0), "1-0");
         assert_eq!(result_label(0.5), "½-½");
+        assert_eq!(format_clock_ms(Some(185_000)), "3:05");
+        assert_eq!(format_clock_ms(None), "--:--");
 
         let entrants = vec![
             Entrant {
@@ -368,9 +390,22 @@ mod tests {
             score_cp: 0,
             depth: 0,
             nodes: 0,
+            white_clock_ms: Some(180_000),
+            black_clock_ms: Some(180_000),
         });
-        snap.apply_ply("g1", 1, "e2e4".into(), 12, 8, 1000, vec!["e2e4".into()]);
+        snap.apply_ply(
+            "g1",
+            1,
+            "e2e4".into(),
+            12,
+            8,
+            1000,
+            vec!["e2e4".into()],
+            Some(179_000),
+            Some(180_000),
+        );
         assert_eq!(snap.live_games[0].moves.len(), 1);
+        assert_eq!(snap.live_games[0].white_clock_ms, Some(179_000));
         snap.finish_live_game("g1", 1.0, vec!["e2e4".into(), "e7e5".into()]);
         assert!(snap.live_games.is_empty());
         assert_eq!(snap.played_games.len(), 1);

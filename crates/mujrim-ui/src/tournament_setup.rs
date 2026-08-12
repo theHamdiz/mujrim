@@ -1,6 +1,6 @@
 //! CuteChess-inspired tournament setup state (Mujrim theme).
 
-use mujrim_benchmarker::strength::MatchConfig;
+use mujrim_benchmarker::strength::{MatchClock, MatchConfig};
 use mujrim_study::tournament::TournamentFormat;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,14 +13,12 @@ pub struct TournamentSetup {
     pub format: TournamentFormat,
     pub swiss_rounds: u32,
     pub games_per_encounter: u32,
+    /// Always 1 — one full board like Engine vs Engine / CuteChess.
     pub concurrency: u32,
     /// Reserved for paired color-swap UI (always on in runner today).
     #[allow(dead_code)]
     pub swap_sides: bool,
-    pub time_mode: TimeMode,
-    pub nodes_per_move: u32,
-    pub move_time_ms: u32,
-    pub max_depth: i32,
+    pub time_control: TimeControlPreset,
     pub hash_mb: u32,
     pub engine_threads: u32,
     pub max_plies: u32,
@@ -30,24 +28,46 @@ pub struct TournamentSetup {
     pub pgn_output: String,
 }
 
+/// Real-time Fischer clocks with a secondary control after move 40.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TimeMode {
-    Nodes,
-    MoveTime,
-    Depth,
+pub enum TimeControlPreset {
+    /// 3 minutes + 2s/move, then +3 minutes after 40 moves.
+    ThreePlusTwo,
+    /// 5 minutes + 3s/move, then +5 minutes after 40 moves.
+    FivePlusThree,
 }
 
-impl TimeMode {
-    pub const ALL: [Self; 3] = [Self::Nodes, Self::MoveTime, Self::Depth];
-}
+impl TimeControlPreset {
+    pub const ALL: [Self; 2] = [Self::ThreePlusTwo, Self::FivePlusThree];
 
-impl std::fmt::Display for TimeMode {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    pub fn match_clock(self) -> MatchClock {
         match self {
-            Self::Nodes => write!(formatter, "Nodes per move"),
-            Self::MoveTime => write!(formatter, "Move time"),
-            Self::Depth => write!(formatter, "Fixed depth"),
+            Self::ThreePlusTwo => MatchClock {
+                initial: Duration::from_secs(3 * 60),
+                increment: Duration::from_secs(2),
+                bonus_after_moves: 40,
+                bonus: Duration::from_secs(3 * 60),
+            },
+            Self::FivePlusThree => MatchClock {
+                initial: Duration::from_secs(5 * 60),
+                increment: Duration::from_secs(3),
+                bonus_after_moves: 40,
+                bonus: Duration::from_secs(5 * 60),
+            },
         }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ThreePlusTwo => "3+2 (+3 after 40)",
+            Self::FivePlusThree => "5+3 (+5 after 40)",
+        }
+    }
+}
+
+impl std::fmt::Display for TimeControlPreset {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.label())
     }
 }
 
@@ -61,13 +81,10 @@ impl Default for TournamentSetup {
             games_per_encounter: 1,
             concurrency: 1,
             swap_sides: true,
-            time_mode: TimeMode::Nodes,
-            nodes_per_move: 2_000,
-            move_time_ms: 100,
-            max_depth: 12,
-            hash_mb: 16,
+            time_control: TimeControlPreset::ThreePlusTwo,
+            hash_mb: 64,
             engine_threads: 1,
-            max_plies: 160,
+            max_plies: 400,
             selected_engine_paths: Vec::new(),
             pgn_output: String::new(),
         }
@@ -79,8 +96,8 @@ impl TournamentSetup {
         if self.selected_engine_paths.len() < 2 {
             return Err("Select at least two host-native engines.".to_owned());
         }
-        if !(1..=4).contains(&self.concurrency) {
-            return Err("Concurrency must be between 1 and 4.".to_owned());
+        if self.concurrency != 1 {
+            return Err("Tournament games run one at a time on a full board.".to_owned());
         }
         if self.games_per_encounter == 0 {
             return Err("Games per encounter must be at least 1.".to_owned());
@@ -89,18 +106,11 @@ impl TournamentSetup {
     }
 
     pub fn to_match_config(&self) -> MatchConfig {
-        let (nodes_per_move, move_time, max_depth) = match self.time_mode {
-            TimeMode::Nodes => (self.nodes_per_move.max(1) as u64, None, 128),
-            TimeMode::MoveTime => (
-                0,
-                Some(Duration::from_millis(self.move_time_ms.max(1) as u64)),
-                128,
-            ),
-            TimeMode::Depth => (0, None, self.max_depth.max(1)),
-        };
+        let clock = self.time_control.match_clock();
+        let read_timeout = clock.initial + clock.bonus + Duration::from_secs(90);
         MatchConfig {
             pairs: self.games_per_encounter.max(1) as usize,
-            concurrency: self.concurrency.clamp(1, 4) as usize,
+            concurrency: 1,
             hash_mb: self.hash_mb.max(1) as usize,
             engine_threads: self.engine_threads.max(1) as usize,
             max_engine_memory_mb: 384,
@@ -111,9 +121,11 @@ impl TournamentSetup {
             checkpoint_path: None,
             stop_flag: None,
             game_progress: None,
-            nodes_per_move,
-            move_time,
-            max_depth,
+            nodes_per_move: 0,
+            move_time: None,
+            clock: Some(clock),
+            max_depth: 128,
+            read_timeout,
             ..MatchConfig::default()
         }
     }
@@ -124,29 +136,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_requires_two_engines_and_sane_concurrency() {
+    fn validate_requires_two_engines_and_single_board() {
         let mut setup = TournamentSetup::default();
         assert!(setup.validate().is_err());
         setup.selected_engine_paths = vec![PathBuf::from("a.exe"), PathBuf::from("b.exe")];
         assert!(setup.validate().is_ok());
-        setup.concurrency = 8;
+        setup.concurrency = 2;
         assert!(setup.validate().is_err());
     }
 
     #[test]
-    fn time_mode_maps_into_match_config() {
-        let mut setup = TournamentSetup {
+    fn time_control_maps_into_match_clock() {
+        let setup = TournamentSetup {
             selected_engine_paths: vec![PathBuf::from("a"), PathBuf::from("b")],
-            time_mode: TimeMode::MoveTime,
-            move_time_ms: 250,
+            time_control: TimeControlPreset::FivePlusThree,
             ..TournamentSetup::default()
         };
         let config = setup.to_match_config();
-        assert_eq!(config.move_time, Some(Duration::from_millis(250)));
+        let clock = config.clock.expect("clock TC");
+        assert_eq!(clock.initial, Duration::from_secs(5 * 60));
+        assert_eq!(clock.increment, Duration::from_secs(3));
+        assert_eq!(clock.bonus_after_moves, 40);
+        assert_eq!(clock.bonus, Duration::from_secs(5 * 60));
+        assert!(config.move_time.is_none());
         assert_eq!(config.nodes_per_move, 0);
-        setup.time_mode = TimeMode::Depth;
-        setup.max_depth = 9;
-        let depth = setup.to_match_config();
-        assert_eq!(depth.max_depth, 9);
+        assert_eq!(config.concurrency, 1);
+
+        let three = TimeControlPreset::ThreePlusTwo.match_clock();
+        assert_eq!(three.initial, Duration::from_secs(3 * 60));
+        assert_eq!(three.increment, Duration::from_secs(2));
+        assert_eq!(three.bonus, Duration::from_secs(3 * 60));
     }
 }

@@ -118,6 +118,7 @@ pub fn run_external_search(
         depth: config.depth,
         movetime: config.time_per_position,
         node_limit: config.node_limit,
+        clock: None,
     })
 }
 
@@ -166,6 +167,7 @@ pub fn run_external_bench(
                     .then_some(config.time_per_position)
                     .flatten(),
                 node_limit: fixed_nodes,
+                clock: None,
             })
         });
         let elapsed = start.elapsed();

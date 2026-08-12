@@ -530,6 +530,15 @@ pub struct EngineOptions {
     pub custom: Vec<(String, String)>,
 }
 
+/// Remaining clock + increment for a UCI `go wtime/btime/winc/binc` search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockLimit {
+    pub white_ms: u64,
+    pub black_ms: u64,
+    pub white_inc_ms: u64,
+    pub black_inc_ms: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchRequest {
     /// Initial FEN for the position history.
@@ -539,6 +548,8 @@ pub struct SearchRequest {
     pub depth: i32,
     pub movetime: Option<Duration>,
     pub node_limit: Option<u64>,
+    /// When set (and nodes/movetime are unset), emit a real-time clock `go`.
+    pub clock: Option<ClockLimit>,
 }
 
 impl SearchRequest {
@@ -549,6 +560,7 @@ impl SearchRequest {
             depth,
             movetime: None,
             node_limit: None,
+            clock: None,
         }
     }
 }
@@ -1380,6 +1392,15 @@ fn uci_go_command_with_prefix(req: &SearchRequest, prefix: &str) -> String {
     } else if let Some(movetime) = req.movetime {
         cmd.push_str(&format!(" movetime {}", movetime.as_millis().max(1)));
         return cmd;
+    } else if let Some(clock) = req.clock {
+        cmd.push_str(&format!(
+            " wtime {} btime {} winc {} binc {}",
+            clock.white_ms.max(1),
+            clock.black_ms.max(1),
+            clock.white_inc_ms,
+            clock.black_inc_ms
+        ));
+        return cmd;
     }
     cmd.push_str(&format!(" depth {}", req.depth.max(1)));
     cmd
@@ -1504,6 +1525,7 @@ mod tests {
             depth: 64,
             movetime: Some(Duration::from_millis(250)),
             node_limit: Some(1_000),
+            clock: None,
         };
 
         assert_eq!(uci_go_command(&request), "go nodes 1000");
@@ -1516,6 +1538,21 @@ mod tests {
 
         let request = SearchRequest {
             movetime: None,
+            clock: Some(ClockLimit {
+                white_ms: 180_000,
+                black_ms: 179_000,
+                white_inc_ms: 2_000,
+                black_inc_ms: 2_000,
+            }),
+            ..request
+        };
+        assert_eq!(
+            uci_go_command(&request),
+            "go wtime 180000 btime 179000 winc 2000 binc 2000"
+        );
+
+        let request = SearchRequest {
+            clock: None,
             ..request
         };
         assert_eq!(uci_go_command(&request), "go depth 64");
@@ -1529,6 +1566,7 @@ mod tests {
             depth: 32,
             movetime: None,
             node_limit: Some(50_000),
+            clock: None,
         };
         assert_eq!(uci_ponder_command(&request), "go ponder nodes 50000");
 

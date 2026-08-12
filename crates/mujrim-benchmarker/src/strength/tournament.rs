@@ -130,6 +130,8 @@ pub enum TournamentEvent {
         depth: i32,
         nodes: u64,
         moves: Vec<String>,
+        white_clock_ms: Option<u64>,
+        black_clock_ms: Option<u64>,
     },
     GameFinished {
         game_key: String,
@@ -471,6 +473,8 @@ fn execute_plan(
                     depth,
                     nodes,
                     moves,
+                    white_clock_ms,
+                    black_clock_ms,
                 } => callback(TournamentEvent::PlyPlayed {
                     game_key,
                     ply,
@@ -479,6 +483,8 @@ fn execute_plan(
                     depth,
                     nodes,
                     moves,
+                    white_clock_ms,
+                    black_clock_ms,
                 }),
                 GameProgressEvent::Finished {
                     game_key,
@@ -576,6 +582,11 @@ fn format_key(format: TournamentFormat) -> &'static str {
 }
 
 fn ensure_compatible_time_control(engines: &[TournamentEngine], config: &mut MatchConfig) {
+    if config.clock.is_some() {
+        config.move_time = None;
+        config.nodes_per_move = 0;
+        return;
+    }
     if engines
         .iter()
         .all(|engine| engine.search_limits.fixed_nodes)
@@ -665,6 +676,30 @@ mod tests {
         assert_eq!(config.move_time, None);
         assert_eq!(config.nodes_per_move, 0);
         assert_eq!(config.max_depth, 10);
+    }
+
+    #[test]
+    fn clock_time_control_is_preserved() {
+        let engines = vec![TournamentEngine {
+            engine: EngineSpec::new(PathBuf::from("stockfish.exe")),
+            established_elo: None,
+            search_limits: SearchLimitSupport::STANDARD,
+        }];
+        let mut config = MatchConfig {
+            clock: Some(crate::strength::MatchClock {
+                initial: std::time::Duration::from_secs(180),
+                increment: std::time::Duration::from_secs(2),
+                bonus_after_moves: 40,
+                bonus: std::time::Duration::from_secs(180),
+            }),
+            nodes_per_move: 20_000,
+            move_time: Some(std::time::Duration::from_millis(100)),
+            ..MatchConfig::default()
+        };
+        ensure_compatible_time_control(&engines, &mut config);
+        assert!(config.clock.is_some());
+        assert!(config.move_time.is_none());
+        assert_eq!(config.nodes_per_move, 0);
     }
 
     #[test]

@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use mujrim_protocols::{EngineOptions, EngineSession, ProtocolKind, SearchInfo, SearchRequest};
+use mujrim_protocols::{
+    ClockLimit, EngineOptions, EngineSession, ProtocolKind, SearchInfo, SearchRequest,
+};
 use types::Color;
 
 use super::openings::{Opening, default_openings, openings_fingerprint, resolve_legal_move};
@@ -62,12 +64,24 @@ pub enum GameProgressEvent {
         depth: i32,
         nodes: u64,
         moves: Vec<String>,
+        white_clock_ms: Option<u64>,
+        black_clock_ms: Option<u64>,
     },
     Finished {
         game_key: String,
         white_score: f64,
         moves: Vec<String>,
     },
+}
+
+/// Real-time game clock (CuteChess / FIDE-style with a secondary control).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatchClock {
+    pub initial: Duration,
+    pub increment: Duration,
+    /// Full moves (by each side) after which `bonus` is added once to both clocks.
+    pub bonus_after_moves: u32,
+    pub bonus: Duration,
 }
 
 #[derive(Clone)]
@@ -78,6 +92,8 @@ pub struct MatchConfig {
     pub nodes_per_move: u64,
     /// Optional wall-clock budget. When present it replaces fixed nodes and depth.
     pub move_time: Option<Duration>,
+    /// Optional Fischer clock. When present it replaces nodes / movetime / depth.
+    pub clock: Option<MatchClock>,
     pub max_depth: i32,
     pub hash_mb: usize,
     pub engine_threads: usize,
@@ -111,6 +127,7 @@ impl std::fmt::Debug for MatchConfig {
             .field("concurrency", &self.concurrency)
             .field("nodes_per_move", &self.nodes_per_move)
             .field("move_time", &self.move_time)
+            .field("clock", &self.clock)
             .field("max_depth", &self.max_depth)
             .field("hash_mb", &self.hash_mb)
             .field("engine_threads", &self.engine_threads)
@@ -128,6 +145,7 @@ impl Default for MatchConfig {
             concurrency: 1,
             nodes_per_move: 20_000,
             move_time: None,
+            clock: None,
             max_depth: 128,
             hash_mb: 32,
             engine_threads: 1,
@@ -1185,6 +1203,10 @@ fn play_game(
         ));
     }
 
+    let mut white_clock = config.clock.map(|clock| clock.initial);
+    let mut black_clock = white_clock;
+    let mut clock_bonus_applied = false;
+
     for ply in moves.len()..config.max_plies {
         let side = board.side_to_move;
         let candidate_turn = (side == Color::White) == candidate_white;
@@ -1193,13 +1215,24 @@ fn play_game(
         } else {
             &mut *reference
         };
+        let using_clock = config.clock.is_some();
         let request = SearchRequest {
             fen: opening.initial_fen.clone(),
             moves: moves.clone(),
             depth: config.max_depth,
-            movetime: config.move_time,
-            node_limit: (config.move_time.is_none() && config.nodes_per_move > 0)
-                .then_some(config.nodes_per_move),
+            movetime: if using_clock { None } else { config.move_time },
+            node_limit: if using_clock {
+                None
+            } else {
+                (config.move_time.is_none() && config.nodes_per_move > 0)
+                    .then_some(config.nodes_per_move)
+            },
+            clock: config.clock.map(|clock| ClockLimit {
+                white_ms: white_clock.unwrap_or(clock.initial).as_millis().max(1) as u64,
+                black_ms: black_clock.unwrap_or(clock.initial).as_millis().max(1) as u64,
+                white_inc_ms: clock.increment.as_millis() as u64,
+                black_inc_ms: clock.increment.as_millis() as u64,
+            }),
         };
         let search_started = Instant::now();
         let info = match session.search(&request) {
@@ -1223,6 +1256,34 @@ fn play_game(
             }
         };
         let search_elapsed = search_started.elapsed();
+        if let Some(clock) = config.clock {
+            let remaining = if side == Color::White {
+                &mut white_clock
+            } else {
+                &mut black_clock
+            };
+            if let Some(time_left) = remaining.as_mut() {
+                if search_elapsed >= *time_left {
+                    return emit_done(with_moves(
+                        with_telemetry(
+                            forfeit_with_progress(
+                                candidate_white,
+                                side,
+                                format!("{side:?} lost on time"),
+                                ply,
+                                nodes,
+                                started.elapsed(),
+                            ),
+                            &candidate_telemetry,
+                            &reference_telemetry,
+                        ),
+                        &moves,
+                    ));
+                }
+                *time_left -= search_elapsed;
+                *time_left += clock.increment;
+            }
+        }
         if candidate_turn {
             candidate_telemetry.observe(&info, search_elapsed);
         } else {
@@ -1287,6 +1348,18 @@ fn play_game(
         };
         moves.push(mv.to_uci());
         board.make_move(mv);
+        if let Some(clock) = config.clock
+            && !clock_bonus_applied
+            && moves.len() >= clock.bonus_after_moves.max(1) as usize * 2
+        {
+            if let Some(time) = white_clock.as_mut() {
+                *time += clock.bonus;
+            }
+            if let Some(time) = black_clock.as_mut() {
+                *time += clock.bonus;
+            }
+            clock_bonus_applied = true;
+        }
         emit(GameProgressEvent::Ply {
             game_key: game_key.to_owned(),
             ply: moves.len(),
@@ -1295,6 +1368,8 @@ fn play_game(
             depth: info.depth,
             nodes: info.nodes,
             moves: moves.clone(),
+            white_clock_ms: white_clock.map(|d| d.as_millis() as u64),
+            black_clock_ms: black_clock.map(|d| d.as_millis() as u64),
         });
         let played = ply + 1;
 
@@ -1541,6 +1616,18 @@ mod tests {
             "mujrim-duel-checkpoint-{}-{nonce}.jsonl",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn match_clock_bonus_targets_move_forty() {
+        let clock = MatchClock {
+            initial: Duration::from_secs(180),
+            increment: Duration::from_secs(2),
+            bonus_after_moves: 40,
+            bonus: Duration::from_secs(180),
+        };
+        assert_eq!(clock.bonus_after_moves.max(1) as usize * 2, 80);
+        assert_eq!(clock.initial + clock.bonus, Duration::from_secs(360));
     }
 
     #[test]

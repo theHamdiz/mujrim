@@ -380,6 +380,18 @@ if (-not $PackageOnly) {
     Write-Host "==> PackageOnly: skipping cargo builds"
 }
 
+# Ensure third-party engines exist under dist/engines/<id>/bin/<arch>/ before filtering.
+$stockfishProbe = Join-Path $Dist "engines\stockfish\bin"
+$vendorScript = Join-Path $PSScriptRoot "vendor-tournament-engines.ps1"
+if ((Test-Path $vendorScript) -and -not (Test-Path $stockfishProbe)) {
+    Write-Host "==> Vendoring tournament engines into dist/engines"
+    try {
+        & $vendorScript
+    } catch {
+        Write-Host "  warning: engine vendor skipped: $_"
+    }
+}
+
 Package-Arch `
     -Triple "aarch64-pc-windows-msvc" `
     -ArchDir "windows-aarch64" `

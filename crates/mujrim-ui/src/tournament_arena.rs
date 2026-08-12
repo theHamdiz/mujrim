@@ -35,6 +35,8 @@ mod tests {
                 score_cp: 0,
                 depth: 0,
                 nodes: 0,
+                white_clock_ms: None,
+                black_clock_ms: None,
             })
             .collect::<Vec<_>>();
         let visible = visible_live_boards(&boards, 2);

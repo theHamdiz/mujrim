@@ -196,6 +196,7 @@ fn query_multipv_bundle(
         depth,
         movetime: Some(movetime),
         node_limit: None,
+        clock: None,
     })?;
     if !info.multipv_lines.is_empty() {
         return Ok(info

@@ -365,6 +365,9 @@ struct App {
     selected_tournament_game_id: Option<usize>,
     tournament_review_active: bool,
     tournament_setup: tournament_setup::TournamentSetup,
+    show_tournament_setup: bool,
+    tournament_setup_offset: iced::Vector,
+    tournament_setup_drag: Option<(iced::Point, iced::Vector)>,
     show_tournament_results: bool,
     /// Latest multi-engine analysis arrows for the analysis/review board.
     analysis_arrows: Vec<BoardArrow>,
@@ -556,15 +559,14 @@ enum Msg {
     ToggleTournamentResults,
     TournamentEventNameChanged(String),
     TournamentSiteChanged(String),
-    TournamentConcurrencyChanged(i32),
     TournamentGamesPerEncounterChanged(i32),
     TournamentHashChanged(i32),
     TournamentThreadsChanged(i32),
-    TournamentNodesChanged(i32),
-    TournamentMoveTimeChanged(i32),
-    TournamentDepthChanged(i32),
-    TournamentTimeModeChanged(tournament_setup::TimeMode),
+    TournamentTimeControlChanged(tournament_setup::TimeControlPreset),
     TournamentToggleEngine(String),
+    ToggleTournamentSetup,
+    StartTournamentSetupDrag,
+    StopTournamentSetupDrag,
     EngineCatalogProbed(Vec<EngineMetadata>),
     AnalyzeGame,
     GameAnalysisFinished(Result<Vec<AnalyzedPly>, String>),
@@ -772,6 +774,9 @@ impl Default for App {
             selected_tournament_game_id: None,
             tournament_review_active: false,
             tournament_setup: tournament_setup::TournamentSetup::default(),
+            show_tournament_setup: true,
+            tournament_setup_offset: iced::Vector::new(0.0, 0.0),
+            tournament_setup_drag: None,
             show_tournament_results: false,
             analysis_arrows: Vec::new(),
             analysis_status: "Pick engines and run multi-engine analysis.".to_owned(),
@@ -942,6 +947,19 @@ impl App {
                     iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                         iced::mouse::Button::Left,
                     )) => Some(Msg::StopOptionsDrag),
+                    _ => None,
+                },
+            ));
+        }
+        if self.show_tournament_setup {
+            subs.push(iced::event::listen_with(
+                |event, _status, _id| match event {
+                    iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                        Some(Msg::CursorMoved(position))
+                    }
+                    iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                        iced::mouse::Button::Left,
+                    )) => Some(Msg::StopTournamentSetupDrag),
                     _ => None,
                 },
             ));
@@ -1415,6 +1433,8 @@ impl App {
             }
             Msg::OpenTournaments => {
                 self.screen = Screen::Tournaments;
+                self.show_tournament_setup = self.live_tournament.is_none();
+                self.tournament_setup_drag = None;
                 self.refresh_tournament_history();
                 Task::none()
             }
@@ -1528,10 +1548,6 @@ impl App {
                 self.tournament_setup.site = value;
                 Task::none()
             }
-            Msg::TournamentConcurrencyChanged(value) => {
-                self.tournament_setup.concurrency = value.clamp(1, 4) as u32;
-                Task::none()
-            }
             Msg::TournamentGamesPerEncounterChanged(value) => {
                 self.tournament_setup.games_per_encounter = value.max(1) as u32;
                 Task::none()
@@ -1544,20 +1560,24 @@ impl App {
                 self.tournament_setup.engine_threads = value.max(1) as u32;
                 Task::none()
             }
-            Msg::TournamentNodesChanged(value) => {
-                self.tournament_setup.nodes_per_move = value.max(1) as u32;
+            Msg::TournamentTimeControlChanged(preset) => {
+                self.tournament_setup.time_control = preset;
                 Task::none()
             }
-            Msg::TournamentMoveTimeChanged(value) => {
-                self.tournament_setup.move_time_ms = value.max(1) as u32;
+            Msg::ToggleTournamentSetup => {
+                if self.live_tournament.is_none() {
+                    self.show_tournament_setup = !self.show_tournament_setup;
+                    self.tournament_setup_drag = None;
+                }
                 Task::none()
             }
-            Msg::TournamentDepthChanged(value) => {
-                self.tournament_setup.max_depth = value.max(1);
+            Msg::StartTournamentSetupDrag => {
+                self.tournament_setup_drag =
+                    Some((self.cursor_position, self.tournament_setup_offset));
                 Task::none()
             }
-            Msg::TournamentTimeModeChanged(mode) => {
-                self.tournament_setup.time_mode = mode;
+            Msg::StopTournamentSetupDrag => {
+                self.tournament_setup_drag = None;
                 Task::none()
             }
             Msg::TournamentToggleEngine(path) => {
@@ -1612,10 +1632,14 @@ impl App {
                 self.selected_tournament_game_id = None;
                 self.tournament_review_active = false;
                 self.show_tournament_results = false;
+                self.show_tournament_setup = false;
+                self.tournament_setup_drag = None;
+                self.tournament_setup.concurrency = 1;
                 self.tournament_format = self.tournament_setup.format;
                 self.tournament_status = format!(
-                    "Running {} — live boards update move-by-move (concurrency {}).",
-                    self.tournament_setup.event, self.tournament_setup.concurrency
+                    "Running {} — {} · one full board, real clocks.",
+                    self.tournament_setup.event,
+                    self.tournament_setup.time_control.label()
                 );
                 let setup = self.tournament_setup.clone();
                 Task::perform(run_quick_tournament(engines, setup, handle), |summary| {
@@ -2525,6 +2549,14 @@ impl App {
                         (original.y + position.y - anchor.y).clamp(-max_y, max_y),
                     );
                 }
+                if let Some((anchor, original)) = self.tournament_setup_drag {
+                    let max_x = ((self.window_width - 620.0) * 0.5).max(0.0);
+                    let max_y = ((self.window_height - 680.0) * 0.5).max(0.0);
+                    self.tournament_setup_offset = iced::Vector::new(
+                        (original.x + position.x - anchor.x).clamp(-max_x, max_x),
+                        (original.y + position.y - anchor.y).clamp(-max_y, max_y),
+                    );
+                }
                 Task::none()
             }
             Msg::SetBoardTheme(t) => {
@@ -2984,6 +3016,9 @@ impl App {
         // Wrap in options modal overlay if open
         let page: Element<'_, Msg> = if self.show_options {
             let modal = self.view_options_modal();
+            iced::widget::stack![content, modal].into()
+        } else if matches!(self.screen, Screen::Tournaments) && self.show_tournament_setup {
+            let modal = self.view_tournament_setup_modal();
             iced::widget::stack![content, modal].into()
         } else {
             content
@@ -4351,23 +4386,31 @@ impl App {
             .selected_tournament_game_id
             .is_none()
             .then(|| {
-                tournament_arena::visible_live_boards(
-                    &self.live_tournament_view.live_games,
-                    self.tournament_setup.concurrency as usize,
-                )
-                .into_iter()
-                .next_back()
+                tournament_arena::visible_live_boards(&self.live_tournament_view.live_games, 1)
+                    .into_iter()
+                    .next_back()
             })
             .flatten();
         let played = self
             .selected_tournament_game_id
             .and_then(|id| self.live_tournament_view.game(id));
         if played.is_none() && live_focus.is_none() && !self.tournament_review_active {
-            return text(
-                "Live boards appear here while games run. Select a finished game to replay.",
+            return container(
+                column![
+                    text("Configure the tournament, then Start.")
+                        .size(18)
+                        .color(palette.text_primary),
+                    text("Games play with real clocks on one full board — like Engine vs Engine.")
+                        .size(13)
+                        .color(palette.text_secondary),
+                ]
+                .spacing(8)
+                .align_x(Alignment::Center),
             )
-            .size(13)
-            .color(palette.text_secondary)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .into();
         }
         let Some(gs) = self.game.as_ref().filter(|_| self.tournament_review_active) else {
@@ -4377,9 +4420,15 @@ impl App {
                 .into();
         };
 
-        let sq_size = ((self.window_width * 0.28) / 8.0)
-            .min(56.0)
-            .clamp(28.0, 56.0);
+        let title_bar_h = 48.0_f32;
+        let padding = 40.0_f32;
+        let available_h = (self.window_height - title_bar_h - padding - 72.0).max(200.0);
+        let panel_w = (self.window_width * 0.23).clamp(250.0, 400.0);
+        let available_board_w = (self.window_width - panel_w - padding * 2.0 - 20.0).max(224.0);
+        let sq_size = (available_h * 0.90 / 8.0)
+            .min(available_board_w / 8.0)
+            .clamp(28.0, 120.0);
+
         let board = board_view::view_board(
             gs,
             &self.assets,
@@ -4411,13 +4460,51 @@ impl App {
         } else {
             "Tournament board".to_owned()
         };
+        let white_clock = live_focus
+            .as_ref()
+            .and_then(|live| live.white_clock_ms)
+            .or_else(|| {
+                Some(
+                    self.tournament_setup
+                        .time_control
+                        .match_clock()
+                        .initial
+                        .as_millis() as u64,
+                )
+            });
+        let black_clock = live_focus
+            .as_ref()
+            .and_then(|live| live.black_clock_ms)
+            .or(white_clock);
+        let clock_row = row![
+            text(format!(
+                "White {}  {}",
+                live_focus
+                    .as_ref()
+                    .map(|live| live.white.as_str())
+                    .or_else(|| played.map(|game| game.white.as_str()))
+                    .unwrap_or("—"),
+                tournament_live::format_clock_ms(white_clock)
+            ))
+            .size(14)
+            .color(palette.text_primary),
+            Space::new().width(Length::Fill),
+            text(format!(
+                "{}  {} Black",
+                tournament_live::format_clock_ms(black_clock),
+                live_focus
+                    .as_ref()
+                    .map(|live| live.black.as_str())
+                    .or_else(|| played.map(|game| game.black.as_str()))
+                    .unwrap_or("—"),
+            ))
+            .size(14)
+            .color(palette.text_primary),
+        ]
+        .width(Length::Fill);
+
         let subtitle = if let Some(played) = played {
-            format!(
-                "White {} · Black {} · {}",
-                played.white,
-                played.black,
-                played.result_label()
-            )
+            format!("Result {}", played.result_label())
         } else if let Some(live) = &live_focus {
             format!(
                 "Last {} · {} · d{} · {} nodes",
@@ -4433,36 +4520,14 @@ impl App {
         } else {
             self.engine_info.clone()
         };
-        let ply_label = format!("{} plies", self.move_log.len());
-
-        let result_panel = container(
-            column![
-                text(title).size(16).color(palette.text_primary),
-                text(subtitle).size(13).color(palette.text_secondary),
-                text(ply_label).size(12).color(palette.text_secondary),
-                text(&self.engine_info).size(12).color(palette.accent_alt),
-            ]
-            .spacing(4),
-        )
-        .padding(10)
-        .width(Length::Fill)
-        .style(move |_theme| container::Style {
-            background: Some(iced::Background::Color(palette.sidebar)),
-            border: iced::Border {
-                radius: 8.0.into(),
-                width: 1.0,
-                color: palette.border,
-            },
-            ..Default::default()
-        });
 
         let moves_content: Element<'_, Msg> = if self.move_log.is_empty() {
-            text("No moves recorded.")
-                .size(12)
+            text("No moves yet.")
+                .size(13)
                 .color(palette.text_secondary)
                 .into()
         } else {
-            let mut moves_col = column![].spacing(2).padding([2, 4]);
+            let mut moves_col = column![].spacing(2).padding([4, 8]);
             for (i, pair) in self.move_log.chunks(2).enumerate() {
                 let white_index = i * 2;
                 let white_move = move_history_button(
@@ -4488,36 +4553,38 @@ impl App {
                         palette,
                     )
                 } else {
-                    container(text("…").size(12).color(palette.text_secondary))
-                        .width(72)
+                    container(text("…").size(13).color(palette.text_secondary))
+                        .width(88)
                         .into()
                 };
                 moves_col = moves_col.push(
                     row![
                         text(format!("{}.", i + 1))
-                            .size(11)
+                            .size(12)
                             .color(palette.text_secondary)
-                            .width(28),
+                            .width(32),
                         white_move,
                         black_move
                     ]
-                    .spacing(4)
+                    .spacing(6)
                     .align_y(Alignment::Center),
                 );
             }
-            scrollable(moves_col).height(Length::Fixed(180.0)).into()
+            scrollable(moves_col).height(Length::Fill).into()
         };
 
         let mut side = column![
-            result_panel,
-            text("Move list").size(12).color(palette.text_secondary),
+            text(title).size(16).color(palette.text_primary),
+            text(subtitle).size(12).color(palette.text_secondary),
+            text("Moves").size(13).color(palette.text_secondary),
             container(moves_content)
-                .padding(6)
+                .padding(8)
                 .width(Length::Fill)
+                .height(Length::Fill)
                 .style(move |_theme| container::Style {
                     background: Some(iced::Background::Color(palette.sidebar)),
                     border: iced::Border {
-                        radius: 8.0.into(),
+                        radius: 6.0.into(),
                         width: 1.0,
                         color: palette.border,
                     },
@@ -4525,19 +4592,174 @@ impl App {
                 }),
         ]
         .spacing(8)
-        .width(Length::FillPortion(2));
+        .width(panel_w);
 
-        if self.analysis_scores_cp.iter().any(Option::is_some) {
-            side = side
-                .push(
-                    text("Eval histogram")
+        if self.review_ply.is_some() {
+            side = side.push(styled_button(
+                "Return to final position",
+                Msg::ReturnToLivePosition,
+            ));
+        }
+        if played.is_some() {
+            side = side.push(
+                row![
+                    styled_button("Analyze game", Msg::AnalyzeGame),
+                    styled_button("Open in Analysis", Msg::OpenAnalysis),
+                ]
+                .spacing(8),
+            );
+        }
+
+        column![
+            clock_row,
+            Space::new().height(8),
+            row![container(board).width(Length::Fill), side,]
+                .spacing(16)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ]
+        .spacing(4)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
+    fn view_tournament_hub(&self) -> Element<'_, Msg> {
+        let palette = self.settings.board_theme.gui_palette();
+        let live = &self.live_tournament_view;
+        let running = self.live_tournament.is_some();
+
+        let mut toolbar = row![].spacing(8);
+        if !running {
+            toolbar = toolbar.push(styled_button(
+                if self.show_tournament_setup {
+                    "Hide setup"
+                } else {
+                    "Tournament setup"
+                },
+                Msg::ToggleTournamentSetup,
+            ));
+        } else {
+            toolbar = toolbar.push(styled_button("Cancel safely", Msg::CancelTournament));
+        }
+        toolbar = toolbar.push(styled_button(
+            if self.show_tournament_results {
+                "Hide results"
+            } else {
+                "Results"
+            },
+            Msg::ToggleTournamentResults,
+        ));
+
+        let status = column![
+            text(if running {
+                "Tournament · Live"
+            } else if live.finished {
+                "Tournament · Finished"
+            } else {
+                "Tournament"
+            })
+            .size(22)
+            .color(palette.text_primary),
+            text(format!(
+                "{} · {} · {}/{} ({:.0}%) · {}",
+                live.format_label,
+                self.tournament_setup.time_control.label(),
+                live.completed_matches,
+                live.total_matches.max(live.completed_matches),
+                live.progress_fraction() * 100.0,
+                live.current_match_label()
+            ))
+            .size(13)
+            .color(palette.text_secondary),
+            text(&self.tournament_status)
+                .size(12)
+                .color(palette.accent_alt),
+            toolbar,
+        ]
+        .spacing(6);
+
+        let mut body = column![
+            status,
+            Space::new().height(8),
+            self.view_tournament_game_board()
+        ]
+        .spacing(6)
+        .padding([12, 20])
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        if tournament_results::panel_open(live, self.show_tournament_results) {
+            let mut standings_col =
+                column![text("Standings").size(14).color(palette.text_primary)].spacing(4);
+            if !tournament_results::standings_ready(&live.standings) {
+                standings_col = standings_col.push(
+                    text("Standings appear after the first finished pairing.")
                         .size(12)
                         .color(palette.text_secondary),
-                )
-                .push(
-                    container(eval_graph::view(&self.analysis_scores_cp, 96.0))
-                        .padding(6)
-                        .width(Length::Fill)
+                );
+            } else {
+                for row in &live.standings {
+                    let perf = row
+                        .performance
+                        .map(|elo| format!(" · {elo:.0} Elo"))
+                        .unwrap_or_default();
+                    standings_col = standings_col.push(
+                        text(format!(
+                            "{}. {}  {:.1}  ({}-{}-{}){perf}",
+                            row.rank, row.name, row.points, row.wins, row.draws, row.losses
+                        ))
+                        .size(12)
+                        .color(palette.text_primary),
+                    );
+                }
+            }
+            let mut games_col =
+                column![text("Games").size(14).color(palette.text_primary)].spacing(4);
+            for row in live.finished_matches.iter().rev().take(6) {
+                games_col =
+                    games_col.push(text(row.label()).size(11).color(palette.text_secondary));
+            }
+            for game in tournament_arena::finished_strip(&live.played_games, 16) {
+                games_col = games_col.push(tournament_game_button(
+                    game.title(),
+                    format!("{} plies", game.moves.len()),
+                    game.id,
+                    self.selected_tournament_game_id == Some(game.id),
+                    palette,
+                ));
+            }
+
+            let mut history = column![
+                text("Saved events").size(14).color(palette.text_primary),
+                styled_button("Refresh history", Msg::RefreshTournamentHistory),
+            ]
+            .spacing(4);
+            if self.stored_tournaments.is_empty() {
+                history = history.push(
+                    text("No saved tournaments yet.")
+                        .size(12)
+                        .color(palette.text_secondary),
+                );
+            } else {
+                for tournament in self.stored_tournaments.iter().take(8) {
+                    let selected_id =
+                        self.selected_tournament_id.as_deref() == Some(tournament.id.as_str());
+                    history = history.push(tournament_history_button(
+                        tournament.name.clone(),
+                        tournament.status.clone(),
+                        tournament.id.clone(),
+                        selected_id,
+                        palette,
+                    ));
+                }
+            }
+
+            body = body.push(Space::new().height(8)).push(
+                row![
+                    container(scrollable(standings_col).height(Length::Fixed(160.0)))
+                        .width(Length::FillPortion(3))
+                        .padding(8)
                         .style(move |_theme| container::Style {
                             background: Some(iced::Background::Color(palette.sidebar)),
                             border: iced::Border {
@@ -4547,46 +4769,52 @@ impl App {
                             },
                             ..Default::default()
                         }),
-                );
-        } else if !self.move_log.is_empty() {
-            side = side.push(
-                text("Eval graph fills in after automatic game analysis.")
-                    .size(11)
-                    .color(palette.text_secondary),
+                    Space::new().width(12),
+                    container(scrollable(games_col).height(Length::Fixed(160.0)))
+                        .width(Length::FillPortion(2))
+                        .padding(8)
+                        .style(move |_theme| container::Style {
+                            background: Some(iced::Background::Color(palette.sidebar)),
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                width: 1.0,
+                                color: palette.border,
+                            },
+                            ..Default::default()
+                        }),
+                    Space::new().width(12),
+                    container(scrollable(history).height(Length::Fixed(160.0)))
+                        .width(Length::FillPortion(2))
+                        .padding(8)
+                        .style(move |_theme| container::Style {
+                            background: Some(iced::Background::Color(palette.sidebar)),
+                            border: iced::Border {
+                                radius: 8.0.into(),
+                                width: 1.0,
+                                color: palette.border,
+                            },
+                            ..Default::default()
+                        }),
+                ]
+                .width(Length::Fill),
             );
         }
 
-        side = side.push(
-            row![
-                styled_button("Analyze game", Msg::AnalyzeGame),
-                styled_button("Open in Analysis", Msg::OpenAnalysis),
-            ]
-            .spacing(8),
-        );
-        if self.review_ply.is_some() {
-            side = side.push(styled_button(
-                "Return to final position",
-                Msg::ReturnToLivePosition,
-            ));
-        }
-
-        row![container(board).width(Length::FillPortion(3)), side,]
-            .spacing(14)
+        column![self.view_title_bar(), body]
             .width(Length::Fill)
+            .height(Length::Fill)
             .into()
     }
 
-    fn view_tournament_hub(&self) -> Element<'_, Msg> {
+    fn view_tournament_setup_modal(&self) -> Element<'_, Msg> {
         let palette = self.settings.board_theme.gui_palette();
-        let live = &self.live_tournament_view;
-        let running = self.live_tournament.is_some();
         let setup = &self.tournament_setup;
         let roster_engines =
             tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
 
         let mut engines = column![].spacing(6);
         engines = engines.push(
-            text("Host-native UCI engines only (wrong-arch binaries are hidden).")
+            text("Only engines found on disk for this host architecture are listed.")
                 .size(12)
                 .color(palette.text_secondary),
         );
@@ -4603,12 +4831,9 @@ impl App {
                         Msg::TournamentToggleEngine(path_key),
                     ),
                     text(engine.name.clone())
-                        .size(15)
+                        .size(14)
                         .color(palette.text_primary)
                         .width(Length::Fill),
-                    text(engine.path.display().to_string())
-                        .size(11)
-                        .color(palette.text_secondary),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -4621,38 +4846,33 @@ impl App {
                     .color(palette.text_secondary),
             );
         }
-        let roster = settings_card(
-            iced_fonts::lucide::cpu,
-            "Players",
-            scrollable(engines).height(Length::Fixed(200.0)).into(),
-        );
 
-        let mut setup_form = column![
+        let setup_form = column![
             text_input("Event name", &setup.event)
                 .on_input(Msg::TournamentEventNameChanged)
                 .width(Length::Fill),
             text_input("Site (optional)", &setup.site)
                 .on_input(Msg::TournamentSiteChanged)
                 .width(Length::Fill),
-            pick_list(
-                TournamentFormat::ALL,
-                Some(setup.format),
-                Msg::SelectTournamentFormat,
-            )
-            .width(Length::Fill),
-            pick_list(
-                tournament_setup::TimeMode::ALL,
-                Some(setup.time_mode),
-                Msg::TournamentTimeModeChanged,
-            )
-            .width(Length::Fill),
-            config_slider(
-                "Concurrency",
-                setup.concurrency as i32,
-                "",
-                1,
-                4,
-                Msg::TournamentConcurrencyChanged,
+            settings_row(
+                "Format",
+                pick_list(
+                    TournamentFormat::ALL,
+                    Some(setup.format),
+                    Msg::SelectTournamentFormat,
+                )
+                .width(220)
+                .into(),
+            ),
+            settings_row(
+                "Time control",
+                pick_list(
+                    tournament_setup::TimeControlPreset::ALL,
+                    Some(setup.time_control),
+                    Msg::TournamentTimeControlChanged,
+                )
+                .width(220)
+                .into(),
             ),
             config_slider(
                 "Games / pairing",
@@ -4666,8 +4886,8 @@ impl App {
                 "Hash",
                 setup.hash_mb as i32,
                 "MiB",
-                1,
-                256,
+                16,
+                512,
                 Msg::TournamentHashChanged,
             ),
             config_slider(
@@ -4678,505 +4898,92 @@ impl App {
                 8,
                 Msg::TournamentThreadsChanged,
             ),
+            text("Games use one board at a time with live clocks (not instant).")
+                .size(12)
+                .color(palette.text_secondary),
         ]
         .spacing(8);
-        setup_form = match setup.time_mode {
-            tournament_setup::TimeMode::Nodes => setup_form.push(config_slider(
-                "Nodes",
-                setup.nodes_per_move as i32,
-                "",
-                100,
-                50_000,
-                Msg::TournamentNodesChanged,
-            )),
-            tournament_setup::TimeMode::MoveTime => setup_form.push(config_slider(
-                "Move time",
-                setup.move_time_ms as i32,
-                "ms",
-                10,
-                5_000,
-                Msg::TournamentMoveTimeChanged,
-            )),
-            tournament_setup::TimeMode::Depth => setup_form.push(config_slider(
-                "Depth",
-                setup.max_depth,
-                "",
-                1,
-                40,
-                Msg::TournamentDepthChanged,
-            )),
-        };
 
-        let mut controls = column![
-            text("CuteChess-style setup · Mujrim theme · live ply boards")
-                .size(13)
-                .color(palette.text_secondary),
-            setup_form,
-        ]
-        .spacing(10);
-        let mut action_row = row![].spacing(8);
-        action_row = action_row.push(styled_button(
-            if self.show_tournament_results {
-                "Hide results"
-            } else {
-                "Results"
-            },
-            Msg::ToggleTournamentResults,
-        ));
-        if running {
-            action_row = action_row.push(styled_button("Cancel safely", Msg::CancelTournament));
-        } else {
-            action_row =
-                action_row.push(styled_button("Start tournament", Msg::RunQuickTournament));
-        }
-        controls = controls.push(action_row).push(
-            text(&self.tournament_status)
-                .size(13)
-                .color(palette.accent_alt),
-        );
-        let controls = settings_card(iced_fonts::lucide::trophy, "Setup", controls.into());
-
-        let progress_pct = (live.progress_fraction() * 100.0).round() as i32;
-        let progress_bar = container(Space::new().width(Length::Fill).height(10.0))
-            .width(Length::FillPortion(
-                ((live.progress_fraction() * 1000.0) as u16).max(1),
-            ))
-            .height(10.0)
-            .style(move |_theme| container::Style {
-                background: Some(iced::Background::Color(palette.accent_alt)),
-                border: iced::Border {
-                    radius: 5.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-        let progress_track = container(
-            row![
-                progress_bar,
-                Space::new().width(Length::FillPortion(
-                    (1000u16.saturating_sub(((live.progress_fraction() * 1000.0) as u16).max(1)))
-                        .max(1)
-                ))
-            ]
-            .width(Length::Fill),
+        let modal_header = mouse_area(
+            container(
+                row![
+                    iced_fonts::lucide::grip_horizontal()
+                        .size(16)
+                        .color(TEXT_SECONDARY),
+                    text("Tournament Setup").size(20).color(TEXT_PRIMARY),
+                    Space::new().width(Length::Fill),
+                    text("Drag to move").size(10).color(TEXT_SECONDARY),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([5, 6]),
         )
-        .width(Length::Fill)
-        .height(10.0)
-        .style(move |_theme| container::Style {
+        .interaction(iced::mouse::Interaction::Grab)
+        .on_press(Msg::StartTournamentSetupDrag);
+
+        let modal_content = container(
+            column![
+                modal_header,
+                Space::new().height(8),
+                scrollable(
+                    column![
+                        settings_card(iced_fonts::lucide::cpu, "Players", engines.into()),
+                        settings_card(iced_fonts::lucide::trophy, "Event", setup_form.into()),
+                        text(&self.tournament_status)
+                            .size(12)
+                            .color(palette.accent_alt),
+                        row![
+                            styled_button("Start tournament", Msg::RunQuickTournament),
+                            styled_button("Close", Msg::ToggleTournamentSetup),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(12)
+                    .width(Length::Fill),
+                )
+                .height(520),
+            ]
+            .spacing(0)
+            .width(560),
+        )
+        .padding(24)
+        .style(|_theme| container::Style {
             background: Some(iced::Background::Color(Color::from_rgba(
-                palette.border.r,
-                palette.border.g,
-                palette.border.b,
-                0.55,
+                0.08, 0.08, 0.16, 0.96,
             ))),
             border: iced::Border {
-                radius: 5.0.into(),
-                ..Default::default()
+                radius: 12.0.into(),
+                width: 1.0,
+                color: BORDER_SUBTLE,
             },
             ..Default::default()
         });
 
-        let visible_live =
-            tournament_arena::visible_live_boards(&live.live_games, setup.concurrency as usize);
-        let mut live_tiles = row![].spacing(10);
-        if visible_live.is_empty() {
-            live_tiles = live_tiles.push(
-                text(if running {
-                    "Waiting for the first ply…"
-                } else {
-                    "No live boards — start a tournament to watch moves."
-                })
-                .size(12)
-                .color(palette.text_secondary),
-            );
-        } else {
-            for board in &visible_live {
-                let last = if board.last_uci.is_empty() {
-                    "—".to_owned()
-                } else {
-                    board.last_uci.clone()
-                };
-                live_tiles = live_tiles.push(
-                    container(
-                        column![
-                            text(format!("R{} · #{}", board.round, board.match_index))
-                                .size(11)
-                                .color(palette.text_secondary),
-                            text(format!("{} vs {}", board.white, board.black))
-                                .size(13)
-                                .color(palette.text_primary),
-                            text(format!(
-                                "{} · {} · d{} · ply {}",
-                                last,
-                                tournament_arena::score_text(board.score_cp),
-                                board.depth,
-                                board.moves.len()
-                            ))
-                            .size(11)
-                            .color(palette.accent_alt),
-                        ]
-                        .spacing(4),
-                    )
-                    .padding(10)
-                    .width(Length::Fill)
-                    .style(move |_theme| container::Style {
-                        background: Some(iced::Background::Color(palette.sidebar)),
-                        border: iced::Border {
-                            radius: 10.0.into(),
-                            width: 1.0,
-                            color: palette.border,
-                        },
-                        ..Default::default()
-                    }),
-                );
-            }
-        }
+        let modal_width = 608.0;
+        let modal_height = 680.0;
+        let left = ((self.window_width - modal_width) * 0.5 + self.tournament_setup_offset.x)
+            .clamp(0.0, (self.window_width - modal_width).max(0.0));
+        let top = ((self.window_height - modal_height) * 0.5 + self.tournament_setup_offset.y)
+            .clamp(0.0, (self.window_height - modal_height).max(0.0));
 
-        let finished_strip = tournament_arena::finished_strip(&live.played_games, 12);
-        let mut finished_row = row![].spacing(6);
-        if finished_strip.is_empty() {
-            finished_row = finished_row.push(
-                text("Finished games appear here for one-click replay.")
-                    .size(12)
-                    .color(palette.text_secondary),
-            );
-        } else {
-            for game in &finished_strip {
-                finished_row = finished_row.push(tournament_game_button(
-                    game.title(),
-                    format!("{} plies", game.moves.len()),
-                    game.id,
-                    self.selected_tournament_game_id == Some(game.id),
-                    palette,
-                ));
-            }
-        }
-
-        let live_rows = column![
-            text(if running {
-                "Arena · Live Boards"
-            } else if live.finished {
-                "Arena · Latest Event"
-            } else {
-                "Arena"
-            })
-            .size(16)
-            .color(palette.accent_alt),
-            text(format!(
-                "{} · {}/{} pairings · {progress_pct}% · concurrency {}",
-                live.format_label,
-                live.completed_matches,
-                live.total_matches.max(live.completed_matches),
-                setup.concurrency
-            ))
-            .size(13)
-            .color(palette.text_secondary),
-            progress_track,
-            text(live.current_match_label())
-                .size(18)
-                .color(palette.text_primary),
-            text(&live.status_line)
-                .size(13)
-                .color(palette.text_secondary),
-            live_tiles.width(Length::Fill),
-            scrollable(finished_row).height(Length::Fixed(72.0)),
-        ]
-        .spacing(8);
-
-        let mut standings_col = column![
-            text(if running {
-                "Current Standings"
-            } else {
-                "Final Standings"
-            })
-            .size(14)
-            .color(palette.text_primary)
-        ]
-        .spacing(4);
-        if live.standings.is_empty() {
-            standings_col = standings_col.push(
-                text("Standings appear after the first finished pairing.")
-                    .size(12)
-                    .color(palette.text_secondary),
-            );
-        } else {
-            for row in &live.standings {
-                let perf = row
-                    .performance
-                    .map(|elo| format!("{elo:.0} Elo"))
-                    .unwrap_or_else(|| "—".to_owned());
-                standings_col = standings_col.push(
-                    row![
-                        text(format!("{}.", row.rank))
-                            .size(13)
-                            .color(palette.text_secondary)
-                            .width(28),
-                        text(&row.name)
-                            .size(13)
-                            .color(palette.text_primary)
-                            .width(Length::Fill),
-                        text(format!("{:.1}", row.points))
-                            .size(13)
-                            .color(palette.accent_alt)
-                            .width(42),
-                        text(format!("{}-{}-{}", row.wins, row.draws, row.losses))
-                            .size(12)
-                            .color(palette.text_secondary)
-                            .width(70),
-                        text(perf).size(12).color(palette.text_secondary).width(70),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                );
-            }
-        }
-
-        let mut match_col = column![text("Games").size(14).color(palette.text_primary)].spacing(4);
-        if !live.finished_matches.is_empty() {
-            match_col = match_col.push(
-                text("Pairing scores")
-                    .size(12)
-                    .color(palette.text_secondary),
-            );
-            for row in live.finished_matches.iter().rev().take(8) {
-                match_col =
-                    match_col.push(text(row.label()).size(11).color(palette.text_secondary));
-            }
-            match_col = match_col.push(Space::new().height(6)).push(
-                text("Open a game board")
-                    .size(12)
-                    .color(palette.text_secondary),
-            );
-        }
-        if live.played_games.is_empty() {
-            match_col = match_col.push(
-                text(if running {
-                    "Waiting for the first completed game…"
-                } else {
-                    "No games yet. Start a tournament to populate boards and results."
-                })
-                .size(12)
-                .color(palette.text_secondary),
-            );
-        } else {
-            for game in live.played_games.iter().rev().take(24) {
-                let selected = self.selected_tournament_game_id == Some(game.id);
-                match_col = match_col.push(tournament_game_button(
-                    game.title(),
-                    format!("Match {} · {} plies", game.match_index, game.moves.len()),
-                    game.id,
-                    selected,
-                    palette,
-                ));
-            }
-        }
-
-        let mut arena_body = column![
-            live_rows,
-            Space::new().height(8),
-            self.view_tournament_game_board(),
-        ]
-        .spacing(8);
-        if tournament_results::panel_open(live, self.show_tournament_results) {
-            let standings_body = if tournament_results::standings_ready(&live.standings) {
-                standings_col
-            } else {
-                column![
-                    text("Standings appear after the first finished pairing.")
-                        .size(12)
-                        .color(palette.text_secondary)
-                ]
-                .spacing(4)
-            };
-            arena_body = arena_body.push(Space::new().height(8)).push(
-                row![
-                    container(scrollable(standings_body).height(Length::Fixed(220.0)))
-                        .width(Length::FillPortion(3))
-                        .padding(8)
-                        .style(move |_theme| container::Style {
-                            background: Some(iced::Background::Color(palette.sidebar)),
-                            border: iced::Border {
-                                radius: 10.0.into(),
-                                width: 1.0,
-                                color: palette.border,
-                            },
-                            ..Default::default()
-                        }),
-                    Space::new().width(12),
-                    container(scrollable(match_col).height(Length::Fixed(220.0)))
-                        .width(Length::FillPortion(2))
-                        .padding(8)
-                        .style(move |_theme| container::Style {
-                            background: Some(iced::Background::Color(palette.sidebar)),
-                            border: iced::Border {
-                                radius: 10.0.into(),
-                                width: 1.0,
-                                color: palette.border,
-                            },
-                            ..Default::default()
-                        }),
-                ]
-                .width(Length::Fill),
-            );
-        } else {
-            arena_body = arena_body.push(
-                text("Open Results for standings and the full game table.")
-                    .size(12)
-                    .color(palette.text_secondary),
-            );
-        }
-        let live_card = settings_card(iced_fonts::lucide::activity, "Arena", arena_body.into());
-
-        let selected = self
-            .selected_tournament_id
-            .as_ref()
-            .and_then(|id| {
-                self.stored_tournaments
-                    .iter()
-                    .find(|tournament| &tournament.id == id)
-            })
-            .or_else(|| self.stored_tournaments.first());
-
-        let mut history = column![].spacing(6);
-        if self.stored_tournaments.is_empty() {
-            history = history.push(
-                text("No saved tournaments yet.")
-                    .size(13)
-                    .color(palette.text_secondary),
-            );
-        } else {
-            for tournament in self.stored_tournaments.iter().take(10) {
-                let selected_id = self.selected_tournament_id.as_deref()
-                    == Some(tournament.id.as_str())
-                    || (self.selected_tournament_id.is_none()
-                        && self
-                            .stored_tournaments
-                            .first()
-                            .is_some_and(|first| first.id == tournament.id));
-                history = history.push(tournament_history_button(
-                    tournament.name.clone(),
-                    tournament.status.clone(),
-                    tournament.id.clone(),
-                    selected_id,
-                    palette,
-                ));
-            }
-        }
-
-        let mut detail = column![].spacing(6);
-        if let Some(tournament) = selected {
-            detail = detail
-                .push(text(&tournament.name).size(16).color(palette.text_primary))
-                .push(
-                    text(format!("{} · {}", tournament.format, tournament.status))
-                        .size(12)
-                        .color(palette.text_secondary),
-                );
-            let standings = tournament.standings();
-            let names = tournament
-                .entrants
-                .iter()
-                .map(|entrant| entrant.name.clone())
-                .collect::<Vec<_>>();
-            let rows = tournament_live::standing_rows(&names, &standings);
-            if rows.is_empty() {
-                detail = detail.push(
-                    text("This event has no completed games stored.")
-                        .size(12)
-                        .color(palette.text_secondary),
-                );
-            } else {
-                for row in rows {
-                    detail = detail.push(
-                        text(format!(
-                            "{}. {}  {:.1} pts  ({}-{}-{})",
-                            row.rank, row.name, row.points, row.wins, row.draws, row.losses
-                        ))
-                        .size(12)
-                        .color(palette.text_primary),
-                    );
-                }
-            }
-            if !tournament.results.is_empty() {
-                detail = detail
-                    .push(Space::new().height(6))
-                    .push(text("Game results").size(13).color(palette.text_secondary));
-                for result in tournament.results.iter().take(16) {
-                    let white = names
-                        .get(result.pairing.white)
-                        .map(String::as_str)
-                        .unwrap_or("?");
-                    let black = names
-                        .get(result.pairing.black)
-                        .map(String::as_str)
-                        .unwrap_or("?");
-                    detail = detail.push(
-                        text(format!(
-                            "R{} · {} {} {}",
-                            result.pairing.round,
-                            white,
-                            tournament_live::result_label(result.white_score),
-                            black
-                        ))
-                        .size(12)
-                        .color(palette.text_primary),
-                    );
-                }
-            }
-        } else {
-            detail = detail.push(
-                text("Select a saved tournament to inspect final standings.")
-                    .size(13)
-                    .color(palette.text_secondary),
-            );
-        }
-
-        let history_card = settings_card(
-            iced_fonts::lucide::history,
-            "Saved Results",
+        container(
             column![
-                row![
-                    container(scrollable(history).height(Length::Fixed(240.0)))
-                        .width(Length::FillPortion(2)),
-                    Space::new().width(12),
-                    container(scrollable(detail).height(Length::Fixed(240.0)))
-                        .width(Length::FillPortion(3))
-                        .padding(8)
-                        .style(move |_theme| container::Style {
-                            background: Some(iced::Background::Color(palette.sidebar)),
-                            border: iced::Border {
-                                radius: 10.0.into(),
-                                width: 1.0,
-                                color: palette.border,
-                            },
-                            ..Default::default()
-                        }),
-                ]
-                .width(Length::Fill),
-                styled_button("Refresh history", Msg::RefreshTournamentHistory),
+                Space::new().height(top),
+                row![Space::new().width(left), modal_content],
             ]
-            .spacing(10)
-            .into(),
-        );
-
-        let content = column![
-            text("Tournament Studio")
-                .size(30)
-                .color(palette.text_primary),
-            text("Setup engines and time controls, watch up to four live boards move-by-move, then open Results when you want standings.")
-                .size(14)
-                .color(palette.text_secondary),
-            row![roster, controls].spacing(16).width(Length::Fill),
-            live_card,
-            history_card,
-        ]
-        .spacing(16)
-        .padding(24)
-        .width(Length::Fill);
-        column![
-            self.view_title_bar(),
-            scrollable(content).height(Length::Fill)
-        ]
+            .width(Length::Fill)
+            .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(
+                0.0, 0.0, 0.0, 0.55,
+            ))),
+            ..Default::default()
+        })
         .into()
     }
 
@@ -6457,7 +6264,7 @@ fn tournament_engine_roster(
 ) -> Vec<QuickTournamentEngine> {
     let mut roster = Vec::new();
     for engine in bundled {
-        if !mujrim_protocols::is_host_native_binary(&engine.path) {
+        if !engine.path.is_file() || !mujrim_protocols::is_host_native_binary(&engine.path) {
             continue;
         }
         roster.push(QuickTournamentEngine {
@@ -6469,6 +6276,7 @@ fn tournament_engine_roster(
     for engine in discovered {
         let path = PathBuf::from(&engine.path);
         if engine.protocol.eq_ignore_ascii_case("UCI")
+            && path.is_file()
             && mujrim_protocols::is_host_native_binary(&path)
             && !roster.iter().any(|existing| existing.path == path)
         {
@@ -6513,6 +6321,7 @@ async fn run_quick_tournament(
                     }
                 })
                 .collect();
+            let initial_clock_ms = setup.time_control.match_clock().initial.as_millis() as u64;
             let progress: TournamentProgress = Arc::new({
                 let snapshot = Arc::clone(&snapshot);
                 move |event: TournamentEvent| {
@@ -6564,6 +6373,8 @@ async fn run_quick_tournament(
                                 score_cp: 0,
                                 depth: 0,
                                 nodes: 0,
+                                white_clock_ms: Some(initial_clock_ms),
+                                black_clock_ms: Some(initial_clock_ms),
                             });
                             guard.current_round = round;
                             guard.current_white = white;
@@ -6577,8 +6388,20 @@ async fn run_quick_tournament(
                             depth,
                             nodes,
                             moves,
+                            white_clock_ms,
+                            black_clock_ms,
                         } => {
-                            guard.apply_ply(&game_key, ply, uci, score_cp, depth, nodes, moves);
+                            guard.apply_ply(
+                                &game_key,
+                                ply,
+                                uci,
+                                score_cp,
+                                depth,
+                                nodes,
+                                moves,
+                                white_clock_ms,
+                                black_clock_ms,
+                            );
                         }
                         TournamentEvent::GameFinished {
                             game_key,
