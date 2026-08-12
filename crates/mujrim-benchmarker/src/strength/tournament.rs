@@ -10,7 +10,11 @@ use mujrim_study::tournament::{
     knockout_round, schedule, standings, swiss_round,
 };
 
-use super::{EngineSpec, GameProgressEvent, MatchConfig, MatchSummary, run_match};
+use super::{
+    EngineSpec, GameProgressEvent, MatchConfig, MatchSummary, ensure_scored_match,
+    forfeit_match_summary, run_match,
+};
+use super::runner::FailedEngine;
 
 #[derive(Clone, Debug)]
 pub struct TournamentEngine {
@@ -497,14 +501,32 @@ fn execute_plan(
                 }),
             }));
         }
-        let summary = run_match(candidate, reference, None, match_config);
+        // Isolate engine/process failures: never let a panic abort the tournament.
+        let summary = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_match(
+                candidate.clone(),
+                reference.clone(),
+                None,
+                match_config.clone(),
+            )
+        })) {
+            Ok(summary) => ensure_scored_match(summary, &candidate, &reference),
+            Err(_) => forfeit_match_summary(
+                &candidate,
+                &reference,
+                &match_config,
+                FailedEngine::Candidate,
+                "match panicked; awarded forfeit loss to white/candidate and continued",
+            ),
+        };
         let white_points = summary.scores.wins as f64 + summary.scores.draws as f64 * 0.5;
         let games = summary.scores.games() as f64;
         let black_points = games - white_points;
         append_game_results(pairing, &summary, game_results);
-        let match_error = summary.error.as_ref().map(|error| {
+        // Engine failures become scored forfeits — surface as a note, do not abort.
+        let match_note = summary.error.as_ref().map(|error| {
             format!(
-                "{} vs {} failed: {error}",
+                "{} vs {}: {error} (forfeit recorded; tournament continues)",
                 summary.candidate, summary.reference
             )
         });
@@ -527,7 +549,7 @@ fn execute_plan(
             black: summary.reference.clone(),
             white_points,
             black_points,
-            error: match_error.clone(),
+            error: match_note,
             standings: current_standings,
             game_results: game_results.clone(),
             games,
@@ -536,13 +558,7 @@ fn execute_plan(
         if cancel.load(Ordering::Acquire) {
             return PlanOutcome {
                 cancelled: true,
-                error: match_error,
-            };
-        }
-        if match_error.is_some() {
-            return PlanOutcome {
-                cancelled: false,
-                error: match_error,
+                error: None,
             };
         }
     }

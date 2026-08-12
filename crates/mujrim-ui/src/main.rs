@@ -886,8 +886,10 @@ impl App {
                 if let Err(error) = self.load_live_tournament_board(&live) {
                     self.tournament_status = format!("Could not open live board: {error}");
                 }
-                return Task::none();
             }
+            // Never auto-follow/analyze finished boards while a tournament is live —
+            // stacking review workers was crashing the UI under engine load.
+            return Task::none();
         }
         self.follow_latest_tournament_game()
     }
@@ -903,16 +905,7 @@ impl App {
             return Task::none();
         };
         match self.load_tournament_game(&game) {
-            Ok(()) => {
-                if game.moves.is_empty() {
-                    Task::none()
-                } else {
-                    Task::perform(
-                        analyze_game(self.initial_fen.clone(), self.move_log.clone()),
-                        Msg::GameAnalysisFinished,
-                    )
-                }
-            }
+            Ok(()) => Task::none(),
             Err(error) => {
                 self.tournament_status = format!("Could not open tournament game: {error}");
                 Task::none()
@@ -1691,41 +1684,53 @@ impl App {
                 Task::none()
             }
             Msg::QuickTournamentFinished(summary) => {
-                if let Some(handle) = &self.live_tournament {
-                    self.live_tournament_view = handle.clone_snapshot();
+                // Keep the UI alive even if persistence/standings formatting panics.
+                let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(handle) = &self.live_tournament {
+                        self.live_tournament_view = handle.clone_snapshot();
+                    }
+                    self.live_tournament = None;
+                    self.live_tournament_view.running = false;
+                    self.live_tournament_view.finished = true;
+                    self.persist_tournament_summary(&summary);
+                    self.tournament_status = if summary.cancelled {
+                        format!(
+                            "Tournament cancelled. {}",
+                            format_tournament_summary(&summary)
+                        )
+                    } else if let Some(error) = &summary.error {
+                        format!("Tournament finished with notes: {error}")
+                    } else {
+                        format!(
+                            "Tournament complete. {}",
+                            format_tournament_summary(&summary)
+                        )
+                    };
+                    self.live_tournament_view.status_line = self.tournament_status.clone();
+                    let names = summary
+                        .engines
+                        .iter()
+                        .map(|engine| engine.engine.name.clone())
+                        .collect::<Vec<_>>();
+                    self.live_tournament_view.standings =
+                        tournament_live::standing_rows(&names, &summary.standings);
+                    self.live_tournament_view.game_results = summary.game_results.clone();
+                    let games = mujrim_benchmarker::strength::games_from_summary(&summary);
+                    if self.live_tournament_view.played_games.len() < games.len() {
+                        self.live_tournament_view.played_games.clear();
+                        self.live_tournament_view.append_games(games);
+                    }
+                    self.refresh_tournament_history();
+                }));
+                if finished.is_err() {
+                    self.live_tournament = None;
+                    self.live_tournament_view.running = false;
+                    self.live_tournament_view.finished = true;
+                    self.tournament_status =
+                        "Tournament finished, but updating the results panel failed. Standings may be incomplete."
+                            .to_owned();
+                    self.live_tournament_view.status_line = self.tournament_status.clone();
                 }
-                self.live_tournament = None;
-                self.live_tournament_view.running = false;
-                self.live_tournament_view.finished = true;
-                self.persist_tournament_summary(&summary);
-                self.tournament_status = if summary.cancelled {
-                    format!(
-                        "Tournament cancelled. {}",
-                        format_tournament_summary(&summary)
-                    )
-                } else if let Some(error) = &summary.error {
-                    format!("Tournament stopped: {error}")
-                } else {
-                    format!(
-                        "Tournament complete. {}",
-                        format_tournament_summary(&summary)
-                    )
-                };
-                self.live_tournament_view.status_line = self.tournament_status.clone();
-                let names = summary
-                    .engines
-                    .iter()
-                    .map(|engine| engine.engine.name.clone())
-                    .collect::<Vec<_>>();
-                self.live_tournament_view.standings =
-                    tournament_live::standing_rows(&names, &summary.standings);
-                self.live_tournament_view.game_results = summary.game_results.clone();
-                let games = mujrim_benchmarker::strength::games_from_summary(&summary);
-                if self.live_tournament_view.played_games.len() < games.len() {
-                    self.live_tournament_view.played_games.clear();
-                    self.live_tournament_view.append_games(games);
-                }
-                self.refresh_tournament_history();
                 self.follow_latest_tournament_game()
             }
             Msg::SelectTournament(id) => {
@@ -6624,6 +6629,8 @@ fn run_quick_tournament_body(
     let progress: TournamentProgress = Arc::new({
         let snapshot = Arc::clone(&snapshot);
         move |event: TournamentEvent| {
+            let snapshot = Arc::clone(&snapshot);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let Ok(mut guard) = snapshot.lock() else {
                 return;
             };
@@ -6748,7 +6755,7 @@ fn run_quick_tournament_body(
                     guard.current_white.clear();
                     guard.current_black.clear();
                     guard.status_line = if let Some(error) = error {
-                        format!("Match {index}/{total} stopped: {error}")
+                        format!("Match {index}/{total}: {error}")
                     } else {
                         format!(
                             "Finished {index}/{total} · {white} {} {}",
@@ -6770,6 +6777,7 @@ fn run_quick_tournament_body(
                         "Tournament cancelled. Partial standings are available.".to_owned();
                 }
             }
+            }));
         }
     });
     let mut match_config = setup.to_match_config();

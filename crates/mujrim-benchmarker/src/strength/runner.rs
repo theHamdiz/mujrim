@@ -928,31 +928,71 @@ pub fn run_match(
                     drop(sessions.take());
                     sessions = match spawn_sessions(&candidate, &reference, &config) {
                         Ok(sessions) => Some(sessions),
-                        Err(message) => {
-                            *lock_recover(&error) = Some(message);
+                        Err((failed, message)) => {
+                            let forfeited = forfeit_match_summary(
+                                &candidate,
+                                &reference,
+                                &config,
+                                failed,
+                                message,
+                            );
+                            if let Some(pair) = forfeited.pairs.into_iter().next() {
+                                let mut pair = pair;
+                                pair.index = index;
+                                if let Some(writer) = lock_recover(&checkpoint_writer).as_mut()
+                                    && let Err(checkpoint_error) = writer.append(&pair)
+                                {
+                                    *lock_recover(&error) = Some(checkpoint_error);
+                                }
+                                lock_recover(&results).push(pair);
+                            }
+                            *lock_recover(&error) = forfeited.error;
                             stopped.store(true, Ordering::Release);
                             break;
                         }
                     };
                     session_pairs = 0;
                 }
-                let opening = &openings[(config.opening_offset + index) % openings.len()];
-                let white = {
-                    let (candidate_session, reference_session) =
-                        sessions.as_mut().expect("sessions initialized above");
-                    play_game(
-                        candidate_session,
-                        reference_session,
-                        opening,
-                        true,
-                        &config,
-                        &candidate.name,
-                        &reference.name,
-                        &format!("pair{index}-cw"),
-                    )
+                let Some((candidate_session, reference_session)) = sessions.as_mut() else {
+                    *lock_recover(&error) =
+                        Some("engine sessions unavailable after spawn".to_owned());
+                    stopped.store(true, Ordering::Release);
+                    break;
                 };
+                let opening = &openings[(config.opening_offset + index) % openings.len()];
+                let white = play_game(
+                    candidate_session,
+                    reference_session,
+                    opening,
+                    true,
+                    &config,
+                    &candidate.name,
+                    &reference.name,
+                    &format!("pair{index}-cw"),
+                );
                 if let Some(message) = resource_limit_detail(&white) {
+                    // Record the forfeited game, skip the return game, and stop the match.
                     *lock_recover(&error) = Some(message.to_string());
+                    let black_forfeit_side = match classify_engine_failure(
+                        &candidate,
+                        &reference,
+                        message,
+                    ) {
+                        FailedEngine::Candidate => Color::Black,
+                        FailedEngine::Reference => Color::White,
+                    };
+                    let black = forfeit(
+                        false,
+                        black_forfeit_side,
+                        message.to_string(),
+                        Duration::ZERO,
+                    );
+                    let pair = PairRecord {
+                        index,
+                        candidate_white: white,
+                        candidate_black: black,
+                    };
+                    lock_recover(&results).push(pair);
                     stopped.store(true, Ordering::Release);
                     break;
                 }
@@ -960,7 +1000,22 @@ pub fn run_match(
                     drop(sessions.take());
                     sessions = match spawn_sessions(&candidate, &reference, &config) {
                         Ok(sessions) => Some(sessions),
-                        Err(message) => {
+                        Err((failed, message)) => {
+                            let black = forfeit(
+                                false,
+                                match failed {
+                                    FailedEngine::Candidate => Color::Black,
+                                    FailedEngine::Reference => Color::White,
+                                },
+                                message.clone(),
+                                Duration::ZERO,
+                            );
+                            let pair = PairRecord {
+                                index,
+                                candidate_white: white,
+                                candidate_black: black,
+                            };
+                            lock_recover(&results).push(pair);
                             *lock_recover(&error) = Some(message);
                             stopped.store(true, Ordering::Release);
                             break;
@@ -968,23 +1023,47 @@ pub fn run_match(
                     };
                     session_pairs = 0;
                 }
-                let black = {
-                    let (candidate_session, reference_session) =
-                        sessions.as_mut().expect("sessions initialized above");
-                    play_game(
-                        candidate_session,
-                        reference_session,
-                        opening,
+                let Some((candidate_session, reference_session)) = sessions.as_mut() else {
+                    let black = forfeit(
                         false,
-                        &config,
-                        &candidate.name,
-                        &reference.name,
-                        &format!("pair{index}-cb"),
-                    )
+                        Color::Black,
+                        "engine sessions lost before return game".to_owned(),
+                        Duration::ZERO,
+                    );
+                    lock_recover(&results).push(PairRecord {
+                        index,
+                        candidate_white: white,
+                        candidate_black: black,
+                    });
+                    *lock_recover(&error) =
+                        Some("engine sessions unavailable before return game".to_owned());
+                    stopped.store(true, Ordering::Release);
+                    break;
                 };
+                let black = play_game(
+                    candidate_session,
+                    reference_session,
+                    opening,
+                    false,
+                    &config,
+                    &candidate.name,
+                    &reference.name,
+                    &format!("pair{index}-cb"),
+                );
                 if let Some(message) = resource_limit_detail(&black) {
                     *lock_recover(&error) = Some(message.to_string());
                     stopped.store(true, Ordering::Release);
+                    let pair = PairRecord {
+                        index,
+                        candidate_white: white,
+                        candidate_black: black,
+                    };
+                    if let Some(writer) = lock_recover(&checkpoint_writer).as_mut()
+                        && let Err(checkpoint_error) = writer.append(&pair)
+                    {
+                        *lock_recover(&error) = Some(checkpoint_error);
+                    }
+                    lock_recover(&results).push(pair);
                     break;
                 }
                 let recycle_after_black = requires_session_recycle(&black);
@@ -1025,10 +1104,12 @@ pub fn run_match(
         }
     }
 
-    let mut pairs = Arc::try_unwrap(results)
-        .expect("match results still shared")
-        .into_inner()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut pairs = match Arc::try_unwrap(results) {
+        Ok(mutex) => mutex
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        Err(shared) => lock_recover(&shared).clone(),
+    };
     pairs.sort_unstable_by_key(|pair| pair.index);
     let scores = score_records(&pairs);
     let pair_counts = pair_count_records(&pairs);
@@ -1042,10 +1123,16 @@ pub fn run_match(
         .flat_map(|pair| [&pair.candidate_white, &pair.candidate_black])
         .map(|game| game.nodes)
         .sum();
+    let match_error = match Arc::try_unwrap(error) {
+        Ok(mutex) => mutex
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        Err(shared) => lock_recover(&shared).clone(),
+    };
 
-    MatchSummary {
-        candidate: candidate.name,
-        reference: reference.name,
+    let summary = MatchSummary {
+        candidate: candidate.name.clone(),
+        reference: reference.name.clone(),
         pairs,
         scores,
         pair_counts,
@@ -1056,36 +1143,43 @@ pub fn run_match(
         sprt_decision: config.sprt.paired_decision(pair_counts),
         total_nodes,
         elapsed: started.elapsed(),
-        error: Arc::try_unwrap(error)
-            .expect("match error still shared")
-            .into_inner()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        error: match_error,
         reference_elo: config.reference_elo,
         config,
         opening_count,
         opening_fingerprint,
         resumed_pairs,
-    }
+    };
+    ensure_scored_match(summary, &candidate, &reference)
+}
+
+/// Which engine failed during match setup / containment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailedEngine {
+    Candidate,
+    Reference,
 }
 
 fn spawn_sessions(
     candidate: &EngineSpec,
     reference: &EngineSpec,
     config: &MatchConfig,
-) -> Result<(EngineSession, EngineSession), String> {
+) -> Result<(EngineSession, EngineSession), (FailedEngine, String)> {
     let memory_limit = Some((config.max_engine_memory_mb as u64).saturating_mul(1024 * 1024));
     let mut candidate_session = EngineSession::spawn_with_args_and_memory_limit(
         &candidate.path,
         &candidate.args,
         ProtocolKind::Uci,
         memory_limit,
-    )?;
+    )
+    .map_err(|error| (FailedEngine::Candidate, error))?;
     let mut reference_session = EngineSession::spawn_with_args_and_memory_limit(
         &reference.path,
         &reference.args,
         ProtocolKind::Uci,
         memory_limit,
-    )?;
+    )
+    .map_err(|error| (FailedEngine::Reference, error))?;
     let common_options = EngineOptions {
         hash_mb: Some(config.hash_mb),
         threads: Some(config.engine_threads),
@@ -1096,13 +1190,112 @@ fn spawn_sessions(
     candidate_options.custom.clone_from(&candidate.uci_options);
     let mut reference_options = common_options;
     reference_options.custom.clone_from(&reference.uci_options);
-    candidate_session.configure(&candidate_options)?;
-    reference_session.configure(&reference_options)?;
+    candidate_session
+        .configure(&candidate_options)
+        .map_err(|error| (FailedEngine::Candidate, error))?;
+    reference_session
+        .configure(&reference_options)
+        .map_err(|error| (FailedEngine::Reference, error))?;
     candidate_session.set_read_timeout(config.read_timeout);
     reference_session.set_read_timeout(config.read_timeout);
     candidate_session.set_memory_limit_bytes(memory_limit);
     reference_session.set_memory_limit_bytes(memory_limit);
     Ok((candidate_session, reference_session))
+}
+
+/// Infer which engine failed from an error string (paths / role labels).
+pub fn classify_engine_failure(
+    candidate: &EngineSpec,
+    reference: &EngineSpec,
+    message: &str,
+) -> FailedEngine {
+    let lower = message.to_ascii_lowercase();
+    let candidate_path = candidate.path.to_string_lossy().to_ascii_lowercase();
+    let reference_path = reference.path.to_string_lossy().to_ascii_lowercase();
+    let candidate_name = candidate.name.to_ascii_lowercase();
+    let reference_name = reference.name.to_ascii_lowercase();
+    if lower.contains("reference")
+        || (!reference_path.is_empty() && lower.contains(&reference_path))
+        || (!reference_name.is_empty() && lower.contains(&reference_name))
+    {
+        return FailedEngine::Reference;
+    }
+    if lower.contains("candidate")
+        || (!candidate_path.is_empty() && lower.contains(&candidate_path))
+        || (!candidate_name.is_empty() && lower.contains(&candidate_name))
+    {
+        return FailedEngine::Candidate;
+    }
+    // Spawn order probes candidate first.
+    FailedEngine::Candidate
+}
+
+/// Build a one-pair match where `failed` loses both colors (full pairing forfeit).
+pub fn forfeit_match_summary(
+    candidate: &EngineSpec,
+    reference: &EngineSpec,
+    config: &MatchConfig,
+    failed: FailedEngine,
+    detail: impl Into<String>,
+) -> MatchSummary {
+    let detail = detail.into();
+    let (white_forfeit_side, black_forfeit_side) = match failed {
+        // Candidate is white in game 1 and black in game 2.
+        FailedEngine::Candidate => (Color::White, Color::Black),
+        FailedEngine::Reference => (Color::Black, Color::White),
+    };
+    let label = match failed {
+        FailedEngine::Candidate => candidate.name.as_str(),
+        FailedEngine::Reference => reference.name.as_str(),
+    };
+    let message = format!("{label} forfeited: {detail}");
+    let candidate_white = forfeit(true, white_forfeit_side, message.clone(), Duration::ZERO);
+    let candidate_black = forfeit(false, black_forfeit_side, message.clone(), Duration::ZERO);
+    let pairs = vec![PairRecord {
+        index: 0,
+        candidate_white,
+        candidate_black,
+    }];
+    let scores = score_records(&pairs);
+    let pair_counts = pair_count_records(&pairs);
+    MatchSummary {
+        candidate: candidate.name.clone(),
+        reference: reference.name.clone(),
+        pairs,
+        scores,
+        pair_counts,
+        elo_delta: scores.elo(),
+        elo_low: 0.0,
+        elo_high: 0.0,
+        llr: 0.0,
+        sprt_decision: SprtDecision::Continue,
+        total_nodes: 0,
+        elapsed: Duration::ZERO,
+        // Informational only — callers must not abort tournaments on this.
+        error: Some(message),
+        reference_elo: config.reference_elo,
+        config: config.clone(),
+        opening_count: 0,
+        opening_fingerprint: String::new(),
+        resumed_pairs: 0,
+    }
+}
+
+/// If a match produced no games (spawn/crash), convert the failure into a scored forfeit.
+pub fn ensure_scored_match(
+    summary: MatchSummary,
+    candidate: &EngineSpec,
+    reference: &EngineSpec,
+) -> MatchSummary {
+    if !summary.pairs.is_empty() {
+        return summary;
+    }
+    let detail = summary
+        .error
+        .clone()
+        .unwrap_or_else(|| "engine failed before any game completed".to_owned());
+    let failed = classify_engine_failure(candidate, reference, &detail);
+    forfeit_match_summary(candidate, reference, &summary.config, failed, detail)
 }
 
 fn resource_limit_detail(game: &GameRecord) -> Option<&str> {
@@ -1815,6 +2008,66 @@ mod tests {
         assert_eq!(MatchConfig::default().max_engine_memory_mb, 384);
         assert_eq!(MatchConfig::default().max_match_memory_mb, 768);
         assert_eq!(MatchConfig::default().session_pairs, 1);
+    }
+
+    #[test]
+    fn forfeit_match_awards_loss_to_the_failed_engine() {
+        let candidate = EngineSpec::new(PathBuf::from("alpha.exe"));
+        let reference = EngineSpec::new(PathBuf::from("beta.exe"));
+        let summary = forfeit_match_summary(
+            &candidate,
+            &reference,
+            &MatchConfig::default(),
+            FailedEngine::Reference,
+            "spawn failed",
+        );
+        assert_eq!(summary.pairs.len(), 1);
+        assert_eq!(summary.scores.wins, 2); // candidate wins both colors
+        assert_eq!(summary.scores.losses, 0);
+        assert!(summary.error.as_ref().unwrap().contains("beta"));
+    }
+
+    #[test]
+    fn classify_failure_prefers_path_match() {
+        let candidate = EngineSpec::new(PathBuf::from(r"C:\engines\alpha.exe"));
+        let reference = EngineSpec::new(PathBuf::from(r"C:\engines\beta.exe"));
+        assert_eq!(
+            classify_engine_failure(
+                &candidate,
+                &reference,
+                r"failed to spawn engine 'C:\engines\beta.exe': access denied"
+            ),
+            FailedEngine::Reference
+        );
+    }
+
+    #[test]
+    fn empty_match_is_converted_into_a_scored_forfeit() {
+        let candidate = EngineSpec::new(PathBuf::from("alpha.exe"));
+        let reference = EngineSpec::new(PathBuf::from("beta.exe"));
+        let empty = MatchSummary {
+            candidate: candidate.name.clone(),
+            reference: reference.name.clone(),
+            pairs: Vec::new(),
+            scores: ScoreCount::default(),
+            pair_counts: PairCount::default(),
+            elo_delta: 0.0,
+            elo_low: 0.0,
+            elo_high: 0.0,
+            llr: 0.0,
+            sprt_decision: SprtDecision::Continue,
+            total_nodes: 0,
+            elapsed: Duration::ZERO,
+            error: Some(r"failed to spawn engine 'alpha.exe': boom".to_owned()),
+            reference_elo: None,
+            config: MatchConfig::default(),
+            opening_count: 0,
+            opening_fingerprint: String::new(),
+            resumed_pairs: 0,
+        };
+        let scored = ensure_scored_match(empty, &candidate, &reference);
+        assert_eq!(scored.pairs.len(), 1);
+        assert_eq!(scored.scores.losses, 2);
     }
 
     #[test]

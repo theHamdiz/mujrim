@@ -6,7 +6,8 @@ pub mod stats;
 pub mod tournament;
 
 pub use runner::{
-    EngineSpec, GameProgress, GameProgressEvent, MatchClock, MatchConfig, MatchSummary, run_match,
+    EngineSpec, FailedEngine, GameProgress, GameProgressEvent, MatchClock, MatchConfig,
+    MatchSummary, classify_engine_failure, ensure_scored_match, forfeit_match_summary, run_match,
 };
 pub use tournament::{
     TournamentConfig, TournamentEngine, TournamentEvent, TournamentGameSnapshot,

@@ -120,6 +120,38 @@ impl StudyDatabase {
         self.games.len()
     }
 
+    /// Wipe games, engine catalog, and tournament history from the study database.
+    pub fn clear_all_history(&mut self) -> Result<(), String> {
+        self.sqlite
+            .execute_batch(
+                "DELETE FROM tournament_results;
+                 DELETE FROM tournament_entrants;
+                 DELETE FROM tournaments;
+                 DELETE FROM engines;
+                 DELETE FROM games;",
+            )
+            .map_err(|error| format!("failed to clear study history: {error}"))?;
+        self.games.clear();
+        let games_dir = self.root.join("games");
+        if games_dir.is_dir() {
+            for entry in fs::read_dir(&games_dir)
+                .map_err(|error| format!("failed to read games directory: {error}"))?
+            {
+                let entry =
+                    entry.map_err(|error| format!("failed to read games entry: {error}"))?;
+                let path = entry.path();
+                if path.is_file() {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        let index = self.root.join(INDEX_FILE);
+        if index.exists() {
+            let _ = fs::remove_file(index);
+        }
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.games.is_empty()
     }
@@ -564,6 +596,30 @@ mod tests {
     fn malformed_index_rows_are_rejected() {
         assert!(decode_index_row("too\tfew").is_err());
         assert!(unescape("broken%2").is_err());
+    }
+
+    #[test]
+    fn clear_all_history_removes_games_and_tournaments() {
+        let root = temporary_database();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        database
+            .import_pgn(
+                GameMetadata {
+                    event: "Wipe Me".to_owned(),
+                    white: "A".to_owned(),
+                    black: "B".to_owned(),
+                    result: "1-0".to_owned(),
+                    ..GameMetadata::default()
+                },
+                "[Event \"Wipe Me\"]\n\n1. e4 1-0\n",
+            )
+            .unwrap();
+        assert_eq!(database.len(), 1);
+        database.clear_all_history().unwrap();
+        assert_eq!(database.len(), 0);
+        assert!(database.search(&GameQuery::default()).is_empty());
+        drop(database);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
