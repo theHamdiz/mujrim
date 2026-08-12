@@ -374,17 +374,18 @@ pub fn discover_bundled_engines_from_environment() -> Result<Vec<DiscoveredEngin
 mod tests {
     use super::*;
 
+    // Use forward slashes so Path parent/join semantics work on Linux/macOS CI hosts too.
     #[test]
     fn explicit_engine_path_has_priority() {
         let candidates = engine_candidates(
             "reckless",
-            Path::new(r"C:\Program Files\Mujrim\mujrim.exe"),
-            Path::new(r"D:\src\mujrim"),
-            Some(Path::new(r"E:\engines\reckless-custom.exe")),
+            Path::new("C:/Program Files/Mujrim/mujrim.exe"),
+            Path::new("D:/src/mujrim"),
+            Some(Path::new("E:/engines/reckless-custom.exe")),
         );
         assert_eq!(
             candidates.first().unwrap(),
-            Path::new(r"E:\engines\reckless-custom.exe")
+            Path::new("E:/engines/reckless-custom.exe")
         );
     }
 
@@ -392,14 +393,15 @@ mod tests {
     fn flat_installer_layout_finds_adjacent_engine() {
         let candidates = engine_candidate_details(
             "mujrim-v60",
-            Path::new(r"C:\Program Files\Mujrim\bin\mujrim.exe"),
-            Path::new(r"D:\unrelated"),
+            Path::new("C:/Program Files/Mujrim/bin/mujrim.exe"),
+            Path::new("D:/unrelated"),
             None,
         );
         assert_eq!(
             candidates.first().unwrap(),
             &EngineCandidate {
-                path: PathBuf::from(r"C:\Program Files\Mujrim\bin\mujrim-v60.exe"),
+                path: Path::new("C:/Program Files/Mujrim/bin")
+                    .join(executable_filename("mujrim-v60")),
                 target_directory: "adjacent".to_owned(),
                 compatibility: RuntimeCompatibility::Native,
             }
@@ -422,17 +424,20 @@ mod tests {
     fn packaged_candidates_include_runtime_architecture() {
         let candidates = engine_candidates(
             "reckless",
-            Path::new(r"C:\Mujrim\mujrim.exe"),
-            Path::new(r"D:\src\mujrim"),
+            Path::new("C:/Mujrim/mujrim.exe"),
+            Path::new("D:/src/mujrim"),
             None,
         );
-        let expected = Path::new(r"C:\Mujrim")
+        let expected = Path::new("C:/Mujrim")
             .join("engines")
             .join("reckless")
             .join("bin")
             .join(RuntimePlatform::current().directory_name())
             .join(executable_filename("reckless"));
-        assert!(candidates.contains(&expected));
+        assert!(
+            candidates.contains(&expected),
+            "missing {expected:?} in {candidates:?}"
+        );
     }
 
     #[test]
@@ -446,11 +451,11 @@ mod tests {
         for adapter in ["mujrim-v60", "mujrim-v10", "mujrim-akimbo"] {
             let candidates = engine_candidates(
                 adapter,
-                Path::new(r"C:\Mujrim\mujrim-ui.exe"),
-                Path::new(r"D:\src\mujrim"),
+                Path::new("C:/Mujrim/mujrim-ui.exe"),
+                Path::new("D:/src/mujrim"),
                 None,
             );
-            let expected = Path::new(r"C:\Mujrim")
+            let expected = Path::new("C:/Mujrim")
                 .join("engines")
                 .join("mujrim")
                 .join("bin")
@@ -553,18 +558,19 @@ mod tests {
     fn engine_inside_packaged_tree_finds_sibling_backends() {
         let candidates = engine_candidates(
             "stockfish",
-            Path::new(r"C:\Mujrim\dist\engines\mujrim\bin\windows-aarch64\mujrim-elite.exe"),
-            Path::new(r"D:\unrelated"),
+            Path::new("C:/Mujrim/dist/engines/mujrim/bin/windows-aarch64/mujrim-elite.exe"),
+            Path::new("D:/unrelated"),
             None,
         );
-        assert!(candidates.iter().any(|candidate| {
-            candidate
-                == &Path::new(r"C:\Mujrim\dist\engines")
-                    .join("stockfish")
-                    .join("bin")
-                    .join(RuntimePlatform::current().directory_name())
-                    .join(executable_filename("stockfish"))
-        }));
+        let expected = Path::new("C:/Mujrim/dist/engines")
+            .join("stockfish")
+            .join("bin")
+            .join(RuntimePlatform::current().directory_name())
+            .join(executable_filename("stockfish"));
+        assert!(
+            candidates.iter().any(|candidate| candidate == &expected),
+            "missing {expected:?} in {candidates:?}"
+        );
     }
 
     #[test]
@@ -590,8 +596,8 @@ mod tests {
     fn windows_arm64_auto_detect_skips_emulated_x64_folders() {
         let candidates = engine_candidate_details(
             "obsidian",
-            Path::new(r"C:\Mujrim\mujrim.exe"),
-            Path::new(r"D:\src\mujrim"),
+            Path::new("C:/Mujrim/mujrim.exe"),
+            Path::new("D:/src/mujrim"),
             None,
         );
         assert!(candidates.iter().all(|candidate| {
