@@ -6174,11 +6174,13 @@ async fn pick_pgn_file() -> Option<String> {
     Some(file.path().to_string_lossy().into_owned())
 }
 
+fn strip_move_annotations(notation: &str) -> &str {
+    notation.trim().trim_end_matches(['+', '#', '!', '?'])
+}
+
 fn normalize_logged_uci(notation: &str) -> String {
-    notation
-        .trim()
-        .trim_end_matches(['+', '#', '!', '?'])
-        .to_ascii_lowercase()
+    // UCI tokens are lowercase; keep this separate from SAN PGN export.
+    strip_move_annotations(notation).to_ascii_lowercase()
 }
 
 fn find_logged_move(board: &mut types::Board, notation: &str) -> Option<types::Move> {
@@ -6985,11 +6987,11 @@ fn build_pgn(white: &str, black: &str, moves: &[String], result: &str) -> String
         pgn.push_str(&format!(
             "{}. {}",
             index + 1,
-            normalize_logged_uci(&pair[0])
+            strip_move_annotations(&pair[0])
         ));
         if let Some(black_move) = pair.get(1) {
             pgn.push(' ');
-            pgn.push_str(&normalize_logged_uci(black_move));
+            pgn.push_str(strip_move_annotations(black_move));
         }
         pgn.push(' ');
     }
