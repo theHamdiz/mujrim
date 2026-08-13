@@ -616,6 +616,9 @@ pub trait ProtocolDriver {
     fn stop_search(&mut self, _io: &mut EngineIo) -> Result<(), String> {
         Err("stopping an active search is not supported by this protocol".to_owned())
     }
+    fn supports_stop(&self) -> bool {
+        false
+    }
     fn parse_output_line(&mut self, line: &str, info: &mut SearchInfo) -> Option<String>;
 
     fn quit(&mut self, io: &mut EngineIo) -> Result<(), String> {
@@ -865,6 +868,7 @@ pub enum SearchStep {
 pub struct EngineSession {
     io: EngineIo,
     driver: Box<dyn ProtocolDriver + Send>,
+    protocol: ProtocolKind,
     search_state: EngineSearchState,
     pending_info: SearchInfo,
 }
@@ -897,6 +901,7 @@ impl EngineSession {
         Ok(Self {
             io,
             driver,
+            protocol,
             search_state: EngineSearchState::Idle,
             pending_info: SearchInfo::default(),
         })
@@ -1020,6 +1025,39 @@ impl EngineSession {
     pub fn search(&mut self, req: &SearchRequest) -> Result<SearchInfo, String> {
         self.start_search(req)?;
         self.wait_for_bestmove()
+    }
+
+    pub const fn protocol(&self) -> ProtocolKind {
+        self.protocol
+    }
+
+    pub fn supports_stop(&self) -> bool {
+        self.driver.supports_stop()
+    }
+
+    /// Run a search, sending the protocol stop command if `interrupt` becomes true.
+    ///
+    /// UCI uses `stop` (engine still replies `bestmove`). XBoard uses `?`.
+    /// If the protocol cannot interrupt, this falls back to a blocking search.
+    pub fn search_interruptible(
+        &mut self,
+        req: &SearchRequest,
+        interrupt: impl Fn() -> bool,
+    ) -> Result<SearchInfo, String> {
+        if !self.supports_stop() {
+            return self.search(req);
+        }
+        self.start_search(req)?;
+        loop {
+            if interrupt() {
+                return self.stop_search();
+            }
+            match self.poll_search_step()? {
+                SearchStep::Pending => std::thread::sleep(Duration::from_millis(8)),
+                SearchStep::Info(_) => {}
+                SearchStep::Done(info) => return Ok(info),
+            }
+        }
     }
 
     fn consume_search_line(&mut self, line: &str) -> Option<SearchInfo> {
@@ -1272,7 +1310,11 @@ impl ProtocolDriver for UciDriver {
     }
 
     fn stop_search(&mut self, io: &mut EngineIo) -> Result<(), String> {
-        io.send("stop")
+        io.send(protocol_stop_command(ProtocolKind::Uci).expect("uci stop"))
+    }
+
+    fn supports_stop(&self) -> bool {
+        true
     }
 
     fn parse_output_line(&mut self, line: &str, info: &mut SearchInfo) -> Option<String> {
@@ -1379,6 +1421,14 @@ impl ProtocolDriver for XboardDriver {
         io.send("go")
     }
 
+    fn stop_search(&mut self, io: &mut EngineIo) -> Result<(), String> {
+        io.send(protocol_stop_command(ProtocolKind::Xboard).expect("xboard stop"))
+    }
+
+    fn supports_stop(&self) -> bool {
+        true
+    }
+
     fn parse_output_line(&mut self, line: &str, info: &mut SearchInfo) -> Option<String> {
         if let Some(rest) = line.strip_prefix("move ") {
             return rest.split_whitespace().next().map(ToString::to_string);
@@ -1392,6 +1442,13 @@ impl ProtocolDriver for XboardDriver {
             self.parse_post_line(line, info);
         }
         None
+    }
+}
+
+pub fn protocol_stop_command(kind: ProtocolKind) -> Option<&'static str> {
+    match kind {
+        ProtocolKind::Uci => Some("stop"),
+        ProtocolKind::Xboard => Some("?"),
     }
 }
 
@@ -1448,6 +1505,14 @@ mod tests {
         assert_eq!(info.current_move.as_deref(), Some("e2e4"));
         assert_eq!(info.current_move_number, 4);
         assert_eq!(info.pv, ["e2e4", "e7e5"]);
+    }
+
+    #[test]
+    fn uci_and_xboard_advertise_stop_commands() {
+        assert_eq!(protocol_stop_command(ProtocolKind::Uci), Some("stop"));
+        assert_eq!(protocol_stop_command(ProtocolKind::Xboard), Some("?"));
+        assert!(UciDriver.supports_stop());
+        assert!(XboardDriver.supports_stop());
     }
 
     #[test]

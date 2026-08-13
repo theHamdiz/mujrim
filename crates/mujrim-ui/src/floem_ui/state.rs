@@ -10,6 +10,7 @@ use mujrim_protocols::catalog::DiscoveredEngine;
 use mujrim_study::annotation::MoveAnnotation;
 use mujrim_study::database::{EngineMetadata, GameSummary, StudyDatabase};
 use mujrim_study::opening::{OpeningExplorer, PrepSide, SavedLine};
+use mujrim_study::tournament_store::StoredTournament;
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
 use types::Square;
 
@@ -90,6 +91,12 @@ pub struct AppState {
     pub line_name: RwSignal<String>,
     pub prep_notes: RwSignal<String>,
     pub prep_side: RwSignal<PrepSide>,
+    pub move_note: RwSignal<String>,
+    pub tournament_history: RwSignal<Vec<StoredTournament>>,
+    pub current_tournament_id: RwSignal<Option<String>>,
+    pub persisted_tournament_games: RwSignal<usize>,
+    pub resume_prompt:
+        RwSignal<Option<crate::app_core::tournament_resume::ActiveTournamentCheckpoint>>,
 }
 
 #[derive(Clone)]
@@ -186,6 +193,11 @@ impl AppState {
             line_name: RwSignal::new("New preparation".to_owned()),
             prep_notes: RwSignal::new(String::new()),
             prep_side: RwSignal::new(PrepSide::White),
+            move_note: RwSignal::new(String::new()),
+            tournament_history: RwSignal::new(Vec::new()),
+            current_tournament_id: RwSignal::new(None),
+            persisted_tournament_games: RwSignal::new(0),
+            resume_prompt: RwSignal::new(None),
         };
         let study_path = crate::app_core::logic::study_database_path();
         let study = StudyDatabase::open(&study_path).ok();
@@ -202,10 +214,13 @@ impl AppState {
             .map(|store| store.due(crate::app_core::logic::today_day(), 32))
             .unwrap_or_default();
         state.training_due.set(due);
-        if let Some(database) = study.as_ref()
-            && let Ok(lines) = database.list_lines()
-        {
-            state.saved_lines.set(lines);
+        if let Some(database) = study.as_ref() {
+            if let Ok(lines) = database.list_lines() {
+                state.saved_lines.set(lines);
+            }
+            if let Ok(history) = database.list_tournaments() {
+                state.tournament_history.set(history);
+            }
         }
         let handles = AppHandles {
             assets: Rc::new(PieceAssets::load()),

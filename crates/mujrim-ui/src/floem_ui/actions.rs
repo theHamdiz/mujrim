@@ -2,11 +2,12 @@
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use floem::ext_event::create_ext_action;
 use floem::prelude::{SignalGet, SignalUpdate, SignalWith};
 use mujrim_study::database::GameQuery;
+use mujrim_study::game_export::{self, GameExportFormat, GameRecord};
 use types::{Color, Move, Square};
 
 use crate::app_core::analysis::{AnalysisEngineSpec, AnalysisRequest, run_multi_engine_analysis};
@@ -28,6 +29,7 @@ use super::state::{AppHandles, AppState};
 pub fn new_game(state: AppState, handles: &AppHandles) {
     types::init();
     uci_process::cancel_all_pondering();
+    crate::app_core::engine::stop_builtin_search();
     let mut generation = state.game_generation.get_untracked();
     let mut searching = state.searching.get_untracked();
     let mut retries = state.engine_retries.get_untracked();
@@ -198,6 +200,7 @@ pub fn apply_engine_move(
             game.deselect();
             game.game_over = game.board.is_game_over();
             let settings = state.settings.get_untracked();
+            let ponder = ponder.filter(|_| settings.ponder_arrow);
             game.refresh_move_overlays(settings.last_move_arrow, ponder, &[]);
         }
     });
@@ -288,14 +291,183 @@ fn human_color(state: AppState) -> Color {
 }
 
 pub fn export_pgn(state: AppState) {
-    let white = state.white_player.get_untracked().to_string();
-    let black = state.black_player.get_untracked().to_string();
-    let moves = state.move_log.get_untracked();
-    let pgn = logic::build_pgn(&white, &black, &moves, "*");
+    let record = current_record(state);
+    let pgn = String::from_utf8(
+        game_export::encode_games(std::slice::from_ref(&record), GameExportFormat::Pgn)
+            .unwrap_or_default(),
+    )
+    .unwrap_or_default();
     if let Ok(mut clipboard) = arboard::Clipboard::new() {
         let _ = clipboard.set_text(&pgn);
         state.status.set("PGN copied to clipboard.".to_owned());
     }
+}
+
+pub fn export_board(state: AppState, handles: &AppHandles, format: GameExportFormat) {
+    save_records(
+        state,
+        handles,
+        vec![current_record(state)],
+        format,
+        "mujrim-game",
+        "Game exported",
+    );
+}
+
+pub fn export_results(state: AppState, handles: &AppHandles, format: GameExportFormat) {
+    let records = tournament_export_records(state, handles);
+    if records.is_empty() {
+        export_board(state, handles, format);
+        return;
+    }
+    save_records(
+        state,
+        handles,
+        records,
+        format,
+        "mujrim-tournament",
+        "Tournament exported",
+    );
+}
+
+pub fn import_games(state: AppState, handles: &AppHandles) {
+    let handles = handles.clone();
+    let on_done = create_ext_action(handles.ui_scope, move |path: Option<PathBuf>| {
+        let Some(path) = path else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            state.status.set("Could not read import file.".to_owned());
+            return;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        match game_export::import_text(&text) {
+            Ok(records) => {
+                let mut loaded = false;
+                if let Some(first) = records.first()
+                    && let Ok(game) = logic::replay_study_game(&first.initial_fen, &first.moves)
+                {
+                    state.initial_fen.set(first.initial_fen.clone());
+                    state.move_log.set(first.moves.clone());
+                    state.move_annotations.set(vec![None; first.moves.len()]);
+                    state.review_ply.set(None);
+                    state.game.set(Some(game));
+                    loaded = true;
+                }
+                let mut study = handles.study.borrow_mut();
+                let imported = if let Some(database) = study.as_mut() {
+                    let pgn = String::from_utf8(
+                        game_export::encode_games(&records, GameExportFormat::Pgn)
+                            .unwrap_or_default(),
+                    )
+                    .unwrap_or_default();
+                    database.import_pgn_text(&pgn).ok()
+                } else {
+                    None
+                };
+                drop(study);
+                refresh_study(state, &handles);
+                state.status.set(match (imported, loaded) {
+                    (Some(report), true) => format!(
+                        "Imported {} / {} games onto the board.",
+                        report.imported, report.discovered
+                    ),
+                    (Some(report), false) => format!(
+                        "Imported {} / {} games.",
+                        report.imported, report.discovered
+                    ),
+                    (None, true) => "Loaded imported position.".to_owned(),
+                    _ => "Nothing was imported.".to_owned(),
+                });
+            }
+            Err(error) => state.status.set(error),
+        }
+    });
+    std::thread::spawn(move || {
+        on_done(
+            rfd::FileDialog::new()
+                .add_filter("Games", &["pgn", "txt", "json", "epd", "fen", "uci"])
+                .add_filter("PGN", &["pgn", "txt"])
+                .add_filter("JSON", &["json"])
+                .add_filter("EPD/FEN", &["epd", "fen"])
+                .pick_file(),
+        );
+    });
+}
+
+fn current_record(state: AppState) -> GameRecord {
+    logic::current_game_record(
+        &state.white_player.get_untracked().to_string(),
+        &state.black_player.get_untracked().to_string(),
+        &state.tournament_event.get_untracked(),
+        &state.tournament_site.get_untracked(),
+        &state.initial_fen.get_untracked(),
+        &state.move_log.get_untracked(),
+        "*",
+    )
+}
+
+fn tournament_export_records(state: AppState, handles: &AppHandles) -> Vec<GameRecord> {
+    let snap = state.tournament_snapshot.get_untracked();
+    let event = state.tournament_event.get_untracked();
+    let site = state.tournament_site.get_untracked();
+    let mut stored = Vec::new();
+    if snap.played_games.is_empty()
+        && let Some(id) = state.current_tournament_id.get_untracked()
+        && let Some(database) = handles.study.borrow().as_ref()
+        && let Ok(Some(tournament)) = database.load_tournament(&id)
+    {
+        stored = database.recover_tournament_games(&tournament);
+    }
+    if stored.is_empty() {
+        stored = state
+            .tournament_history
+            .get_untracked()
+            .into_iter()
+            .flat_map(|tournament| {
+                handles
+                    .study
+                    .borrow()
+                    .as_ref()
+                    .map(|database| database.recover_tournament_games(&tournament))
+                    .unwrap_or(tournament.games)
+            })
+            .collect();
+    }
+    logic::tournament_records(&event, &site, &snap.played_games, &stored)
+}
+
+fn save_records(
+    state: AppState,
+    handles: &AppHandles,
+    records: Vec<GameRecord>,
+    format: GameExportFormat,
+    stem: &str,
+    ok_prefix: &'static str,
+) {
+    let filename = format!("{stem}.{}", format.extension());
+    let on_done = create_ext_action(handles.ui_scope, move |message: String| {
+        state.status.set(message);
+    });
+    std::thread::spawn(move || {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(format.label(), &[format.extension()])
+            .set_file_name(&filename)
+            .save_file()
+        else {
+            on_done("Export cancelled.".to_owned());
+            return;
+        };
+        on_done(match logic::export_records_to_path(&records, &path) {
+            Ok(written) => format!(
+                "{ok_prefix} {} {} to {}.",
+                records.len(),
+                written.label().to_ascii_lowercase(),
+                path.display()
+            ),
+            Err(error) => error,
+        });
+    });
 }
 
 pub fn save_to_library(state: AppState, handles: &AppHandles) {
@@ -394,6 +566,7 @@ pub fn analyze_game(state: AppState, handles: &AppHandles) {
             ));
         })
         .ok();
+    review_played_game(state, handles);
 }
 
 pub fn export_gif(state: AppState) {
@@ -489,39 +662,7 @@ fn tick_recording(state: AppState, handles: AppHandles) {
 }
 
 pub fn import_pgn(state: AppState, handles: &AppHandles) {
-    let handles = handles.clone();
-    let on_done = create_ext_action(handles.ui_scope, move |path: Option<PathBuf>| {
-        let Some(path) = path else {
-            return;
-        };
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            state.status.set("Could not read PGN.".to_owned());
-            return;
-        };
-        let mut study = handles.study.borrow_mut();
-        let Some(database) = study.as_mut() else {
-            state.status.set("Study library is unavailable.".to_owned());
-            return;
-        };
-        match database.import_pgn_text(&text) {
-            Ok(report) => {
-                state.status.set(format!(
-                    "Imported {} / {} games.",
-                    report.imported, report.discovered
-                ));
-                drop(study);
-                refresh_study(state, &handles);
-            }
-            Err(error) => state.status.set(error),
-        }
-    });
-    std::thread::spawn(move || {
-        on_done(
-            rfd::FileDialog::new()
-                .add_filter("PGN", &["pgn", "txt"])
-                .pick_file(),
-        );
-    });
+    import_games(state, handles);
 }
 
 pub fn pick_eval_file(state: AppState, handles: &AppHandles) {
@@ -580,6 +721,7 @@ pub fn load_library_game(state: AppState, handles: &AppHandles, id: String) {
                     state.screen.set(Screen::Study);
                 }
                 state.status.set("Loaded library game.".to_owned());
+                sync_move_note(state, handles);
             }
             Err(error) => state.status.set(error),
         },
@@ -706,7 +848,7 @@ pub fn study_opening_move(state: AppState, uci: String) {
     }
 }
 
-pub fn ensure_study_board(state: AppState) {
+pub fn ensure_study_board(state: AppState, handles: &AppHandles) {
     if state.game.get_untracked().is_some() {
         return;
     }
@@ -718,9 +860,10 @@ pub fn ensure_study_board(state: AppState) {
     state.move_annotations.set(Vec::new());
     state.review_ply.set(None);
     state.game.set(Some(GameState::new(types::Board::new())));
+    sync_move_note(state, handles);
 }
 
-pub fn view_ply(state: AppState, ply: usize) {
+pub fn view_ply(state: AppState, handles: &AppHandles, ply: usize) {
     let fen = state.initial_fen.get_untracked();
     let moves = state.move_log.get_untracked();
     match logic::board_at_ply(&fen, &moves, ply) {
@@ -746,6 +889,7 @@ pub fn view_ply(state: AppState, ply: usize) {
                 }
             });
             state.status.set(format!("Reviewing ply {ply}."));
+            sync_move_note(state, handles);
         }
         Err(error) => state.status.set(format!("Could not navigate: {error}")),
     }
@@ -961,19 +1105,58 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     uci_process::shutdown_external_engines();
     state.selected_tournament_game_id.set(None);
     state.analysis_scores.set(Vec::new());
-    state.move_log.set(Vec::new());
-    state.game.set(None);
-    state.dock_tab.set(DockTab::Histogram);
+    state.move_annotations.set(Vec::new());
+    state.review_ply.set(None);
+    state.resume_prompt.set(None);
+    state.dock_tab.set(DockTab::Results);
     state.dock_open.set(true);
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    state
+        .current_tournament_id
+        .set(Some(format!("t-{started}")));
+    state.persisted_tournament_games.set(0);
     let handle = crate::app_core::tournament_live::LiveTournamentHandle::new(setup.format);
+    let white_name = selected[0].name.clone();
+    let black_name = selected[1].name.clone();
+    let clock_ms = setup.time_control.match_clock().initial.as_millis() as u64;
+    if let Ok(mut guard) = handle.snapshot.lock() {
+        guard.engine_names = selected.iter().map(|engine| engine.name.clone()).collect();
+        guard.current_white = white_name.clone();
+        guard.current_black = black_name.clone();
+        guard.current_round = 1;
+        guard.upsert_live_game(logic::optimistic_live_board(
+            white_name.clone(),
+            black_name.clone(),
+            clock_ms,
+        ));
+        guard.status_line = format!("Starting {white_name} vs {black_name}…");
+    }
+    if let Ok(game) = logic::replay_study_game(mujrim_study::opening::START_FEN, &[]) {
+        state.game.set(Some(game));
+        state.move_log.set(Vec::new());
+        state
+            .initial_fen
+            .set(mujrim_study::opening::START_FEN.to_owned());
+    }
+    state.tournament_snapshot.set(handle.clone_snapshot());
+    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
+        format!("t-{started}"),
+        &setup,
+        &handle.clone_snapshot(),
+    )
+    .save();
     *handles.tournament.borrow_mut() = Some(handle.clone());
     state.show_tournament_setup.set(false);
     state.screen.set(Screen::Tournaments);
     state.tournament_status.set(format!(
-        "Starting {} engines · 1 board · forfeit on engine errors.",
+        "Starting {} engines · 1 board · {white_name} vs {black_name}.",
         selected.len()
     ));
     let snapshot = handle.clone();
+    let persist_handles = handles.clone();
     let on_done = create_ext_action(handles.ui_scope, move |summary| {
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
             state
@@ -981,6 +1164,7 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
                 .set(logic::format_tournament_summary(&summary));
             if let Ok(guard) = snapshot.snapshot.lock() {
                 state.tournament_snapshot.set(guard.clone());
+                persist_tournament_progress(state, &persist_handles, &guard);
             }
         }));
     });
@@ -1034,6 +1218,21 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
             if match_controller::should_sync_tournament_board(state.screen.get_untracked()) {
                 sync_tournament_board(state, &guard);
             }
+            persist_tournament_progress(state, &handles, &guard);
+            if running {
+                let id = state
+                    .current_tournament_id
+                    .get_untracked()
+                    .unwrap_or_default();
+                crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
+                    id,
+                    &state.tournament_setup.get_untracked(),
+                    &guard,
+                )
+                .save();
+            } else {
+                crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+            }
             running
         }))
         .unwrap_or(false);
@@ -1080,12 +1279,338 @@ fn sync_tournament_board(
     }
 }
 
-pub fn cancel_tournament(handles: &AppHandles) {
-    if let Some(handle) = handles.tournament.borrow().as_ref() {
-        handle
-            .cancel
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+pub fn pause_tournament(state: AppState, handles: &AppHandles) {
+    apply_tournament_control(state, handles, |handle| handle.request_pause());
+    persist_active_checkpoint(state, handles);
+}
+
+pub fn resume_tournament(state: AppState, handles: &AppHandles) {
+    apply_tournament_control(state, handles, |handle| handle.request_resume());
+}
+
+pub fn abort_tournament_game(state: AppState, handles: &AppHandles) {
+    apply_tournament_control(state, handles, |handle| handle.request_abort_game());
+}
+
+pub fn cancel_tournament(state: AppState, handles: &AppHandles) {
+    apply_tournament_control(state, handles, |handle| handle.request_cancel());
+    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+}
+
+fn persist_active_checkpoint(state: AppState, handles: &AppHandles) {
+    let Some(id) = state.current_tournament_id.get_untracked() else {
+        return;
+    };
+    let snap = handles
+        .tournament
+        .borrow()
+        .as_ref()
+        .map(|handle| handle.clone_snapshot())
+        .unwrap_or_else(|| state.tournament_snapshot.get_untracked());
+    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
+        id,
+        &state.tournament_setup.get_untracked(),
+        &snap,
+    )
+    .save();
+    persist_tournament_progress(state, handles, &snap);
+}
+
+pub fn open_tournaments_screen(state: AppState, handles: &AppHandles) {
+    state.screen.set(Screen::Tournaments);
+    refresh_tournament_history(state, handles);
+    if state.tournament_snapshot.get_untracked().running {
+        return;
     }
+    if let Some(checkpoint) = crate::app_core::tournament_resume::ActiveTournamentCheckpoint::load()
+    {
+        offer_resume(state, checkpoint);
+        return;
+    }
+    if let Some(stored) = state
+        .tournament_history
+        .get_untracked()
+        .into_iter()
+        .find(|tournament| mujrim_study::tournament_store::is_resumable_status(&tournament.status))
+    {
+        offer_resume(
+            state,
+            crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_stored(
+                &stored,
+                &state.tournament_setup.get_untracked(),
+            ),
+        );
+        return;
+    }
+    open_tournament_setup(state, handles);
+}
+
+fn offer_resume(
+    state: AppState,
+    checkpoint: crate::app_core::tournament_resume::ActiveTournamentCheckpoint,
+) {
+    state.resume_prompt.set(Some(checkpoint.clone()));
+    state.show_tournament_setup.set(false);
+    if let Ok(game) = logic::replay_study_game(&checkpoint.initial_fen, &checkpoint.moves) {
+        state.game.set(Some(game));
+        state.move_log.set(checkpoint.moves.clone());
+        state.initial_fen.set(checkpoint.initial_fen.clone());
+    }
+    state.tournament_status.set(format!(
+        "Paused event “{}” · {} vs {}. Resume or start a new tournament.",
+        checkpoint.event, checkpoint.white, checkpoint.black
+    ));
+}
+
+pub fn resume_paused_tournament(state: AppState, handles: &AppHandles) {
+    let Some(checkpoint) = state.resume_prompt.get_untracked() else {
+        open_tournament_setup(state, handles);
+        return;
+    };
+    state.tournament_setup.update(|setup| {
+        setup.event = checkpoint.event.clone();
+        setup.site = checkpoint.site.clone();
+        setup.format = checkpoint.parsed_format();
+        if !checkpoint.selected_engine_paths.is_empty() {
+            setup.selected_engine_paths = checkpoint.selected_engine_paths.clone();
+        }
+        setup.sanitize_for_gui();
+    });
+    state.tournament_event.set(checkpoint.event.clone());
+    state.tournament_site.set(checkpoint.site.clone());
+    start_tournament(state, handles);
+    if let Ok(game) = logic::replay_study_game(&checkpoint.initial_fen, &checkpoint.moves) {
+        state.game.set(Some(game));
+        state.move_log.set(checkpoint.moves);
+        state.initial_fen.set(checkpoint.initial_fen);
+    }
+}
+
+pub fn discard_paused_tournament(state: AppState, handles: &AppHandles) {
+    let checkpoint = state.resume_prompt.get_untracked();
+    state.resume_prompt.set(None);
+    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+    if let Some(checkpoint) = checkpoint {
+        if let Some(database) = handles.study.borrow_mut().as_mut() {
+            let _ = database.delete_tournament(&checkpoint.id);
+        }
+        if let Some(parent) = logic::study_database_path().parent() {
+            let dir = parent
+                .join("tournaments")
+                .join(logic::tournament_directory_name(checkpoint.parsed_format()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    refresh_tournament_history(state, handles);
+    state.game.set(None);
+    state.move_log.set(Vec::new());
+    state.tournament_snapshot.set(Default::default());
+    state
+        .tournament_status
+        .set("Previous tournament discarded.".to_owned());
+    open_tournament_setup(state, handles);
+}
+
+fn apply_tournament_control(
+    state: AppState,
+    handles: &AppHandles,
+    apply: impl FnOnce(&crate::app_core::tournament_live::LiveTournamentHandle),
+) {
+    let Some(handle) = handles.tournament.borrow().as_ref().cloned() else {
+        state
+            .tournament_status
+            .set("No tournament is running.".to_owned());
+        return;
+    };
+    apply(&handle);
+    let snap = handle.clone_snapshot();
+    state.tournament_snapshot.set(snap.clone());
+    state.tournament_status.set(snap.status_line);
+}
+
+pub fn stop_engine_search(state: AppState, handles: &AppHandles) {
+    uci_process::cancel_all_pondering();
+    crate::app_core::engine::stop_builtin_search();
+    let mut generation = state.game_generation.get_untracked();
+    let mut searching = state.searching.get_untracked();
+    let mut retries = state.engine_retries.get_untracked();
+    match_controller::bump_generation(&mut generation, &mut searching, &mut retries);
+    state.game_generation.set(generation);
+    state.searching.set(searching);
+    state.engine_retries.set(retries);
+    handles
+        .telemetry
+        .set(crate::app_core::engine::TelemetrySnapshot::from_label(
+            "Search stopped.",
+        ));
+    state.status.set("Search stopped.".to_owned());
+}
+
+fn persist_tournament_progress(
+    state: AppState,
+    handles: &AppHandles,
+    snap: &crate::app_core::tournament_live::LiveTournamentSnapshot,
+) {
+    let Some(id) = state.current_tournament_id.get_untracked() else {
+        return;
+    };
+    let count = snap.played_games.len();
+    if count == 0 && !snap.finished && !snap.paused && snap.live_games.is_empty() {
+        return;
+    }
+    if count <= state.persisted_tournament_games.get_untracked() && snap.running && !snap.paused {
+        return;
+    }
+    let created_at = id
+        .strip_prefix("t-")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let mut study = handles.study.borrow_mut();
+    let Some(database) = study.as_mut() else {
+        return;
+    };
+    if logic::persist_live_tournament(
+        database,
+        &id,
+        &state.tournament_event.get_untracked(),
+        state.tournament_setup.get_untracked().format,
+        created_at,
+        snap,
+    )
+    .is_ok()
+    {
+        state.persisted_tournament_games.set(count);
+        drop(study);
+        refresh_tournament_history(state, handles);
+    }
+}
+
+pub fn refresh_tournament_history(state: AppState, handles: &AppHandles) {
+    if let Some(database) = handles.study.borrow().as_ref()
+        && let Ok(history) = database.list_tournaments()
+    {
+        state.tournament_history.set(history);
+    }
+}
+
+pub fn load_historical_tournament(state: AppState, handles: &AppHandles, id: String) {
+    let study = handles.study.borrow();
+    let Some(database) = study.as_ref() else {
+        state.status.set("Study library is unavailable.".to_owned());
+        return;
+    };
+    let Ok(Some(mut tournament)) = database.load_tournament(&id) else {
+        state
+            .status
+            .set("That tournament could not be loaded.".to_owned());
+        return;
+    };
+    if tournament.games.is_empty() {
+        tournament.games = database.recover_tournament_games(&tournament);
+    }
+    let played = logic::stored_to_played(&tournament.games);
+    state.current_tournament_id.set(Some(tournament.id.clone()));
+    state.tournament_event.set(tournament.name.clone());
+    state.tournament_snapshot.update(|snap| {
+        snap.running = false;
+        snap.finished = true;
+        snap.format_label = tournament.format.to_string();
+        snap.engine_names = tournament
+            .entrants
+            .iter()
+            .map(|entrant| entrant.name.clone())
+            .collect();
+        snap.game_results = tournament.results.clone();
+        snap.played_games = played;
+        snap.status_line = tournament.status.clone();
+        snap.standings = tournament
+            .standings()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(rank, standing)| {
+                tournament.entrants.get(standing.entrant).map(|entrant| {
+                    crate::app_core::tournament_live::StandingRow {
+                        rank: rank + 1,
+                        name: entrant.name.clone(),
+                        played: standing.played,
+                        wins: standing.wins,
+                        draws: standing.draws,
+                        losses: standing.losses,
+                        points: standing.points,
+                        performance: standing.performance.map(|elo| elo.elo),
+                    }
+                })
+            })
+            .collect();
+    });
+    state.screen.set(Screen::Tournaments);
+    state.dock_tab.set(DockTab::Results);
+    state.dock_open.set(true);
+    if let Some(game) = state
+        .tournament_snapshot
+        .get_untracked()
+        .played_games
+        .last()
+        .cloned()
+        && let Ok(board) = logic::replay_study_game(&game.initial_fen, &game.moves)
+    {
+        state.selected_tournament_game_id.set(Some(game.id));
+        state.game.set(Some(board));
+        state.move_log.set(game.moves);
+        state.initial_fen.set(game.initial_fen);
+    }
+    state.status.set(format!(
+        "Loaded {} · {} games.",
+        tournament.name,
+        tournament.games.len()
+    ));
+}
+
+pub fn save_move_note(state: AppState, handles: &AppHandles) {
+    let Some(fen) = current_position_fen(state) else {
+        state
+            .status
+            .set("Load a position before adding a note.".to_owned());
+        return;
+    };
+    let note = state.move_note.get_untracked();
+    let mut study = handles.study.borrow_mut();
+    let Some(database) = study.as_mut() else {
+        state.status.set("Study library is unavailable.".to_owned());
+        return;
+    };
+    match database.upsert_move_note(&fen, &note) {
+        Ok(()) => state.status.set(if note.trim().is_empty() {
+            "Note cleared.".to_owned()
+        } else {
+            "Note saved on this move.".to_owned()
+        }),
+        Err(error) => state.status.set(error),
+    }
+}
+
+fn sync_move_note(state: AppState, handles: &AppHandles) {
+    let Some(fen) = current_position_fen(state) else {
+        state.move_note.set(String::new());
+        return;
+    };
+    let note = handles
+        .study
+        .borrow()
+        .as_ref()
+        .and_then(|database| database.load_move_note(&fen).ok().flatten())
+        .unwrap_or_default();
+    state.move_note.set(note);
+}
+
+fn current_position_fen(state: AppState) -> Option<String> {
+    let fen = state.initial_fen.get_untracked();
+    let moves = state.move_log.get_untracked();
+    let ply = state.review_ply.get_untracked().unwrap_or(moves.len());
+    logic::board_at_ply(&fen, &moves, ply)
+        .ok()
+        .map(|board| board.to_fen())
+        .or_else(|| state.game.get_untracked().map(|game| game.board.to_fen()))
 }
 
 pub fn refresh_updater_status(state: AppState) {
@@ -1155,6 +1680,58 @@ pub fn download_nnue(state: AppState, handles: &AppHandles) {
 pub fn update_settings(state: AppState, patch: impl FnOnce(&mut AppSettings)) {
     state.settings.update(patch);
     state.persist_settings();
+    apply_live_settings(state);
+}
+
+fn apply_live_settings(state: AppState) {
+    let settings = state.settings.get_untracked();
+    if !settings.premoves_enabled {
+        state.game.update(|game| {
+            if let Some(game) = game.as_mut() {
+                game.clear_premoves();
+            }
+        });
+    }
+    state.game.update(|game| {
+        let Some(game) = game.as_mut() else {
+            return;
+        };
+        if settings.auto_flip_black
+            && player_is_human(state, Color::Black)
+            && !player_is_human(state, Color::White)
+        {
+            game.flipped = true;
+        }
+        if settings.auto_flip_black
+            && player_is_human(state, Color::White)
+            && !player_is_human(state, Color::Black)
+        {
+            game.flipped = false;
+        }
+        let analysis: Vec<_> = game
+            .overlay_arrows
+            .iter()
+            .filter(|arrow| {
+                !matches!(
+                    arrow.role,
+                    mujrim_study::board_marks::ArrowRole::LastMove
+                        | mujrim_study::board_marks::ArrowRole::Ponder
+                )
+            })
+            .cloned()
+            .collect();
+        let ponder = game
+            .overlay_arrows
+            .iter()
+            .find(|arrow| arrow.role == mujrim_study::board_marks::ArrowRole::Ponder)
+            .map(|arrow| (arrow.from, arrow.to))
+            .filter(|_| settings.ponder_arrow);
+        game.refresh_move_overlays(settings.last_move_arrow, ponder, &analysis);
+        if !settings.draw_arrows {
+            game.arrows.clear();
+            game.arrow_start = None;
+        }
+    });
 }
 
 pub fn select_mode(state: AppState, handles: &AppHandles, mode: GameMode) {
@@ -1214,23 +1791,36 @@ pub fn pick_external_engine(
     });
 }
 
-pub fn annotate_last_move(state: AppState) {
+pub fn review_played_game(state: AppState, handles: &AppHandles) {
     let moves = state.move_log.get_untracked();
     if moves.is_empty() {
         return;
     }
     let fen = state.initial_fen.get_untracked();
-    match logic::analyze_game_at_depth_from(&fen, &moves, 8) {
-        Ok(plies) => {
-            state
-                .move_annotations
-                .set(plies.iter().map(|ply| Some(ply.annotation)).collect());
-            state
-                .analysis_scores
-                .set(plies.iter().map(|ply| Some(ply.score_cp)).collect());
-        }
-        Err(error) => state.status.set(error),
-    }
+    let on_done = create_ext_action(
+        handles.ui_scope,
+        move |result: Result<Vec<logic::AnalyzedPly>, String>| match result {
+            Ok(plies) => apply_analyzed_plies(state, plies),
+            Err(error) => state.status.set(error),
+        },
+    );
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            types::init();
+            on_done(logic::analyze_game_at_depth_from(&fen, &moves, 8));
+        })
+        .ok();
+}
+
+fn apply_analyzed_plies(state: AppState, plies: Vec<logic::AnalyzedPly>) {
+    state
+        .move_annotations
+        .set(plies.iter().map(|ply| Some(ply.annotation)).collect());
+    state
+        .analysis_scores
+        .set(plies.iter().map(|ply| Some(ply.score_cp)).collect());
+    state.status.set(format!("Reviewed {} moves.", plies.len()));
 }
 
 #[cfg(test)]
@@ -1245,5 +1835,28 @@ mod tests {
         let (white, black) = players_for_mode(GameMode::HumanVsEngine, &[]);
         assert!(matches!(white, PlayerConfig::Human));
         assert!(matches!(black, PlayerConfig::BuiltIn { .. }));
+    }
+
+    #[test]
+    fn tournament_and_game_stop_actions_are_wired() {
+        let src = include_str!("actions.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        for needle in [
+            "fn pause_tournament",
+            "fn resume_tournament",
+            "fn abort_tournament_game",
+            "fn stop_engine_search",
+            "fn resume_paused_tournament",
+            "fn discard_paused_tournament",
+            "fn open_tournaments_screen",
+            "apply_live_settings",
+            "optimistic_live_board",
+            "request_pause",
+            "request_abort_game",
+            "stop_builtin_search",
+            "cancel_all_pondering",
+        ] {
+            assert!(production.contains(needle), "missing {needle}");
+        }
     }
 }

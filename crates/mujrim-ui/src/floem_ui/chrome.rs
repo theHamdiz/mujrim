@@ -1,14 +1,13 @@
-//! In-app tab strip. Compositor decorations on Linux; CSD drag only on undecorated hosts.
+//! Custom client-side title bar and in-app navigation.
 
-use floem::action::{drag_resize_window, minimize_window, toggle_window_maximized};
+use floem::action::{minimize_window, toggle_window_maximized};
 use floem::prelude::*;
 use floem::taffy::style::{Display, FlexWrap};
-use floem::views::drag_window_area;
+use floem::views::{drag_resize_window_area, drag_window_area};
 use floem::window::{ResizeDirection, WindowId};
 
 use crate::app_core::layout;
 use crate::app_core::settings::Screen;
-use crate::app_core::windowing::WindowPolicy;
 
 use super::actions;
 use super::icons;
@@ -22,8 +21,7 @@ pub fn shell(
     content: impl IntoView + 'static,
 ) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    let policy = WindowPolicy::current();
-    let title = title_bar(window_id, state, handles.clone(), policy);
+    let title = title_bar(window_id, state, handles.clone());
     let body = Stack::vertical((
         title,
         content.style(|s| s.flex_grow(1.0f32).min_width(0.0).min_height(0.0)),
@@ -34,25 +32,16 @@ pub fn shell(
             .min_height(0.0)
             .background(theme::rgba(pal().bg))
     });
-    if policy.client_resize_edges {
-        Stack::new((body, resize_edges()))
-            .style(|s| s.size_full())
-            .into_any()
-    } else {
-        body.style(|s| s.size_full()).into_any()
-    }
+    Stack::new((body, resize_edges()))
+        .style(|s| s.size_full())
+        .into_any()
 }
 
-fn title_bar(
-    window_id: WindowId,
-    state: AppState,
-    handles: AppHandles,
-    policy: WindowPolicy,
-) -> impl IntoView {
+fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl IntoView {
     let logo_bytes = handles.logo.clone();
-    let logo = img(move || logo_bytes.clone()).style(|s| s.size(24, 24));
+    let logo = img(move || logo_bytes.clone()).style(|s| s.size(22, 22));
     let title_block = Stack::vertical((
-        Label::new("Mujrim").style(|s| s.font_size(14.0).font_bold()),
+        Label::new("Mujrim").style(|s| s.font_size(13.0).font_bold()),
         Label::new("Chess Engine • v1.0.0").style(move |s| {
             s.font_size(10.0).color(theme::rgba(
                 theme::palette(state.settings.get().board_theme).accent,
@@ -60,38 +49,41 @@ fn title_bar(
         }),
     ))
     .style(|s| s.row_gap(1.0));
-    let brand = Stack::horizontal((logo, title_block))
-        .style(|s| s.col_gap(8.0f32).items_center().padding_left(12.0));
-    let brand = if policy.undecorated {
-        drag_window_area(brand).into_any()
-    } else {
-        brand.into_any()
-    };
-
-    let nav = nav_pills(state, handles);
-    let trailing = if policy.client_window_controls {
-        window_controls(window_id, state).into_any()
-    } else {
-        Empty::new()
-            .style(|s| s.width(12.0).height(24.0))
-            .into_any()
-    };
-
-    Stack::horizontal((
-        brand,
-        nav.style(|s| {
-            s.flex_grow(1.0f32)
+    let brand = Stack::horizontal((logo, title_block)).style(|s| {
+        s.col_gap(8.0f32)
+            .items_center()
+            .padding_horiz(10.0)
+            .height_full()
+            .pointer_events_none()
+    });
+    Stack::new((
+        drag_window_area(Empty::new()).style(|s| s.size_full().absolute()),
+        nav_pills(state, handles).style(|s| {
+            s.absolute()
+                .inset_left(0.0)
+                .inset_right(0.0)
+                .height_full()
                 .min_width(0.0)
                 .justify_center()
                 .items_center()
+                .pointer_events_none()
+                .z_index(1)
         }),
-        trailing,
+        brand.style(|s| s.absolute().inset_left(0.0).height_full().z_index(2)),
+        window_controls(window_id, state).style(|s| {
+            s.absolute()
+                .inset_right(0.0)
+                .height_full()
+                .items_center()
+                .z_index(3)
+        }),
     ))
     .style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
         s.width_full()
-            .height(layout::TITLE_BAR_PX)
+            .min_height(layout::TITLE_BAR_PX)
             .min_width(0.0)
+            .padding_vert(4.0)
             .items_center()
             .background(theme::rgba(pal.sidebar))
             .border_bottom(1.0)
@@ -139,9 +131,12 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             icons::DATABASE,
             "Study",
             move || matches!(state.screen.get(), Screen::Study),
-            move || {
-                actions::ensure_study_board(state);
-                state.screen.set(Screen::Study);
+            {
+                let handles = handles.clone();
+                move || {
+                    actions::ensure_study_board(state, &handles);
+                    state.screen.set(Screen::Study);
+                }
             },
         ),
         pill(
@@ -149,9 +144,12 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             icons::SPARKLES,
             "Learn",
             move || matches!(state.screen.get(), Screen::Learn),
-            move || {
-                actions::ensure_study_board(state);
-                state.screen.set(Screen::Learn);
+            {
+                let handles = handles.clone();
+                move || {
+                    actions::ensure_study_board(state, &handles);
+                    state.screen.set(Screen::Learn);
+                }
             },
         ),
         pill(
@@ -162,10 +160,7 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             {
                 let handles = handles.clone();
                 move || {
-                    state.screen.set(Screen::Tournaments);
-                    if !state.tournament_snapshot.get_untracked().running {
-                        actions::open_tournament_setup(state, &handles);
-                    }
+                    actions::open_tournaments_screen(state, &handles);
                 }
             },
         ),
@@ -279,6 +274,11 @@ fn pill(
                 s.background(theme::rgba(pal.panel))
                     .color(theme::rgba(pal.text_primary))
             })
+            .transition(
+                floem::style::Background,
+                floem::style::Transition::ease_in_out(std::time::Duration::from_millis(140)),
+            )
+            .pointer_events_auto()
     })
 }
 
@@ -306,20 +306,18 @@ fn icon_btn(state: AppState, icon: &'static str, action: impl Fn() + 'static) ->
                     s.background(theme::rgba(pal.panel))
                         .color(theme::rgba(pal.text_primary))
                 })
+                .pointer_events_auto()
         })
 }
 
 fn resize_edges() -> impl IntoView {
     let edge = |dir: ResizeDirection, style: fn(floem::style::Style) -> floem::style::Style| {
-        Empty::new()
-            .style(move |s| style(s.absolute().z_index(20)))
-            .on_event_stop(el::PointerDown, move |_, _| {
-                drag_resize_window(dir);
-            })
+        drag_resize_window_area(dir, Empty::new())
+            .style(move |s| style(s.absolute().z_index(20).pointer_events_auto()))
     };
     Stack::new((
         edge(ResizeDirection::North, |s| {
-            s.inset_top(0).width_full().height(6)
+            s.inset_top(0).width_full().height(4)
         }),
         edge(ResizeDirection::South, |s| {
             s.inset_bottom(0).width_full().height(6)
@@ -343,7 +341,7 @@ fn resize_edges() -> impl IntoView {
             s.inset_bottom(0).inset_right(0).size(10, 10)
         }),
     ))
-    .style(|s| s.size_full().absolute())
+    .style(|s| s.size_full().absolute().pointer_events_none())
 }
 
 #[cfg(test)]
@@ -359,16 +357,40 @@ mod tests {
         assert!(!production.contains("new_window"));
         assert!(!production.contains("drag_window()"));
         assert!(
-            production.contains("open_tournament_setup"),
-            "Tournaments nav must open the setup overlay"
+            production.contains("open_tournaments_screen"),
+            "Tournaments nav must resume a paused event or open setup"
         );
         assert!(
             production.contains("display(Display::None)"),
             "board tools must stay mounted and hidden instead of swapping Empty views"
         );
         assert!(
-            !production.contains("dyn_view"),
-            "creating nav widgets inside dyn_view leaves them without a window root"
+            production.contains("drag_window_area"),
+            "custom title bar must drag the undecorated window"
+        );
+        assert!(
+            !production.contains("drag_window_area(nav_pills"),
+            "nav pills inside drag_window_area never receive Click"
+        );
+        assert!(
+            production.contains("justify_center()"),
+            "nav cluster must sit in the middle of the title bar"
+        );
+        assert!(
+            production.contains("inset_right(0.0)"),
+            "window controls must pin to the right edge"
+        );
+        assert!(
+            production.contains("pointer_events_none"),
+            "resize overlay must let title-bar clicks pass through"
+        );
+        assert!(
+            production.contains("pointer_events_auto"),
+            "resize handles must still receive pointer events"
+        );
+        assert!(
+            production.contains("window_controls"),
+            "custom title bar must own minimize/maximize/close"
         );
     }
 }

@@ -8,11 +8,11 @@ pub const SIDEBAR_MIN_PX: f64 = 240.0;
 pub const SIDEBAR_IDEAL_PX: f64 = 280.0;
 pub const SIDEBAR_MAX_PX: f64 = 340.0;
 pub const BOARD_MIN_PX: f64 = 120.0;
-pub const TITLE_BAR_PX: f64 = 48.0;
+pub const TITLE_BAR_PX: f64 = 44.0;
 pub const OVERLAY_MAX_WIDTH: f64 = 760.0;
 pub const OVERLAY_PAD: f64 = 24.0;
 pub const DOCK_TAB_BAR_PX: f64 = 36.0;
-pub const DOCK_OPEN_PX: f64 = 220.0;
+pub const DOCK_OPEN_PX: f64 = 248.0;
 pub const LOW_TIME_MS: u64 = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -11,5 +11,6 @@ name = "mujrim_study"
 path = "src/lib.rs"
 
 [dependencies]
+flate2 = "1.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 types = { package = "mujrim-types", path = "../mujrim-types" }

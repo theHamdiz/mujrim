@@ -25,6 +25,7 @@ pub mod settings;
 pub mod tournament_arena;
 pub mod tournament_live;
 pub mod tournament_results;
+pub mod tournament_resume;
 pub mod tournament_setup;
 pub mod uci_process;
 pub mod windowing;
@@ -40,4 +41,6 @@ pub use palette::{BoardTheme, GuiPalette, Rgba, ThemeColors};
 #[allow(unused_imports)]
 pub use pieces::{PieceAssets, PieceSet};
 #[allow(unused_imports)]
-pub use settings::{AppSettings, CaptureAnimStyle, CoordPosition, OptionsTab, Screen};
+pub use settings::{
+    AppSettings, CaptureAnimStyle, CoordPosition, OptionsTab, PieceAnimStyle, Screen,
+};

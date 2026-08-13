@@ -13,6 +13,7 @@ use crate::app_core::tournament_results;
 use super::eval_graph;
 use super::state::{AppHandles, AppState};
 use super::theme;
+use super::widgets;
 
 pub fn bottom_dock(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((tab_bar(state), dock_body(state, handles))).style(move |s| {
@@ -97,7 +98,8 @@ fn dock_tab(state: AppState, tab: DockTab, label: &'static str) -> impl IntoView
 
 fn dock_body(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::new((
-        results_pane(state).style(move |s| dock_tab_host(s, state, DockTab::Results)),
+        results_pane(state, handles.clone())
+            .style(move |s| dock_tab_host(s, state, DockTab::Results)),
         eval_graph::eval_histogram(state, 148.0)
             .style(move |s| dock_tab_host(s, state, DockTab::Histogram)),
         engine_log_pane(state, handles).style(move |s| dock_tab_host(s, state, DockTab::EngineLog)),
@@ -119,38 +121,42 @@ fn dock_tab_host(style: floem::style::Style, state: AppState, tab: DockTab) -> f
     }
 }
 
-fn results_pane(state: AppState) -> impl IntoView {
+fn results_pane(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    Stack::horizontal((
-        Label::derived(move || {
-            let snap = state.tournament_snapshot.get();
-            if !tournament_results::standings_ready(&snap.standings) {
-                return "Standings appear as matches finish.".to_owned();
-            }
-            snap.standings
-                .iter()
-                .map(|row| {
-                    format!(
-                        "{}. {}  {:.1}  ({}-{}-{})",
-                        row.rank, row.name, row.points, row.wins, row.draws, row.losses
-                    )
-                })
+    Stack::vertical((
+        widgets::results_export_bar(state, handles),
+        Stack::horizontal((
+            Label::derived(move || {
+                let snap = state.tournament_snapshot.get();
+                if !tournament_results::standings_ready(&snap.standings) {
+                    return "Standings appear as matches finish.".to_owned();
+                }
+                snap.standings
+                    .iter()
+                    .map(|row| {
+                        format!(
+                            "{}. {}  {:.1}  ({}-{}-{})",
+                            row.rank, row.name, row.points, row.wins, row.draws, row.losses
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .style(move |s| {
+                s.font_size(12.0)
+                    .width_pct(42.0)
+                    .color(theme::rgba(pal().text_primary))
+            }),
+            (0..12)
+                .map(|index| played_game_slot(state, index, pal))
                 .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .style(move |s| {
-            s.font_size(12.0)
-                .width_pct(42.0)
-                .color(theme::rgba(pal().text_primary))
-        }),
-        (0..12)
-            .map(|index| played_game_slot(state, index, pal))
-            .collect::<Vec<_>>()
-            .into_view()
-            .style(|s| s.width_pct(58.0).flex_col().row_gap(2.0).min_width(0.0))
-            .scroll(),
+                .into_view()
+                .style(|s| s.width_pct(58.0).flex_col().row_gap(2.0).min_width(0.0))
+                .scroll(),
+        ))
+        .style(|s| s.size_full().col_gap(16.0).min_height(0.0)),
     ))
-    .style(|s| s.size_full().col_gap(16.0).min_height(0.0))
+    .style(|s| s.size_full().row_gap(8.0).min_height(0.0))
 }
 
 fn played_game_slot(

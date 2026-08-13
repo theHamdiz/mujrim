@@ -12,10 +12,20 @@ pub enum CaptureAnimStyle {
     Instant,
     Explosion,
     Fire,
+    Shatter,
+    Vortex,
+    Spark,
 }
 
 impl CaptureAnimStyle {
-    pub const ALL: [Self; 3] = [Self::Instant, Self::Explosion, Self::Fire];
+    pub const ALL: [Self; 6] = [
+        Self::Instant,
+        Self::Explosion,
+        Self::Fire,
+        Self::Shatter,
+        Self::Vortex,
+        Self::Spark,
+    ];
 }
 
 impl std::fmt::Display for CaptureAnimStyle {
@@ -24,6 +34,40 @@ impl std::fmt::Display for CaptureAnimStyle {
             Self::Instant => write!(f, "Instant"),
             Self::Explosion => write!(f, "Explosion"),
             Self::Fire => write!(f, "Fire"),
+            Self::Shatter => write!(f, "Shatter"),
+            Self::Vortex => write!(f, "Vortex"),
+            Self::Spark => write!(f, "Spark"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PieceAnimStyle {
+    Slide,
+    Arc,
+    Bounce,
+    Warp,
+    Instant,
+}
+
+impl PieceAnimStyle {
+    pub const ALL: [Self; 5] = [
+        Self::Slide,
+        Self::Arc,
+        Self::Bounce,
+        Self::Warp,
+        Self::Instant,
+    ];
+}
+
+impl std::fmt::Display for PieceAnimStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Slide => write!(f, "Slide"),
+            Self::Arc => write!(f, "Arc hop"),
+            Self::Bounce => write!(f, "Bounce"),
+            Self::Warp => write!(f, "Warp"),
+            Self::Instant => write!(f, "Instant"),
         }
     }
 }
@@ -79,6 +123,7 @@ pub struct AppSettings {
     pub show_last_move: bool,
     pub premoves_enabled: bool,
     pub capture_anim_style: CaptureAnimStyle,
+    pub piece_anim_style: PieceAnimStyle,
     pub coord_position: CoordPosition,
     pub multi_premoves: bool,
     pub draw_arrows: bool,
@@ -89,6 +134,7 @@ pub struct AppSettings {
     pub system_motion: bool,
     pub last_move_arrow: bool,
     pub ponder_arrow: bool,
+    pub show_threats: bool,
 }
 
 impl Default for AppSettings {
@@ -107,6 +153,7 @@ impl Default for AppSettings {
             show_last_move: true,
             premoves_enabled: true,
             capture_anim_style: CaptureAnimStyle::Explosion,
+            piece_anim_style: PieceAnimStyle::Arc,
             coord_position: CoordPosition::Inside,
             multi_premoves: true,
             draw_arrows: true,
@@ -117,6 +164,7 @@ impl Default for AppSettings {
             system_motion: true,
             last_move_arrow: true,
             ponder_arrow: true,
+            show_threats: true,
         }
     }
 }
@@ -159,8 +207,10 @@ mod tests {
         assert_eq!(settings.board_theme, BoardTheme::Classic);
         assert_eq!(settings.piece_set, PieceSet::Cburnett);
         assert!(settings.piece_slide);
+        assert!(settings.show_threats);
         assert_eq!(BoardTheme::ALL.len(), 8);
-        assert_eq!(CaptureAnimStyle::ALL.len(), 3);
+        assert_eq!(CaptureAnimStyle::ALL.len(), 6);
+        assert_eq!(PieceAnimStyle::ALL.len(), 5);
         assert_eq!(CoordPosition::ALL.len(), 2);
     }
 }

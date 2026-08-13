@@ -211,9 +211,15 @@ fn finish_move(state: AppState, handles: AppHandles, generation: u64, result: En
 
 pub fn begin_slide(state: AppState, from: types::Square, to: types::Square, captured: bool) {
     let settings = state.settings.get_untracked();
-    if !settings.piece_slide {
+    if !settings.piece_slide
+        || settings.piece_anim_style == crate::app_core::settings::PieceAnimStyle::Instant
+    {
         state.slide.set(None);
         state.slide_t.set(1.0);
+        if captured {
+            state.capture_burst.set(1.0);
+            tick_slide(state);
+        }
         return;
     }
     state.slide.set(Some(SlideAnim { from, to, captured }));

@@ -303,6 +303,48 @@ fn is_result(token: &str) -> bool {
     matches!(token, "1-0" | "0-1" | "1/2-1/2" | "*")
 }
 
+pub fn resolve_uci(board: &Board, uci: &str) -> Option<Move> {
+    let mut board = board.clone();
+    resolve_notation(&mut board, uci)
+}
+
+pub fn uci_to_san(board: &Board, uci: &str) -> String {
+    let Some(mv) = resolve_uci(board, uci) else {
+        return uci.to_owned();
+    };
+    match mv.flag {
+        MoveFlag::KingCastle => return "O-O".to_owned(),
+        MoveFlag::QueenCastle => return "O-O-O".to_owned(),
+        _ => {}
+    }
+    let Some((piece, _)) = board.piece_on(mv.from) else {
+        return uci.to_owned();
+    };
+    let dest = mv.to.to_string();
+    let capture = mv.is_capture() || board.piece_on(mv.to).is_some();
+    let promo = mv
+        .promotion
+        .map(|piece| format!("={}", piece.to_char().to_ascii_uppercase()))
+        .unwrap_or_default();
+    match piece {
+        Piece::Pawn => {
+            if capture {
+                format!("{}x{dest}{promo}", mv.from.file_char())
+            } else {
+                format!("{dest}{promo}")
+            }
+        }
+        _ => {
+            let letter = piece.to_char().to_ascii_uppercase();
+            if capture {
+                format!("{letter}x{dest}{promo}")
+            } else {
+                format!("{letter}{dest}{promo}")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

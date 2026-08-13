@@ -1,11 +1,12 @@
 //! Shared Floem chrome: cards, buttons, in-flow pickers, and overlay frames.
 
 use floem::prelude::*;
+use floem::style::Transition;
 
 use crate::app_core::layout;
 use crate::app_core::palette::GuiPalette;
 
-use super::state::AppState;
+use super::state::{AppHandles, AppState};
 use super::theme;
 
 pub fn curious_title(text: impl Into<String>, size: f32) -> impl IntoView {
@@ -90,6 +91,10 @@ pub fn primary_button(
             .background(theme::rgba(pal.accent))
             .color(theme::rgba(pal.text_primary))
             .hover(|s| s.background(theme::rgba(pal.accent_alt)))
+            .transition(
+                floem::style::Background,
+                Transition::ease_in_out(std::time::Duration::from_millis(140)),
+            )
     })
 }
 
@@ -109,6 +114,116 @@ pub fn ghost_button(
             .background(Color::TRANSPARENT)
             .color(theme::rgba(pal.text_primary))
             .hover(|s| s.background(theme::rgba(pal.panel)))
+            .transition(
+                floem::style::Background,
+                Transition::ease_in_out(std::time::Duration::from_millis(140)),
+            )
+    })
+}
+
+pub fn game_io_bar(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::horizontal((
+        ghost_button(state, "Import", {
+            let handles = handles.clone();
+            move || super::actions::import_games(state, &handles)
+        }),
+        ghost_button(state, "PGN", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_board(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Pgn,
+                )
+            }
+        }),
+        ghost_button(state, "JSON", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_board(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Json,
+                )
+            }
+        }),
+        ghost_button(state, "EPD", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_board(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Epd,
+                )
+            }
+        }),
+        ghost_button(state, "Binpack", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_board(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Binpack,
+                )
+            }
+        }),
+    ))
+    .style(|s| {
+        s.width_full()
+            .col_gap(6.0)
+            .row_gap(6.0)
+            .flex_wrap(floem::taffy::style::FlexWrap::Wrap)
+    })
+}
+
+pub fn results_export_bar(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::horizontal((
+        ghost_button(state, "PGN", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_results(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Pgn,
+                )
+            }
+        }),
+        ghost_button(state, "JSON", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_results(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Json,
+                )
+            }
+        }),
+        ghost_button(state, "EPD", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_results(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Epd,
+                )
+            }
+        }),
+        ghost_button(state, "Binpack", {
+            let handles = handles.clone();
+            move || {
+                super::actions::export_results(
+                    state,
+                    &handles,
+                    mujrim_study::game_export::GameExportFormat::Binpack,
+                )
+            }
+        }),
+    ))
+    .style(|s| {
+        s.width_full()
+            .col_gap(6.0)
+            .row_gap(6.0)
+            .flex_wrap(floem::taffy::style::FlexWrap::Wrap)
     })
 }
 
@@ -341,6 +456,10 @@ mod tests {
         assert!(
             production.contains("min_height(160.0)"),
             "modal panel must have a visible minimum size"
+        );
+        assert!(
+            production.contains("results_export_bar"),
+            "results export buttons must stay always-mounted"
         );
     }
 }

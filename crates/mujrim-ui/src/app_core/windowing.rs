@@ -1,4 +1,4 @@
-//! Host window policy: compositor decorations on Linux/Wayland, CSD elsewhere.
+//! Host window policy: client-side decorations on every platform.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowPolicy {
@@ -10,14 +10,6 @@ pub struct WindowPolicy {
 }
 
 impl WindowPolicy {
-    pub const LINUX_WAYLAND: Self = Self {
-        show_titlebar: true,
-        undecorated: false,
-        undecorated_shadow: false,
-        client_window_controls: false,
-        client_resize_edges: false,
-    };
-
     pub const CLIENT_CHROME: Self = Self {
         show_titlebar: false,
         undecorated: true,
@@ -26,11 +18,8 @@ impl WindowPolicy {
         client_resize_edges: true,
     };
 
-    pub fn for_os(os: &str) -> Self {
-        match os {
-            "linux" | "freebsd" | "openbsd" | "netbsd" | "dragonfly" => Self::LINUX_WAYLAND,
-            _ => Self::CLIENT_CHROME,
-        }
+    pub fn for_os(_os: &str) -> Self {
+        Self::CLIENT_CHROME
     }
 
     pub fn current() -> Self {
@@ -43,17 +32,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn linux_policy_uses_compositor_decorations() {
-        let policy = WindowPolicy::for_os("linux");
-        assert!(policy.show_titlebar);
-        assert!(!policy.undecorated);
-        assert!(!policy.client_window_controls);
-        assert!(!policy.client_resize_edges);
-    }
-
-    #[test]
-    fn windows_and_macos_keep_client_chrome() {
-        for os in ["windows", "macos"] {
+    fn every_os_uses_custom_titlebar() {
+        for os in ["linux", "freebsd", "windows", "macos"] {
             let policy = WindowPolicy::for_os(os);
             assert!(!policy.show_titlebar);
             assert!(policy.undecorated);

@@ -108,6 +108,14 @@ impl StudyDatabase {
         crate::tournament_store::ensure_schema(&sqlite)?;
         sqlite
             .execute_batch(
+                "CREATE TABLE IF NOT EXISTS move_notes (
+                    position_fen TEXT PRIMARY KEY,
+                    note TEXT NOT NULL
+                 );",
+            )
+            .map_err(|error| format!("failed to initialize move notes: {error}"))?;
+        sqlite
+            .execute_batch(
                 "CREATE TABLE IF NOT EXISTS repertoire_lines (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -142,7 +150,9 @@ impl StudyDatabase {
                  DELETE FROM tournaments;
                  DELETE FROM engines;
                  DELETE FROM games;
-                 DELETE FROM repertoire_lines;",
+                 DELETE FROM repertoire_lines;
+                 DELETE FROM tournament_games;
+                 DELETE FROM move_notes;",
             )
             .map_err(|error| format!("failed to clear study history: {error}"))?;
         self.games.clear();
@@ -223,6 +233,10 @@ impl StudyDatabase {
         crate::tournament_store::save_tournament(&self.sqlite, tournament)
     }
 
+    pub fn delete_tournament(&mut self, id: &str) -> Result<(), String> {
+        crate::tournament_store::delete_tournament(&self.sqlite, id)
+    }
+
     pub fn list_tournaments(
         &self,
     ) -> Result<Vec<crate::tournament_store::StoredTournament>, String> {
@@ -234,6 +248,68 @@ impl StudyDatabase {
         id: &str,
     ) -> Result<Option<crate::tournament_store::StoredTournament>, String> {
         crate::tournament_store::load_tournament(&self.sqlite, id)
+    }
+
+    pub fn upsert_move_note(&mut self, fen: &str, note: &str) -> Result<(), String> {
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            self.sqlite
+                .execute("DELETE FROM move_notes WHERE position_fen=?1", [fen])
+                .map(|_| ())
+                .map_err(|error| format!("failed to clear move note: {error}"))
+        } else {
+            self.sqlite
+                .execute(
+                    "INSERT INTO move_notes(position_fen, note) VALUES (?1, ?2)
+                     ON CONFLICT(position_fen) DO UPDATE SET note=excluded.note",
+                    params![fen, trimmed],
+                )
+                .map(|_| ())
+                .map_err(|error| format!("failed to save move note: {error}"))
+        }
+    }
+
+    pub fn load_move_note(&self, fen: &str) -> Result<Option<String>, String> {
+        self.sqlite
+            .query_row(
+                "SELECT note FROM move_notes WHERE position_fen=?1",
+                [fen],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("failed to load move note: {error}"))
+    }
+
+    pub fn recover_tournament_games(
+        &self,
+        tournament: &crate::tournament_store::StoredTournament,
+    ) -> Vec<crate::tournament_store::StoredTournamentGame> {
+        if !tournament.games.is_empty() {
+            return tournament.games.clone();
+        }
+        self.search(&GameQuery {
+            event: Some(tournament.name.clone()),
+            ..GameQuery::default()
+        })
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, summary)| {
+            let game = self.load_game(&summary.id).ok()?;
+            Some(crate::tournament_store::StoredTournamentGame {
+                game_index: index,
+                round: game.metadata.round.parse().unwrap_or(0),
+                white: game.metadata.white,
+                black: game.metadata.black,
+                white_score: match game.result.as_str() {
+                    "1-0" => 1.0,
+                    "0-1" => 0.0,
+                    _ => 0.5,
+                },
+                initial_fen: game.initial_fen,
+                moves: game.moves,
+            })
+        })
+        .collect()
     }
 
     pub fn save_line(&mut self, line: &crate::opening::SavedLine) -> Result<(), String> {
@@ -766,6 +842,22 @@ mod tests {
                 "needle={needle}"
             );
         }
+        drop(database);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn move_notes_round_trip_and_clear() {
+        let root = temporary_database();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
+        database.upsert_move_note(fen, "Fight for d5.").unwrap();
+        assert_eq!(
+            database.load_move_note(fen).unwrap().as_deref(),
+            Some("Fight for d5.")
+        );
+        database.upsert_move_note(fen, "   ").unwrap();
+        assert_eq!(database.load_move_note(fen).unwrap(), None);
         drop(database);
         fs::remove_dir_all(&root).unwrap();
     }

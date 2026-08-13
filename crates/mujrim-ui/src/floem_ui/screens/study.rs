@@ -16,10 +16,11 @@ use super::workspace;
 pub fn study_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
         opening_card(state, handles.clone()),
+        notes_card(state, handles.clone()),
         Stack::vertical((
             pane_title("Moves"),
-            workspace::move_list(state),
-            workspace::ply_nav(state),
+            workspace::move_list(state, handles.clone()),
+            workspace::ply_nav(state, handles.clone()),
         ))
         .style(|s| s.row_gap(6.0).width_full().min_width(0.0)),
         preparations_card(state, handles.clone()),
@@ -33,22 +34,58 @@ pub fn learn_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         training_card(state, handles.clone()),
         gambit_card(state),
         coaching_card(state),
-        widgets::ghost_button(state, "Coach review", move || {
-            actions::annotate_last_move(state)
-        }),
-        widgets::ghost_button(state, "Analyze game", {
-            let handles = handles.clone();
-            move || actions::analyze_game(state, &handles)
-        }),
-        pane_title("Moves"),
-        workspace::move_list(state),
-        workspace::ply_nav(state),
+        notes_card(state, handles.clone()),
+        Stack::vertical((
+            widgets::ghost_button(state, "Coach review", {
+                let handles = handles.clone();
+                move || actions::review_played_game(state, &handles)
+            }),
+            widgets::ghost_button(state, "Analyze game", {
+                let handles = handles.clone();
+                move || actions::analyze_game(state, &handles)
+            }),
+            pane_title("Moves"),
+            workspace::move_list(state, handles.clone()),
+            workspace::ply_nav(state, handles),
+        ))
+        .style(|s| s.row_gap(8.0).width_full()),
     ))
     .style(|s| s.flex_col().row_gap(8.0).width_full().min_height(0.0))
 }
 
 fn pane_title(label: &'static str) -> impl IntoView {
     Label::new(label).style(|s| s.font_size(12.0).font_bold())
+}
+
+fn notes_card(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("Move notes", pal),
+            TextInput::new(state.move_note).style(|s| {
+                s.width_full()
+                    .min_width(120.0)
+                    .height(34.0)
+                    .border_radius(10.0)
+            }),
+            widgets::primary_button(state, "Save note", {
+                let handles = handles.clone();
+                move || actions::save_move_note(state, &handles)
+            }),
+            widgets::toggle_row(
+                state,
+                "Threat highlights",
+                move || state.settings.get().show_threats,
+                move |value| {
+                    actions::update_settings(state, |settings| settings.show_threats = value);
+                },
+            ),
+            pane_title("Import / Export"),
+            widgets::game_io_bar(state, handles),
+        ))
+        .style(|s| s.row_gap(8.0).width_full()),
+    )
 }
 
 fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -620,6 +657,10 @@ mod tests {
             "explorer_slot",
             "uci_to_san",
             "study_opening_move",
+            "Save note",
+            "Threat highlights",
+            "move_note",
+            "game_io_bar",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

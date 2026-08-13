@@ -6,8 +6,10 @@ use std::sync::Arc;
 use mujrim_protocols::catalog::{DiscoveredEngine, RuntimeCompatibility};
 use mujrim_study::annotation::{AnnotationContext, MoveAnnotation};
 use mujrim_study::database::{EngineMetadata, GameQuery, GameSummary, StudyDatabase};
+use mujrim_study::game_export::{self, GameExportFormat, GameRecord};
 use mujrim_study::opening::{MoveStatistics, OpeningExplorer, PrepSide, SavedLine};
-use mujrim_study::tournament::TournamentFormat;
+use mujrim_study::tournament::{Entrant, TournamentFormat};
+use mujrim_study::tournament_store::{StoredTournament, StoredTournamentGame};
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::TrainingStore;
 
@@ -679,6 +681,8 @@ pub fn run_quick_tournament(
     handle: LiveTournamentHandle,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     let cancel = Arc::clone(&handle.cancel);
+    let pause = Arc::clone(&handle.pause);
+    let abort_game = Arc::clone(&handle.abort_game);
     let snapshot = Arc::clone(&handle.snapshot);
     let format = setup.format;
     let worker = std::thread::Builder::new()
@@ -686,7 +690,7 @@ pub fn run_quick_tournament(
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_quick_tournament_body(engines, setup, cancel, snapshot)
+                run_quick_tournament_body(engines, setup, cancel, pause, abort_game, snapshot)
             }))
             .unwrap_or_else(|_| mujrim_benchmarker::strength::TournamentSummary {
                 format,
@@ -730,6 +734,8 @@ fn run_quick_tournament_body(
     engines: Vec<QuickTournamentEngine>,
     setup: TournamentSetup,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    pause: Arc<std::sync::atomic::AtomicBool>,
+    abort_game: Arc<std::sync::atomic::AtomicBool>,
     snapshot: Arc<std::sync::Mutex<tournament_live::LiveTournamentSnapshot>>,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     use mujrim_benchmarker::strength::{
@@ -896,6 +902,7 @@ fn run_quick_tournament_body(
                     } => {
                         guard.cancelled = true;
                         guard.running = false;
+                        guard.paused = false;
                         guard.standings =
                             tournament_live::standing_rows(&guard.engine_names, &standings);
                         guard.game_results = game_results;
@@ -908,6 +915,8 @@ fn run_quick_tournament_body(
     });
     let mut match_config = setup.to_match_config();
     match_config.stop_flag = Some(Arc::clone(&cancel));
+    match_config.pause_flag = Some(pause);
+    match_config.abort_game_flag = Some(abort_game);
     let summary = run_tournament_with_control(
         roster,
         TournamentConfig {
@@ -1146,6 +1155,238 @@ pub fn build_annotated_pgn(
     }
     pgn.push_str(result);
     pgn
+}
+
+pub fn current_game_record(
+    white: &str,
+    black: &str,
+    event: &str,
+    site: &str,
+    initial_fen: &str,
+    moves: &[String],
+    result: &str,
+) -> GameRecord {
+    GameRecord {
+        event: if event.trim().is_empty() {
+            "Mujrim Game".to_owned()
+        } else {
+            event.to_owned()
+        },
+        site: if site.trim().is_empty() {
+            "Local".to_owned()
+        } else {
+            site.to_owned()
+        },
+        date: String::new(),
+        round: String::new(),
+        white: white.to_owned(),
+        black: black.to_owned(),
+        result: result.to_owned(),
+        initial_fen: if initial_fen.is_empty() {
+            mujrim_study::opening::START_FEN.to_owned()
+        } else {
+            initial_fen.to_owned()
+        },
+        moves: moves.to_vec(),
+        comments: Vec::new(),
+    }
+}
+
+pub fn played_game_record(
+    event: &str,
+    site: &str,
+    game: &tournament_live::PlayedGame,
+) -> GameRecord {
+    GameRecord {
+        event: event.to_owned(),
+        site: site.to_owned(),
+        date: String::new(),
+        round: game.round.to_string(),
+        white: game.white.clone(),
+        black: game.black.clone(),
+        result: game_export::result_from_white_score(game.white_score).to_owned(),
+        initial_fen: game.initial_fen.clone(),
+        moves: game.moves.clone(),
+        comments: Vec::new(),
+    }
+}
+
+pub fn stored_game_record(event: &str, site: &str, game: &StoredTournamentGame) -> GameRecord {
+    GameRecord {
+        event: event.to_owned(),
+        site: site.to_owned(),
+        date: String::new(),
+        round: game.round.to_string(),
+        white: game.white.clone(),
+        black: game.black.clone(),
+        result: game_export::result_from_white_score(game.white_score).to_owned(),
+        initial_fen: game.initial_fen.clone(),
+        moves: game.moves.clone(),
+        comments: Vec::new(),
+    }
+}
+
+pub fn tournament_records(
+    event: &str,
+    site: &str,
+    played: &[tournament_live::PlayedGame],
+    stored: &[StoredTournamentGame],
+) -> Vec<GameRecord> {
+    if !played.is_empty() {
+        played
+            .iter()
+            .map(|game| played_game_record(event, site, game))
+            .collect()
+    } else {
+        stored
+            .iter()
+            .map(|game| stored_game_record(event, site, game))
+            .collect()
+    }
+}
+
+pub fn optimistic_live_board(
+    white: impl Into<String>,
+    black: impl Into<String>,
+    initial_clock_ms: u64,
+) -> tournament_live::LiveGameBoard {
+    tournament_live::LiveGameBoard {
+        game_key: "pending-0".to_owned(),
+        match_index: 1,
+        round: 1,
+        white: white.into(),
+        black: black.into(),
+        initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+        moves: Vec::new(),
+        last_uci: String::new(),
+        score_cp: 0,
+        depth: 0,
+        nodes: 0,
+        white_clock_ms: Some(initial_clock_ms),
+        black_clock_ms: Some(initial_clock_ms),
+    }
+}
+
+pub fn eval_label(score_cp: i32) -> String {
+    format!("{:+.2}", score_cp as f32 / 100.0)
+}
+
+pub fn eval_tint(score_cp: i32) -> (u8, u8, u8) {
+    let t = (score_cp as f32 / 280.0).clamp(-1.0, 1.0);
+    if t >= 0.0 {
+        let mix = t;
+        (
+            (160.0 * (1.0 - mix) + 72.0 * mix) as u8,
+            (170.0 * (1.0 - mix) + 210.0 * mix) as u8,
+            (160.0 * (1.0 - mix) + 92.0 * mix) as u8,
+        )
+    } else {
+        let mix = -t;
+        (
+            (160.0 * (1.0 - mix) + 230.0 * mix) as u8,
+            (170.0 * (1.0 - mix) + 72.0 * mix) as u8,
+            (160.0 * (1.0 - mix) + 72.0 * mix) as u8,
+        )
+    }
+}
+
+pub fn annotation_tint(annotation: Option<MoveAnnotation>) -> Option<(u8, u8, u8)> {
+    annotation
+        .filter(|item| item.shows_board_badge())
+        .map(MoveAnnotation::chess_com_rgb)
+}
+
+pub fn snapshot_to_stored(
+    id: &str,
+    name: &str,
+    format: TournamentFormat,
+    created_at: i64,
+    snap: &tournament_live::LiveTournamentSnapshot,
+) -> StoredTournament {
+    StoredTournament {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        format,
+        created_at,
+        status: mujrim_study::tournament_store::lifecycle_status(
+            snap.paused,
+            snap.running,
+            snap.cancelled,
+            snap.finished,
+        )
+        .to_owned(),
+        entrants: snap
+            .engine_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| Entrant {
+                id: format!("engine-{index}"),
+                name: name.clone(),
+                seed_elo: None,
+            })
+            .collect(),
+        results: snap.game_results.clone(),
+        games: snap
+            .played_games
+            .iter()
+            .map(|game| StoredTournamentGame {
+                game_index: game.id,
+                round: game.round,
+                white: game.white.clone(),
+                black: game.black.clone(),
+                white_score: game.white_score,
+                initial_fen: game.initial_fen.clone(),
+                moves: game.moves.clone(),
+            })
+            .collect(),
+    }
+}
+
+pub fn stored_to_played(games: &[StoredTournamentGame]) -> Vec<tournament_live::PlayedGame> {
+    games
+        .iter()
+        .map(|game| tournament_live::PlayedGame {
+            id: game.game_index,
+            match_index: game.game_index,
+            round: game.round,
+            white: game.white.clone(),
+            black: game.black.clone(),
+            white_score: game.white_score,
+            initial_fen: game.initial_fen.clone(),
+            moves: game.moves.clone(),
+        })
+        .collect()
+}
+
+pub fn persist_live_tournament(
+    database: &mut StudyDatabase,
+    id: &str,
+    name: &str,
+    format: TournamentFormat,
+    created_at: i64,
+    snap: &tournament_live::LiveTournamentSnapshot,
+) -> Result<(), String> {
+    let stored = snapshot_to_stored(id, name, format, created_at, snap);
+    for game in &stored.games {
+        let record = stored_game_record(name, "Local", game);
+        let pgn = String::from_utf8(game_export::encode_games(
+            std::slice::from_ref(&record),
+            GameExportFormat::Pgn,
+        )?)
+        .unwrap_or_default();
+        let _ = database.import_pgn_text(&pgn);
+    }
+    database.save_tournament(&stored)
+}
+
+pub fn export_records_to_path(
+    records: &[GameRecord],
+    path: &Path,
+) -> Result<GameExportFormat, String> {
+    if records.is_empty() {
+        return Err("No games to export.".to_owned());
+    }
+    game_export::write_games(records, path)
 }
 
 #[cfg(test)]
@@ -1480,5 +1721,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ok.moves, vec!["e2e4".to_owned()]);
+    }
+
+    #[test]
+    fn tournament_records_prefer_played_games_and_export_binpack() {
+        let played = vec![tournament_live::PlayedGame {
+            id: 0,
+            match_index: 0,
+            round: 1,
+            white: "Alpha".into(),
+            black: "Beta".into(),
+            white_score: 1.0,
+            initial_fen: mujrim_study::opening::START_FEN.into(),
+            moves: vec!["e2e4".into(), "e7e5".into()],
+        }];
+        let records = tournament_records("Cup", "Local", &played, &[]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].result, "1-0");
+        let bytes =
+            mujrim_study::game_export::encode_games(&records, GameExportFormat::Binpack).unwrap();
+        let positions = mujrim_study::game_export::decode_binpack(&bytes).unwrap();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].mv, "e2e4");
+    }
+
+    #[test]
+    fn optimistic_board_and_eval_tints_are_stable() {
+        let board = optimistic_live_board("A", "B", 180_000);
+        assert_eq!(board.white, "A");
+        assert_eq!(board.black, "B");
+        assert!(board.moves.is_empty());
+        assert_eq!(eval_label(32), "+0.32");
+        let (r, g, _b) = eval_tint(300);
+        assert!(g > r);
+        let (r, g, _b) = eval_tint(-300);
+        assert!(r > g);
+        assert_eq!(
+            annotation_tint(Some(MoveAnnotation::Blunder)),
+            Some((224, 40, 40))
+        );
     }
 }

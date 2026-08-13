@@ -115,6 +115,10 @@ pub struct MatchConfig {
     pub early_stop: bool,
     /// Optional external cancel flag observed by match workers.
     pub stop_flag: Option<Arc<AtomicBool>>,
+    /// When set, the current search is interrupted and clocks freeze until cleared.
+    pub pause_flag: Option<Arc<AtomicBool>>,
+    /// When set, the current game is stopped after the in-flight search returns.
+    pub abort_game_flag: Option<Arc<AtomicBool>>,
     /// Optional ply-by-ply progress hook for live tournament boards.
     pub game_progress: Option<GameProgress>,
 }
@@ -164,6 +168,8 @@ impl Default for MatchConfig {
             checkpoint_path: None,
             early_stop: true,
             stop_flag: None,
+            pause_flag: None,
+            abort_game_flag: None,
             game_progress: None,
         }
     }
@@ -176,6 +182,7 @@ pub enum Termination {
     AdjudicatedWin,
     AdjudicatedDraw,
     MaxPlies,
+    Aborted,
     Forfeit(String),
 }
 
@@ -430,6 +437,7 @@ fn game_json(game: &GameRecord) -> serde_json::Value {
         Termination::AdjudicatedWin => "adjudicated_win",
         Termination::AdjudicatedDraw => "adjudicated_draw",
         Termination::MaxPlies => "max_plies",
+        Termination::Aborted => "aborted",
         Termination::Forfeit(_) => "forfeit",
     };
     let _detail = match &game.termination {
@@ -724,6 +732,7 @@ fn game_from_checkpoint(
         Some("adjudicated_win") => Termination::AdjudicatedWin,
         Some("adjudicated_draw") => Termination::AdjudicatedDraw,
         Some("max_plies") => Termination::MaxPlies,
+        Some("aborted") => Termination::Aborted,
         Some("forfeit") => Termination::Forfeit(
             value
                 .get("detail")
@@ -1326,6 +1335,51 @@ fn engine_color(candidate_white: bool, candidate_engine: bool) -> Color {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchControl {
+    Run,
+    Pause,
+    AbortGame,
+    Cancel,
+}
+
+pub fn match_search_control(config: &MatchConfig) -> SearchControl {
+    if config
+        .stop_flag
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        SearchControl::Cancel
+    } else if config
+        .abort_game_flag
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        SearchControl::AbortGame
+    } else if config
+        .pause_flag
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        SearchControl::Pause
+    } else {
+        SearchControl::Run
+    }
+}
+
+fn wait_while_paused(config: &MatchConfig) {
+    while match_search_control(config) == SearchControl::Pause {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn take_abort_game(config: &MatchConfig) -> bool {
+    let Some(flag) = config.abort_game_flag.as_ref() else {
+        return false;
+    };
+    flag.swap(false, Ordering::AcqRel)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn play_game(
     candidate: &mut EngineSession,
@@ -1405,6 +1459,23 @@ fn play_game(
     let mut clock_bonus_applied = false;
 
     for ply in moves.len()..config.max_plies {
+        wait_while_paused(config);
+        if take_abort_game(config) || match_search_control(config) == SearchControl::Cancel {
+            return emit_done(with_moves(
+                with_telemetry(
+                    draw_record(
+                        candidate_white,
+                        Termination::Aborted,
+                        ply,
+                        nodes,
+                        started.elapsed(),
+                    ),
+                    &candidate_telemetry,
+                    &reference_telemetry,
+                ),
+                &moves,
+            ));
+        }
         let side = board.side_to_move;
         let candidate_turn = (side == Color::White) == candidate_white;
         let session = if candidate_turn {
@@ -1432,7 +1503,9 @@ fn play_game(
             }),
         };
         let search_started = Instant::now();
-        let info = match session.search(&request) {
+        let info = match session.search_interruptible(&request, || {
+            match_search_control(config) != SearchControl::Run
+        }) {
             Ok(info) => info,
             Err(message) => {
                 return emit_done(with_moves(
@@ -1452,6 +1525,27 @@ fn play_game(
                 ));
             }
         };
+        match match_search_control(config) {
+            SearchControl::Pause => continue,
+            SearchControl::AbortGame | SearchControl::Cancel => {
+                let _ = take_abort_game(config);
+                return emit_done(with_moves(
+                    with_telemetry(
+                        draw_record(
+                            candidate_white,
+                            Termination::Aborted,
+                            ply,
+                            nodes,
+                            started.elapsed(),
+                        ),
+                        &candidate_telemetry,
+                        &reference_telemetry,
+                    ),
+                    &moves,
+                ));
+            }
+            SearchControl::Run => {}
+        }
         let search_elapsed = search_started.elapsed();
         if let Some(clock) = config.clock {
             let remaining = if side == Color::White {
@@ -2286,5 +2380,32 @@ mod tests {
         );
 
         std::fs::remove_file(&path).expect("remove checkpoint fixture");
+    }
+
+    #[test]
+    fn search_control_prefers_cancel_then_abort_then_pause() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let pause = Arc::new(AtomicBool::new(true));
+        let abort = Arc::new(AtomicBool::new(true));
+        let mut config = MatchConfig {
+            stop_flag: Some(Arc::clone(&cancel)),
+            pause_flag: Some(Arc::clone(&pause)),
+            abort_game_flag: Some(Arc::clone(&abort)),
+            ..MatchConfig::default()
+        };
+        assert_eq!(match_search_control(&config), SearchControl::Cancel);
+        cancel.store(false, Ordering::Release);
+        assert_eq!(match_search_control(&config), SearchControl::AbortGame);
+        abort.store(false, Ordering::Release);
+        assert_eq!(match_search_control(&config), SearchControl::Pause);
+        pause.store(false, Ordering::Release);
+        assert_eq!(match_search_control(&config), SearchControl::Run);
+        abort.store(true, Ordering::Release);
+        assert!(take_abort_game(&config));
+        assert!(!take_abort_game(&config));
+        config.stop_flag = None;
+        config.pause_flag = None;
+        config.abort_game_flag = None;
+        assert_eq!(match_search_control(&config), SearchControl::Run);
     }
 }

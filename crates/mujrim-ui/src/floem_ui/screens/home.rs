@@ -42,22 +42,23 @@ pub fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
                 }
             }),
             widgets::ghost_button(state, "Open Study", {
+                let handles = handles.clone();
                 move || {
-                    actions::ensure_study_board(state);
+                    actions::ensure_study_board(state, &handles);
                     state.screen.set(Screen::Study);
                 }
             }),
             widgets::ghost_button(state, "Open Learn", {
+                let handles = handles.clone();
                 move || {
-                    actions::ensure_study_board(state);
+                    actions::ensure_study_board(state, &handles);
                     state.screen.set(Screen::Learn);
                 }
             }),
             widgets::ghost_button(state, "Engine Tournament", {
                 let handles = handles.clone();
                 move || {
-                    actions::open_tournament_setup(state, &handles);
-                    state.screen.set(Screen::Tournaments);
+                    actions::open_tournaments_screen(state, &handles);
                 }
             }),
         ))

@@ -6245,6 +6245,7 @@ dependencies = [
 name = "mujrim-study"
 version = "1.0.0"
 dependencies = [
+ "flate2",
  "mujrim-types",
  "rusqlite",
 ]

@@ -464,23 +464,11 @@ fn run_cached_search_streaming(
         && ponder;
     let info = if ponder_hit {
         engine.session.ponder_hit()?;
-        loop {
-            match engine.session.poll_search_step()? {
-                SearchStep::Pending => std::thread::sleep(Duration::from_millis(8)),
-                SearchStep::Info(snapshot) => on_info(&snapshot),
-                SearchStep::Done(done) => break done,
-            }
-        }
+        poll_until_bestmove(engine, cancel_epoch, on_info)?
     } else {
         engine.cancel_active_search()?;
         engine.session.start_search(request)?;
-        loop {
-            match engine.session.poll_search_step()? {
-                SearchStep::Pending => std::thread::sleep(Duration::from_millis(8)),
-                SearchStep::Info(snapshot) => on_info(&snapshot),
-                SearchStep::Done(done) => break done,
-            }
-        }
+        poll_until_bestmove(engine, cancel_epoch, on_info)?
     };
     engine.predicted_fen = None;
 
@@ -504,6 +492,23 @@ fn run_cached_search_streaming(
     }
 
     Ok((info, ponder_hit))
+}
+
+fn poll_until_bestmove(
+    engine: &mut CachedExternalEngine,
+    cancel_epoch: u64,
+    on_info: &mut impl FnMut(&SearchInfo),
+) -> Result<SearchInfo, String> {
+    loop {
+        if CANCEL_EPOCH.load(Ordering::Acquire) != cancel_epoch && engine.session.supports_stop() {
+            return engine.session.stop_search();
+        }
+        match engine.session.poll_search_step()? {
+            SearchStep::Pending => std::thread::sleep(Duration::from_millis(8)),
+            SearchStep::Info(snapshot) => on_info(&snapshot),
+            SearchStep::Done(done) => return Ok(done),
+        }
+    }
 }
 
 fn predicted_position_fen(fen: &str, best_move: &str, ponder_move: Option<&str>) -> Option<String> {
@@ -561,6 +566,16 @@ mod tests {
     fn shutdown_external_engines_is_safe_when_the_pool_is_empty() {
         shutdown_external_engines();
         shutdown_external_engines();
+    }
+
+    #[test]
+    fn streaming_search_sends_protocol_stop_on_cancel() {
+        let src = include_str!("uci_process.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("poll_until_bestmove"));
+        assert!(production.contains("CANCEL_EPOCH.load(Ordering::Acquire) != cancel_epoch"));
+        assert!(production.contains("supports_stop"));
+        assert!(production.contains("stop_search"));
     }
 
     #[test]

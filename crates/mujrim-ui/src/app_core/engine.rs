@@ -1,6 +1,8 @@
 //! Engine player configuration and built-in search.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use mujrim_protocols::SearchInfo;
@@ -287,8 +289,6 @@ pub fn builtin_engine_search(
     time: Duration,
     max_depth: i32,
 ) -> Result<(types::Move, String), String> {
-    use std::sync::{Mutex, OnceLock};
-
     struct BuiltinCache {
         hash_mb: usize,
         threads: usize,
@@ -298,6 +298,7 @@ pub fn builtin_engine_search(
     }
 
     static CACHE: OnceLock<Mutex<Option<BuiltinCache>>> = OnceLock::new();
+    let token_slot = builtin_stop_slot();
     let mut guard = CACHE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -328,7 +329,14 @@ pub fn builtin_engine_search(
     }
 
     let cached = guard.as_mut().expect("builtin cache just initialized");
+    let token = cached.engine.stop_token();
+    *token_slot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&token));
     let result = cached.engine.search_time(board, time, max_depth);
+    *token_slot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     let note = eval_file
         .map(|_| format!(" | net {}", cached.engine.nnue_info().name))
         .unwrap_or_default();
@@ -343,6 +351,22 @@ pub fn builtin_engine_search(
             note,
         ),
     ))
+}
+
+fn builtin_stop_slot() -> &'static Mutex<Option<Arc<AtomicBool>>> {
+    static SLOT: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Interrupt an in-flight built-in search without waiting on the engine mutex.
+pub fn stop_builtin_search() {
+    if let Some(flag) = builtin_stop_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        flag.store(true, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +385,15 @@ mod tests {
         assert_eq!(bounded_hash_mb(-1), 1);
         assert_eq!(bounded_hash_mb(64), 64);
         assert_eq!(bounded_hash_mb(4096), 512);
+    }
+
+    #[test]
+    fn builtin_stop_uses_the_search_engine_token() {
+        let src = include_str!("engine.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("stop_builtin_search"));
+        assert!(production.contains("stop_token"));
+        assert!(production.contains("builtin_stop_slot"));
     }
 
     #[test]

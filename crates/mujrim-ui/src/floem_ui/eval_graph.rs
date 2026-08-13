@@ -32,5 +32,9 @@ pub fn eval_histogram(state: AppState, height: f64) -> impl IntoView {
         }
         cx.stroke(&path, theme::rgba(pal.accent), &Stroke::new(2.0));
     })
-    .style(move |s| s.width_full().height(height).border_radius(8.0))
+    .style(move |s| {
+        let _ = state.settings.get();
+        let _ = state.analysis_scores.get();
+        s.width_full().height(height).border_radius(8.0)
+    })
 }

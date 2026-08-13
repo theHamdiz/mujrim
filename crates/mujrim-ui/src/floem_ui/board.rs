@@ -11,12 +11,12 @@ use floem::prelude::*;
 use floem::ui_events::pointer::{PointerButton, PointerButtonEvent, PointerUpdate};
 use types::Square;
 
-use crate::app_core::arrows::{ArrowAppearance, arrow_geometry};
+use crate::app_core::arrows::{ArrowAppearance, ArrowColor, ArrowShape, ArrowSize, arrow_geometry};
 use crate::app_core::game;
 use crate::app_core::layout;
-use crate::app_core::motion::AnimPace;
+use crate::app_core::motion::{self, AnimPace};
 use crate::app_core::palette::Rgba;
-use crate::app_core::settings::{CaptureAnimStyle, CoordPosition};
+use crate::app_core::settings::{CoordPosition, PieceAnimStyle, Screen};
 
 use super::actions;
 use super::state::{AppHandles, AppState};
@@ -32,7 +32,19 @@ pub fn board_view(state: AppState, handles: AppHandles) -> impl IntoView {
         let handles = handles.clone();
         move |cx, size| paint_board(cx, size, state, &handles)
     })
-    .style(|s| s.size_full().min_width(0.0).min_height(0.0));
+    .style(move |s| {
+        let _ = state.settings.get();
+        let _ = state.game.get();
+        let _ = state.slide.get();
+        let _ = state.slide_t.get();
+        let _ = state.capture_burst.get();
+        let _ = state.review_ply.get();
+        let _ = state.move_log.get();
+        let _ = state.move_annotations.get();
+        let _ = state.analysis.get();
+        let _ = state.screen.get();
+        s.size_full().min_width(0.0).min_height(0.0)
+    });
 
     Stack::new((painted, coord_layer(state)))
         .style(|s| s.size_full().min_width(0.0).min_height(0.0))
@@ -137,8 +149,26 @@ fn paint_board(
         }
     }
 
+    let threat_marks = threat_marks_for(&board, state.screen.get(), settings.show_threats);
+    for mark in &threat_marks {
+        let (row, col) = square_display(mark.square, game.flipped);
+        let x = geom.origin_x + col as f64 * sq;
+        let y = geom.origin_y + row as f64 * sq;
+        let fill = if mark.hanging {
+            Color::from_rgba8(220, 48, 48, 92)
+        } else {
+            Color::from_rgba8(255, 140, 40, 72)
+        };
+        cx.fill(&Rect::new(x, y, x + sq, y + sq), fill, 0.0);
+    }
+
     let slide = state.slide.get();
     let t = AnimPace::ease(state.slide_t.get());
+    let piece_style = if settings.piece_slide {
+        settings.piece_anim_style
+    } else {
+        PieceAnimStyle::Instant
+    };
     for square in types::Square::ALL {
         let Some((piece, color)) = board.piece_on(square) else {
             continue;
@@ -167,16 +197,19 @@ fn paint_board(
     {
         let (from_row, from_col) = square_display(anim.from, game.flipped);
         let (to_row, to_col) = square_display(anim.to, game.flipped);
-        let row = from_row as f64 * (1.0 - t as f64) + to_row as f64 * t as f64;
-        let col = from_col as f64 * (1.0 - t as f64) + to_col as f64 * t as f64;
-        let svg = handles.assets.get_str(settings.piece_set, piece, color);
-        draw_piece(
-            cx,
-            svg,
-            geom.origin_x + col * sq,
-            geom.origin_y + row * sq,
-            sq,
+        let flight = motion::piece_flight(
+            piece_style,
+            state.slide_t.get(),
+            from_row as f64,
+            from_col as f64,
+            to_row as f64,
+            to_col as f64,
         );
+        let svg = handles.assets.get_str(settings.piece_set, piece, color);
+        let size = sq * flight.scale.max(0.08);
+        let x = geom.origin_x + flight.col * sq + (sq - size) * 0.5;
+        let y = geom.origin_y + flight.row * sq + (sq - size) * 0.5;
+        draw_piece(cx, svg, x, y, size);
     }
 
     let appearance = ArrowAppearance {
@@ -184,72 +217,49 @@ fn paint_board(
         color: settings.arrow_color,
         size: settings.arrow_size,
     };
+    let mut arrows = Vec::new();
     if settings.draw_arrows {
-        for arrow in game.arrows.iter().chain(game.overlay_arrows.iter()) {
-            for geom_arrow in arrow_geometry(arrow, sq as f32, game.flipped, appearance) {
-                if let Some(body) = geom_arrow.body.as_ref().filter(|body| body.len() >= 3) {
-                    let mut path = BezPath::new();
-                    path.move_to((
-                        geom.origin_x + body[0].x as f64,
-                        geom.origin_y + body[0].y as f64,
-                    ));
-                    for point in &body[1..] {
-                        path.line_to((
-                            geom.origin_x + point.x as f64,
-                            geom.origin_y + point.y as f64,
-                        ));
-                    }
-                    path.close_path();
-                    cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
-                    cx.stroke(&path, theme::rgba(geom_arrow.outline), &Stroke::new(1.4));
-                } else {
-                    let mut path = BezPath::new();
-                    path.move_to((
-                        geom.origin_x + geom_arrow.shaft.points[0].x as f64,
-                        geom.origin_y + geom_arrow.shaft.points[0].y as f64,
-                    ));
-                    for point in &geom_arrow.shaft.points[1..] {
-                        path.line_to((
-                            geom.origin_x + point.x as f64,
-                            geom.origin_y + point.y as f64,
-                        ));
-                    }
-                    path.close_path();
-                    cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
-                    let mut head = BezPath::new();
-                    head.move_to((
-                        geom.origin_x + geom_arrow.head.a.x as f64,
-                        geom.origin_y + geom_arrow.head.a.y as f64,
-                    ));
-                    head.line_to((
-                        geom.origin_x + geom_arrow.head.b.x as f64,
-                        geom.origin_y + geom_arrow.head.b.y as f64,
-                    ));
-                    head.line_to((
-                        geom.origin_x + geom_arrow.head.c.x as f64,
-                        geom.origin_y + geom_arrow.head.c.y as f64,
-                    ));
-                    head.close_path();
-                    cx.fill(&head, theme::rgba(geom_arrow.fill), 0.0);
-                }
-                if let Some((tip, step, fill)) = geom_arrow.step {
-                    let center =
-                        Point::new(geom.origin_x + tip.x as f64, geom.origin_y + tip.y as f64);
-                    cx.fill(
-                        &Circle::new(center, sq * 0.16),
-                        Color::from_rgba8(20, 20, 24, 210),
-                        0.0,
-                    );
-                    cx.stroke(
-                        &Circle::new(center, sq * 0.16),
-                        theme::rgba(fill),
-                        &Stroke::new(1.5),
-                    );
-                    let _ = step;
-                }
-            }
+        arrows.extend(game.arrows.iter().cloned());
+        if let (Some(from), Some(to)) = (game.arrow_start, game.drag_over)
+            && from != to
+        {
+            arrows.push(crate::app_core::arrows::user_arrow(
+                from,
+                to,
+                settings.arrow_color,
+            ));
         }
     }
+    for arrow in &game.overlay_arrows {
+        let show = match arrow.role {
+            mujrim_study::board_marks::ArrowRole::LastMove => settings.last_move_arrow,
+            mujrim_study::board_marks::ArrowRole::Ponder => settings.ponder_arrow,
+            mujrim_study::board_marks::ArrowRole::User => settings.draw_arrows,
+            _ => true,
+        };
+        if show {
+            arrows.push(arrow.clone());
+        }
+    }
+    for arrow in &arrows {
+        paint_arrow(
+            cx,
+            arrow,
+            geom.origin_x,
+            geom.origin_y,
+            sq,
+            game.flipped,
+            appearance,
+        );
+    }
+    paint_threat_arrows(
+        cx,
+        &threat_marks,
+        geom.origin_x,
+        geom.origin_y,
+        sq,
+        game.flipped,
+    );
     if let Some((square, annotation)) = crate::app_core::logic::review_annotation_badge(
         &state.initial_fen.get(),
         &state.move_log.get(),
@@ -270,17 +280,82 @@ fn paint_board(
         let (row, col) = square_display(slide.to, game.flipped);
         let cx_pos = geom.origin_x + (col as f64 + 0.5) * sq;
         let cy_pos = geom.origin_y + (row as f64 + 0.5) * sq;
-        let radius = sq * (0.2 + (1.0 - burst as f64) * 0.5);
-        let color = match settings.capture_anim_style {
-            CaptureAnimStyle::Fire => Color::from_rgba8(255, 120, 40, (burst * 180.0) as u8),
-            CaptureAnimStyle::Explosion => Color::from_rgba8(255, 220, 80, (burst * 160.0) as u8),
-            CaptureAnimStyle::Instant => Color::from_rgba8(255, 255, 255, 0),
-        };
-        cx.stroke(
-            &Circle::new(Point::new(cx_pos, cy_pos), radius),
-            color,
-            &Stroke::new(3.0),
-        );
+        for mark in motion::capture_marks(settings.capture_anim_style, burst) {
+            let x = cx_pos + mark.x * sq;
+            let y = cy_pos + mark.y * sq;
+            let color = Color::from_rgba8(mark.r, mark.g, mark.b, mark.a);
+            if mark.ring {
+                cx.stroke(
+                    &Circle::new(Point::new(x, y), mark.radius * sq),
+                    color,
+                    &Stroke::new(3.0),
+                );
+            } else {
+                cx.fill(&Circle::new(Point::new(x, y), mark.radius * sq), color, 0.0);
+            }
+        }
+    }
+}
+
+fn paint_arrow(
+    cx: &mut floem::context::PaintCx<'_>,
+    arrow: &mujrim_study::board_marks::BoardArrow,
+    origin_x: f64,
+    origin_y: f64,
+    sq: f64,
+    flipped: bool,
+    appearance: ArrowAppearance,
+) {
+    for geom_arrow in arrow_geometry(arrow, sq as f32, flipped, appearance) {
+        if let Some(body) = geom_arrow.body.as_ref().filter(|body| body.len() >= 3) {
+            let mut path = BezPath::new();
+            path.move_to((origin_x + body[0].x as f64, origin_y + body[0].y as f64));
+            for point in &body[1..] {
+                path.line_to((origin_x + point.x as f64, origin_y + point.y as f64));
+            }
+            path.close_path();
+            cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
+            cx.stroke(&path, theme::rgba(geom_arrow.outline), &Stroke::new(1.4));
+        } else {
+            let mut path = BezPath::new();
+            path.move_to((
+                origin_x + geom_arrow.shaft.points[0].x as f64,
+                origin_y + geom_arrow.shaft.points[0].y as f64,
+            ));
+            for point in &geom_arrow.shaft.points[1..] {
+                path.line_to((origin_x + point.x as f64, origin_y + point.y as f64));
+            }
+            path.close_path();
+            cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
+            let mut head = BezPath::new();
+            head.move_to((
+                origin_x + geom_arrow.head.a.x as f64,
+                origin_y + geom_arrow.head.a.y as f64,
+            ));
+            head.line_to((
+                origin_x + geom_arrow.head.b.x as f64,
+                origin_y + geom_arrow.head.b.y as f64,
+            ));
+            head.line_to((
+                origin_x + geom_arrow.head.c.x as f64,
+                origin_y + geom_arrow.head.c.y as f64,
+            ));
+            head.close_path();
+            cx.fill(&head, theme::rgba(geom_arrow.fill), 0.0);
+        }
+        if let Some((tip, _step, fill)) = geom_arrow.step {
+            let center = Point::new(origin_x + tip.x as f64, origin_y + tip.y as f64);
+            cx.fill(
+                &Circle::new(center, sq * 0.16),
+                Color::from_rgba8(20, 20, 24, 210),
+                0.0,
+            );
+            cx.stroke(
+                &Circle::new(center, sq * 0.16),
+                theme::rgba(fill),
+                &Stroke::new(1.5),
+            );
+        }
     }
 }
 
@@ -397,6 +472,72 @@ fn coord_layer(state: AppState) -> impl IntoView {
         .style(|s| s.size_full().absolute().pointer_events_none())
 }
 
+fn threat_marks_for(
+    board: &types::Board,
+    screen: Screen,
+    show_threats: bool,
+) -> Vec<mujrim_study::threats::ThreatMark> {
+    if !show_threats || !matches!(screen, Screen::Study | Screen::Learn) {
+        return Vec::new();
+    }
+    mujrim_study::threats::threatened_pieces(board)
+}
+
+fn paint_threat_arrows(
+    cx: &mut floem::context::PaintCx<'_>,
+    marks: &[mujrim_study::threats::ThreatMark],
+    origin_x: f64,
+    origin_y: f64,
+    sq: f64,
+    flipped: bool,
+) {
+    use mujrim_study::board_marks::{ArrowRole, BoardArrow};
+    for mark in marks {
+        let appearance = ArrowAppearance {
+            shape: ArrowShape::Straight,
+            color: if mark.hanging {
+                ArrowColor::Red
+            } else {
+                ArrowColor::Orange
+            },
+            size: ArrowSize::Slim,
+        };
+        let arrow = BoardArrow::new(
+            mark.attacker,
+            mark.square,
+            appearance.color.to_mark(),
+            ArrowRole::Coach,
+        );
+        for geom_arrow in arrow_geometry(&arrow, sq as f32, flipped, appearance) {
+            let mut path = BezPath::new();
+            path.move_to((
+                origin_x + geom_arrow.shaft.points[0].x as f64,
+                origin_y + geom_arrow.shaft.points[0].y as f64,
+            ));
+            for point in &geom_arrow.shaft.points[1..] {
+                path.line_to((origin_x + point.x as f64, origin_y + point.y as f64));
+            }
+            path.close_path();
+            cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
+            let mut head = BezPath::new();
+            head.move_to((
+                origin_x + geom_arrow.head.a.x as f64,
+                origin_y + geom_arrow.head.a.y as f64,
+            ));
+            head.line_to((
+                origin_x + geom_arrow.head.b.x as f64,
+                origin_y + geom_arrow.head.b.y as f64,
+            ));
+            head.line_to((
+                origin_x + geom_arrow.head.c.x as f64,
+                origin_y + geom_arrow.head.c.y as f64,
+            ));
+            head.close_path();
+            cx.fill(&head, theme::rgba(geom_arrow.fill), 0.0);
+        }
+    }
+}
+
 fn square_display(square: Square, flipped: bool) -> (usize, usize) {
     let file = square.file();
     let rank = square.rank();
@@ -422,9 +563,13 @@ fn on_pointer_down(state: AppState, handles: &AppHandles, event: &PointerButtonE
         return;
     };
     if event.button == Some(PointerButton::Secondary) {
+        if !state.settings.get_untracked().draw_arrows {
+            return;
+        }
         state.game.update(|game| {
             if let Some(game) = game.as_mut() {
                 game.begin_arrow(square);
+                game.drag_over = Some(square);
             }
         });
         return;
@@ -441,10 +586,13 @@ fn on_pointer_move(state: AppState, _handles: &AppHandles, event: &PointerUpdate
         return;
     };
     state.game.update(|game| {
-        if let Some(game) = game.as_mut()
-            && game.drag_from.is_some()
-        {
-            game.update_drag(square);
+        if let Some(game) = game.as_mut() {
+            if game.drag_from.is_some() {
+                game.update_drag(square);
+            }
+            if game.arrow_start.is_some() {
+                game.drag_over = Some(square);
+            }
         }
     });
 }
@@ -513,6 +661,32 @@ mod tests {
                         .unwrap_or_else(|error| panic!("{set} {piece:?} {color:?}: {error}"));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn threat_overlay_is_limited_to_study_and_learn() {
+        types::init();
+        let board = types::Board::new();
+        assert!(threat_marks_for(&board, Screen::Playing, true).is_empty());
+        assert!(threat_marks_for(&board, Screen::Study, false).is_empty());
+    }
+
+    #[test]
+    fn canvas_style_tracks_settings_and_arrows() {
+        let src = include_str!("board.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        for needle in [
+            "state.settings.get()",
+            "state.slide_t.get()",
+            "state.capture_burst.get()",
+            "paint_arrow",
+            "piece_flight",
+            "capture_marks",
+            "last_move_arrow",
+            "arrow_start",
+        ] {
+            assert!(production.contains(needle), "missing {needle}");
         }
     }
 }

@@ -544,6 +544,9 @@ pub(super) enum Msg {
     SelectTournamentFormat(TournamentFormat),
     RunQuickTournament,
     CancelTournament,
+    PauseTournament,
+    ResumeTournament,
+    AbortTournamentGame,
     TournamentTick(Instant),
     QuickTournamentFinished(Box<mujrim_benchmarker::strength::TournamentSummary>),
     SelectTournament(String),
@@ -787,6 +790,7 @@ impl App {
         self.game_generation = self.game_generation.wrapping_add(1);
         self.engine_move_retries = 1;
         uci_process::cancel_all_pondering();
+        crate::app_core::engine::stop_builtin_search();
     }
 
     fn clear_review_state(&mut self) {
@@ -1373,6 +1377,7 @@ impl App {
             status,
             entrants,
             results: summary.game_results.clone(),
+            games: Vec::new(),
         };
         let _ = database.save_tournament(&tournament);
         self.selected_tournament_id = Some(id);
@@ -1647,6 +1652,30 @@ impl App {
                     self.tournament_status = self.live_tournament_view.status_line.clone();
                 } else {
                     self.tournament_status = "No tournament is running.".to_owned();
+                }
+                Task::none()
+            }
+            Msg::PauseTournament => {
+                if let Some(handle) = &self.live_tournament {
+                    handle.request_pause();
+                    self.live_tournament_view = handle.clone_snapshot();
+                    self.tournament_status = self.live_tournament_view.status_line.clone();
+                }
+                Task::none()
+            }
+            Msg::ResumeTournament => {
+                if let Some(handle) = &self.live_tournament {
+                    handle.request_resume();
+                    self.live_tournament_view = handle.clone_snapshot();
+                    self.tournament_status = self.live_tournament_view.status_line.clone();
+                }
+                Task::none()
+            }
+            Msg::AbortTournamentGame => {
+                if let Some(handle) = &self.live_tournament {
+                    handle.request_abort_game();
+                    self.live_tournament_view = handle.clone_snapshot();
+                    self.tournament_status = self.live_tournament_view.status_line.clone();
                 }
                 Task::none()
             }
@@ -4732,7 +4761,13 @@ impl App {
                 Msg::ToggleTournamentSetup,
             ));
         } else {
-            toolbar = toolbar.push(styled_button("Cancel safely", Msg::CancelTournament));
+            if live.paused {
+                toolbar = toolbar.push(styled_button("Resume", Msg::ResumeTournament));
+            } else {
+                toolbar = toolbar.push(styled_button("Pause", Msg::PauseTournament));
+            }
+            toolbar = toolbar.push(styled_button("Stop this game", Msg::AbortTournamentGame));
+            toolbar = toolbar.push(styled_button("Stop tournament", Msg::CancelTournament));
         }
         toolbar = toolbar.push(styled_button(
             if self.show_tournament_results {
@@ -6422,6 +6457,8 @@ async fn run_quick_tournament(
     handle: tournament_live::LiveTournamentHandle,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     let cancel = Arc::clone(&handle.cancel);
+    let pause = Arc::clone(&handle.pause);
+    let abort_game = Arc::clone(&handle.abort_game);
     let snapshot = Arc::clone(&handle.snapshot);
     let format = setup.format;
     let worker = std::thread::Builder::new()
@@ -6429,7 +6466,7 @@ async fn run_quick_tournament(
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_quick_tournament_body(engines, setup, cancel, snapshot)
+                run_quick_tournament_body(engines, setup, cancel, pause, abort_game, snapshot)
             }))
             .unwrap_or_else(|_| mujrim_benchmarker::strength::TournamentSummary {
                 format,
@@ -6473,6 +6510,8 @@ fn run_quick_tournament_body(
     engines: Vec<QuickTournamentEngine>,
     setup: tournament_setup::TournamentSetup,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    pause: Arc<std::sync::atomic::AtomicBool>,
+    abort_game: Arc<std::sync::atomic::AtomicBool>,
     snapshot: Arc<std::sync::Mutex<tournament_live::LiveTournamentSnapshot>>,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     use mujrim_benchmarker::strength::{
@@ -6639,6 +6678,7 @@ fn run_quick_tournament_body(
                     } => {
                         guard.cancelled = true;
                         guard.running = false;
+                        guard.paused = false;
                         guard.standings =
                             tournament_live::standing_rows(&guard.engine_names, &standings);
                         guard.game_results = game_results;
@@ -6651,6 +6691,8 @@ fn run_quick_tournament_body(
     });
     let mut match_config = setup.to_match_config();
     match_config.stop_flag = Some(Arc::clone(&cancel));
+    match_config.pause_flag = Some(pause);
+    match_config.abort_game_flag = Some(abort_game);
     let summary = run_tournament_with_control(
         roster,
         TournamentConfig {

@@ -7,6 +7,17 @@ use crate::tournament::{
 };
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct StoredTournamentGame {
+    pub game_index: usize,
+    pub round: usize,
+    pub white: String,
+    pub black: String,
+    pub white_score: f64,
+    pub initial_fen: String,
+    pub moves: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct StoredTournament {
     pub id: String,
     pub name: String,
@@ -15,6 +26,7 @@ pub struct StoredTournament {
     pub status: String,
     pub entrants: Vec<Entrant>,
     pub results: Vec<TournamentResult>,
+    pub games: Vec<StoredTournamentGame>,
 }
 
 impl StoredTournament {
@@ -53,6 +65,18 @@ pub fn ensure_schema(sqlite: &Connection) -> Result<(), String> {
                 black INTEGER NOT NULL,
                 white_score REAL NOT NULL,
                 PRIMARY KEY (tournament_id, round, white, black),
+                FOREIGN KEY (tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS tournament_games (
+                tournament_id TEXT NOT NULL,
+                game_index INTEGER NOT NULL,
+                round INTEGER NOT NULL,
+                white TEXT NOT NULL,
+                black TEXT NOT NULL,
+                white_score REAL NOT NULL,
+                initial_fen TEXT NOT NULL,
+                moves TEXT NOT NULL,
+                PRIMARY KEY (tournament_id, game_index),
                 FOREIGN KEY (tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE
              );",
         )
@@ -119,7 +143,102 @@ pub fn save_tournament(sqlite: &Connection, tournament: &StoredTournament) -> Re
             )
             .map_err(|error| format!("failed to save tournament result: {error}"))?;
     }
+    sqlite
+        .execute(
+            "DELETE FROM tournament_games WHERE tournament_id=?1",
+            params![tournament.id],
+        )
+        .map_err(|error| format!("failed to clear tournament games: {error}"))?;
+    for game in &tournament.games {
+        sqlite
+            .execute(
+                "INSERT INTO tournament_games(
+                    tournament_id,game_index,round,white,black,white_score,initial_fen,moves
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    tournament.id,
+                    game.game_index as i64,
+                    game.round as i64,
+                    game.white,
+                    game.black,
+                    game.white_score,
+                    game.initial_fen,
+                    game.moves.join(" "),
+                ],
+            )
+            .map_err(|error| format!("failed to save tournament game: {error}"))?;
+    }
     Ok(())
+}
+
+pub fn delete_tournament(sqlite: &Connection, id: &str) -> Result<(), String> {
+    sqlite
+        .execute(
+            "DELETE FROM tournament_games WHERE tournament_id=?1",
+            params![id],
+        )
+        .map_err(|error| format!("failed to delete tournament games: {error}"))?;
+    sqlite
+        .execute(
+            "DELETE FROM tournament_results WHERE tournament_id=?1",
+            params![id],
+        )
+        .map_err(|error| format!("failed to delete tournament results: {error}"))?;
+    sqlite
+        .execute(
+            "DELETE FROM tournament_entrants WHERE tournament_id=?1",
+            params![id],
+        )
+        .map_err(|error| format!("failed to delete tournament entrants: {error}"))?;
+    sqlite
+        .execute("DELETE FROM tournaments WHERE id=?1", params![id])
+        .map_err(|error| format!("failed to delete tournament: {error}"))?;
+    Ok(())
+}
+
+pub const STATUS_PAUSED: &str = "paused";
+pub const STATUS_IN_PROGRESS: &str = "in-progress";
+pub const STATUS_FINISHED: &str = "finished";
+pub const STATUS_CANCELLED: &str = "cancelled";
+
+pub fn is_resumable_status(status: &str) -> bool {
+    matches!(lifecycle_key(status), STATUS_PAUSED | STATUS_IN_PROGRESS)
+}
+
+pub fn lifecycle_key(status: &str) -> &'static str {
+    let lowered = status.trim().to_ascii_lowercase();
+    if lowered == STATUS_PAUSED || lowered.starts_with("paused") {
+        STATUS_PAUSED
+    } else if lowered == STATUS_IN_PROGRESS || lowered.starts_with("in-progress") {
+        STATUS_IN_PROGRESS
+    } else if lowered == STATUS_CANCELLED || lowered.contains("cancelled") {
+        STATUS_CANCELLED
+    } else if lowered == STATUS_FINISHED || lowered.contains("finished") {
+        STATUS_FINISHED
+    } else if lowered.starts_with("playing") || lowered.starts_with("starting") {
+        STATUS_IN_PROGRESS
+    } else {
+        STATUS_FINISHED
+    }
+}
+
+pub fn lifecycle_status(
+    paused: bool,
+    running: bool,
+    cancelled: bool,
+    finished: bool,
+) -> &'static str {
+    if cancelled {
+        STATUS_CANCELLED
+    } else if finished {
+        STATUS_FINISHED
+    } else if paused {
+        STATUS_PAUSED
+    } else if running {
+        STATUS_IN_PROGRESS
+    } else {
+        STATUS_FINISHED
+    }
 }
 
 pub fn list_tournaments(sqlite: &Connection) -> Result<Vec<StoredTournament>, String> {
@@ -196,6 +315,32 @@ pub fn load_tournament(sqlite: &Connection, id: &str) -> Result<Option<StoredTou
         .map_err(|error| format!("failed to read results: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("invalid result row: {error}"))?;
+    let mut game_stmt = sqlite
+        .prepare(
+            "SELECT game_index,round,white,black,white_score,initial_fen,moves
+             FROM tournament_games WHERE tournament_id=?1 ORDER BY game_index",
+        )
+        .map_err(|error| format!("failed to query tournament games: {error}"))?;
+    let games = game_stmt
+        .query_map(params![id], |row| {
+            let moves: String = row.get(6)?;
+            Ok(StoredTournamentGame {
+                game_index: row.get::<_, i64>(0)? as usize,
+                round: row.get::<_, i64>(1)? as usize,
+                white: row.get(2)?,
+                black: row.get(3)?,
+                white_score: row.get(4)?,
+                initial_fen: row.get(5)?,
+                moves: if moves.is_empty() {
+                    Vec::new()
+                } else {
+                    moves.split_whitespace().map(str::to_owned).collect()
+                },
+            })
+        })
+        .map_err(|error| format!("failed to read tournament games: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("invalid tournament game row: {error}"))?;
     Ok(Some(StoredTournament {
         id,
         name,
@@ -204,6 +349,7 @@ pub fn load_tournament(sqlite: &Connection, id: &str) -> Result<Option<StoredTou
         status,
         entrants,
         results,
+        games,
     }))
 }
 
@@ -273,14 +419,41 @@ mod tests {
                 },
                 white_score: 1.0,
             }],
+            games: vec![StoredTournamentGame {
+                game_index: 0,
+                round: 1,
+                white: "Alpha".into(),
+                black: "Beta".into(),
+                white_score: 1.0,
+                initial_fen: crate::opening::START_FEN.into(),
+                moves: vec!["e2e4".into(), "e7e5".into()],
+            }],
         };
         database.save_tournament(&tournament).unwrap();
         let loaded = database.load_tournament("t1").unwrap().unwrap();
         assert_eq!(loaded.entrants.len(), 2);
         assert_eq!(loaded.results.len(), 1);
+        assert_eq!(loaded.games.len(), 1);
+        assert_eq!(loaded.games[0].moves, ["e2e4", "e7e5"]);
         assert_eq!(loaded.standings()[0].points, 1.0);
         assert_eq!(database.list_tournaments().unwrap().len(), 1);
+        database.delete_tournament("t1").unwrap();
+        assert!(database.list_tournaments().unwrap().is_empty());
         drop(database);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resumable_status_detects_paused_and_in_progress() {
+        assert!(is_resumable_status("paused"));
+        assert!(is_resumable_status("Paused — clocks frozen"));
+        assert!(is_resumable_status("in-progress"));
+        assert!(is_resumable_status("Playing 1/4 · Round 1"));
+        assert!(!is_resumable_status("finished"));
+        assert!(!is_resumable_status(
+            "Round Robin finished without completed games."
+        ));
+        assert!(!is_resumable_status("cancelled"));
+        assert_eq!(lifecycle_status(true, true, false, false), STATUS_PAUSED);
     }
 }

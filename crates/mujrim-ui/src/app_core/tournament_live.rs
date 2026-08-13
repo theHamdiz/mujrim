@@ -122,6 +122,7 @@ pub struct LiveTournamentSnapshot {
     pub live_games: Vec<LiveGameBoard>,
     pub cancelled: bool,
     pub finished: bool,
+    pub paused: bool,
     pub status_line: String,
     pub error: Option<String>,
     pub show_results_panel: bool,
@@ -235,6 +236,8 @@ impl LiveTournamentSnapshot {
 #[derive(Clone, Debug)]
 pub struct LiveTournamentHandle {
     pub cancel: Arc<AtomicBool>,
+    pub pause: Arc<AtomicBool>,
+    pub abort_game: Arc<AtomicBool>,
     pub snapshot: Arc<Mutex<LiveTournamentSnapshot>>,
 }
 
@@ -242,6 +245,8 @@ impl LiveTournamentHandle {
     pub fn new(format: TournamentFormat) -> Self {
         Self {
             cancel: Arc::new(AtomicBool::new(false)),
+            pause: Arc::new(AtomicBool::new(false)),
+            abort_game: Arc::new(AtomicBool::new(false)),
             snapshot: Arc::new(Mutex::new(LiveTournamentSnapshot {
                 running: true,
                 format_label: format.to_string(),
@@ -252,11 +257,49 @@ impl LiveTournamentHandle {
     }
 
     pub fn request_cancel(&self) {
+        self.pause
+            .store(false, std::sync::atomic::Ordering::Release);
         self.cancel
             .store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut guard) = self.snapshot.lock() {
+            guard.paused = false;
             guard.status_line =
-                "Cancel requested — finishing current engine move safely…".to_owned();
+                "Stop requested — interrupting the current search with UCI stop / XBoard ?."
+                    .to_owned();
+        }
+    }
+
+    pub fn request_pause(&self) {
+        if self.cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        self.pause.store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(mut guard) = self.snapshot.lock() {
+            guard.paused = true;
+            guard.status_line =
+                "Paused — current search is being stopped; clocks stay frozen until Resume."
+                    .to_owned();
+        }
+    }
+
+    pub fn request_resume(&self) {
+        self.pause
+            .store(false, std::sync::atomic::Ordering::Release);
+        if let Ok(mut guard) = self.snapshot.lock() {
+            guard.paused = false;
+            if !self.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                guard.status_line = "Resumed — searching from the paused position.".to_owned();
+            }
+        }
+    }
+
+    pub fn request_abort_game(&self) {
+        self.abort_game
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(mut guard) = self.snapshot.lock() {
+            guard.status_line =
+                "Stopping this game — interrupting the engine, then continuing the event."
+                    .to_owned();
         }
     }
 
@@ -371,8 +414,21 @@ mod tests {
             handle
                 .clone_snapshot()
                 .status_line
-                .contains("Cancel requested")
+                .contains("Stop requested")
         );
+    }
+
+    #[test]
+    fn pause_and_resume_toggle_the_live_flag() {
+        let handle = LiveTournamentHandle::new(TournamentFormat::RoundRobin);
+        handle.request_pause();
+        assert!(handle.pause.load(std::sync::atomic::Ordering::Acquire));
+        assert!(handle.clone_snapshot().paused);
+        handle.request_resume();
+        assert!(!handle.pause.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!handle.clone_snapshot().paused);
+        handle.request_abort_game();
+        assert!(handle.abort_game.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]

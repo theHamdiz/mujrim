@@ -222,6 +222,14 @@ fn settings_tab(state: AppState, handles: AppHandles) -> impl IntoView {
             ),
             widgets::toggle_row(
                 state,
+                "Threat highlights",
+                move || state.settings.get().show_threats,
+                move |value| {
+                    actions::update_settings(state, |settings| settings.show_threats = value);
+                },
+            ),
+            widgets::toggle_row(
+                state,
                 "Premoves",
                 move || state.settings.get().premoves_enabled,
                 move |value| {
@@ -251,6 +259,15 @@ fn settings_tab(state: AppState, handles: AppHandles) -> impl IntoView {
                 CaptureAnimStyle::ALL,
                 move |value| {
                     actions::update_settings(state, |settings| settings.capture_anim_style = value);
+                },
+            ),
+            widgets::picker_row(
+                state,
+                "Piece motion",
+                move || state.settings.get().piece_anim_style,
+                crate::app_core::settings::PieceAnimStyle::ALL,
+                move |value| {
+                    actions::update_settings(state, |settings| settings.piece_anim_style = value);
                 },
             ),
         ))
@@ -680,6 +697,7 @@ mod tests {
             "Last-move arrow",
             "Ponder arrow",
             "BGM volume",
+            "Threat highlights",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
