@@ -482,6 +482,12 @@ pub(crate) fn discover_network_file(
         collect_network_files(&current.join("nnue"), 0, &mut paths);
         collect_network_files(&current.join("dist").join("nnue"), 0, &mut paths);
     }
+    // Checked-in eval payloads (CI + workspace tests of UI/search dependents).
+    collect_network_files(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"),
+        0,
+        &mut paths,
+    );
     paths.sort();
     paths.dedup();
 
