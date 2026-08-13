@@ -65,6 +65,7 @@ pub fn run() -> iced::Result {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
 fn set_macos_dock_icon() {
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
@@ -794,5 +795,14 @@ mod tests {
     fn step_ordering() {
         assert_ne!(Step::Welcome, Step::InstallPath);
         assert_ne!(Step::InstallPath, Step::Downloads);
+    }
+
+    #[test]
+    fn objc_clippy_feature_cfg_is_declared() {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        assert!(
+            manifest.contains(r#"cfg(feature, values("cargo-clippy"))"#),
+            "objc 0.2 msg_send! expands feature=\"cargo-clippy\"; declare it so macOS clippy -D warnings passes"
+        );
     }
 }

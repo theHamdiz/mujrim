@@ -43,3 +43,8 @@ mujrim-benchmarker = { path = "../mujrim-benchmarker", default-features = false 
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+
+[lints.rust]
+# objc 0.2 `msg_send!` expands `#[cfg(feature = "cargo-clippy")]` at call sites.
+# Declare it so macOS `clippy -D warnings` does not fail on unexpected_cfgs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

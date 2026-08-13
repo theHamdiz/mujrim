@@ -3,6 +3,8 @@
 mod actions;
 mod board;
 mod chrome;
+mod clock;
+mod dock;
 mod engine;
 mod eval_graph;
 mod icons;
@@ -98,6 +100,7 @@ fn tick_hub(state: AppState) {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)]
 fn set_macos_dock_icon() {
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
@@ -117,5 +120,17 @@ fn set_macos_dock_icon() {
         if !image.is_null() {
             let _: () = msg_send![app, setApplicationIconImage:image];
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn objc_clippy_feature_cfg_is_declared() {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        assert!(
+            manifest.contains(r#"cfg(feature, values("cargo-clippy"))"#),
+            "objc 0.2 msg_send! expands feature=\"cargo-clippy\"; declare it so macOS clippy -D warnings passes"
+        );
     }
 }
