@@ -23,10 +23,22 @@ pub enum SoundTheme {
     Wood,
     Crystal,
     Soft,
+    Marble,
+    Digital,
+    Arena,
+    Glass,
 }
 
 impl SoundTheme {
-    pub const ALL: [Self; 3] = [Self::Wood, Self::Crystal, Self::Soft];
+    pub const ALL: [Self; 7] = [
+        Self::Wood,
+        Self::Crystal,
+        Self::Soft,
+        Self::Marble,
+        Self::Digital,
+        Self::Arena,
+        Self::Glass,
+    ];
 }
 
 impl std::fmt::Display for SoundTheme {
@@ -35,6 +47,10 @@ impl std::fmt::Display for SoundTheme {
             Self::Wood => f.write_str("Wood"),
             Self::Crystal => f.write_str("Crystal"),
             Self::Soft => f.write_str("Soft"),
+            Self::Marble => f.write_str("Marble"),
+            Self::Digital => f.write_str("Digital"),
+            Self::Arena => f.write_str("Arena"),
+            Self::Glass => f.write_str("Glass"),
         }
     }
 }
@@ -48,10 +64,23 @@ pub enum GameMood {
     Joyful,
     /// Deep drone, Hijaz scale, ethereal shimmer.
     Mystique,
+    /// Spare fifths, slow pulse — concentration.
+    Focus,
+    /// Dotted martial rhythm.
+    March,
+    /// Low strings and distant bells.
+    Nocturne,
 }
 
 impl GameMood {
-    pub const ALL: [Self; 3] = [Self::Playful, Self::Joyful, Self::Mystique];
+    pub const ALL: [Self; 6] = [
+        Self::Playful,
+        Self::Joyful,
+        Self::Mystique,
+        Self::Focus,
+        Self::March,
+        Self::Nocturne,
+    ];
 }
 
 impl std::fmt::Display for GameMood {
@@ -60,6 +89,34 @@ impl std::fmt::Display for GameMood {
             Self::Playful => write!(f, "Playful"),
             Self::Joyful => write!(f, "Joyful"),
             Self::Mystique => write!(f, "Mystique"),
+            Self::Focus => write!(f, "Focus"),
+            Self::March => write!(f, "March"),
+            Self::Nocturne => write!(f, "Nocturne"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfxKind {
+    Move,
+    Capture,
+    Check,
+    Castle,
+    Promote,
+}
+
+impl SfxKind {
+    pub fn from_move(mv: types::Move, captured: bool, gives_check: bool) -> Self {
+        if gives_check {
+            Self::Check
+        } else if mv.is_castling() {
+            Self::Castle
+        } else if mv.is_promotion() {
+            Self::Promote
+        } else if captured || mv.is_capture() {
+            Self::Capture
+        } else {
+            Self::Move
         }
     }
 }
@@ -74,6 +131,12 @@ pub struct SoundEngine {
     game_bgm_playful: Arc<[u8]>,
     game_bgm_joyful: Arc<[u8]>,
     game_bgm_mystique: Arc<[u8]>,
+    game_bgm_focus: Arc<[u8]>,
+    game_bgm_march: Arc<[u8]>,
+    game_bgm_nocturne: Arc<[u8]>,
+    check_sound: Arc<[u8]>,
+    castle_sound: Arc<[u8]>,
+    promote_sound: Arc<[u8]>,
     bgm_sink: Option<rodio::Sink>,
     current_track: Option<BgmTrack>,
     current_mood: GameMood,
@@ -93,6 +156,12 @@ impl SoundEngine {
             game_bgm_playful: generate_game_playful().into(),
             game_bgm_joyful: generate_game_joyful().into(),
             game_bgm_mystique: generate_game_mystique().into(),
+            game_bgm_focus: generate_game_focus().into(),
+            game_bgm_march: generate_game_march().into(),
+            game_bgm_nocturne: generate_game_nocturne().into(),
+            check_sound: generate_tone_wav(880.0, 1_320.0, 140, 0.42).into(),
+            castle_sound: generate_tone_wav(330.0, 495.0, 160, 0.38).into(),
+            promote_sound: generate_tone_wav(523.0, 784.0, 180, 0.48).into(),
             bgm_sink: None,
             current_track: None,
             current_mood: GameMood::Mystique,
@@ -101,15 +170,28 @@ impl SoundEngine {
     }
 
     pub fn play_move(&self) {
-        if let Ok(source) = rodio::Decoder::new(Cursor::new(Arc::clone(&self.move_sound))) {
-            let _ = self
-                .stream_handle
-                .play_raw(rodio::source::Source::convert_samples(source));
-        }
+        self.play_buffer(&self.move_sound);
     }
 
     pub fn play_capture(&self) {
-        if let Ok(source) = rodio::Decoder::new(Cursor::new(Arc::clone(&self.capture_sound))) {
+        self.play_buffer(&self.capture_sound);
+    }
+
+    pub fn play_sfx(&self, sfx_on: bool, kind: SfxKind) {
+        if !sfx_on {
+            return;
+        }
+        match kind {
+            SfxKind::Move => self.play_move(),
+            SfxKind::Capture => self.play_capture(),
+            SfxKind::Check => self.play_buffer(&self.check_sound),
+            SfxKind::Castle => self.play_buffer(&self.castle_sound),
+            SfxKind::Promote => self.play_buffer(&self.promote_sound),
+        }
+    }
+
+    fn play_buffer(&self, data: &Arc<[u8]>) {
+        if let Ok(source) = rodio::Decoder::new(Cursor::new(Arc::clone(data))) {
             let _ = self
                 .stream_handle
                 .play_raw(rodio::source::Source::convert_samples(source));
@@ -118,7 +200,14 @@ impl SoundEngine {
 
     /// Play the specified BGM track with the current mood.
     pub fn play_bgm(&mut self, track: BgmTrack) {
+        self.play_bgm_gated(true, track);
+    }
+
+    pub fn play_bgm_gated(&mut self, enabled: bool, track: BgmTrack) {
         self.stop_bgm();
+        if !enabled {
+            return;
+        }
 
         let (data, vol) = match track {
             BgmTrack::Menu => (Arc::clone(&self.menu_bgm), self.volume * 1.2),
@@ -127,6 +216,9 @@ impl SoundEngine {
                     GameMood::Playful => Arc::clone(&self.game_bgm_playful),
                     GameMood::Joyful => Arc::clone(&self.game_bgm_joyful),
                     GameMood::Mystique => Arc::clone(&self.game_bgm_mystique),
+                    GameMood::Focus => Arc::clone(&self.game_bgm_focus),
+                    GameMood::March => Arc::clone(&self.game_bgm_march),
+                    GameMood::Nocturne => Arc::clone(&self.game_bgm_nocturne),
                 };
                 (d, self.volume * 0.6)
             }
@@ -239,6 +331,22 @@ fn generate_sound_theme(theme: SoundTheme) -> (Arc<[u8]>, Arc<[u8]>) {
         SoundTheme::Soft => (
             generate_tone_wav(260.0, 390.0, 70, 0.22),
             generate_tone_wav(190.0, 310.0, 100, 0.28),
+        ),
+        SoundTheme::Marble => (
+            generate_tone_wav(210.0, 420.0, 90, 0.34),
+            generate_tone_wav(160.0, 640.0, 120, 0.4),
+        ),
+        SoundTheme::Digital => (
+            generate_tone_wav(980.0, 1_960.0, 55, 0.3),
+            generate_tone_wav(740.0, 1_480.0, 80, 0.36),
+        ),
+        SoundTheme::Arena => (
+            generate_tone_wav(140.0, 280.0, 110, 0.5),
+            generate_tone_wav(90.0, 360.0, 140, 0.55),
+        ),
+        SoundTheme::Glass => (
+            generate_tone_wav(1_176.0, 2_352.0, 70, 0.28),
+            generate_tone_wav(988.0, 1_976.0, 95, 0.32),
         ),
     };
     (move_sound.into(), capture_sound.into())
@@ -474,6 +582,63 @@ fn generate_game_mystique() -> Vec<u8> {
     encode_wav(&s, sr)
 }
 
+fn generate_game_focus() -> Vec<u8> {
+    generate_drone_track(22.0, 98.0, 147.0, 196.0, 0.08)
+}
+
+fn generate_game_march() -> Vec<u8> {
+    generate_pulse_track(20.0, 130.81, 196.0, 0.55)
+}
+
+fn generate_game_nocturne() -> Vec<u8> {
+    generate_drone_track(26.0, 73.4, 110.0, 220.0, 0.06)
+}
+
+fn generate_drone_track(dur: f64, root: f64, fifth: f64, octave: f64, gain: f64) -> Vec<u8> {
+    let sr = 44100u32;
+    let n = (sr as f64 * dur) as usize;
+    let mut s = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 / sr as f64;
+        let vib = (std::f64::consts::TAU * 0.12 * t).sin() * 0.8;
+        let drone = (std::f64::consts::TAU * (root + vib) * t).sin() * gain;
+        let pad = (std::f64::consts::TAU * fifth * t).sin() * gain * 0.45;
+        let bell_t = t % 6.0;
+        let bell = (std::f64::consts::TAU * octave * t).sin() * (-bell_t / 1.8).exp() * gain * 0.5;
+        let mut mix = drone + pad + bell;
+        let fd = 0.8;
+        if t < fd {
+            mix *= t / fd;
+        } else if t > dur - fd {
+            mix *= (dur - t) / fd;
+        }
+        s.push((mix * 32767.0).clamp(-32767.0, 32767.0) as i16);
+    }
+    encode_wav(&s, sr)
+}
+
+fn generate_pulse_track(dur: f64, bass: f64, treble: f64, beat: f64) -> Vec<u8> {
+    let sr = 44100u32;
+    let n = (sr as f64 * dur) as usize;
+    let mut s = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 / sr as f64;
+        let phase = (t * beat).fract();
+        let env = (-phase * 5.0).exp();
+        let low = (std::f64::consts::TAU * bass * t).sin() * 0.09 * env;
+        let high = (std::f64::consts::TAU * treble * t).sin() * 0.04 * env;
+        let mut mix = low + high;
+        let fd = 0.6;
+        if t < fd {
+            mix *= t / fd;
+        } else if t > dur - fd {
+            mix *= (dur - t) / fd;
+        }
+        s.push((mix * 32767.0).clamp(-32767.0, 32767.0) as i16);
+    }
+    encode_wav(&s, sr)
+}
+
 fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     let data_size = (samples.len() * 2) as u32;
     let file_size = 36 + data_size;
@@ -530,6 +695,43 @@ mod tests {
         assert_ne!(crystal.0.as_ref(), soft.0.as_ref());
         assert!(wood.0.starts_with(b"RIFF"));
         assert!(soft.1.starts_with(b"RIFF"));
+        for theme in SoundTheme::ALL {
+            let (mv, cap) = generate_sound_theme(theme);
+            assert!(mv.starts_with(b"RIFF"), "{theme}");
+            assert!(cap.starts_with(b"RIFF"), "{theme}");
+        }
+    }
+
+    #[test]
+    fn extra_moods_emit_wav_headers() {
+        assert!(generate_game_focus().starts_with(b"RIFF"));
+        assert!(generate_game_march().starts_with(b"RIFF"));
+        assert!(generate_game_nocturne().starts_with(b"RIFF"));
+        assert_eq!(GameMood::ALL.len(), 6);
+        assert_eq!(SoundTheme::ALL.len(), 7);
+    }
+
+    #[test]
+    fn sfx_kind_prefers_check_then_specials() {
+        let castle = types::Move::king_castle(types::Square::E1, types::Square::G1);
+        assert_eq!(SfxKind::from_move(castle, false, false), SfxKind::Castle);
+        assert_eq!(SfxKind::from_move(castle, false, true), SfxKind::Check);
+        let capture = types::Move::capture(types::Square::E4, types::Square::D5);
+        assert_eq!(SfxKind::from_move(capture, true, false), SfxKind::Capture);
+        let quiet = types::Move::quiet(types::Square::E2, types::Square::E4);
+        assert_eq!(SfxKind::from_move(quiet, false, false), SfxKind::Move);
+    }
+
+    #[test]
+    fn sfx_gate_skips_when_disabled() {
+        assert_eq!(
+            SfxKind::from_move(
+                types::Move::quiet(types::Square::A2, types::Square::A3),
+                false,
+                false
+            ),
+            SfxKind::Move
+        );
     }
 
     #[test]

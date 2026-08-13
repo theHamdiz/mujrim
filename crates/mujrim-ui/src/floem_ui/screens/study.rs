@@ -26,7 +26,33 @@ pub fn study_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         preparations_card(state, handles.clone()),
         library_card(state, handles),
     ))
-    .style(|s| s.flex_col().row_gap(10.0).width_full().min_height(0.0))
+    .style(|s| {
+        s.flex_col()
+            .row_gap(10.0)
+            .width_full()
+            .min_width(0.0)
+            .min_height(0.0)
+    })
+}
+
+pub fn library_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::vertical((
+        library_card(state, handles.clone()),
+        notes_card(state, handles.clone()),
+        Stack::vertical((
+            pane_title("Moves"),
+            workspace::move_list(state, handles.clone()),
+            workspace::ply_nav(state, handles),
+        ))
+        .style(|s| s.row_gap(6.0).width_full().min_width(0.0)),
+    ))
+    .style(|s| {
+        s.flex_col()
+            .row_gap(10.0)
+            .width_full()
+            .min_width(0.0)
+            .min_height(0.0)
+    })
 }
 
 pub fn learn_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -34,6 +60,7 @@ pub fn learn_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         training_card(state, handles.clone()),
         gambit_card(state),
         coaching_card(state),
+        widgets::explanation_card(state, move || workspace::explanation_text(state)),
         notes_card(state, handles.clone()),
         Stack::vertical((
             widgets::ghost_button(state, "Coach review", {
@@ -48,13 +75,19 @@ pub fn learn_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
             workspace::move_list(state, handles.clone()),
             workspace::ply_nav(state, handles),
         ))
-        .style(|s| s.row_gap(8.0).width_full()),
+        .style(|s| s.row_gap(8.0).width_full().min_width(0.0)),
     ))
-    .style(|s| s.flex_col().row_gap(8.0).width_full().min_height(0.0))
+    .style(|s| {
+        s.flex_col()
+            .row_gap(8.0)
+            .width_full()
+            .min_width(0.0)
+            .min_height(0.0)
+    })
 }
 
 fn pane_title(label: &'static str) -> impl IntoView {
-    Label::new(label).style(|s| s.font_size(12.0).font_bold())
+    Label::new(label).style(|s| s.font_size(12.0).font_bold().min_width(0.0).width_full())
 }
 
 fn notes_card(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -106,11 +139,17 @@ fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     format!("{count} locally indexed games")
                 }
             })
-            .style(|s| s.font_size(16.0).font_bold()),
-            Label::new(
+            .style(|s| {
+                s.font_size(16.0)
+                    .font_bold()
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+            }),
+            widgets::body_copy(
                 "Search by player, event, ECO, or Elo. Click a game to replay it on the board.",
-            )
-            .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+                pal,
+            ),
             Stack::horizontal((
                 TextInput::new(state.study_query).style(|s| {
                     s.flex_grow(1.0f32)
@@ -150,7 +189,13 @@ fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     } else {
                         "No games match this search."
                     })
-                    .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary)))
+                    .style(move |s| {
+                        s.font_size(12.0)
+                            .min_width(0.0)
+                            .width_full()
+                            .text_wrap()
+                            .color(theme::rgba(pal().text_secondary))
+                    })
                     .into_any();
                 }
                 results
@@ -161,9 +206,19 @@ fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         let (title, detail) = logic::game_summary_label(&summary);
                         Button::new(
                             Stack::vertical((
-                                Label::new(title).style(|s| s.font_size(13.0).font_bold()),
+                                Label::new(title).style(|s| {
+                                    s.font_size(13.0)
+                                        .font_bold()
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_ellipsis()
+                                }),
                                 Label::new(detail).style(move |s| {
-                                    s.font_size(11.0).color(theme::rgba(pal().text_secondary))
+                                    s.font_size(11.0)
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_wrap()
+                                        .color(theme::rgba(pal().text_secondary))
                                 }),
                             ))
                             .style(|s| s.row_gap(2.0).width_full().min_width(0.0)),
@@ -175,6 +230,7 @@ fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         .style(move |s| {
                             let pal = pal();
                             s.width_full()
+                                .min_width(0.0)
                                 .padding(8.0)
                                 .border_radius(10.0)
                                 .border(0.0)
@@ -198,13 +254,21 @@ fn coaching_card(state: AppState) -> impl IntoView {
         state,
         Stack::vertical((
             widgets::section_label("Coach & Review", pal),
-            Label::new("Move-quality vocabulary ready").style(|s| s.font_size(16.0).font_bold()),
-            Label::new(
+            Label::new("Move-quality vocabulary ready").style(|s| {
+                s.font_size(16.0)
+                    .font_bold()
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+            }),
+            widgets::body_copy(
                 "Aura !!!, Brilliant !!, Great !, Best, Excellent, Good, OK, Book, Novelty, Inaccuracy, Mistake, and Blunder share one review model.",
-            )
-            .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
-            Label::new("Click a move in the list to jump the board. Annotation badges paint on the destination square.")
-            .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+                pal,
+            ),
+            widgets::body_copy(
+                "Click a move in the list to jump the board. Annotation badges paint on the destination square.",
+                pal,
+            ),
         )),
     )
 }
@@ -230,9 +294,17 @@ fn training_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     )
                 }
             })
-            .style(|s| s.font_size(16.0).font_bold()),
-            Label::new("Legal puzzle replay with persisted spaced-repetition scheduling.")
-                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            .style(|s| {
+                s.font_size(16.0)
+                    .font_bold()
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+            }),
+            widgets::body_copy(
+                "Legal puzzle replay with persisted spaced-repetition scheduling.",
+                pal,
+            ),
             widgets::primary_button(state, "Install starter set", {
                 let handles = handles.clone();
                 move || actions::seed_training(state, &handles)
@@ -257,7 +329,13 @@ fn training_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         } else {
                             "Nothing is due today."
                         })
-                        .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary)))
+                        .style(move |s| {
+                            s.font_size(12.0)
+                                .min_width(0.0)
+                                .width_full()
+                                .text_wrap()
+                                .color(theme::rgba(pal().text_secondary))
+                        })
                         .into_any();
                     }
                     due.into_iter()
@@ -268,13 +346,19 @@ fn training_card(state: AppState, handles: AppHandles) -> impl IntoView {
                             let rating = format!("{} Elo", item.puzzle.rating);
                             Button::new(
                                 Stack::horizontal((
-                                    Label::new(themes)
-                                        .style(|s| s.font_size(12.0).flex_grow(1.0f32)),
+                                    Label::new(themes).style(|s| {
+                                        s.font_size(12.0)
+                                            .flex_grow(1.0f32)
+                                            .min_width(0.0)
+                                            .text_ellipsis()
+                                    }),
                                     Label::new(rating).style(move |s| {
                                         s.font_size(11.0).color(theme::rgba(pal().text_secondary))
                                     }),
                                 ))
-                                .style(|s| s.width_full().col_gap(8.0).items_center()),
+                                .style(|s| {
+                                    s.width_full().col_gap(8.0).items_center().min_width(0.0)
+                                }),
                             )
                             .action({
                                 let handles = handles.clone();
@@ -283,6 +367,7 @@ fn training_card(state: AppState, handles: AppHandles) -> impl IntoView {
                             .style(move |s| {
                                 let pal = pal();
                                 s.width_full()
+                                    .min_width(0.0)
                                     .padding(8.0)
                                     .border(0.0)
                                     .border_radius(10.0)
@@ -312,11 +397,17 @@ fn opening_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     state.opening_indexed.get()
                 )
             })
-            .style(|s| s.font_size(16.0).font_bold()),
-            Label::new(
+            .style(|s| {
+                s.font_size(16.0)
+                    .font_bold()
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+            }),
+            widgets::body_copy(
                 "Play a book move to stay on this board. White / draw / Black bars match the library sample.",
-            )
-            .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+                pal,
+            ),
             widgets::ghost_button(state, "Index openings", {
                 let handles = handles.clone();
                 move || actions::index_openings(state, &handles)
@@ -335,7 +426,12 @@ fn opening_card(state: AppState, handles: AppHandles) -> impl IntoView {
                 let handles = handles.clone();
                 move |s| {
                     let pal = pal();
-                    let s = s.font_size(12.0).color(theme::rgba(pal.text_secondary));
+                    let s = s
+                        .font_size(12.0)
+                        .min_width(0.0)
+                        .width_full()
+                        .text_wrap()
+                        .color(theme::rgba(pal.text_secondary));
                     if explorer_entry(state, &handles, 0).is_some() {
                         s.display(Display::None)
                     } else {
@@ -404,7 +500,7 @@ fn explorer_slot(
                             .unwrap_or_default()
                     }
                 })
-                .style(|s| s.font_size(14.0).font_bold()),
+                .style(|s| s.font_size(14.0).font_bold().min_width(0.0).text_ellipsis()),
                 Label::derived({
                     let handles = handles.clone();
                     move || {
@@ -423,6 +519,8 @@ fn explorer_slot(
                 .style(move |s| {
                     s.font_size(11.0)
                         .flex_grow(1.0f32)
+                        .min_width(0.0)
+                        .text_ellipsis()
                         .color(theme::rgba(pal().text_secondary))
                 }),
             ))
@@ -511,8 +609,10 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
         state,
         Stack::vertical((
             widgets::section_label("Preparations", pal),
-            Label::new("Name the current line, pick a side, and save it to your repertoire.")
-                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            widgets::body_copy(
+                "Name the current line, pick a side, and save it to your repertoire.",
+                pal,
+            ),
             TextInput::new(state.line_name).style(|s| {
                 s.width_full()
                     .min_width(0.0)
@@ -542,7 +642,11 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     if lines.is_empty() {
                         return Label::new("No saved lines yet.")
                             .style(move |s| {
-                                s.font_size(12.0).color(theme::rgba(pal().text_secondary))
+                                s.font_size(12.0)
+                                    .min_width(0.0)
+                                    .width_full()
+                                    .text_wrap()
+                                    .color(theme::rgba(pal().text_secondary))
                             })
                             .into_any();
                     }
@@ -554,14 +658,24 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
                             let title =
                                 format!("{} · {} · {} ply", line.name, line.side, line.moves.len());
                             Stack::vertical((
-                                Label::new(title).style(|s| s.font_size(13.0).font_bold()),
+                                Label::new(title).style(|s| {
+                                    s.font_size(13.0)
+                                        .font_bold()
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_wrap()
+                                }),
                                 Label::new(if line.notes.is_empty() {
                                     "No notes".to_owned()
                                 } else {
                                     line.notes
                                 })
                                 .style(move |s| {
-                                    s.font_size(11.0).color(theme::rgba(pal().text_secondary))
+                                    s.font_size(11.0)
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_wrap()
+                                        .color(theme::rgba(pal().text_secondary))
                                 }),
                                 Stack::horizontal((
                                     widgets::ghost_button(state, "Load", {
@@ -581,7 +695,7 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
                                         }
                                     }),
                                 ))
-                                .style(|s| s.col_gap(6.0)),
+                                .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap).min_width(0.0)),
                             ))
                             .style(move |s| {
                                 let pal = pal();
@@ -609,18 +723,26 @@ fn gambit_card(state: AppState) -> impl IntoView {
         state,
         Stack::vertical((
             widgets::section_label("Gambit Laboratory", pal),
-            Label::new("Interactive lines with numbered coaching arrows.")
-                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            widgets::body_copy("Interactive lines with numbered coaching arrows.", pal),
             gambit::catalog()
                 .iter()
                 .map(|lesson| {
                     let id = lesson.id.to_owned();
                     Stack::horizontal((
                         Stack::vertical((
-                            Label::new(format!("{} ({})", lesson.name, lesson.eco))
-                                .style(|s| s.font_size(13.0).font_bold()),
+                            Label::new(format!("{} ({})", lesson.name, lesson.eco)).style(|s| {
+                                s.font_size(13.0)
+                                    .font_bold()
+                                    .min_width(0.0)
+                                    .width_full()
+                                    .text_wrap()
+                            }),
                             Label::new(lesson.summary).style(move |s| {
-                                s.font_size(11.0).color(theme::rgba(pal().text_secondary))
+                                s.font_size(11.0)
+                                    .min_width(0.0)
+                                    .width_full()
+                                    .text_wrap()
+                                    .color(theme::rgba(pal().text_secondary))
                             }),
                         ))
                         .style(|s| s.flex_grow(1.0f32).row_gap(2.0).min_width(0.0)),
@@ -628,7 +750,7 @@ fn gambit_card(state: AppState) -> impl IntoView {
                             move || actions::start_gambit_lesson(state, id.clone())
                         }),
                     ))
-                    .style(|s| s.width_full().col_gap(8.0).items_center())
+                    .style(|s| s.width_full().col_gap(8.0).items_start().min_width(0.0))
                 })
                 .collect::<Vec<_>>()
                 .into_view()
@@ -661,8 +783,17 @@ mod tests {
             "Threat highlights",
             "move_note",
             "game_io_bar",
+            "library_sidebar",
+            "explanation_card",
+            "body_copy",
+            "text_wrap()",
+            "text_ellipsis()",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
+        assert!(
+            production.contains("min_width(0.0)"),
+            "study panels must shrink with the sidebar instead of overflowing"
+        );
     }
 }

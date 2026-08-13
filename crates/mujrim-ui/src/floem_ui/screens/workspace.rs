@@ -1,6 +1,7 @@
 //! Single-window board workspace: play, analysis, tournaments.
 
 use floem::prelude::*;
+use floem::style::CursorStyle;
 use floem::taffy::style::{Display, FlexWrap, Overflow};
 
 use crate::app_core::layout;
@@ -10,6 +11,7 @@ use crate::app_core::tournament_arena;
 
 use super::super::actions;
 use super::super::board;
+use super::super::chrome;
 use super::super::clock;
 use super::super::dock;
 use super::super::engine;
@@ -23,7 +25,6 @@ pub fn playing(state: AppState, handles: AppHandles) -> impl IntoView {
         state,
         handles.clone(),
         false,
-        false,
         playing_sidebar(state, handles),
     )
 }
@@ -32,7 +33,6 @@ pub fn analysis(state: AppState, handles: AppHandles) -> impl IntoView {
     workspace(
         state,
         handles.clone(),
-        false,
         false,
         analysis_sidebar(state, handles),
     )
@@ -43,7 +43,6 @@ pub fn study(state: AppState, handles: AppHandles) -> impl IntoView {
         state,
         handles.clone(),
         false,
-        true,
         super::study::study_sidebar(state, handles),
     )
 }
@@ -53,8 +52,16 @@ pub fn learn(state: AppState, handles: AppHandles) -> impl IntoView {
         state,
         handles.clone(),
         false,
-        true,
         super::study::learn_sidebar(state, handles),
+    )
+}
+
+pub fn library(state: AppState, handles: AppHandles) -> impl IntoView {
+    workspace(
+        state,
+        handles.clone(),
+        false,
+        super::study::library_sidebar(state, handles),
     )
 }
 
@@ -63,7 +70,6 @@ pub fn tournaments(state: AppState, handles: AppHandles) -> impl IntoView {
         state,
         handles.clone(),
         true,
-        false,
         tournament_sidebar(state, handles),
     )
 }
@@ -72,37 +78,49 @@ fn workspace(
     state: AppState,
     handles: AppHandles,
     show_clocks: bool,
-    sidebar_scroll: bool,
     sidebar: impl IntoView + 'static,
 ) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
+    let dragging = RwSignal::new(false);
+    let drag_origin_x = RwSignal::new(0.0);
+    let drag_origin_width = RwSignal::new(layout::SIDEBAR_IDEAL_PX);
+    let pane_width = RwSignal::new(1280.0);
     Stack::vertical((
         Stack::horizontal((
             board_pane(state, handles.clone(), show_clocks).style(|s| {
                 s.flex_grow(1.0f32)
+                    .flex_shrink(1.0f32)
                     .min_width(layout::BOARD_MIN_PX)
                     .min_height(0.0)
                     .height_full()
             }),
+            split_handle(
+                state,
+                pal,
+                dragging,
+                drag_origin_x,
+                drag_origin_width,
+                pane_width,
+            ),
             sidebar.style(move |s| {
-                let overflow_y = if sidebar_scroll {
-                    Overflow::Scroll
-                } else {
-                    Overflow::Clip
-                };
-                s.width(layout::SIDEBAR_IDEAL_PX)
+                let width = layout::clamp_sidebar_width(
+                    state.settings.get().sidebar_width_px,
+                    pane_width.get(),
+                );
+                s.width(width)
                     .min_width(layout::SIDEBAR_MIN_PX)
                     .max_width(layout::SIDEBAR_MAX_PX)
-                    .flex_grow(1.0f32)
+                    .flex_grow(0.0f32)
+                    .flex_shrink(0.0f32)
                     .height_full()
                     .min_height(0.0)
-                    .padding(14.0)
-                    .row_gap(10.0)
+                    .padding(16.0)
+                    .row_gap(12.0)
                     .background(theme::rgba(pal().sidebar))
                     .border_left(1.0)
                     .border_color(theme::rgba(pal().border))
                     .overflow_x(Overflow::Clip)
-                    .overflow_y(overflow_y)
+                    .overflow_y(Overflow::Scroll)
             }),
         ))
         .style(|s| {
@@ -111,8 +129,13 @@ fn workspace(
                 .min_width(0.0)
                 .min_height(0.0)
                 .items_stretch()
-                .flex_wrap(FlexWrap::Wrap)
+                .flex_wrap(FlexWrap::NoWrap)
                 .overflow_x(Overflow::Clip)
+        })
+        .on_event_cont(el::WindowResized, move |_, size: &floem::kurbo::Size| {
+            if size.width > 1.0 {
+                pane_width.set(size.width);
+            }
         }),
         dock::bottom_dock(state, handles),
     ))
@@ -126,6 +149,83 @@ fn workspace(
     })
 }
 
+fn split_handle(
+    state: AppState,
+    pal: impl Fn() -> crate::app_core::palette::GuiPalette + Copy + 'static,
+    dragging: RwSignal<bool>,
+    drag_origin_x: RwSignal<f64>,
+    drag_origin_width: RwSignal<f64>,
+    pane_width: RwSignal<f64>,
+) -> impl IntoView {
+    Empty::new()
+        .style(move |s| {
+            let active = dragging.get();
+            s.width(layout::SPLIT_HANDLE_PX)
+                .flex_shrink(0.0f32)
+                .height_full()
+                .cursor(CursorStyle::ColResize)
+                .background(if active {
+                    theme::rgba(pal().accent)
+                } else {
+                    theme::rgba(pal().border)
+                })
+                .hover(|s| {
+                    s.background(theme::rgba(pal().accent))
+                        .cursor(CursorStyle::ColResize)
+                })
+        })
+        .on_event_stop(
+            el::PointerDown,
+            move |cx, event: &floem::ui_events::pointer::PointerButtonEvent| {
+                if let Some(pointer_id) = event.pointer.pointer_id {
+                    cx.request_pointer_capture(pointer_id);
+                }
+                if let Some(size) = cx.target.owning_id().parent_size()
+                    && size.width > 1.0
+                {
+                    pane_width.set(size.width);
+                }
+                dragging.set(true);
+                drag_origin_x.set(window_pointer_x(cx, event.state.logical_point()));
+                drag_origin_width.set(state.settings.get_untracked().sidebar_width_px);
+            },
+        )
+        .on_event_cont(
+            el::PointerMove,
+            move |cx, event: &floem::ui_events::pointer::PointerUpdate| {
+                if !dragging.get_untracked() {
+                    return;
+                }
+                let dx = window_pointer_x(cx, event.current.logical_point())
+                    - drag_origin_x.get_untracked();
+                let next = layout::apply_sidebar_drag(
+                    drag_origin_width.get_untracked(),
+                    dx,
+                    pane_width.get_untracked(),
+                );
+                state
+                    .settings
+                    .update(|settings| settings.sidebar_width_px = next);
+            },
+        )
+        .on_event_stop(el::PointerUp, move |_, _| {
+            if dragging.get_untracked() {
+                dragging.set(false);
+                state.persist_settings();
+            }
+        })
+        .on_event_stop(el::LostPointerCapture, move |_, _| {
+            if dragging.get_untracked() {
+                dragging.set(false);
+                state.persist_settings();
+            }
+        })
+}
+
+fn window_pointer_x(cx: &floem::event::EventCx, local: floem::kurbo::Point) -> f64 {
+    (cx.world_transform.inverse() * local).x
+}
+
 fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let clocks = if show_clocks {
@@ -136,6 +236,8 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
             .into_any()
     };
     Stack::vertical((
+        chrome::screen_tools(state, handles.clone())
+            .style(|s| s.width_full().padding_bottom(6.0).min_width(0.0)),
         clocks,
         Stack::new((
             board::board_view(state, handles.clone())
@@ -190,14 +292,17 @@ fn empty_board(state: AppState, handles: AppHandles, tournament_board: bool) -> 
             Label::derived(move || {
                 (if state.screen.get() == Screen::Tournaments {
                     "Configure the tournament, then Start."
-                } else if matches!(state.screen.get(), Screen::Study | Screen::Learn) {
+                } else if matches!(
+                    state.screen.get(),
+                    Screen::Study | Screen::Learn | Screen::Library
+                ) {
                     "Explorer, library, and saved lines load onto this board."
                 } else {
                     "Start a game from Home."
                 })
                 .to_owned()
             })
-            .style(|s| s.font_size(15.0).font_bold()),
+            .style(|s| s.font_size(15.0).font_bold().min_width(0.0).width_full().text_wrap()),
             Label::derived(move || {
                 (if state.screen.get() == Screen::Tournaments {
                     "Games play with real clocks on one full board. Start to show the first pairing immediately."
@@ -206,10 +311,16 @@ fn empty_board(state: AppState, handles: AppHandles, tournament_board: bool) -> 
                 })
                 .to_owned()
             })
-            .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            .style(move |s| {
+                s.font_size(12.0)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_secondary))
+            }),
             setup,
         ))
-        .style(|s| s.row_gap(8.0).items_center()),
+        .style(|s| s.row_gap(8.0).items_center().min_width(0.0).width_full()),
     )
     .style(move |s| {
         s.size_full()
@@ -274,12 +385,13 @@ fn playing_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
             };
             format!("{searching} · {}", state.status.get())
         })
-        .style(|s| s.font_size(11.0)),
+        .style(|s| s.font_size(11.0).min_width(0.0).width_full().text_wrap()),
     ))
     .style(|s| {
         s.flex_col()
             .row_gap(8.0)
             .width_full()
+            .min_width(0.0)
             .height_full()
             .min_height(0.0)
     })
@@ -296,7 +408,7 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
                 .get()
                 .map_or_else(|| telemetry.get().label, |snap| snap.status)
         })
-        .style(|s| s.font_size(12.0)),
+        .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
         Label::derived(move || {
             state
                 .analysis
@@ -304,7 +416,7 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
                 .and_then(|snap| snap.consensus.clone())
                 .unwrap_or_default()
         })
-        .style(|s| s.font_size(12.0)),
+        .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
         widgets::stepper_row(
             state,
             "MultiPV",
@@ -323,6 +435,7 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
             let handles = handles.clone();
             move || actions::review_played_game(state, &handles)
         }),
+        widgets::explanation_card(state, move || explanation_text(state)),
         pane_title("Engine PV arrows"),
         Label::derived(move || {
             state.analysis.get().map_or_else(
@@ -343,7 +456,7 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
                 },
             )
         })
-        .style(|s| s.font_size(12.0)),
+        .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
         pane_title("Gambit coach"),
         gambit_controls(state),
         Stack::vertical((
@@ -363,6 +476,7 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         s.flex_col()
             .row_gap(8.0)
             .width_full()
+            .min_width(0.0)
             .height_full()
             .min_height(0.0)
     })
@@ -382,7 +496,7 @@ fn analysis_engine_toggles(state: AppState, handles: AppHandles) -> impl IntoVie
                         .iter()
                         .any(|id| id == "builtin")
                 },
-                move |_| actions::toggle_analysis_engine(state, "builtin".to_owned()),
+                move |enabled| actions::set_analysis_engine(state, "builtin".to_owned(), enabled),
             )
             .into_any(),
         ];
@@ -405,7 +519,7 @@ fn analysis_engine_toggles(state: AppState, handles: AppHandles) -> impl IntoVie
                     },
                     {
                         let id = id.clone();
-                        move |_| actions::toggle_analysis_engine(state, id.clone())
+                        move |enabled| actions::set_analysis_engine(state, id.clone(), enabled)
                     },
                 )
                 .into_any(),
@@ -421,24 +535,31 @@ fn gambit_controls(state: AppState) -> impl IntoView {
     dyn_view(move || {
         let Some(id) = state.active_gambit_id.get() else {
             return Label::new("Load a gambit from Study for stepped coaching arrows.")
-                .style(|s| s.font_size(12.0))
+                .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap())
                 .into_any();
         };
         let Some(lesson) = mujrim_study::gambit::find_gambit(&id) else {
             return Empty::new().into_any();
         };
         Stack::vertical((
-            Label::new(format!("{} · {}", lesson.name, lesson.eco)).style(|s| s.font_size(14.0)),
-            Label::new(lesson.summary).style(|s| s.font_size(12.0)),
+            Label::new(format!("{} · {}", lesson.name, lesson.eco))
+                .style(|s| s.font_size(14.0).min_width(0.0).width_full().text_wrap()),
+            Label::new(lesson.summary)
+                .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
             Stack::horizontal((
                 widgets::ghost_button(state, "◀ Step", move || actions::gambit_step(state, -1)),
                 Label::derived(move || format!("Ply {}", state.gambit_ply.get()))
                     .style(|s| s.font_size(13.0)),
                 widgets::ghost_button(state, "Step ▶", move || actions::gambit_step(state, 1)),
             ))
-            .style(|s| s.col_gap(8.0).items_center()),
+            .style(|s| {
+                s.col_gap(8.0)
+                    .items_center()
+                    .flex_wrap(FlexWrap::Wrap)
+                    .min_width(0.0)
+            }),
         ))
-        .style(|s| s.row_gap(8.0).width_full())
+        .style(|s| s.row_gap(8.0).width_full().min_width(0.0))
         .into_any()
     })
 }
@@ -460,11 +581,21 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
                         )
                     })
             })
-            .style(|s| s.font_size(13.0).font_bold()),
+            .style(|s| {
+                s.font_size(13.0)
+                    .font_bold()
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+            }),
             Label::derived(move || state.tournament_status.get()).style(move |s| {
-                s.font_size(11.0).color(theme::rgba(
-                    theme::palette(state.settings.get().board_theme).text_secondary,
-                ))
+                s.font_size(11.0)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(
+                        theme::palette(state.settings.get().board_theme).text_secondary,
+                    ))
             }),
             Label::derived(move || {
                 let snap = state.tournament_snapshot.get();
@@ -484,7 +615,7 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
                     })
                     .unwrap_or_else(|| telemetry.get().label)
             })
-            .style(|s| s.font_size(12.0)),
+            .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
             tournament_controls(state, handles.clone()),
         ))
         .style(|s| s.row_gap(8.0).width_full()),
@@ -502,24 +633,10 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         }),
         Stack::vertical((
             pane_title("Standings"),
-            Label::derived(move || {
-                let snap = state.tournament_snapshot.get();
-                if snap.standings.is_empty() {
-                    "Standings appear after the first finished pairing.".to_owned()
-                } else {
-                    snap.standings
-                        .iter()
-                        .map(|row| {
-                            format!(
-                                "{}. {}  {:.1}  ({}-{}-{})",
-                                row.rank, row.name, row.points, row.wins, row.draws, row.losses
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            })
-            .style(|s| s.font_size(11.0)),
+            widgets::standing_rows_list(
+                state,
+                "Standings appear after the first finished pairing.",
+            ),
         ))
         .style(|s| s.row_gap(8.0).width_full()),
         Stack::vertical((
@@ -534,6 +651,7 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         s.flex_col()
             .row_gap(8.0)
             .width_full()
+            .min_width(0.0)
             .height_full()
             .min_height(0.0)
     })
@@ -553,15 +671,24 @@ fn resume_banner(state: AppState, handles: AppHandles) -> impl IntoView {
                 })
         })
         .style(move |s| {
-            s.font_size(13.0).font_bold().color(theme::rgba(
-                theme::palette(state.settings.get().board_theme).accent_alt,
-            ))
+            s.font_size(13.0)
+                .font_bold()
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(
+                    theme::palette(state.settings.get().board_theme).accent_alt,
+                ))
         }),
         Label::new("Pick up the last event, or discard it and start a new tournament.").style(
             move |s| {
-                s.font_size(11.0).color(theme::rgba(
-                    theme::palette(state.settings.get().board_theme).text_secondary,
-                ))
+                s.font_size(11.0)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(
+                        theme::palette(state.settings.get().board_theme).text_secondary,
+                    ))
             },
         ),
         Stack::horizontal((
@@ -647,7 +774,13 @@ fn tournament_controls(state: AppState, handles: AppHandles) -> impl IntoView {
             }
         }),
     ))
-    .style(|s| s.col_gap(6.0).row_gap(6.0).flex_wrap(FlexWrap::Wrap))
+    .style(|s| {
+        s.width_full()
+            .min_width(0.0)
+            .col_gap(6.0)
+            .row_gap(6.0)
+            .flex_wrap(FlexWrap::Wrap)
+    })
 }
 
 fn tournament_history(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -686,11 +819,13 @@ fn tournament_history(state: AppState, handles: AppHandles) -> impl IntoView {
                 let pal = theme::palette(state.settings.get().board_theme);
                 let s = s
                     .width_full()
+                    .min_width(0.0)
                     .padding_horiz(8.0)
                     .padding_vert(4.0)
                     .border_radius(6.0)
                     .border(0.0)
                     .font_size(12.0)
+                    .text_ellipsis()
                     .background(Color::TRANSPARENT)
                     .color(theme::rgba(pal.text_primary))
                     .hover(|s| s.background(theme::rgba(pal.panel)));
@@ -712,7 +847,12 @@ fn tournament_history(state: AppState, handles: AppHandles) -> impl IntoView {
         })
         .style(move |s| {
             let pal = theme::palette(state.settings.get().board_theme);
-            let s = s.font_size(12.0).color(theme::rgba(pal.text_secondary));
+            let s = s
+                .font_size(12.0)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(pal.text_secondary));
             if state.tournament_history.get().is_empty() {
                 s
             } else {
@@ -727,7 +867,12 @@ fn tournament_history(state: AppState, handles: AppHandles) -> impl IntoView {
 }
 
 fn pane_title(label: &'static str) -> impl IntoView {
-    Label::new(label).style(|s| s.font_size(12.0).font_bold())
+    Label::new(label).style(|s| {
+        s.font_size(theme::TYPE_TITLE)
+            .font_bold()
+            .min_width(0.0)
+            .width_full()
+    })
 }
 
 pub(super) fn ply_nav(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -800,7 +945,12 @@ pub(super) fn move_list(state: AppState, handles: AppHandles) -> impl IntoView {
         })
         .style(move |s| {
             let pal = theme::palette(state.settings.get().board_theme);
-            let s = s.font_size(12.0).color(theme::rgba(pal.text_secondary));
+            let s = s
+                .font_size(12.0)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(pal.text_secondary));
             if state.move_log.get().is_empty() {
                 s
             } else {
@@ -877,7 +1027,7 @@ fn ply_slot(state: AppState, handles: AppHandles, ply_index: usize) -> impl Into
             (Color::TRANSPARENT, theme::rgba(pal.text_primary))
         };
         let s = s
-            .min_width(88.0)
+            .min_width(0.0)
             .flex_grow(1.0f32)
             .padding_horiz(8.0)
             .padding_vert(6.0)
@@ -885,6 +1035,7 @@ fn ply_slot(state: AppState, handles: AppHandles, ply_index: usize) -> impl Into
             .border(0.0)
             .font_size(12.0)
             .font_bold()
+            .text_ellipsis()
             .background(bg)
             .color(fg)
             .hover(|s| s.background(theme::rgba(pal.panel)));
@@ -915,10 +1066,39 @@ fn engine_lines(state: AppState, handles: AppHandles) -> impl IntoView {
         }
     })
     .style(move |s| {
-        s.font_size(12.0).color(theme::rgba(
-            theme::palette(state.settings.get().board_theme).text_secondary,
-        ))
+        s.font_size(12.0)
+            .min_width(0.0)
+            .width_full()
+            .text_wrap()
+            .color(theme::rgba(
+                theme::palette(state.settings.get().board_theme).text_secondary,
+            ))
     })
+}
+
+pub(super) fn explanation_text(state: AppState) -> String {
+    let fen = state.initial_fen.get();
+    let moves = state.move_log.get();
+    let ply = state.review_ply.get().unwrap_or(moves.len());
+    let Ok(board) = logic::board_at_ply(&fen, &moves, ply) else {
+        return "Load a position to hear the threats and plans.".to_owned();
+    };
+    let last = if ply > 0 {
+        let annotation = state.move_annotations.get().get(ply - 1).copied().flatten();
+        let score = state.analysis_scores.get().get(ply - 1).copied().flatten();
+        let mv = logic::board_at_ply(&fen, &moves, ply - 1)
+            .ok()
+            .and_then(|mut previous| logic::find_logged_move(&mut previous, &moves[ply - 1]));
+        mujrim_study::explain::MoveContext {
+            annotation,
+            score_cp: score,
+            mv,
+            san: None,
+        }
+    } else {
+        mujrim_study::explain::MoveContext::default()
+    };
+    mujrim_study::explain::explain_position(&board, ply, last).panel_text()
 }
 
 #[cfg(test)]
@@ -949,9 +1129,40 @@ mod tests {
             "results_export_bar",
             "stop_engine_search",
             "Resume search",
+            "pub fn library",
+            "screen_tools",
+            "apply_sidebar_drag",
+            "standing_rows_list",
+            "explanation_card",
+            "set_analysis_engine",
+            "split_handle",
+            "request_pointer_capture",
+            "CursorStyle::ColResize",
+            "window_pointer_x",
+            "FlexWrap::NoWrap",
+            "Overflow::Scroll",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
+        let split = production
+            .split("fn workspace(")
+            .nth(1)
+            .expect("workspace")
+            .split("fn split_handle(")
+            .next()
+            .expect("split_handle");
+        assert!(
+            !split.contains("FlexWrap::Wrap"),
+            "board/sidebar split must stay on one row so the handle can be dragged"
+        );
+        assert!(
+            !split.contains("1600.0"),
+            "sidebar drag must clamp against the live pane width"
+        );
+        assert!(
+            !split.contains("sidebar_scroll"),
+            "every right panel including Tournament must scroll"
+        );
         assert!(
             !production.contains("board::board_view(state, handles.clone()).into_any()"),
             "creating the board canvas inside dyn_view panics when a tournament position loads"

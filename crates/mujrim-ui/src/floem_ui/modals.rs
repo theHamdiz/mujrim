@@ -132,6 +132,7 @@ fn settings_tab(state: AppState, handles: AppHandles) -> impl IntoView {
                 let handles = handles.clone();
                 move |value| {
                     state.bgm_on.set(value);
+                    actions::update_settings(state, |settings| settings.bgm_on = value);
                     if let Some(sound) = handles.sound.borrow_mut().as_mut() {
                         if value {
                             sound.play_bgm(crate::app_core::audio::BgmTrack::Menu);

@@ -21,6 +21,8 @@ pub fn root_content(state: AppState, handles: AppHandles) -> impl IntoView {
             .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Study))),
         workspace::learn(state, handles.clone())
             .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Learn))),
+        workspace::library(state, handles.clone())
+            .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Library))),
         workspace::tournaments(state, handles.clone())
             .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Tournaments))),
         workspace::analysis(state, handles)

@@ -227,6 +227,7 @@ struct AppSettings {
     last_move_arrow: bool,
     /// Draw ponder suggestion as a translucent arrow.
     ponder_arrow: bool,
+    bgm_on: bool,
 }
 
 impl Default for AppSettings {
@@ -255,34 +256,19 @@ impl Default for AppSettings {
             system_motion: true,
             last_move_arrow: true,
             ponder_arrow: true,
+            bgm_on: true,
         }
     }
 }
 
 impl AppSettings {
-    fn config_path() -> PathBuf {
-        let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        p.push("mujrim");
-        p.push("settings.toml");
-        p
-    }
-
     fn load() -> Self {
-        let path = Self::config_path();
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            toml::from_str(&contents).unwrap_or_default()
-        } else {
-            Self::default()
-        }
+        crate::app_core::settings::AppSettings::decode_subset()
     }
 
     fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(toml_str) = toml::to_string_pretty(self) {
-            let _ = std::fs::write(&path, toml_str);
+        if let Ok(overlay) = toml::to_string(self) {
+            crate::app_core::settings::AppSettings::merge_and_save_toml(&overlay);
         }
     }
 }
@@ -691,7 +677,7 @@ impl Default for App {
             s.set_volume(settings.bgm_volume as f32 / 100.0);
             s.set_mood(settings.game_mood);
             s.set_sound_theme(settings.sound_theme);
-            s.play_bgm(audio::BgmTrack::Menu);
+            s.play_bgm_gated(settings.bgm_on, audio::BgmTrack::Menu);
         }
         let study_database = StudyDatabase::open(study_database_path()).ok();
         let external_engine_catalog = study_database
@@ -748,7 +734,7 @@ impl Default for App {
             animation: None,
             window_width: 1280.0,
             window_height: 850.0,
-            bgm_on: true,
+            bgm_on: settings.bgm_on,
             coin_flip: CoinFlipState::Idle,
             recorder: recording::RecordingEngine::new(),
             window_id: None,
@@ -2141,7 +2127,9 @@ impl App {
                 // Return to menu
                 self.screen = Screen::Menu;
                 self.game = None;
-                if let Some(ref mut s) = self.sound {
+                if self.bgm_on
+                    && let Some(ref mut s) = self.sound
+                {
                     s.play_bgm(audio::BgmTrack::Menu);
                 }
                 Task::none()
@@ -2446,6 +2434,8 @@ impl App {
                 };
                 if let Some(ref mut sound) = self.sound {
                     self.bgm_on = sound.toggle_bgm(track);
+                    self.settings.bgm_on = self.bgm_on;
+                    self.settings.save();
                 }
                 Task::none()
             }
@@ -6527,9 +6517,10 @@ fn run_quick_tournament_body(
             spec.name = engine.name;
             spec.args = crate::app_core::logic::gui_safe_engine_args(&engine.path);
             spec.uci_options = uci_process::uci_resource_options(&engine.path, false, true, None);
+            let established_elo = mujrim_study::rating::published_reference_elo(&spec.name);
             TournamentEngine {
                 engine: spec,
-                established_elo: None,
+                established_elo,
                 search_limits: engine.search_limits,
             }
         })

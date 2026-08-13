@@ -2,10 +2,13 @@
 
 use floem::prelude::*;
 use floem::style::Transition;
+use floem::taffy::style::Overflow;
 
 use crate::app_core::layout;
 use crate::app_core::palette::GuiPalette;
+use crate::app_core::tournament_live::{PodiumTier, StandingRow};
 
+use super::icons;
 use super::state::{AppHandles, AppState};
 use super::theme;
 
@@ -24,6 +27,9 @@ pub fn section_label(
     Label::new(text).style(move |s| {
         s.font_size(12.0)
             .font_bold()
+            .min_width(0.0)
+            .width_full()
+            .text_ellipsis()
             .color(theme::rgba(pal().accent_alt))
     })
 }
@@ -31,13 +37,15 @@ pub fn section_label(
 pub fn card(state: AppState, child: impl IntoView + 'static) -> impl IntoView {
     child.style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
-        s.padding(18.0)
-            .row_gap(10.0)
+        s.width_full()
+            .min_width(0.0)
+            .padding(theme::SPACE_LG)
+            .row_gap(theme::SPACE_MD)
             .border_radius(16.0)
             .background(theme::rgba(pal.panel))
             .border(1.0)
             .border_color(theme::rgba(pal.border))
-            .min_width(0.0)
+            .overflow_x(Overflow::Clip)
     })
 }
 
@@ -82,7 +90,8 @@ pub fn primary_button(
 ) -> impl IntoView {
     Button::new(label).action(action).style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
-        s.padding_horiz(16.0)
+        s.min_width(0.0)
+            .padding_horiz(16.0)
             .padding_vert(10.0)
             .border_radius(12.0)
             .border(0.0)
@@ -105,7 +114,8 @@ pub fn ghost_button(
 ) -> impl IntoView {
     Button::new(label).action(action).style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
-        s.padding_horiz(12.0)
+        s.min_width(0.0)
+            .padding_horiz(12.0)
             .padding_vert(8.0)
             .border_radius(10.0)
             .border(1.0)
@@ -381,18 +391,58 @@ pub fn toggle_row(
 ) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let label = label.into();
+    let value = std::rc::Rc::new(value);
+    let on_toggle = std::rc::Rc::new(on_toggle);
+    let value_visual = value.clone();
     Stack::horizontal((
         Label::new(label).style(move |s| {
             s.flex_grow(1.0f32)
                 .min_width(0.0)
                 .font_size(13.0)
+                .text_ellipsis()
                 .color(theme::rgba(pal().text_primary))
         }),
-        ToggleButton::new(value)
-            .on_event_stop(ToggleChanged::listener(), move |_, next| on_toggle(*next))
-            .style(move |s| s.color(theme::rgba(pal().accent))),
+        Button::new(Label::derived({
+            let value = value_visual.clone();
+            move || {
+                if value() {
+                    "On".to_owned()
+                } else {
+                    "Off".to_owned()
+                }
+            }
+        }))
+        .action({
+            let value = value.clone();
+            let on_toggle = on_toggle.clone();
+            move || {
+                let current = value();
+                let Some(next) = crate::app_core::settings::committed_toggle(current, !current)
+                else {
+                    return;
+                };
+                on_toggle(next);
+            }
+        })
+        .style(move |s| {
+            let on = value();
+            let pal = pal();
+            s.min_width(52.0)
+                .padding_horiz(10.0)
+                .padding_vert(4.0)
+                .border_radius(12.0)
+                .border(0.0)
+                .font_size(11.0)
+                .font_bold()
+                .background(if on {
+                    theme::rgba(pal.accent)
+                } else {
+                    theme::rgba(pal.bg)
+                })
+                .color(theme::rgba(pal.text_primary))
+        }),
     ))
-    .style(|s| s.width_full().col_gap(12.0).items_center())
+    .style(|s| s.width_full().col_gap(12.0).items_center().min_width(0.0))
 }
 
 pub fn overlay_layer_style(style: floem::style::Style) -> floem::style::Style {
@@ -439,6 +489,130 @@ pub fn overlay_frame(
     .style(|s| s.size_full().items_center().justify_center().padding(16.0))
 }
 
+pub fn wrapping_label(
+    text: impl Fn() -> String + 'static,
+    pal: impl Fn() -> GuiPalette + Copy + 'static,
+) -> impl IntoView {
+    Label::derived(text).style(move |s| {
+        s.font_size(theme::TYPE_BODY)
+            .min_width(0.0)
+            .width_full()
+            .text_wrap()
+            .color(theme::rgba(pal().text_secondary))
+    })
+}
+
+pub fn body_copy(
+    text: impl Into<String>,
+    pal: impl Fn() -> GuiPalette + Copy + 'static,
+) -> impl IntoView {
+    let text = text.into();
+    wrapping_label(move || text.clone(), pal)
+}
+
+pub fn explanation_card(state: AppState, body: impl Fn() -> String + 'static) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    card(
+        state,
+        Stack::vertical((
+            section_label("Position explainer", pal),
+            wrapping_label(body, pal),
+        ))
+        .style(|s| s.row_gap(theme::SPACE_SM).width_full().min_width(0.0)),
+    )
+}
+
+pub fn standing_rows_list(state: AppState, empty: &'static str) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    dyn_view(move || {
+        let snap = state.tournament_snapshot.get();
+        if snap.standings.is_empty() {
+            return Label::new(empty)
+                .style(move |s| {
+                    s.font_size(theme::TYPE_CAPTION)
+                        .min_width(0.0)
+                        .width_full()
+                        .text_wrap()
+                        .color(theme::rgba(pal().text_secondary))
+                })
+                .into_any();
+        }
+        snap.standings
+            .into_iter()
+            .map(|row| standing_row(state, row))
+            .collect::<Vec<_>>()
+            .into_view()
+            .style(|s| s.width_full().row_gap(6.0).flex_col().min_width(0.0))
+            .into_any()
+    })
+}
+
+fn standing_row(state: AppState, row: StandingRow) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    let podium = row.podium();
+    let (tr, tg, tb) = podium.map(PodiumTier::rgb).unwrap_or((160, 160, 168));
+    let name = row.name.clone();
+    let stats = match row.performance {
+        Some(elo) => format!(
+            "{elo:.0} Elo · {:.1}  ({}-{}-{})",
+            row.points, row.wins, row.draws, row.losses
+        ),
+        None => format!(
+            "{:.1}  ({}-{}-{})",
+            row.points, row.wins, row.draws, row.losses
+        ),
+    };
+    let rank = row.rank;
+    Stack::vertical((
+        Stack::horizontal((
+            svg(icons::TROPHY).style(move |s| {
+                let s = s.size(16, 16).color(Color::from_rgb8(tr, tg, tb));
+                if podium.is_none() {
+                    s.display(floem::taffy::style::Display::None)
+                } else {
+                    s
+                }
+            }),
+            Label::new(format!("{rank}")).style(move |s| {
+                s.font_size(12.0)
+                    .font_bold()
+                    .width(22.0)
+                    .color(Color::from_rgb8(tr, tg, tb))
+            }),
+            Label::new(name).style(move |s| {
+                s.flex_grow(1.0f32)
+                    .min_width(0.0)
+                    .font_size(theme::TYPE_BODY)
+                    .font_bold()
+                    .text_ellipsis()
+                    .color(theme::rgba(pal().text_primary))
+            }),
+        ))
+        .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0)),
+        Label::new(stats).style(move |s| {
+            s.font_size(theme::TYPE_CAPTION)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(pal().text_secondary))
+        }),
+    ))
+    .style(move |s| {
+        let s = s
+            .width_full()
+            .row_gap(2.0)
+            .padding_horiz(8.0)
+            .padding_vert(8.0)
+            .border_radius(10.0)
+            .min_width(0.0);
+        if podium.is_some() {
+            s.background(Color::from_rgba8(tr, tg, tb, 28))
+        } else {
+            s
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -460,6 +634,37 @@ mod tests {
         assert!(
             production.contains("results_export_bar"),
             "results export buttons must stay always-mounted"
+        );
+        assert!(
+            !production.contains("ToggleChanged"),
+            "settings toggles must not use ToggleChanged cascade"
+        );
+        assert!(
+            production.contains("committed_toggle"),
+            "toggle clicks must ignore no-op events"
+        );
+        assert!(
+            production.contains("standing_rows_list"),
+            "podium standings widget must be shared"
+        );
+        assert!(
+            production.contains("text_wrap()"),
+            "sidebar copy must wrap instead of painting past the panel"
+        );
+        assert!(
+            production.contains("text_ellipsis()"),
+            "single-line sidebar titles must ellipsize"
+        );
+        let wrapping = production
+            .split("pub fn wrapping_label")
+            .nth(1)
+            .expect("wrapping_label")
+            .split("pub fn body_copy")
+            .next()
+            .expect("body_copy follows wrapping_label");
+        assert!(
+            wrapping.contains("text_wrap()"),
+            "wrapping_label must enable Floem text wrap"
         );
     }
 }

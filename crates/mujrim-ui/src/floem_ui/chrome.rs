@@ -2,7 +2,7 @@
 
 use floem::action::{minimize_window, toggle_window_maximized};
 use floem::prelude::*;
-use floem::taffy::style::{Display, FlexWrap};
+use floem::taffy::style::Display;
 use floem::views::{drag_resize_window_area, drag_window_area};
 use floem::window::{ResizeDirection, WindowId};
 
@@ -92,12 +92,6 @@ fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl 
 }
 
 fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
-    let board = move || {
-        matches!(
-            state.screen.get(),
-            Screen::Playing | Screen::Analysis | Screen::Study | Screen::Learn
-        )
-    };
     Stack::horizontal((
         pill(
             state,
@@ -141,7 +135,7 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
         ),
         pill(
             state,
-            icons::SPARKLES,
+            icons::GRADUATION_CAP,
             "Learn",
             move || matches!(state.screen.get(), Screen::Learn),
             {
@@ -150,6 +144,16 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
                     actions::ensure_study_board(state, &handles);
                     state.screen.set(Screen::Learn);
                 }
+            },
+        ),
+        pill(
+            state,
+            icons::CLIPBOARD,
+            "Library",
+            move || matches!(state.screen.get(), Screen::Library),
+            {
+                let handles = handles.clone();
+                move || actions::open_library(state, &handles)
             },
         ),
         pill(
@@ -164,54 +168,36 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
                 }
             },
         ),
+    ))
+    .style(|s| s.col_gap(3.0).items_center().min_width(0.0))
+}
+
+pub fn screen_tools(state: AppState, handles: AppHandles) -> impl IntoView {
+    let playing = move || matches!(state.screen.get(), Screen::Playing);
+    let analysis = move || matches!(state.screen.get(), Screen::Analysis);
+    let study = move || {
+        matches!(
+            state.screen.get(),
+            Screen::Study | Screen::Learn | Screen::Library
+        )
+    };
+    Stack::horizontal((
         Stack::horizontal((
-            pill(state, icons::CAMERA, "Shot", || false, {
-                let handles = handles.clone();
-                move || actions::screenshot(state, &handles)
-            }),
             pill(state, icons::PLUS, "New", || false, {
                 let handles = handles.clone();
                 move || actions::new_game(state, &handles)
             }),
-            pill(
-                state,
-                icons::ARROW_UP_DOWN,
-                "Flip",
-                || false,
-                move || {
-                    state.game.update(|game| {
-                        if let Some(game) = game.as_mut() {
-                            game.flipped = !game.flipped;
-                        }
-                    });
-                },
-            ),
             pill(state, icons::FLAG, "Resign", || true, {
                 let handles = handles.clone();
                 move || actions::resign(state, &handles)
             }),
-            pill(
-                state,
-                icons::CLIPBOARD,
-                "PGN",
-                || false,
-                move || actions::export_pgn(state),
-            ),
-            pill(state, icons::DATABASE, "Library", || false, {
+            pill(state, icons::CAMERA, "Shot", || false, {
                 let handles = handles.clone();
-                move || actions::save_to_library(state, &handles)
+                move || actions::screenshot(state, &handles)
             }),
-            pill(state, icons::SPARKLES, "Review", || false, {
-                let handles = handles.clone();
-                move || actions::analyze_game(state, &handles)
+            pill(state, icons::FILM, "GIF", || false, {
+                move || actions::export_gif(state)
             }),
-            pill(
-                state,
-                icons::FILM,
-                "GIF",
-                || false,
-                move || actions::export_gif(state),
-            ),
             pill(
                 state,
                 icons::CIRCLE,
@@ -225,15 +211,51 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
         ))
         .style(move |s| {
             let s = s.col_gap(3.0).items_center();
-            if board() { s } else { s.display(Display::None) }
+            if playing() {
+                s
+            } else {
+                s.display(Display::None)
+            }
+        }),
+        Stack::horizontal((
+            pill(state, icons::SEARCH, "Review", || false, {
+                let handles = handles.clone();
+                move || actions::analyze_game(state, &handles)
+            }),
+            pill(state, icons::CLIPBOARD, "PGN", || false, {
+                move || actions::export_pgn(state)
+            }),
+        ))
+        .style(move |s| {
+            let s = s.col_gap(3.0).items_center();
+            if analysis() {
+                s
+            } else {
+                s.display(Display::None)
+            }
+        }),
+        pill(
+            state,
+            icons::ARROW_UP_DOWN,
+            "Flip",
+            || false,
+            move || {
+                state.game.update(|game| {
+                    if let Some(game) = game.as_mut() {
+                        game.flipped = !game.flipped;
+                    }
+                });
+            },
+        )
+        .style(move |s| {
+            if playing() || analysis() || study() {
+                s
+            } else {
+                s.display(Display::None)
+            }
         }),
     ))
-    .style(|s| {
-        s.col_gap(3.0)
-            .items_center()
-            .min_width(0.0)
-            .flex_wrap(FlexWrap::Wrap)
-    })
+    .style(|s| s.col_gap(6.0).items_center().min_width(0.0))
 }
 
 fn pill(
@@ -245,7 +267,7 @@ fn pill(
 ) -> impl IntoView {
     Button::new(
         Stack::horizontal((
-            svg(move || icon.to_owned()).style(|s| s.size(13, 13)),
+            svg(icon).style(|s| s.size(13, 13)),
             Label::new(label).style(|s| s.font_size(11.0)),
         ))
         .style(|s| {
@@ -292,7 +314,7 @@ fn window_controls(window_id: WindowId, state: AppState) -> impl IntoView {
 }
 
 fn icon_btn(state: AppState, icon: &'static str, action: impl Fn() + 'static) -> impl IntoView {
-    Button::new(svg(move || icon.to_owned()).style(|s| s.size(12, 12)))
+    Button::new(svg(icon).style(|s| s.size(12, 12)))
         .action(action)
         .style(move |s| {
             let pal = theme::palette(state.settings.get().board_theme);
@@ -361,8 +383,32 @@ mod tests {
             "Tournaments nav must resume a paused event or open setup"
         );
         assert!(
-            production.contains("display(Display::None)"),
-            "board tools must stay mounted and hidden instead of swapping Empty views"
+            production.contains("open_library"),
+            "Library nav must open the library screen"
+        );
+        assert!(
+            production.contains("GRADUATION_CAP"),
+            "Learn nav must use the graduation-cap icon"
+        );
+        assert!(
+            !production.contains("FlexWrap::Wrap"),
+            "title bar must not wrap board tools onto a second row"
+        );
+        assert!(
+            !production
+                .split("pub fn screen_tools")
+                .next()
+                .unwrap()
+                .contains("\"Shot\""),
+            "screenshot belongs on the playing toolbar, not the global nav"
+        );
+        assert!(
+            production.contains("pub fn screen_tools"),
+            "board actions must live in a per-screen toolbar"
+        );
+        assert!(
+            !production.contains("icon.to_owned()"),
+            "chrome icons should reuse interned SVG strings"
         );
         assert!(
             production.contains("drag_window_area"),

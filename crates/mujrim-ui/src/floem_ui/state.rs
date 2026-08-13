@@ -12,7 +12,6 @@ use mujrim_study::database::{EngineMetadata, GameSummary, StudyDatabase};
 use mujrim_study::opening::{OpeningExplorer, PrepSide, SavedLine};
 use mujrim_study::tournament_store::StoredTournament;
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
-use types::Square;
 
 use crate::app_core::analysis::AnalysisSnapshot;
 use crate::app_core::audio::{BgmTrack, SoundEngine};
@@ -21,19 +20,14 @@ use crate::app_core::game::GameState;
 use crate::app_core::hub::CoinFlipState;
 use crate::app_core::layout::DockTab;
 use crate::app_core::match_controller;
-use crate::app_core::motion::AnimPace;
+use crate::app_core::motion::{AnimPace, MoveSlide};
 use crate::app_core::pieces::PieceAssets;
 use crate::app_core::recording::RecordingEngine;
 use crate::app_core::settings::{AppSettings, OptionsTab, Screen};
 use crate::app_core::tournament_live::{LiveTournamentHandle, LiveTournamentSnapshot};
 use crate::app_core::tournament_setup::TournamentSetup;
 
-#[derive(Clone, Copy)]
-pub struct SlideAnim {
-    pub from: Square,
-    pub to: Square,
-    pub captured: bool,
-}
+pub type SlideAnim = MoveSlide;
 
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -128,7 +122,7 @@ impl AppState {
             engine.set_volume(settings.bgm_volume as f32 / 100.0);
             engine.set_mood(settings.game_mood);
             engine.set_sound_theme(settings.sound_theme);
-            engine.play_bgm(BgmTrack::Menu);
+            engine.play_bgm_gated(settings.bgm_on, BgmTrack::Menu);
         }
         let bundled = mujrim_protocols::catalog::discover_bundled_engines_from_environment()
             .unwrap_or_default();
@@ -147,7 +141,7 @@ impl AppState {
             white_player: RwSignal::new(PlayerConfig::Human),
             black_player: RwSignal::new(black),
             engine_cfg: RwSignal::new(EngineConfig::default()),
-            settings: RwSignal::new(settings),
+            settings: RwSignal::new(settings.clone()),
             show_options: RwSignal::new(false),
             options_tab: RwSignal::new(OptionsTab::Settings),
             show_tournament_setup: RwSignal::new(false),
@@ -182,7 +176,7 @@ impl AppState {
             hub_progress: RwSignal::new(0.0),
             coin_flip: RwSignal::new(CoinFlipState::Idle),
             engine_retries: RwSignal::new(match_controller::DEFAULT_ENGINE_RETRIES),
-            bgm_on: RwSignal::new(true),
+            bgm_on: RwSignal::new(settings.bgm_on),
             tournament_event: RwSignal::new("Mujrim Tournament".to_owned()),
             tournament_site: RwSignal::new(String::new()),
             analysis_engines_selected: RwSignal::new(vec!["builtin".to_owned()]),
@@ -221,6 +215,12 @@ impl AppState {
             if let Ok(history) = database.list_tournaments() {
                 state.tournament_history.set(history);
             }
+            state
+                .study_results
+                .set(database.search(&mujrim_study::database::GameQuery {
+                    text: None,
+                    ..mujrim_study::database::GameQuery::default()
+                }));
         }
         let handles = AppHandles {
             assets: Rc::new(PieceAssets::load()),

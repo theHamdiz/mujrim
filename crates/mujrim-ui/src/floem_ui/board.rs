@@ -3,9 +3,6 @@
 //! Pieces are painted in the same canvas as the squares (no inherited text-color
 //! tint). The widget fills its pane and letterboxes a square inside it.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use floem::kurbo::{BezPath, Circle, Point, Rect, Stroke};
 use floem::prelude::*;
 use floem::ui_events::pointer::{PointerButton, PointerButtonEvent, PointerUpdate};
@@ -14,18 +11,15 @@ use types::Square;
 use crate::app_core::arrows::{ArrowAppearance, ArrowColor, ArrowShape, ArrowSize, arrow_geometry};
 use crate::app_core::game;
 use crate::app_core::layout;
-use crate::app_core::motion::{self, AnimPace};
+use crate::app_core::motion;
 use crate::app_core::palette::Rgba;
+use crate::app_core::pieces::PieceSet;
 use crate::app_core::settings::{CoordPosition, PieceAnimStyle, Screen};
 
 use super::actions;
 use super::state::{AppHandles, AppState};
+use super::svg_cache;
 use super::theme;
-
-thread_local! {
-    static PIECE_TREES: RefCell<HashMap<usize, usvg::Tree>> = RefCell::new(HashMap::new());
-    static BADGE_TREES: RefCell<HashMap<&'static str, usvg::Tree>> = RefCell::new(HashMap::new());
-}
 
 pub fn board_view(state: AppState, handles: AppHandles) -> impl IntoView {
     let painted = canvas({
@@ -95,12 +89,11 @@ fn paint_board(
     let sq = geom.square();
     let colors = settings.board_theme.colors();
     let review = state.review_ply.get();
-    let board = if let Some(ply) = review {
+    let reviewed = review.and_then(|ply| {
         crate::app_core::logic::board_at_ply(&state.initial_fen.get(), &state.move_log.get(), ply)
-            .unwrap_or_else(|_| game.board.clone())
-    } else {
-        game.board.clone()
-    };
+            .ok()
+    });
+    let board = reviewed.as_ref().unwrap_or(&game.board);
     for row in 0..8 {
         for col in 0..8 {
             let light = (row + col) % 2 == 0;
@@ -149,7 +142,7 @@ fn paint_board(
         }
     }
 
-    let threat_marks = threat_marks_for(&board, state.screen.get(), settings.show_threats);
+    let threat_marks = threat_marks_for(board, state.screen.get(), settings.show_threats);
     for mark in &threat_marks {
         let (row, col) = square_display(mark.square, game.flipped);
         let x = geom.origin_x + col as f64 * sq;
@@ -163,7 +156,7 @@ fn paint_board(
     }
 
     let slide = state.slide.get();
-    let t = AnimPace::ease(state.slide_t.get());
+    let t = state.slide_t.get();
     let piece_style = if settings.piece_slide {
         settings.piece_anim_style
     } else {
@@ -174,10 +167,10 @@ fn paint_board(
             continue;
         };
         if let Some(anim) = slide {
-            if anim.from == square {
+            if anim.from == square || anim.rook_from == Some(square) {
                 continue;
             }
-            if anim.to == square && t < 1.0 {
+            if t < 1.0 && (anim.to == square || anim.rook_to == Some(square)) {
                 continue;
             }
         }
@@ -193,23 +186,43 @@ fn paint_board(
     }
     if let Some(anim) = slide
         && t < 1.0
-        && let Some((piece, color)) = game.board.piece_on(anim.to)
     {
-        let (from_row, from_col) = square_display(anim.from, game.flipped);
-        let (to_row, to_col) = square_display(anim.to, game.flipped);
-        let flight = motion::piece_flight(
-            piece_style,
-            state.slide_t.get(),
-            from_row as f64,
-            from_col as f64,
-            to_row as f64,
-            to_col as f64,
+        paint_flying_piece(
+            cx,
+            PieceFlightPaint {
+                handles,
+                piece_set: settings.piece_set,
+                style: piece_style,
+                t,
+                from: anim.from,
+                to: anim.to,
+                piece: anim.piece,
+                color: anim.color,
+                flipped: game.flipped,
+                origin_x: geom.origin_x,
+                origin_y: geom.origin_y,
+                sq,
+            },
         );
-        let svg = handles.assets.get_str(settings.piece_set, piece, color);
-        let size = sq * flight.scale.max(0.08);
-        let x = geom.origin_x + flight.col * sq + (sq - size) * 0.5;
-        let y = geom.origin_y + flight.row * sq + (sq - size) * 0.5;
-        draw_piece(cx, svg, x, y, size);
+        if let (Some(rook_from), Some(rook_to)) = (anim.rook_from, anim.rook_to) {
+            paint_flying_piece(
+                cx,
+                PieceFlightPaint {
+                    handles,
+                    piece_set: settings.piece_set,
+                    style: piece_style,
+                    t,
+                    from: rook_from,
+                    to: rook_to,
+                    piece: types::Piece::Rook,
+                    color: anim.color,
+                    flipped: game.flipped,
+                    origin_x: geom.origin_x,
+                    origin_y: geom.origin_y,
+                    sq,
+                },
+            );
+        }
     }
 
     let appearance = ArrowAppearance {
@@ -277,7 +290,7 @@ fn paint_board(
         && let Some(slide) = slide
         && slide.captured
     {
-        let (row, col) = square_display(slide.to, game.flipped);
+        let (row, col) = square_display(slide.burst_square, game.flipped);
         let cx_pos = geom.origin_x + (col as f64 + 0.5) * sq;
         let cy_pos = geom.origin_y + (row as f64 + 0.5) * sq;
         for mark in motion::capture_marks(settings.capture_anim_style, burst) {
@@ -368,50 +381,58 @@ fn draw_annotation_badge(
 ) {
     let key = annotation.label();
     let svg = annotation.board_badge_svg();
-    BADGE_TREES.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if !cache.contains_key(key)
-            && let Ok(tree) = usvg::Tree::from_str(&svg, &usvg::Options::default())
-        {
-            cache.insert(key, tree);
-        }
-        if let Some(tree) = cache.get(key) {
-            cx.draw_svg(
-                floem::RendererSvg {
-                    tree,
-                    hash: key.as_bytes(),
-                },
-                Rect::new(x, y, x + size, y + size),
-                None::<&floem::peniko::Brush>,
-            );
-        }
-    });
+    svg_cache::draw(
+        cx,
+        &svg,
+        Rect::new(x, y, x + size, y + size),
+        key.as_bytes(),
+    );
+}
+
+struct PieceFlightPaint<'a> {
+    handles: &'a AppHandles,
+    piece_set: PieceSet,
+    style: PieceAnimStyle,
+    t: f32,
+    from: Square,
+    to: Square,
+    piece: types::Piece,
+    color: types::Color,
+    flipped: bool,
+    origin_x: f64,
+    origin_y: f64,
+    sq: f64,
+}
+
+fn paint_flying_piece(cx: &mut floem::context::PaintCx<'_>, flight: PieceFlightPaint<'_>) {
+    let (from_row, from_col) = square_display(flight.from, flight.flipped);
+    let (to_row, to_col) = square_display(flight.to, flight.flipped);
+    let path = motion::piece_flight(
+        flight.style,
+        flight.t,
+        from_row as f64,
+        from_col as f64,
+        to_row as f64,
+        to_col as f64,
+    );
+    let svg = flight
+        .handles
+        .assets
+        .get_str(flight.piece_set, flight.piece, flight.color);
+    let size = flight.sq * path.scale.max(0.08);
+    let x = flight.origin_x + path.col * flight.sq + (flight.sq - size) * 0.5;
+    let y = flight.origin_y + path.row * flight.sq + (flight.sq - size) * 0.5;
+    draw_piece(cx, svg, x, y, size);
 }
 
 fn draw_piece(cx: &mut floem::context::PaintCx<'_>, svg: &str, x: f64, y: f64, size: f64) {
-    if svg.is_empty() {
-        return;
-    }
-    let key = svg.as_ptr() as usize;
-    PIECE_TREES.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if !cache.contains_key(&key)
-            && let Ok(tree) = usvg::Tree::from_str(svg, &usvg::Options::default())
-        {
-            cache.insert(key, tree);
-        }
-        if let Some(tree) = cache.get(&key) {
-            let inset = size * 0.06;
-            cx.draw_svg(
-                floem::RendererSvg {
-                    tree,
-                    hash: svg.as_bytes(),
-                },
-                Rect::new(x + inset, y + inset, x + size - inset, y + size - inset),
-                None::<&floem::peniko::Brush>,
-            );
-        }
-    });
+    let inset = size * 0.06;
+    svg_cache::draw(
+        cx,
+        svg,
+        Rect::new(x + inset, y + inset, x + size - inset, y + size - inset),
+        svg.as_bytes(),
+    );
 }
 
 fn coord_layer(state: AppState) -> impl IntoView {
@@ -477,7 +498,12 @@ fn threat_marks_for(
     screen: Screen,
     show_threats: bool,
 ) -> Vec<mujrim_study::threats::ThreatMark> {
-    if !show_threats || !matches!(screen, Screen::Study | Screen::Learn) {
+    if !show_threats
+        || !matches!(
+            screen,
+            Screen::Study | Screen::Learn | Screen::Analysis | Screen::Library
+        )
+    {
         return Vec::new();
     }
     mujrim_study::threats::threatened_pieces(board)

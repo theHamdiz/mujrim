@@ -15,7 +15,7 @@ use crate::app_core::match_controller::{self, FinishOutcome, MatchAction, MatchS
 use crate::app_core::uci_process::{self, ExternalSearchConfig};
 
 use super::actions;
-use super::state::{AppHandles, AppState, SlideAnim};
+use super::state::{AppHandles, AppState};
 
 type EngineSearchOutcome =
     Result<(Move, String, Option<(types::Square, types::Square)>, bool), String>;
@@ -183,13 +183,24 @@ fn finish_move(state: AppState, handles: AppHandles, generation: u64, result: En
                 game.as_ref()
                     .and_then(|gs| gs.board.piece_on(mv.to))
                     .is_some()
+                    || mv.is_capture()
             });
-            if captured {
-                if let Some(sound) = handles.sound.borrow().as_ref() {
-                    sound.play_capture();
+            let gives_check = {
+                let mut predicted = state
+                    .game
+                    .with_untracked(|game| game.as_ref().map(|gs| gs.board.clone()));
+                if let Some(board) = predicted.as_mut() {
+                    board.make_move(mv);
+                    board.is_in_check(board.side_to_move)
+                } else {
+                    false
                 }
-            } else if let Some(sound) = handles.sound.borrow().as_ref() {
-                sound.play_move();
+            };
+            if let Some(sound) = handles.sound.borrow().as_ref() {
+                sound.play_sfx(
+                    state.settings.get_untracked().sfx_on,
+                    crate::app_core::audio::SfxKind::from_move(mv, captured, gives_check),
+                );
             }
             actions::apply_engine_move(state, mv, ponder, captured);
             if match_controller::should_cancel_ponder(state.engine_cfg.get_untracked().ponder, hit)
@@ -209,35 +220,48 @@ fn finish_move(state: AppState, handles: AppHandles, generation: u64, result: En
     }
 }
 
-pub fn begin_slide(state: AppState, from: types::Square, to: types::Square, captured: bool) {
+pub fn begin_slide(state: AppState, slide: Option<crate::app_core::motion::MoveSlide>) {
     let settings = state.settings.get_untracked();
+    let Some(slide) = slide else {
+        state.slide.set(None);
+        state.slide_t.set(1.0);
+        return;
+    };
     if !settings.piece_slide
         || settings.piece_anim_style == crate::app_core::settings::PieceAnimStyle::Instant
     {
         state.slide.set(None);
         state.slide_t.set(1.0);
-        if captured {
+        if slide.captured {
             state.capture_burst.set(1.0);
             tick_slide(state);
         }
         return;
     }
-    state.slide.set(Some(SlideAnim { from, to, captured }));
+    state.slide.set(Some(slide));
     state.slide_t.set(0.0);
-    if captured {
+    if slide.captured {
         state.capture_burst.set(1.0);
+    } else {
+        state.capture_burst.set(0.0);
     }
     tick_slide(state);
 }
 
 fn tick_slide(state: AppState) {
     floem::action::exec_after(Duration::from_millis(16), move |_| {
+        let settings = state.settings.get_untracked();
         let pace = state.anim_pace();
-        let step = match pace {
-            crate::app_core::motion::AnimPace::Fast => 0.14,
-            crate::app_core::motion::AnimPace::Normal => 0.08,
-            crate::app_core::motion::AnimPace::Slow => 0.045,
+        let duration = if state
+            .slide
+            .get_untracked()
+            .is_some_and(|slide| slide.captured)
+        {
+            pace.capture_style(settings.capture_anim_style)
+        } else {
+            pace.quiet_move()
         };
+        let step = pace.tick_step(duration);
         let next = (state.slide_t.get_untracked() + step).min(1.0);
         state.slide_t.set(next);
         let burst = (state.capture_burst.get_untracked() - step).max(0.0);

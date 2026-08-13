@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use types::chess_move::MoveFlag;
+
 use super::settings::{CaptureAnimStyle, PieceAnimStyle};
 
 /// Piece / capture animation pacing controlled from settings.
@@ -61,6 +63,22 @@ impl AnimPace {
 
     pub fn capture_fire(self) -> Duration {
         Duration::from_millis((400.0 * self.scale()) as u64)
+    }
+
+    pub fn capture_style(self, style: CaptureAnimStyle) -> Duration {
+        match style {
+            CaptureAnimStyle::Instant => self.capture_instant(),
+            CaptureAnimStyle::Explosion => self.capture_explosion(),
+            CaptureAnimStyle::Fire => self.capture_fire(),
+            CaptureAnimStyle::Shatter => Duration::from_millis((380.0 * self.scale()) as u64),
+            CaptureAnimStyle::Vortex => Duration::from_millis((420.0 * self.scale()) as u64),
+            CaptureAnimStyle::Spark => Duration::from_millis((320.0 * self.scale()) as u64),
+        }
+    }
+
+    pub fn tick_step(self, duration: Duration) -> f32 {
+        let millis = duration.as_millis().max(16) as f32;
+        16.0 / millis
     }
 
     /// Ease used for piece slide interpolation (smoothstep).
@@ -177,6 +195,75 @@ pub fn piece_flight(
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveSlide {
+    pub piece: types::Piece,
+    pub color: types::Color,
+    pub from: types::Square,
+    pub to: types::Square,
+    pub captured: bool,
+    pub rook_from: Option<types::Square>,
+    pub rook_to: Option<types::Square>,
+    pub burst_square: types::Square,
+}
+
+pub fn castle_rook_squares(mv: types::Move) -> Option<(types::Square, types::Square)> {
+    if !mv.is_castling() {
+        return None;
+    }
+    let rank = mv.from.rank();
+    let (rook_file, dest_file) = if mv.flag == MoveFlag::KingCastle {
+        (7, 5)
+    } else {
+        (0, 3)
+    };
+    Some((
+        types::Square::from_file_rank(rook_file, rank),
+        types::Square::from_file_rank(dest_file, rank),
+    ))
+}
+
+pub fn en_passant_capture_square(mv: types::Move) -> Option<types::Square> {
+    if mv.flag != MoveFlag::EnPassant {
+        return None;
+    }
+    Some(types::Square::from_file_rank(mv.to.file(), mv.from.rank()))
+}
+
+/// Snapshot a slide from the board **before** `make_move`.
+pub fn move_slide(board: &types::Board, mv: types::Move) -> Option<MoveSlide> {
+    let (piece, color) = board.piece_on(mv.from)?;
+    let rook = castle_rook_squares(mv);
+    let burst_square = en_passant_capture_square(mv).unwrap_or(mv.to);
+    Some(MoveSlide {
+        piece,
+        color,
+        from: mv.from,
+        to: mv.to,
+        captured: board.piece_on(mv.to).is_some() || mv.is_capture(),
+        rook_from: rook.map(|(from, _)| from),
+        rook_to: rook.map(|(_, to)| to),
+        burst_square,
+    })
+}
+
+/// Snapshot a slide from the board **after** `make_move` using the played move.
+pub fn move_slide_after(board: &types::Board, mv: types::Move) -> Option<MoveSlide> {
+    let (piece, color) = board.piece_on(mv.to)?;
+    let rook = castle_rook_squares(mv);
+    let burst_square = en_passant_capture_square(mv).unwrap_or(mv.to);
+    Some(MoveSlide {
+        piece,
+        color,
+        from: mv.from,
+        to: mv.to,
+        captured: mv.is_capture(),
+        rook_from: rook.map(|(from, _)| from),
+        rook_to: rook.map(|(_, to)| to),
+        burst_square,
+    })
 }
 
 /// Capture burst mark in unit-square space around the captured square center.
@@ -376,5 +463,49 @@ mod tests {
         assert!(!capture_marks(CaptureAnimStyle::Vortex, 0.5).is_empty());
         assert!(!capture_marks(CaptureAnimStyle::Spark, 0.4).is_empty());
         assert!(capture_marks(CaptureAnimStyle::Explosion, 0.0).is_empty());
+    }
+
+    #[test]
+    fn capture_duration_exceeds_quiet_move() {
+        let pace = AnimPace::Normal;
+        assert!(pace.capture_style(CaptureAnimStyle::Explosion) > pace.quiet_move());
+        assert!(
+            pace.tick_step(pace.quiet_move())
+                > pace.tick_step(pace.capture_style(CaptureAnimStyle::Fire))
+        );
+    }
+
+    #[test]
+    fn piece_flight_does_not_require_pre_eased_t() {
+        let mid = piece_flight(PieceAnimStyle::Slide, 0.25, 7.0, 0.0, 4.0, 0.0);
+        let double = piece_flight(
+            PieceAnimStyle::Slide,
+            AnimPace::ease(0.25),
+            7.0,
+            0.0,
+            4.0,
+            0.0,
+        );
+        assert!((mid.row - double.row).abs() > 0.01);
+    }
+
+    #[test]
+    fn castling_emits_rook_flight_and_ep_bursts_on_captured_pawn() {
+        types::init();
+        let king = types::Move::king_castle(types::Square::E1, types::Square::G1);
+        let (rook_from, rook_to) = castle_rook_squares(king).expect("rook");
+        assert_eq!(rook_from, types::Square::H1);
+        assert_eq!(rook_to, types::Square::F1);
+        let ep = types::Move::en_passant(types::Square::E5, types::Square::D6);
+        assert_eq!(en_passant_capture_square(ep), Some(types::Square::D5));
+        let mut board = types::Board::new();
+        let e4 = types::Move::quiet(types::Square::E2, types::Square::E4);
+        let before = move_slide(&board, e4).expect("slide");
+        assert_eq!(before.piece, types::Piece::Pawn);
+        assert!(!before.captured);
+        board.make_move(e4);
+        let after = move_slide_after(&board, e4).expect("after");
+        assert_eq!(before.piece, after.piece);
+        assert_eq!(before.from, after.from);
     }
 }

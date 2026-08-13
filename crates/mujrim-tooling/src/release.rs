@@ -178,6 +178,7 @@ fn build_native() -> Result<(), String> {
         ],
         &environment,
     )?;
+    snapshot_engine("mujrim-v60", "mujrim-v60-external")?;
     let arch = host_packaging_arch();
     // Product set: elite / external / v60 / ak
     // Never enable embedded-networks on top of default features — that embeds every net.
@@ -209,6 +210,7 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     snapshot_engine("mujrim", &adapter_binary_stem("mujrim-elite", &arch))?;
+    snapshot_engine("mujrim", "mujrim-embedded")?;
     run(
         "cargo",
         &[
@@ -236,6 +238,7 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
+    snapshot_engine("mujrim-v60", "mujrim-v60-embedded")?;
     // Leave mujrim.exe as the lean external (no embedded net).
     snapshot_engine("mujrim-external", "mujrim")?;
     run(
@@ -836,5 +839,26 @@ mod tests {
             "mujrim-elite"
         );
         assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
+    }
+
+    #[test]
+    fn native_release_snapshots_installer_payload_stems() {
+        let src = include_str!("release.rs");
+        let native = src
+            .split("fn build_native()")
+            .nth(1)
+            .and_then(|rest| rest.split("fn snapshot_engine(").next())
+            .expect("native build");
+        for stem in [
+            "mujrim-external",
+            "mujrim-embedded",
+            "mujrim-v60-external",
+            "mujrim-v60-embedded",
+        ] {
+            assert!(
+                native.contains(&format!("\"{stem}\"")),
+                "missing installer snapshot {stem}"
+            );
+        }
     }
 }

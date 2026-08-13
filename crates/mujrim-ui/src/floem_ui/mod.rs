@@ -11,6 +11,7 @@ mod icons;
 mod modals;
 mod screens;
 mod state;
+mod svg_cache;
 mod theme;
 mod widgets;
 mod windowing;

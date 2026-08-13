@@ -8,7 +8,6 @@ use floem::taffy::style::{Display, Overflow};
 
 use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
-use crate::app_core::tournament_results;
 
 use super::eval_graph;
 use super::state::{AppHandles, AppState};
@@ -126,27 +125,8 @@ fn results_pane(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
         widgets::results_export_bar(state, handles),
         Stack::horizontal((
-            Label::derived(move || {
-                let snap = state.tournament_snapshot.get();
-                if !tournament_results::standings_ready(&snap.standings) {
-                    return "Standings appear as matches finish.".to_owned();
-                }
-                snap.standings
-                    .iter()
-                    .map(|row| {
-                        format!(
-                            "{}. {}  {:.1}  ({}-{}-{})",
-                            row.rank, row.name, row.points, row.wins, row.draws, row.losses
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .style(move |s| {
-                s.font_size(12.0)
-                    .width_pct(42.0)
-                    .color(theme::rgba(pal().text_primary))
-            }),
+            widgets::standing_rows_list(state, "Standings appear as matches finish.")
+                .style(|s| s.width_pct(42.0).min_width(0.0).min_height(0.0)),
             (0..12)
                 .map(|index| played_game_slot(state, index, pal))
                 .collect::<Vec<_>>()

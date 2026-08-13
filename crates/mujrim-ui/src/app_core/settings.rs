@@ -97,6 +97,7 @@ pub enum Screen {
     Playing,
     Study,
     Learn,
+    Library,
     Tournaments,
     Analysis,
 }
@@ -115,9 +116,11 @@ pub struct AppSettings {
     pub show_coords: bool,
     pub anim_speed: i32,
     pub sfx_on: bool,
+    pub bgm_on: bool,
     pub bgm_volume: i32,
     pub game_mood: GameMood,
     pub sound_theme: SoundTheme,
+    pub sidebar_width_px: f64,
     pub auto_flip_black: bool,
     pub show_legal_moves: bool,
     pub show_last_move: bool,
@@ -145,9 +148,11 @@ impl Default for AppSettings {
             show_coords: true,
             anim_speed: 1,
             sfx_on: true,
+            bgm_on: true,
             bgm_volume: 50,
             game_mood: GameMood::Mystique,
             sound_theme: SoundTheme::Wood,
+            sidebar_width_px: super::layout::SIDEBAR_IDEAL_PX,
             auto_flip_black: false,
             show_legal_moves: true,
             show_last_move: true,
@@ -195,6 +200,82 @@ impl AppSettings {
             let _ = std::fs::write(&path, toml_str);
         }
     }
+
+    /// Merge a subset TOML document (Iced settings) into the on-disk Floem schema
+    /// so unknown/Floem-only fields are never dropped.
+    pub fn merge_and_save_toml(overlay: &str) {
+        let mut base = Self::load();
+        let Ok(mut base_val) = toml::Value::try_from(&base) else {
+            base.save();
+            return;
+        };
+        if let Ok(toml::Value::Table(overlay)) = overlay.parse()
+            && let Some(dst) = base_val.as_table_mut()
+        {
+            for (key, value) in overlay {
+                dst.insert(key, value);
+            }
+        }
+        if let Ok(merged) = toml::Value::try_into(base_val) {
+            base = merged;
+        }
+        base.save();
+    }
+
+    pub fn decode_subset<T: Default + serde::de::DeserializeOwned>() -> T {
+        let core = Self::load();
+        let Ok(text) = toml::to_string(&core) else {
+            return T::default();
+        };
+        toml::from_str(&text).unwrap_or_else(|_| {
+            let sanitized = text
+                .replace(
+                    "capture_anim_style = \"Shatter\"",
+                    "capture_anim_style = \"Explosion\"",
+                )
+                .replace(
+                    "capture_anim_style = \"Vortex\"",
+                    "capture_anim_style = \"Explosion\"",
+                )
+                .replace(
+                    "capture_anim_style = \"Spark\"",
+                    "capture_anim_style = \"Explosion\"",
+                );
+            toml::from_str(&sanitized).unwrap_or_default()
+        })
+    }
+}
+
+/// Returns `Some(next)` only when the requested value differs from the current one.
+pub const fn committed_toggle(current: bool, next: bool) -> Option<bool> {
+    if current == next { None } else { Some(next) }
+}
+
+/// Enable or disable `id` in a selection list without flipping neighbors.
+pub fn set_id_enabled(selected: &mut Vec<String>, id: &str, enabled: bool) {
+    let present = selected.iter().any(|existing| existing == id);
+    if enabled && !present {
+        selected.push(id.to_owned());
+    } else if !enabled && present {
+        selected.retain(|existing| existing != id);
+    }
+}
+
+/// Live tail is `None`; earlier plies stay `Some`.
+pub const fn review_cursor_for_view(ply: usize, len: usize) -> Option<usize> {
+    if ply >= len { None } else { Some(ply) }
+}
+
+/// Stay live when a move is appended at the tail; keep an earlier review ply frozen.
+pub const fn review_cursor_after_append(
+    review: Option<usize>,
+    previous_len: usize,
+) -> Option<usize> {
+    match review {
+        None => None,
+        Some(ply) if ply >= previous_len => None,
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -212,5 +293,97 @@ mod tests {
         assert_eq!(CaptureAnimStyle::ALL.len(), 6);
         assert_eq!(PieceAnimStyle::ALL.len(), 5);
         assert_eq!(CoordPosition::ALL.len(), 2);
+        assert!(settings.bgm_on);
+        assert!(
+            (settings.sidebar_width_px - crate::app_core::layout::SIDEBAR_IDEAL_PX).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn toml_round_trip_keeps_floem_only_fields() {
+        let settings = AppSettings {
+            draw_arrows: false,
+            show_threats: false,
+            bgm_on: false,
+            capture_anim_style: CaptureAnimStyle::Shatter,
+            piece_anim_style: PieceAnimStyle::Warp,
+            sidebar_width_px: 400.0,
+            ..AppSettings::default()
+        };
+        let encoded = toml::to_string(&settings).expect("encode");
+        let decoded: AppSettings = toml::from_str(&encoded).expect("decode");
+        assert!(!decoded.draw_arrows);
+        assert!(!decoded.show_threats);
+        assert!(!decoded.bgm_on);
+        assert_eq!(decoded.capture_anim_style, CaptureAnimStyle::Shatter);
+        assert_eq!(decoded.piece_anim_style, PieceAnimStyle::Warp);
+        assert!((decoded.sidebar_width_px - 400.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn merge_overlay_does_not_drop_unknown_core_fields() {
+        let base = AppSettings {
+            show_threats: false,
+            capture_anim_style: CaptureAnimStyle::Vortex,
+            ..AppSettings::default()
+        };
+        let overlay = "draw_arrows = false\nsfx_on = false\n";
+        let mut base_val = toml::Value::try_from(&base).expect("base");
+        if let toml::Value::Table(overlay) = overlay.parse::<toml::Value>().expect("overlay")
+            && let Some(dst) = base_val.as_table_mut()
+        {
+            for (key, value) in overlay {
+                dst.insert(key, value);
+            }
+        }
+        let merged: AppSettings = toml::Value::try_into(base_val).expect("merge");
+        assert!(!merged.draw_arrows);
+        assert!(!merged.sfx_on);
+        assert!(!merged.show_threats);
+        assert_eq!(merged.capture_anim_style, CaptureAnimStyle::Vortex);
+    }
+
+    #[test]
+    fn committed_toggle_ignores_redundant_events() {
+        assert_eq!(committed_toggle(true, true), None);
+        assert_eq!(committed_toggle(false, false), None);
+        assert_eq!(committed_toggle(false, true), Some(true));
+        assert_eq!(committed_toggle(true, false), Some(false));
+    }
+
+    #[test]
+    fn analysis_engine_set_does_not_flip() {
+        let mut selected = vec!["builtin".to_owned()];
+        set_id_enabled(&mut selected, "builtin", true);
+        assert_eq!(selected, vec!["builtin".to_owned()]);
+        set_id_enabled(&mut selected, "builtin", false);
+        assert!(selected.is_empty());
+        set_id_enabled(&mut selected, "stockfish", true);
+        set_id_enabled(&mut selected, "stockfish", true);
+        assert_eq!(selected, vec!["stockfish".to_owned()]);
+    }
+
+    #[test]
+    fn review_cursor_treats_tail_as_live() {
+        assert_eq!(review_cursor_for_view(0, 0), None);
+        assert_eq!(review_cursor_for_view(3, 3), None);
+        assert_eq!(review_cursor_for_view(2, 3), Some(2));
+        assert_eq!(review_cursor_after_append(None, 4), None);
+        assert_eq!(review_cursor_after_append(Some(4), 4), None);
+        assert_eq!(review_cursor_after_append(Some(3), 4), Some(3));
+        assert_eq!(review_cursor_after_append(Some(2), 4), Some(2));
+    }
+
+    #[test]
+    fn draw_arrows_survives_a_simulated_move_patch() {
+        let settings = AppSettings {
+            draw_arrows: true,
+            ..AppSettings::default()
+        };
+        let encoded = toml::to_string(&settings).expect("encode");
+        let mut decoded: AppSettings = toml::from_str(&encoded).expect("decode");
+        decoded.anim_speed = 2;
+        assert!(decoded.draw_arrows);
     }
 }

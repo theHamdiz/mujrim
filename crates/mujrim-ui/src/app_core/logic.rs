@@ -751,9 +751,10 @@ fn run_quick_tournament_body(
             spec.name = engine.name;
             spec.args = gui_safe_engine_args(&engine.path);
             spec.uci_options = uci_process::uci_resource_options(&engine.path, false, true, None);
+            let established_elo = mujrim_study::rating::published_reference_elo(&spec.name);
             TournamentEngine {
                 engine: spec,
-                established_elo: None,
+                established_elo,
                 search_limits: engine.search_limits,
             }
         })
@@ -1188,7 +1189,14 @@ pub fn current_game_record(
             initial_fen.to_owned()
         },
         moves: moves.to_vec(),
-        comments: Vec::new(),
+        comments: mujrim_study::explain::comments_for_line(
+            if initial_fen.is_empty() {
+                mujrim_study::opening::START_FEN
+            } else {
+                initial_fen
+            },
+            moves,
+        ),
     }
 }
 
@@ -1322,7 +1330,7 @@ pub fn snapshot_to_stored(
             .map(|(index, name)| Entrant {
                 id: format!("engine-{index}"),
                 name: name.clone(),
-                seed_elo: None,
+                seed_elo: mujrim_study::rating::published_reference_elo(name),
             })
             .collect(),
         results: snap.game_results.clone(),
@@ -1698,6 +1706,28 @@ mod tests {
         let after_one =
             displayed_study_fen(mujrim_study::opening::START_FEN, &moves, Some(1), None);
         assert!(after_one.contains(" b "));
+    }
+
+    #[test]
+    fn current_game_record_attaches_explainer_comments() {
+        types::init();
+        let record = current_game_record(
+            "W",
+            "B",
+            "",
+            "",
+            "rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+            &["e1g1".to_owned()],
+            "*",
+        );
+        assert!(
+            record
+                .comments
+                .iter()
+                .any(|(_, text)| text.to_lowercase().contains("castl")),
+            "{:?}",
+            record.comments
+        );
     }
 
     #[test]

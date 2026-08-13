@@ -2,11 +2,13 @@
 
 use super::tournament_live::{LiveGameBoard, PlayedGame, format_clock_ms};
 
-pub const BOARD_PANE_PCT: f64 = 80.0;
-pub const SIDE_PANE_PCT: f64 = 20.0;
-pub const SIDEBAR_MIN_PX: f64 = 240.0;
-pub const SIDEBAR_IDEAL_PX: f64 = 280.0;
-pub const SIDEBAR_MAX_PX: f64 = 340.0;
+pub const BOARD_PANE_PCT: f64 = 76.0;
+pub const SIDE_PANE_PCT: f64 = 24.0;
+pub const SIDEBAR_MIN_PX: f64 = 300.0;
+pub const SIDEBAR_IDEAL_PX: f64 = 360.0;
+pub const SIDEBAR_MAX_PX: f64 = 720.0;
+pub const SIDEBAR_MAX_FRACTION: f64 = 0.62;
+pub const SPLIT_HANDLE_PX: f64 = 10.0;
 pub const BOARD_MIN_PX: f64 = 120.0;
 pub const TITLE_BAR_PX: f64 = 44.0;
 pub const OVERLAY_MAX_WIDTH: f64 = 760.0;
@@ -60,7 +62,26 @@ pub fn board_geom(avail_width: f64, avail_height: f64) -> BoardGeom {
 
 pub fn sidebar_width(window_width: f64) -> f64 {
     let from_pct = window_width * SIDE_PANE_PCT / 100.0;
-    from_pct.clamp(SIDEBAR_MIN_PX, SIDEBAR_MAX_PX.min(window_width * 0.42))
+    from_pct.clamp(
+        SIDEBAR_MIN_PX,
+        SIDEBAR_MAX_PX.min(window_width * SIDEBAR_MAX_FRACTION),
+    )
+}
+
+pub fn clamp_sidebar_width(width: f64, pane_width: f64) -> f64 {
+    let max = SIDEBAR_MAX_PX
+        .min((pane_width - BOARD_MIN_PX - SPLIT_HANDLE_PX).max(SIDEBAR_MIN_PX))
+        .min(pane_width * SIDEBAR_MAX_FRACTION);
+    width.clamp(SIDEBAR_MIN_PX, max.max(SIDEBAR_MIN_PX))
+}
+
+pub fn board_remainder_px(pane_width: f64, sidebar_width: f64) -> f64 {
+    (pane_width - SPLIT_HANDLE_PX - sidebar_width).max(BOARD_MIN_PX)
+}
+
+/// Sidebar sits on the right: dragging the split left (negative dx) grows it.
+pub fn apply_sidebar_drag(width: f64, delta_x: f64, window_width: f64) -> f64 {
+    clamp_sidebar_width(width - delta_x, window_width)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +224,33 @@ mod tests {
         assert!(sidebar_width(800.0) < 800.0 * 0.5);
         assert!(sidebar_width(1920.0) <= SIDEBAR_MAX_PX);
         assert!(sidebar_width(1920.0) >= SIDEBAR_IDEAL_PX - 40.0);
+        assert!(clamp_sidebar_width(900.0, 1280.0) <= SIDEBAR_MAX_PX);
+        assert!(clamp_sidebar_width(100.0, 1280.0) >= SIDEBAR_MIN_PX);
+        let grown = apply_sidebar_drag(SIDEBAR_IDEAL_PX, -40.0, 1280.0);
+        assert!(grown > SIDEBAR_IDEAL_PX);
+        let shrunk = apply_sidebar_drag(SIDEBAR_IDEAL_PX, 40.0, 1280.0);
+        assert!(shrunk < SIDEBAR_IDEAL_PX);
+    }
+
+    #[test]
+    fn dragging_the_split_grows_the_sidebar_and_shrinks_the_board() {
+        let pane = 1100.0;
+        let start = SIDEBAR_IDEAL_PX;
+        let grown = apply_sidebar_drag(start, -180.0, pane);
+        assert!((grown - (start + 180.0)).abs() < f64::EPSILON);
+        assert!(board_remainder_px(pane, grown) < board_remainder_px(pane, start));
+        assert!(board_remainder_px(pane, grown) >= BOARD_MIN_PX);
+
+        let capped = apply_sidebar_drag(start, -900.0, pane);
+        assert!(capped <= pane * SIDEBAR_MAX_FRACTION + f64::EPSILON);
+        assert!(capped <= SIDEBAR_MAX_PX);
+        assert!(board_remainder_px(pane, capped) >= BOARD_MIN_PX);
+
+        let fake_wide = apply_sidebar_drag(start, -900.0, 1600.0);
+        assert!(
+            capped < fake_wide,
+            "clamp must use the live pane width, not a 1600px stand-in"
+        );
     }
 
     #[test]

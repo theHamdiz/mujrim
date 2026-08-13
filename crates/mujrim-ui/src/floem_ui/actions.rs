@@ -11,7 +11,7 @@ use mujrim_study::game_export::{self, GameExportFormat, GameRecord};
 use types::{Color, Move, Square};
 
 use crate::app_core::analysis::{AnalysisEngineSpec, AnalysisRequest, run_multi_engine_analysis};
-use crate::app_core::audio::BgmTrack;
+use crate::app_core::audio::{BgmTrack, SfxKind};
 use crate::app_core::engine::{GameMode, PlayerConfig};
 use crate::app_core::game::GameState;
 use crate::app_core::gif_export;
@@ -19,8 +19,9 @@ use crate::app_core::hub::{self, CoinFlipState};
 use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
 use crate::app_core::match_controller;
+use crate::app_core::motion;
 use crate::app_core::recording::RecordState;
-use crate::app_core::settings::{AppSettings, Screen};
+use crate::app_core::settings::{self, AppSettings, Screen};
 use crate::app_core::uci_process::{self, ExternalEngineProtocol};
 
 use super::engine;
@@ -82,7 +83,7 @@ pub fn new_game(state: AppState, handles: &AppHandles) {
     state.screen.set(Screen::Playing);
     state.status.set(status);
     if let Some(sound) = handles.sound.borrow_mut().as_mut() {
-        sound.play_bgm(BgmTrack::Game);
+        sound.play_bgm_gated(state.settings.get_untracked().bgm_on, BgmTrack::Game);
     }
     let handles = handles.clone();
     floem::action::exec_after(Duration::from_millis(0), move |_| {
@@ -127,7 +128,7 @@ pub fn on_board_press(state: AppState, handles: &AppHandles, square: Square) {
     if state.review_ply.get_untracked().is_some() {
         if matches!(
             state.screen.get_untracked(),
-            Screen::Study | Screen::Learn | Screen::Analysis
+            Screen::Study | Screen::Learn | Screen::Analysis | Screen::Library
         ) {
             resume_from_review(state);
         } else {
@@ -193,6 +194,14 @@ pub fn apply_engine_move(
     ponder: Option<(Square, Square)>,
     captured: bool,
 ) {
+    let slide = state.game.with_untracked(|game| {
+        game.as_ref()
+            .and_then(|gs| motion::move_slide(&gs.board, mv))
+            .map(|mut slide| {
+                slide.captured = slide.captured || captured;
+                slide
+            })
+    });
     state.game.update(|game| {
         if let Some(game) = game.as_mut() {
             game.last_move_squares = vec![mv.from, mv.to];
@@ -206,27 +215,26 @@ pub fn apply_engine_move(
     });
     state.move_log.update(|log| log.push(mv.to_uci()));
     state.move_annotations.update(|items| items.push(None));
-    engine::begin_slide(state, mv.from, mv.to, captured);
+    follow_live_tail(state);
+    engine::begin_slide(state, slide);
     try_flush_premoves(state);
 }
 
 fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: bool) {
-    let mut captured = captured;
-    state.game.update(|game| {
-        if let Some(game) = game.as_mut() {
-            captured = game.board.piece_on(mv.to).is_some() || captured;
-        }
+    let captured = captured || mv.is_capture();
+    let gives_check = state.game.with_untracked(|game| {
+        game.as_ref()
+            .is_some_and(|gs| gs.board.is_in_check(gs.board.side_to_move))
     });
-    if let Some(sound) = handles.sound.borrow().as_ref() {
-        if captured {
-            sound.play_capture();
-        } else {
-            sound.play_move();
-        }
-    }
+    play_move_sfx(state, handles, mv, captured, gives_check);
     state.move_log.update(|log| log.push(mv.to_uci()));
     state.move_annotations.update(|items| items.push(None));
-    engine::begin_slide(state, mv.from, mv.to, captured);
+    follow_live_tail(state);
+    let slide = state.game.with_untracked(|game| {
+        game.as_ref()
+            .and_then(|gs| motion::move_slide_after(&gs.board, mv))
+    });
+    engine::begin_slide(state, slide);
     overlay_last_move(state);
     if state
         .game
@@ -236,6 +244,25 @@ fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: 
         return;
     }
     engine::maybe_start_engine_turn(state, handles);
+}
+
+fn follow_live_tail(state: AppState) {
+    let previous_len = state.move_log.get_untracked().len().saturating_sub(1);
+    let next = settings::review_cursor_after_append(state.review_ply.get_untracked(), previous_len);
+    state.review_ply.set(next);
+}
+
+fn play_move_sfx(
+    state: AppState,
+    handles: &AppHandles,
+    mv: Move,
+    captured: bool,
+    gives_check: bool,
+) {
+    let sfx_on = state.settings.get_untracked().sfx_on;
+    if let Some(sound) = handles.sound.borrow().as_ref() {
+        sound.play_sfx(sfx_on, SfxKind::from_move(mv, captured, gives_check));
+    }
 }
 
 fn overlay_last_move(state: AppState) {
@@ -685,6 +712,7 @@ pub fn clear_eval_file(state: AppState) {
 pub fn refresh_study(state: AppState, handles: &AppHandles) {
     let study = handles.study.borrow();
     let Some(database) = study.as_ref() else {
+        state.status.set("Study library is unavailable.".to_owned());
         return;
     };
     let query = GameQuery {
@@ -695,6 +723,11 @@ pub fn refresh_study(state: AppState, handles: &AppHandles) {
         ..GameQuery::default()
     };
     state.study_results.set(database.search(&query));
+}
+
+pub fn open_library(state: AppState, handles: &AppHandles) {
+    refresh_study(state, handles);
+    state.screen.set(Screen::Library);
 }
 
 pub fn load_library_game(state: AppState, handles: &AppHandles, id: String) {
@@ -713,12 +746,15 @@ pub fn load_library_game(state: AppState, handles: &AppHandles, id: String) {
                 state.move_log.set(game.moves.clone());
                 state.move_annotations.set(vec![None; game.moves.len()]);
                 state.game.set(Some(board));
-                state.review_ply.set(Some(game.moves.len()));
+                state.review_ply.set(settings::review_cursor_for_view(
+                    game.moves.len(),
+                    game.moves.len(),
+                ));
                 if !matches!(
                     state.screen.get_untracked(),
-                    Screen::Study | Screen::Learn | Screen::Analysis
+                    Screen::Study | Screen::Learn | Screen::Analysis | Screen::Library
                 ) {
-                    state.screen.set(Screen::Study);
+                    state.screen.set(Screen::Library);
                 }
                 state.status.set("Loaded library game.".to_owned());
                 sync_move_note(state, handles);
@@ -868,7 +904,12 @@ pub fn view_ply(state: AppState, handles: &AppHandles, ply: usize) {
     let moves = state.move_log.get_untracked();
     match logic::board_at_ply(&fen, &moves, ply) {
         Ok(board) => {
-            state.review_ply.set(Some(ply));
+            state.slide.set(None);
+            state.slide_t.set(1.0);
+            state.capture_burst.set(0.0);
+            state
+                .review_ply
+                .set(settings::review_cursor_for_view(ply, moves.len()));
             let last_move = if ply > 0 {
                 logic::board_at_ply(&fen, &moves, ply - 1)
                     .ok()
@@ -888,7 +929,11 @@ pub fn view_ply(state: AppState, handles: &AppHandles, ply: usize) {
                     }
                 }
             });
-            state.status.set(format!("Reviewing ply {ply}."));
+            state.status.set(if ply >= moves.len() {
+                "Live position.".to_owned()
+            } else {
+                format!("Reviewing ply {ply}.")
+            });
             sync_move_note(state, handles);
         }
         Err(error) => state.status.set(format!("Could not navigate: {error}")),
@@ -1050,13 +1095,9 @@ pub fn gambit_step(state: AppState, delta: i32) {
     }
 }
 
-pub fn toggle_analysis_engine(state: AppState, id: String) {
+pub fn set_analysis_engine(state: AppState, id: String, enabled: bool) {
     state.analysis_engines_selected.update(|selected| {
-        if let Some(index) = selected.iter().position(|existing| existing == &id) {
-            selected.remove(index);
-        } else {
-            selected.push(id);
-        }
+        settings::set_id_enabled(selected, &id, enabled);
     });
 }
 
@@ -1850,6 +1891,10 @@ mod tests {
             "fn discard_paused_tournament",
             "fn open_tournaments_screen",
             "apply_live_settings",
+            "follow_live_tail",
+            "open_library",
+            "set_analysis_engine",
+            "play_move_sfx",
             "optimistic_live_board",
             "request_pause",
             "request_abort_game",

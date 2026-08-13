@@ -1,3 +1,4 @@
+#![deny(warnings)]
 #![cfg_attr(all(target_os = "windows", not(test)), windows_subsystem = "windows")]
 
 mod app_core;

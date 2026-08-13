@@ -1,4 +1,19 @@
 //! Elo estimates for players and engines from observed game results.
+//!
+//! Absolute Elo is identified only up to a scale. Known engines (Stockfish on the
+//! CCRL 40/15 scale used elsewhere in this repo) pin that scale. Unknown engines
+//! get a weak prior at 2000 — not 3000 — so club-strength programs can land near
+//! 1500–2200 instead of being forced into super-GM numbers.
+
+/// CCRL 40/15 Stockfish reference used as a scale anchor when Stockfish plays.
+pub const STOCKFISH_REFERENCE_ELO: f64 = 3_612.0;
+/// Uninformative prior for engines with no published or seeded rating.
+pub const UNANCHORED_PRIOR_ELO: f64 = 2_000.0;
+const RATING_FLOOR: f64 = 800.0;
+const RATING_CEILING: f64 = 4_500.0;
+const STOCKFISH_VIRTUAL_DRAWS: f64 = 48.0;
+const SEEDED_VIRTUAL_DRAWS: f64 = 32.0;
+const UNKNOWN_VIRTUAL_DRAWS: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RatedResult {
@@ -15,13 +30,175 @@ pub struct EloEstimate {
     pub games: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RatingPrior {
+    pub elo: f64,
+    pub virtual_draws: f64,
+}
+
+impl RatingPrior {
+    pub fn for_engine(name: &str, seed_elo: Option<f64>) -> Self {
+        if let Some(elo) = seed_elo {
+            return Self {
+                elo: elo.clamp(RATING_FLOOR, RATING_CEILING),
+                virtual_draws: SEEDED_VIRTUAL_DRAWS,
+            };
+        }
+        if let Some(elo) = published_reference_elo(name) {
+            return Self {
+                elo,
+                virtual_draws: STOCKFISH_VIRTUAL_DRAWS,
+            };
+        }
+        Self {
+            elo: UNANCHORED_PRIOR_ELO,
+            virtual_draws: UNKNOWN_VIRTUAL_DRAWS,
+        }
+    }
+}
+
 pub fn expected_score(player_elo: f64, opponent_elo: f64) -> f64 {
     1.0 / (1.0 + 10.0_f64.powf((opponent_elo - player_elo) / 400.0))
+}
+
+/// Published scale pin. Only Stockfish is treated as a CCRL anchor.
+/// Unknown names are not assumed to be 3000+.
+pub fn published_reference_elo(name: &str) -> Option<f64> {
+    let key = normalize_engine_key(name);
+    if is_stockfish_reference(&key) {
+        Some(STOCKFISH_REFERENCE_ELO)
+    } else {
+        None
+    }
+}
+
+fn normalize_engine_key(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_stockfish_reference(key: &str) -> bool {
+    if key.contains("fairy") {
+        return false;
+    }
+    key.split(' ').any(|token| token.starts_with("stockfish"))
 }
 
 /// Maximum-likelihood performance rating with half-game regularization so an
 /// undefeated sample remains finite. Returns `None` for an empty sample.
 pub fn estimate_performance(results: &[RatedResult]) -> Option<EloEstimate> {
+    solve_rating(results, true)
+}
+
+/// Bradley-Terry field ratings from the complete result list, updated as games
+/// finish. Seeded / Stockfish engines pin the absolute scale; everyone else is
+/// estimated from the games plus a weak 2000 prior.
+pub fn estimate_field_ratings(
+    names: &[String],
+    seeds: &[Option<f64>],
+    games: &[(usize, usize, f64)],
+) -> Vec<Option<EloEstimate>> {
+    let n = names.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let priors: Vec<RatingPrior> = (0..n)
+        .map(|index| {
+            RatingPrior::for_engine(
+                names.get(index).map(String::as_str).unwrap_or(""),
+                seeds.get(index).copied().flatten(),
+            )
+        })
+        .collect();
+    let mut ratings: Vec<f64> = priors.iter().map(|prior| prior.elo).collect();
+    let mut played = vec![false; n];
+    for &(white, black, _) in games {
+        if white < n {
+            played[white] = true;
+        }
+        if black < n {
+            played[black] = true;
+        }
+    }
+    for _ in 0..80 {
+        let previous = ratings.clone();
+        for index in 0..n {
+            if !played[index] {
+                continue;
+            }
+            let samples = samples_for(index, &ratings, games, priors[index]);
+            if let Some(estimate) = solve_rating(&samples, false) {
+                ratings[index] = estimate.elo;
+            }
+        }
+        let drift: f64 = ratings
+            .iter()
+            .zip(&previous)
+            .map(|(next, prev)| (next - prev).abs())
+            .sum();
+        if drift < 0.05 {
+            break;
+        }
+    }
+    (0..n)
+        .map(|index| {
+            if !played[index] {
+                return None;
+            }
+            let samples = samples_for(index, &ratings, games, priors[index]);
+            solve_rating(&samples, false).map(|mut estimate| {
+                estimate.games = games
+                    .iter()
+                    .filter(|(white, black, _)| *white == index || *black == index)
+                    .count();
+                estimate
+            })
+        })
+        .collect()
+}
+
+fn samples_for(
+    index: usize,
+    ratings: &[f64],
+    games: &[(usize, usize, f64)],
+    prior: RatingPrior,
+) -> Vec<RatedResult> {
+    let mut samples = Vec::new();
+    let virtual_draws = prior.virtual_draws.max(0.0).round() as usize;
+    for _ in 0..virtual_draws {
+        samples.push(RatedResult {
+            opponent_elo: prior.elo,
+            score: 0.5,
+        });
+    }
+    for &(white, black, white_score) in games {
+        let score = white_score.clamp(0.0, 1.0);
+        if white == index && black < ratings.len() {
+            samples.push(RatedResult {
+                opponent_elo: ratings[black],
+                score,
+            });
+        } else if black == index && white < ratings.len() {
+            samples.push(RatedResult {
+                opponent_elo: ratings[white],
+                score: 1.0 - score,
+            });
+        }
+    }
+    samples
+}
+
+fn solve_rating(results: &[RatedResult], half_game: bool) -> Option<EloEstimate> {
     if results.is_empty() {
         return None;
     }
@@ -29,28 +206,37 @@ pub fn estimate_performance(results: &[RatedResult]) -> Option<EloEstimate> {
         .iter()
         .map(|result| result.score.clamp(0.0, 1.0))
         .sum::<f64>();
-    let target = (observed + 0.5) / (results.len() as f64 + 1.0);
+    let n = results.len() as f64;
+    let target = if half_game {
+        (observed + 0.5) / (n + 1.0)
+    } else {
+        observed / n
+    };
     let opponent_mean = results
         .iter()
         .map(|result| result.opponent_elo)
         .sum::<f64>()
-        / results.len() as f64;
-    let mut low = opponent_mean - 1_600.0;
-    let mut high = opponent_mean + 1_600.0;
+        / n;
+    let mut low = (opponent_mean - 1_600.0).max(RATING_FLOOR);
+    let mut high = (opponent_mean + 1_600.0).min(RATING_CEILING);
+    if low >= high {
+        low = RATING_FLOOR;
+        high = RATING_CEILING;
+    }
     for _ in 0..80 {
         let midpoint = (low + high) * 0.5;
         let expected = results
             .iter()
             .map(|result| expected_score(midpoint, result.opponent_elo))
             .sum::<f64>()
-            / results.len() as f64;
+            / n;
         if expected < target {
             low = midpoint;
         } else {
             high = midpoint;
         }
     }
-    let elo = (low + high) * 0.5;
+    let elo = ((low + high) * 0.5).clamp(RATING_FLOOR, RATING_CEILING);
     let information = results
         .iter()
         .map(|result| {
@@ -62,8 +248,8 @@ pub fn estimate_performance(results: &[RatedResult]) -> Option<EloEstimate> {
     let standard_error = (400.0 / std::f64::consts::LN_10) / information.sqrt();
     Some(EloEstimate {
         elo,
-        lower_95: elo - 1.96 * standard_error,
-        upper_95: elo + 1.96 * standard_error,
+        lower_95: (elo - 1.96 * standard_error).max(RATING_FLOOR),
+        upper_95: (elo + 1.96 * standard_error).min(RATING_CEILING),
         games: results.len(),
     })
 }
@@ -118,5 +304,94 @@ mod tests {
         let estimate = estimate_performance(&results).unwrap();
         assert!(estimate.elo > 2500.0);
         assert!(estimate.elo < 2700.0);
+    }
+
+    #[test]
+    fn stockfish_is_the_only_published_anchor() {
+        assert_eq!(
+            published_reference_elo("Stockfish 17"),
+            Some(STOCKFISH_REFERENCE_ELO)
+        );
+        assert_eq!(
+            published_reference_elo("stockfish-dev"),
+            Some(STOCKFISH_REFERENCE_ELO)
+        );
+        assert_eq!(published_reference_elo("Fairy-Stockfish 14"), None);
+        assert_eq!(published_reference_elo("Koivisto"), None);
+        assert_eq!(published_reference_elo("MyClubEngine"), None);
+    }
+
+    #[test]
+    fn unanchored_field_stays_near_club_prior_not_super_gm() {
+        let names = ["ClubA".to_owned(), "ClubB".to_owned()];
+        let ratings = estimate_field_ratings(
+            &names,
+            &[None, None],
+            &[(0, 1, 0.5), (1, 0, 0.5), (0, 1, 0.5)],
+        );
+        let left = ratings[0].unwrap().elo;
+        let right = ratings[1].unwrap().elo;
+        assert!((left - UNANCHORED_PRIOR_ELO).abs() < 80.0, "{left}");
+        assert!((right - UNANCHORED_PRIOR_ELO).abs() < 80.0, "{right}");
+    }
+
+    #[test]
+    fn winner_is_rated_above_loser_without_seeds() {
+        let names = ["Strong".to_owned(), "Weak".to_owned()];
+        let games: Vec<_> = (0..10).map(|_| (0, 1, 1.0)).collect();
+        let ratings = estimate_field_ratings(&names, &[None, None], &games);
+        let strong = ratings[0].unwrap().elo;
+        let weak = ratings[1].unwrap().elo;
+        assert!(strong > weak + 200.0, "{strong} vs {weak}");
+        assert!(
+            weak < 2_400.0,
+            "weak engine must not be assumed 3000+: {weak}"
+        );
+        assert!(weak > 1_400.0, "{weak}");
+    }
+
+    #[test]
+    fn stockfish_anchor_keeps_absolute_scale() {
+        let names = ["Stockfish 17".to_owned(), "ClubEngine".to_owned()];
+        let games: Vec<_> = (0..8).map(|_| (0, 1, 1.0)).collect();
+        let ratings = estimate_field_ratings(&names, &[None, None], &games);
+        let stockfish = ratings[0].unwrap().elo;
+        let club = ratings[1].unwrap().elo;
+        assert!(
+            (stockfish - STOCKFISH_REFERENCE_ELO).abs() < 80.0,
+            "{stockfish}"
+        );
+        assert!(
+            club < 3_000.0,
+            "a shutout victim is not a 3000 engine: {club}"
+        );
+        assert!(club > 1_500.0, "{club}");
+    }
+
+    #[test]
+    fn seeded_1500_engine_is_not_inflated() {
+        let names = ["Club".to_owned(), "Peer".to_owned()];
+        let ratings = estimate_field_ratings(
+            &names,
+            &[Some(1_520.0), Some(1_480.0)],
+            &[(0, 1, 0.5), (1, 0, 0.5), (0, 1, 1.0), (1, 0, 0.0)],
+        );
+        let club = ratings[0].unwrap().elo;
+        let peer = ratings[1].unwrap().elo;
+        assert!(club > 1_400.0 && club < 1_800.0, "{club}");
+        assert!(peer > 1_300.0 && peer < 1_700.0, "{peer}");
+        assert!(club > peer);
+    }
+
+    #[test]
+    fn drawing_stockfish_lands_in_super_gm_band() {
+        let names = ["Stockfish".to_owned(), "Contender".to_owned()];
+        let games: Vec<_> = (0..20)
+            .map(|i| (0, 1, if i % 2 == 0 { 1.0 } else { 0.0 }))
+            .collect();
+        let ratings = estimate_field_ratings(&names, &[None, None], &games);
+        let contender = ratings[1].unwrap().elo;
+        assert!(contender > 3_200.0, "{contender}");
+        assert!(contender < 4_000.0, "{contender}");
     }
 }

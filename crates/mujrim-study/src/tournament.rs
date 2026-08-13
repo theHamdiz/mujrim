@@ -1,8 +1,6 @@
 //! Deterministic tournament scheduling and standings.
 
-use std::collections::BTreeMap;
-
-use crate::rating::{EloEstimate, RatedResult, estimate_performance};
+use crate::rating::{EloEstimate, estimate_field_ratings};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TournamentFormat {
@@ -247,7 +245,7 @@ pub fn standings(entrants: &[Entrant], results: &[TournamentResult]) -> Vec<Stan
             performance: None,
         })
         .collect::<Vec<_>>();
-    let mut rated_results: BTreeMap<usize, Vec<RatedResult>> = BTreeMap::new();
+    let mut games = Vec::new();
 
     for result in results {
         if result.pairing.white >= entrants.len() || result.pairing.black >= entrants.len() {
@@ -257,27 +255,16 @@ pub fn standings(entrants: &[Entrant], results: &[TournamentResult]) -> Vec<Stan
         let black_score = 1.0 - white_score;
         update_standing(&mut table[result.pairing.white], white_score);
         update_standing(&mut table[result.pairing.black], black_score);
-        if let Some(opponent_elo) = entrants[result.pairing.black].seed_elo {
-            rated_results
-                .entry(result.pairing.white)
-                .or_default()
-                .push(RatedResult {
-                    opponent_elo,
-                    score: white_score,
-                });
-        }
-        if let Some(opponent_elo) = entrants[result.pairing.white].seed_elo {
-            rated_results
-                .entry(result.pairing.black)
-                .or_default()
-                .push(RatedResult {
-                    opponent_elo,
-                    score: black_score,
-                });
-        }
+        games.push((result.pairing.white, result.pairing.black, white_score));
     }
-    for (entrant, samples) in rated_results {
-        table[entrant].performance = estimate_performance(&samples);
+    let names: Vec<String> = entrants
+        .iter()
+        .map(|entrant| entrant.name.clone())
+        .collect();
+    let seeds: Vec<Option<f64>> = entrants.iter().map(|entrant| entrant.seed_elo).collect();
+    let ratings = estimate_field_ratings(&names, &seeds, &games);
+    for (entrant, estimate) in ratings.into_iter().enumerate() {
+        table[entrant].performance = estimate;
     }
     table.sort_by(|left, right| {
         right
@@ -432,5 +419,37 @@ mod tests {
         assert_eq!(table[0].points, 1.0);
         assert!(table[0].performance.is_some());
         assert_eq!(table[1].losses, 1);
+    }
+
+    #[test]
+    fn standings_rate_unseeded_engines_from_the_games() {
+        let entrants = vec![
+            Entrant {
+                id: "sf".to_owned(),
+                name: "Stockfish 17".to_owned(),
+                seed_elo: None,
+            },
+            Entrant {
+                id: "club".to_owned(),
+                name: "ClubEngine".to_owned(),
+                seed_elo: None,
+            },
+        ];
+        let results = (0..6)
+            .map(|round| TournamentResult {
+                pairing: Pairing {
+                    round: round + 1,
+                    white: 0,
+                    black: 1,
+                },
+                white_score: 1.0,
+            })
+            .collect::<Vec<_>>();
+        let table = standings(&entrants, &results);
+        let stockfish = table[0].performance.expect("stockfish elo");
+        let club = table[1].performance.expect("club elo");
+        assert!((stockfish.elo - crate::rating::STOCKFISH_REFERENCE_ELO).abs() < 80.0);
+        assert!(club.elo < 3_000.0);
+        assert!(table[0].points > table[1].points);
     }
 }

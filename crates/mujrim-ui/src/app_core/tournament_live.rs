@@ -45,6 +45,53 @@ pub struct StandingRow {
     pub performance: Option<f64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PodiumTier {
+    Gold,
+    Silver,
+    Bronze,
+}
+
+impl PodiumTier {
+    pub const fn from_rank(rank: usize) -> Option<Self> {
+        match rank {
+            1 => Some(Self::Gold),
+            2 => Some(Self::Silver),
+            3 => Some(Self::Bronze),
+            _ => None,
+        }
+    }
+
+    pub const fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            Self::Gold => (212, 175, 55),
+            Self::Silver => (176, 176, 186),
+            Self::Bronze => (184, 115, 51),
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Gold => "Gold",
+            Self::Silver => "Silver",
+            Self::Bronze => "Bronze",
+        }
+    }
+}
+
+impl StandingRow {
+    pub fn elo_label(&self) -> String {
+        match self.performance {
+            Some(elo) => format!("{elo:.0}"),
+            None => "—".to_owned(),
+        }
+    }
+
+    pub const fn podium(&self) -> Option<PodiumTier> {
+        PodiumTier::from_rank(self.rank)
+    }
+}
+
 /// In-progress game board for the live arena.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveGameBoard {
@@ -403,6 +450,16 @@ mod tests {
         );
         assert_eq!(rows[0].name, "Alpha");
         assert_eq!(rows[0].points, 1.0);
+        assert!(
+            rows[0].performance.is_some(),
+            "live standings must show Elo"
+        );
+        assert_ne!(rows[0].elo_label(), "—");
+        assert_eq!(PodiumTier::from_rank(1), Some(PodiumTier::Gold));
+        assert_eq!(PodiumTier::from_rank(2), Some(PodiumTier::Silver));
+        assert_eq!(PodiumTier::from_rank(3), Some(PodiumTier::Bronze));
+        assert_eq!(PodiumTier::from_rank(4), None);
+        assert_eq!(rows[0].podium(), Some(PodiumTier::Gold));
     }
 
     #[test]
