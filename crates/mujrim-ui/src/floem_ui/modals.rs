@@ -1,7 +1,7 @@
 //! Options and tournament-setup overlays.
 
 use floem::prelude::*;
-use floem::taffy::style::FlexWrap;
+use floem::taffy::style::{Display, FlexWrap};
 use updater::syzygy::SyzygyPieceSet;
 
 use crate::app_core::arrows::{ArrowColor, ArrowShape, ArrowSize};
@@ -481,24 +481,24 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
                         state.tournament_setup.update(|setup| setup.format = format);
                     },
                 ),
-                dyn_view(move || {
+                widgets::stepper_row(
+                    state,
+                    "Swiss rounds",
+                    "",
+                    move || state.tournament_setup.get().swiss_rounds as i32,
+                    move |value| {
+                        state
+                            .tournament_setup
+                            .update(|setup| setup.swiss_rounds = value.max(1) as u32);
+                    },
+                    1,
+                    16,
+                )
+                .style(move |s| {
                     if state.tournament_setup.get().format == TournamentFormat::Swiss {
-                        widgets::stepper_row(
-                            state,
-                            "Swiss rounds",
-                            "",
-                            move || state.tournament_setup.get().swiss_rounds as i32,
-                            move |value| {
-                                state
-                                    .tournament_setup
-                                    .update(|setup| setup.swiss_rounds = value.max(1) as u32);
-                            },
-                            1,
-                            16,
-                        )
-                        .into_any()
+                        s
                     } else {
-                        Empty::new().into_any()
+                        s.display(Display::None)
                     }
                 }),
                 widgets::picker_row(
@@ -683,5 +683,9 @@ mod tests {
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
+        assert!(
+            production.contains("display(Display::None)"),
+            "Swiss rounds must stay mounted instead of swapping Empty views"
+        );
     }
 }

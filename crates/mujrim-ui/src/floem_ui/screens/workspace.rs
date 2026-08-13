@@ -1,7 +1,7 @@
 //! Single-window board workspace: play, analysis, tournaments.
 
 use floem::prelude::*;
-use floem::taffy::style::{FlexWrap, Overflow};
+use floem::taffy::style::{Display, FlexWrap, Overflow};
 
 use crate::app_core::layout;
 use crate::app_core::logic;
@@ -109,21 +109,26 @@ fn workspace(
 
 fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
+    let clocks = if show_clocks {
+        clock::live_clocks(state).into_any()
+    } else {
+        Empty::new()
+            .style(|s| s.width_full().height(0.0))
+            .into_any()
+    };
     Stack::vertical((
-        dyn_view(move || {
-            if show_clocks {
-                clock::live_clocks(state).into_any()
-            } else {
-                Empty::new().into_any()
-            }
-        }),
-        dyn_view(move || {
-            if state.game.get().is_some() {
-                board::board_view(state, handles.clone()).into_any()
-            } else {
-                empty_board(state, handles.clone()).into_any()
-            }
-        })
+        clocks,
+        Stack::new((
+            board::board_view(state, handles.clone())
+                .style(|s| s.size_full().min_width(0.0).min_height(0.0)),
+            empty_board(state, handles, show_clocks).style(move |s| {
+                if state.game.get().is_some() {
+                    s.display(Display::None)
+                } else {
+                    s.size_full()
+                }
+            }),
+        ))
         .style(|s| {
             s.size_full()
                 .flex_grow(1.0f32)
@@ -148,8 +153,17 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
     })
 }
 
-fn empty_board(state: AppState, handles: AppHandles) -> impl IntoView {
+fn empty_board(state: AppState, handles: AppHandles, tournament_board: bool) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
+    let setup = if tournament_board {
+        widgets::primary_button(state, "Tournament setup", {
+            let handles = handles.clone();
+            move || actions::open_tournament_setup(state, &handles)
+        })
+        .into_any()
+    } else {
+        Empty::new().into_any()
+    };
     widgets::card(
         state,
         Stack::vertical((
@@ -174,20 +188,7 @@ fn empty_board(state: AppState, handles: AppHandles) -> impl IntoView {
                 .to_owned()
             })
             .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
-            dyn_view({
-                let handles = handles.clone();
-                move || {
-                    if state.screen.get() == Screen::Tournaments {
-                        widgets::primary_button(state, "Tournament setup", {
-                            let handles = handles.clone();
-                            move || actions::open_tournament_setup(state, &handles)
-                        })
-                        .into_any()
-                    } else {
-                        Empty::new().into_any()
-                    }
-                }
-            }),
+            setup,
         ))
         .style(|s| s.row_gap(8.0).items_center()),
     )
@@ -577,8 +578,14 @@ mod tests {
             "pub fn study",
             "pub fn learn",
             "ply_button",
+            "board::board_view",
+            "display(Display::None)",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
+        assert!(
+            !production.contains("board::board_view(state, handles.clone()).into_any()"),
+            "creating the board canvas inside dyn_view panics when a tournament position loads"
+        );
     }
 }
