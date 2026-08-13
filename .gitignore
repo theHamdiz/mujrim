@@ -18,6 +18,7 @@ Thumbs.db
 *Icon
 Icon*
 Icon
+!**/icons.rs
 
 # Debug
 *.pdb
