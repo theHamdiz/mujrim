@@ -5,6 +5,7 @@ use floem::taffy::style::{Display, FlexWrap};
 use mujrim_study::gambit;
 use mujrim_study::opening::PrepSide;
 
+use crate::app_core::layout;
 use crate::app_core::logic;
 
 use super::super::actions;
@@ -198,7 +199,7 @@ fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     })
                     .into_any();
                 }
-                results
+                let list = results
                     .into_iter()
                     .take(100)
                     .map(|summary| {
@@ -240,9 +241,8 @@ fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     })
                     .collect::<Vec<_>>()
                     .into_view()
-                    .style(|s| s.width_full().row_gap(6.0).flex_col().max_height(220.0))
-                    .scroll()
-                    .into_any()
+                    .style(|s| s.width_full().row_gap(6.0).flex_col());
+                widgets::capped_scroll(list, layout::LIST_SCROLL_PX).into_any()
             }),
         )),
     )
@@ -338,7 +338,8 @@ fn training_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         })
                         .into_any();
                     }
-                    due.into_iter()
+                    let list = due
+                        .into_iter()
                         .take(20)
                         .map(|item| {
                             let id = item.puzzle.id.clone();
@@ -376,9 +377,8 @@ fn training_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         })
                         .collect::<Vec<_>>()
                         .into_view()
-                        .style(|s| s.width_full().row_gap(6.0).flex_col().max_height(180.0))
-                        .scroll()
-                        .into_any()
+                        .style(|s| s.width_full().row_gap(6.0).flex_col());
+                    widgets::capped_scroll(list, layout::LIST_SCROLL_PX).into_any()
                 }
             }),
         )),
@@ -439,12 +439,14 @@ fn opening_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     }
                 }
             }),
-            (0..16)
-                .map(|index| explorer_slot(state, handles.clone(), index, pal))
-                .collect::<Vec<_>>()
-                .into_view()
-                .style(|s| s.width_full().row_gap(6.0).flex_col().max_height(260.0))
-                .scroll(),
+            widgets::capped_scroll(
+                (0..16)
+                    .map(|index| explorer_slot(state, handles.clone(), index, pal))
+                    .collect::<Vec<_>>()
+                    .into_view()
+                    .style(|s| s.width_full().row_gap(6.0).flex_col()),
+                layout::LIST_SCROLL_PX,
+            ),
         )),
     )
 }
@@ -650,7 +652,7 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
                             })
                             .into_any();
                     }
-                    lines
+                    let list = lines
                         .into_iter()
                         .map(|line| {
                             let id = line.id.clone();
@@ -708,9 +710,8 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         })
                         .collect::<Vec<_>>()
                         .into_view()
-                        .style(|s| s.width_full().row_gap(6.0).flex_col().max_height(200.0))
-                        .scroll()
-                        .into_any()
+                        .style(|s| s.width_full().row_gap(6.0).flex_col());
+                    widgets::capped_scroll(list, layout::LIST_SCROLL_PX).into_any()
                 }
             }),
         )),
@@ -724,38 +725,42 @@ fn gambit_card(state: AppState) -> impl IntoView {
         Stack::vertical((
             widgets::section_label("Gambit Laboratory", pal),
             widgets::body_copy("Interactive lines with numbered coaching arrows.", pal),
-            gambit::catalog()
-                .iter()
-                .map(|lesson| {
-                    let id = lesson.id.to_owned();
-                    Stack::horizontal((
-                        Stack::vertical((
-                            Label::new(format!("{} ({})", lesson.name, lesson.eco)).style(|s| {
-                                s.font_size(13.0)
-                                    .font_bold()
-                                    .min_width(0.0)
-                                    .width_full()
-                                    .text_wrap()
-                            }),
-                            Label::new(lesson.summary).style(move |s| {
-                                s.font_size(11.0)
-                                    .min_width(0.0)
-                                    .width_full()
-                                    .text_wrap()
-                                    .color(theme::rgba(pal().text_secondary))
+            widgets::capped_scroll(
+                gambit::catalog()
+                    .iter()
+                    .map(|lesson| {
+                        let id = lesson.id.to_owned();
+                        Stack::horizontal((
+                            Stack::vertical((
+                                Label::new(format!("{} ({})", lesson.name, lesson.eco)).style(
+                                    |s| {
+                                        s.font_size(13.0)
+                                            .font_bold()
+                                            .min_width(0.0)
+                                            .width_full()
+                                            .text_wrap()
+                                    },
+                                ),
+                                Label::new(lesson.summary).style(move |s| {
+                                    s.font_size(11.0)
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_wrap()
+                                        .color(theme::rgba(pal().text_secondary))
+                                }),
+                            ))
+                            .style(|s| s.flex_grow(1.0f32).row_gap(2.0).min_width(0.0)),
+                            widgets::ghost_button(state, "Learn", {
+                                move || actions::start_gambit_lesson(state, id.clone())
                             }),
                         ))
-                        .style(|s| s.flex_grow(1.0f32).row_gap(2.0).min_width(0.0)),
-                        widgets::ghost_button(state, "Learn", {
-                            move || actions::start_gambit_lesson(state, id.clone())
-                        }),
-                    ))
-                    .style(|s| s.width_full().col_gap(8.0).items_start().min_width(0.0))
-                })
-                .collect::<Vec<_>>()
-                .into_view()
-                .style(|s| s.width_full().row_gap(6.0).flex_col().max_height(200.0))
-                .scroll(),
+                        .style(|s| s.width_full().col_gap(8.0).items_start().min_width(0.0))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_view()
+                    .style(|s| s.width_full().row_gap(6.0).flex_col()),
+                layout::LIST_SCROLL_PX,
+            ),
         )),
     )
 }
@@ -788,12 +793,26 @@ mod tests {
             "body_copy",
             "text_wrap()",
             "text_ellipsis()",
+            "capped_scroll",
+            "LIST_SCROLL_PX",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
         assert!(
             production.contains("min_width(0.0)"),
             "study panels must shrink with the sidebar instead of overflowing"
+        );
+        let gambit = production
+            .split("fn gambit_card")
+            .nth(1)
+            .expect("gambit_card");
+        assert!(
+            gambit.contains("capped_scroll"),
+            "gambit repertoire must scroll inside a capped viewport"
+        );
+        assert!(
+            !gambit.contains("max_height(200.0)"),
+            "gambit list height must live on the scroll view"
         );
     }
 }

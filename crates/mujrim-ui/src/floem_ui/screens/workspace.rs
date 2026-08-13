@@ -525,9 +525,12 @@ fn analysis_engine_toggles(state: AppState, handles: AppHandles) -> impl IntoVie
                 .into_any(),
             );
         }
-        rows.into_view()
-            .style(|s| s.width_full().row_gap(6.0).flex_col())
-            .into_any()
+        widgets::capped_scroll(
+            rows.into_view()
+                .style(|s| s.width_full().row_gap(6.0).flex_col()),
+            layout::LIST_SCROLL_PX,
+        )
+        .into_any()
     })
 }
 
@@ -859,9 +862,11 @@ fn tournament_history(state: AppState, handles: AppHandles) -> impl IntoView {
                 s.display(Display::None)
             }
         }),
-        rows.into_view()
-            .style(|s| s.width_full().row_gap(2.0).flex_col().max_height(180.0))
-            .scroll(),
+        widgets::capped_scroll(
+            rows.into_view()
+                .style(|s| s.width_full().row_gap(2.0).flex_col()),
+            layout::LIST_SCROLL_PX,
+        ),
     ))
     .style(|s| s.width_full().row_gap(2.0).min_width(0.0))
 }
@@ -1141,6 +1146,8 @@ mod tests {
             "window_pointer_x",
             "FlexWrap::NoWrap",
             "Overflow::Scroll",
+            "capped_scroll",
+            "LIST_SCROLL_PX",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

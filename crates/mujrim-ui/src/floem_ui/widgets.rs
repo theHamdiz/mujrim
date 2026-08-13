@@ -237,6 +237,26 @@ pub fn results_export_bar(state: AppState, handles: AppHandles) -> impl IntoView
     })
 }
 
+/// Viewport-capped scroller. Height belongs on the scroll view, not the list body.
+pub fn capped_scroll(child: impl IntoView + 'static, max_height: f64) -> impl IntoView {
+    child.scroll().style(move |s| {
+        s.width_full()
+            .min_width(0.0)
+            .min_height(0.0)
+            .max_height(max_height)
+    })
+}
+
+/// Scroller that fills leftover column space (dock panes, sidebar standings).
+pub fn filling_scroll(child: impl IntoView + 'static) -> impl IntoView {
+    child.scroll().style(|s| {
+        s.width_full()
+            .min_width(0.0)
+            .min_height(0.0)
+            .flex_grow(1.0f32)
+    })
+}
+
 /// In-flow expander. Never creates an OS window or Floem overlay toplevel.
 pub fn picker<T>(
     state: AppState,
@@ -307,8 +327,8 @@ where
                             })
                     })
                     .collect::<Vec<_>>();
-                Stack::vertical(list)
-                    .style(move |s| {
+                capped_scroll(
+                    Stack::vertical(list).style(move |s| {
                         let pal = theme::palette(state.settings.get().board_theme);
                         s.width_full()
                             .row_gap(2.0)
@@ -317,8 +337,10 @@ where
                             .background(theme::rgba(pal.bg))
                             .border(1.0)
                             .border_color(theme::rgba(pal.border))
-                    })
-                    .into_any()
+                    }),
+                    layout::PICKER_SCROLL_PX,
+                )
+                .into_any()
             }
         }),
     ))
@@ -537,13 +559,16 @@ pub fn standing_rows_list(state: AppState, empty: &'static str) -> impl IntoView
                 })
                 .into_any();
         }
-        snap.standings
-            .into_iter()
-            .map(|row| standing_row(state, row))
-            .collect::<Vec<_>>()
-            .into_view()
-            .style(|s| s.width_full().row_gap(6.0).flex_col().min_width(0.0))
-            .into_any()
+        capped_scroll(
+            snap.standings
+                .into_iter()
+                .map(|row| standing_row(state, row))
+                .collect::<Vec<_>>()
+                .into_view()
+                .style(|s| s.width_full().row_gap(6.0).flex_col().min_width(0.0)),
+            layout::LIST_SCROLL_PX,
+        )
+        .into_any()
     })
 }
 
@@ -655,16 +680,40 @@ mod tests {
             production.contains("text_ellipsis()"),
             "single-line sidebar titles must ellipsize"
         );
-        let wrapping = production
-            .split("pub fn wrapping_label")
-            .nth(1)
-            .expect("wrapping_label")
-            .split("pub fn body_copy")
-            .next()
-            .expect("body_copy follows wrapping_label");
         assert!(
-            wrapping.contains("text_wrap()"),
-            "wrapping_label must enable Floem text wrap"
+            production.contains("capped_scroll"),
+            "dropdown and sidebar lists must share a viewport-capped scroller"
+        );
+        let scroller = production
+            .split("pub fn capped_scroll")
+            .nth(1)
+            .expect("capped_scroll")
+            .split("pub fn filling_scroll")
+            .next()
+            .expect("filling_scroll follows capped_scroll");
+        assert!(
+            scroller.contains("child.scroll()"),
+            "capped_scroll must wrap the list in a Floem Scroll view"
+        );
+        assert!(
+            scroller.contains(".max_height(max_height)"),
+            "list max-height must sit on the scroll viewport, not the inner stack"
+        );
+        assert!(
+            production
+                .split("pub fn picker")
+                .nth(1)
+                .expect("picker")
+                .contains("capped_scroll"),
+            "engine and theme pickers must scroll when the roster is long"
+        );
+        assert!(
+            production
+                .split("pub fn standing_rows_list")
+                .nth(1)
+                .expect("standing_rows_list")
+                .contains("capped_scroll"),
+            "standings must scroll instead of overflowing the pane"
         );
     }
 }

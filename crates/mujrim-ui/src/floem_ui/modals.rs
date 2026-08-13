@@ -612,7 +612,7 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
                             })
                             .into_any();
                         }
-                        roster
+                        let list = roster
                             .into_iter()
                             .map(|engine| {
                                 let path = engine.path.clone();
@@ -652,7 +652,8 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
                             })
                             .collect::<Vec<_>>()
                             .into_view()
-                            .style(|s| s.width_full().row_gap(6.0).flex_col())
+                            .style(|s| s.width_full().row_gap(6.0).flex_col());
+                        widgets::capped_scroll(list, crate::app_core::layout::MODAL_LIST_SCROLL_PX)
                             .into_any()
                     }
                 }),
@@ -699,6 +700,8 @@ mod tests {
             "Ponder arrow",
             "BGM volume",
             "Threat highlights",
+            "capped_scroll",
+            "MODAL_LIST_SCROLL_PX",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

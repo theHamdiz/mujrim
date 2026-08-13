@@ -15,6 +15,9 @@ pub const OVERLAY_MAX_WIDTH: f64 = 760.0;
 pub const OVERLAY_PAD: f64 = 24.0;
 pub const DOCK_TAB_BAR_PX: f64 = 36.0;
 pub const DOCK_OPEN_PX: f64 = 248.0;
+pub const LIST_SCROLL_PX: f64 = 260.0;
+pub const PICKER_SCROLL_PX: f64 = 220.0;
+pub const MODAL_LIST_SCROLL_PX: f64 = 280.0;
 pub const LOW_TIME_MS: u64 = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -257,6 +260,9 @@ mod tests {
     fn dock_collapses_to_tab_bar_and_expands_upward() {
         const {
             assert!(DOCK_OPEN_PX > DOCK_TAB_BAR_PX);
+            assert!(LIST_SCROLL_PX > 180.0);
+            assert!(PICKER_SCROLL_PX > 120.0);
+            assert!(MODAL_LIST_SCROLL_PX >= LIST_SCROLL_PX);
         }
         assert_eq!(dock_height(false), DOCK_TAB_BAR_PX);
         assert_eq!(dock_height(true), DOCK_OPEN_PX);

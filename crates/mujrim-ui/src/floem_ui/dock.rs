@@ -127,12 +127,14 @@ fn results_pane(state: AppState, handles: AppHandles) -> impl IntoView {
         Stack::horizontal((
             widgets::standing_rows_list(state, "Standings appear as matches finish.")
                 .style(|s| s.width_pct(42.0).min_width(0.0).min_height(0.0)),
-            (0..12)
-                .map(|index| played_game_slot(state, index, pal))
-                .collect::<Vec<_>>()
-                .into_view()
-                .style(|s| s.width_pct(58.0).flex_col().row_gap(2.0).min_width(0.0))
-                .scroll(),
+            widgets::filling_scroll(
+                (0..12)
+                    .map(|index| played_game_slot(state, index, pal))
+                    .collect::<Vec<_>>()
+                    .into_view()
+                    .style(|s| s.width_full().flex_col().row_gap(2.0).min_width(0.0)),
+            )
+            .style(|s| s.width_pct(58.0).min_width(0.0).min_height(0.0)),
         ))
         .style(|s| s.size_full().col_gap(16.0).min_height(0.0)),
     ))
@@ -202,18 +204,21 @@ fn played_game_slot(
 
 fn engine_log_pane(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    Label::derived(move || {
-        let tel = handles.telemetry.get();
-        if tel.label.is_empty() {
-            state.status.get()
-        } else {
-            tel.label
-        }
-    })
-    .style(move |s| {
-        s.font_size(12.0)
-            .width_full()
-            .min_width(0.0)
-            .color(theme::rgba(pal().text_primary))
-    })
+    widgets::filling_scroll(
+        Label::derived(move || {
+            let tel = handles.telemetry.get();
+            if tel.label.is_empty() {
+                state.status.get()
+            } else {
+                tel.label
+            }
+        })
+        .style(move |s| {
+            s.font_size(12.0)
+                .width_full()
+                .min_width(0.0)
+                .text_wrap()
+                .color(theme::rgba(pal().text_primary))
+        }),
+    )
 }
