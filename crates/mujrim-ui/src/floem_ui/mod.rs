@@ -12,9 +12,12 @@ mod modals;
 mod screens;
 mod state;
 mod theme;
+mod widgets;
 
 use floem::kurbo::Size;
 use floem::prelude::*;
+use floem::taffy::style::Overflow;
+use floem::text::FONT_CONTEXT;
 use floem::window::{Theme, WindowConfig, WindowId};
 use tokio::runtime::Runtime;
 
@@ -28,6 +31,12 @@ pub fn run() {
         tokio::task::block_in_place(|| {
             #[cfg(target_os = "macos")]
             set_macos_dock_icon();
+            {
+                let mut font_cx = FONT_CONTEXT.lock();
+                font_cx
+                    .collection
+                    .register_fonts(CURIOUS_FONT.to_vec().into(), None);
+            }
             let mut config = WindowConfig::default()
                 .size(Size::new(1280.0, 850.0))
                 .min_size(Size::new(800.0, 600.0))
@@ -41,7 +50,6 @@ pub fn run() {
             if let Some(icon) = load_window_icon() {
                 config = config.window_icon(icon);
             }
-            let _ = CURIOUS_FONT;
             floem::Application::new()
                 .window(app_view, Some(config))
                 .run();
@@ -85,7 +93,13 @@ fn app_view(window_id: WindowId) -> impl IntoView {
             }
         }),
     ))
-    .style(|s| s.size_full())
+    .style(|s| {
+        s.size_full()
+            .min_width(0.0)
+            .min_height(0.0)
+            .overflow_x(Overflow::Clip)
+            .overflow_y(Overflow::Clip)
+    })
     .window_title(|| "Mujrim Chess".to_owned())
 }
 

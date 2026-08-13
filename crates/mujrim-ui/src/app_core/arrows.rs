@@ -10,6 +10,10 @@ pub enum ArrowShape {
     Straight,
 }
 
+impl ArrowShape {
+    pub const ALL: [Self; 2] = [Self::Smart, Self::Straight];
+}
+
 impl std::fmt::Display for ArrowShape {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {

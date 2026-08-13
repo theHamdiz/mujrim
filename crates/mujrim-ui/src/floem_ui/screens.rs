@@ -1,9 +1,11 @@
 //! Menu, playing, study, tournament, and analysis screens.
 
 use floem::prelude::*;
-use mujrim_protocols::catalog::DiscoveredEngine;
+use floem::taffy::style::{FlexWrap, Overflow};
 
-use crate::app_core::engine::{GameMode, PlayerConfig, bundled_engine_choices};
+use crate::app_core::engine::{
+    BundledEngineChoice, GameMode, PlayerConfig, bundled_engine_choices, selected_bundled_engine,
+};
 use crate::app_core::layout;
 use crate::app_core::logic;
 use crate::app_core::settings::Screen;
@@ -17,6 +19,7 @@ use super::dock;
 use super::eval_graph;
 use super::state::{AppHandles, AppState};
 use super::theme;
+use super::widgets;
 
 pub fn root_content(state: AppState, handles: AppHandles) -> impl IntoView {
     dyn_view(move || match state.screen.get() {
@@ -26,30 +29,49 @@ pub fn root_content(state: AppState, handles: AppHandles) -> impl IntoView {
         Screen::Tournaments => tournaments(state, handles.clone()).into_any(),
         Screen::Analysis => analysis(state, handles.clone()).into_any(),
     })
-    .style(|s| s.size_full().min_height(0.0))
+    .style(|s| {
+        s.size_full()
+            .min_width(0.0)
+            .min_height(0.0)
+            .overflow_x(Overflow::Clip)
+            .overflow_y(Overflow::Clip)
+    })
 }
 
 fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let logo_bytes = handles.logo.clone();
-    let logo = img(move || logo_bytes.clone()).style(|s| s.size(80, 80).border_radius(16.0));
-    Stack::vertical((
-        logo,
-        Label::new("Mujrim Chess").style(|s| s.font_size(28.0).font_bold()),
-        Label::new("Play, study, and run engine tournaments.")
-            .style(move |s| s.font_size(13.0).color(theme::rgba(pal().text_secondary))),
-        player_pickers(state, &handles),
-        Stack::horizontal((
-            Button::new("Start game").action({
+    let logo = img(move || logo_bytes.clone()).style(|s| s.size(96, 96).border_radius(22.0));
+    let setup = widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("Game Setup", pal),
+            Label::new("Choose players and load engines")
+                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            Label::new("Mode")
+                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            widgets::picker(state, move || state.selected_mode.get(), GameMode::ALL, {
+                let bundled = handles.bundled.clone();
+                move |mode| actions::select_mode(state, &bundled, mode)
+            }),
+            player_column(state, &handles, true),
+            player_column(state, &handles, false),
+        ))
+        .style(|s| s.width_full().row_gap(10.0).min_width(0.0)),
+    )
+    .style(|s| s.flex_grow(1.0f32).min_width(280.0).max_width(460.0));
+
+    let actions_card = widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("Studio", pal),
+            Label::new("Open a board, a library, or a live engine event.")
+                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            widgets::primary_button(state, "Start game", {
                 let handles = handles.clone();
                 move || actions::new_game(state, &handles)
             }),
-            Button::new("Study").action(move || state.screen.set(Screen::Study)),
-            Button::new("Tournaments").action(move || {
-                state.show_tournament_setup.set(true);
-                state.screen.set(Screen::Tournaments);
-            }),
-            Button::new("Analyze").action({
+            widgets::ghost_button(state, "Analyze position", {
                 let handles = handles.clone();
                 move || {
                     if state.game.get_untracked().is_none() {
@@ -58,98 +80,163 @@ fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
                     actions::analyze_game(state, &handles);
                 }
             }),
+            widgets::ghost_button(state, "Open study", move || state.screen.set(Screen::Study)),
+            widgets::ghost_button(state, "Engine tournament", move || {
+                state.show_tournament_setup.set(true);
+                state.screen.set(Screen::Tournaments);
+            }),
+            Label::derived(move || state.status.get())
+                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
         ))
-        .style(|s| s.col_gap(8.0)),
-        Label::derived(move || state.status.get())
-            .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+        .style(|s| s.width_full().row_gap(10.0).min_width(0.0)),
+    )
+    .style(|s| s.flex_grow(1.0f32).min_width(280.0).max_width(420.0));
+
+    Stack::vertical((
+        logo,
+        widgets::curious_title("MUJRIM", 56.0).style(move |s| {
+            s.color(theme::rgba(pal().text_primary))
+                .opacity(0.55 + 0.45 * state.hub_progress.get())
+        }),
+        Label::new("Play · Analyze · Prepare · Compete").style(move |s| {
+            s.font_size(16.0)
+                .color(theme::rgba(pal().accent_alt))
+                .opacity(0.55 + 0.45 * state.hub_progress.get())
+        }),
+        Label::new("A full desktop chess studio for every UCI engine on your machine.")
+            .style(move |s| s.font_size(13.0).color(theme::rgba(pal().text_secondary))),
+        Stack::horizontal((setup, actions_card)).style(|s| {
+            s.width_full()
+                .max_width(980.0)
+                .col_gap(16.0)
+                .row_gap(16.0)
+                .flex_wrap(FlexWrap::Wrap)
+                .items_stretch()
+                .justify_center()
+        }),
     ))
     .style(move |s| {
         s.size_full()
             .items_center()
-            .justify_center()
-            .row_gap(14.0)
-            .padding(24.0)
+            .padding(28.0)
+            .row_gap(12.0)
+            .min_width(0.0)
+            .min_height(0.0)
             .color(theme::rgba(pal().text_primary))
     })
+    .scroll()
 }
 
-fn player_pickers(state: AppState, handles: &AppHandles) -> impl IntoView {
-    let engines = handles.bundled.clone();
-    let engines_mode = engines.clone();
+fn player_column(state: AppState, handles: &AppHandles, white: bool) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    let bundled = handles.bundled.clone();
+    let choices = bundled_engine_choices(&bundled);
+    let show_picker = move || {
+        let mode = state.selected_mode.get();
+        if white {
+            matches!(mode, GameMode::EngineVsEngine)
+        } else {
+            matches!(mode, GameMode::HumanVsEngine | GameMode::EngineVsEngine)
+        }
+    };
     Stack::vertical((
-        cycle_enum(
-            state,
-            "Mode",
-            move || state.selected_mode.get().to_string(),
+        Stack::horizontal((
+            widgets::side_badge(if white { "W" } else { "B" }, white),
+            Stack::vertical((
+                Label::new(if white { "White" } else { "Black" })
+                    .style(move |s| s.font_size(11.0).color(theme::rgba(pal().text_secondary))),
+                Label::derived(move || {
+                    if white {
+                        state.white_player.get().to_string()
+                    } else {
+                        state.black_player.get().to_string()
+                    }
+                })
+                .style(move |s| s.font_size(13.0).color(theme::rgba(pal().text_primary))),
+            ))
+            .style(|s| s.row_gap(2.0).min_width(0.0)),
+        ))
+        .style(|s| s.col_gap(10.0).items_center().width_full()),
+        dyn_view({
+            let bundled = bundled.clone();
+            let choices = choices.clone();
             move || {
-                let next = match state.selected_mode.get_untracked() {
-                    GameMode::HumanVsHuman => GameMode::HumanVsEngine,
-                    GameMode::HumanVsEngine => GameMode::EngineVsEngine,
-                    GameMode::EngineVsEngine => GameMode::HumanVsHuman,
-                };
-                state.selected_mode.set(next);
-                match next {
-                    GameMode::HumanVsHuman => {
-                        state.white_player.set(PlayerConfig::Human);
-                        state.black_player.set(PlayerConfig::Human);
-                    }
-                    GameMode::HumanVsEngine => {
-                        state.white_player.set(PlayerConfig::Human);
-                        state.black_player.set(default_engine(&engines_mode));
-                    }
-                    GameMode::EngineVsEngine => {
-                        state.white_player.set(default_engine(&engines_mode));
-                        state.black_player.set(PlayerConfig::BuiltIn { depth: 12 });
-                    }
+                if !show_picker() {
+                    return Empty::new().into_any();
                 }
-            },
-        ),
-        Label::derived(move || format!("White: {}", state.white_player.get()))
-            .style(|s| s.font_size(12.0)),
-        Label::derived(move || format!("Black: {}", state.black_player.get()))
-            .style(|s| s.font_size(12.0)),
-        Button::new("Cycle Black engine").action({
-            let bundled = engines.clone();
-            move || {
-                let choices = bundled_engine_choices(&bundled);
                 if choices.is_empty() {
-                    state.black_player.update(|player| {
-                        *player = match player {
-                            PlayerConfig::BuiltIn { depth } => PlayerConfig::BuiltIn {
-                                depth: (*depth % 20) + 4,
-                            },
-                            _ => PlayerConfig::BuiltIn { depth: 16 },
-                        };
-                    });
-                    return;
+                    return Label::new("No bundled engines found — using Mujrim built-in.")
+                        .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary)))
+                        .into_any();
                 }
-                let current = match state.black_player.get_untracked() {
-                    PlayerConfig::External { path, .. } => bundled
-                        .iter()
-                        .position(|engine| engine.path.to_string_lossy() == path)
-                        .unwrap_or(0),
-                    _ => 0,
-                };
-                let next = (current + 1) % bundled.len();
-                state.black_player.set(PlayerConfig::External {
-                    path: bundled[next].path.to_string_lossy().into_owned(),
-                    protocol: ExternalEngineProtocol::Uci,
-                });
+                let bundled = bundled.clone();
+                let choices = choices.clone();
+                let list = choices.clone();
+                Stack::vertical((
+                    widgets::picker(
+                        state,
+                        {
+                            let bundled = bundled.clone();
+                            move || {
+                                let player = if white {
+                                    state.white_player.get()
+                                } else {
+                                    state.black_player.get()
+                                };
+                                selected_bundled_engine(&bundled, &player)
+                                    .or_else(|| choices.first().cloned())
+                                    .unwrap_or(BundledEngineChoice {
+                                        index: 0,
+                                        label: "Engine".into(),
+                                    })
+                            }
+                        },
+                        list,
+                        {
+                            let bundled = bundled.clone();
+                            move |choice: BundledEngineChoice| {
+                                if let Some(engine) = bundled.get(choice.index) {
+                                    let player = PlayerConfig::External {
+                                        path: engine.path.to_string_lossy().into_owned(),
+                                        protocol: ExternalEngineProtocol::Uci,
+                                    };
+                                    if white {
+                                        state.white_player.set(player);
+                                    } else {
+                                        state.black_player.set(player);
+                                    }
+                                }
+                            }
+                        },
+                    ),
+                    Stack::horizontal((
+                        widgets::ghost_button(state, "Load UCI", {
+                            move || {
+                                actions::pick_external_engine(
+                                    state,
+                                    white,
+                                    ExternalEngineProtocol::Uci,
+                                );
+                            }
+                        }),
+                        widgets::ghost_button(state, "Load XBoard", {
+                            move || {
+                                actions::pick_external_engine(
+                                    state,
+                                    white,
+                                    ExternalEngineProtocol::Xboard,
+                                );
+                            }
+                        }),
+                    ))
+                    .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
+                ))
+                .style(|s| s.width_full().row_gap(8.0))
+                .into_any()
             }
         }),
     ))
-    .style(|s| s.row_gap(6.0).items_center())
-}
-
-fn default_engine(bundled: &[DiscoveredEngine]) -> PlayerConfig {
-    bundled
-        .first()
-        .map_or(PlayerConfig::BuiltIn { depth: 16 }, |engine| {
-            PlayerConfig::External {
-                path: engine.path.to_string_lossy().into_owned(),
-                protocol: ExternalEngineProtocol::Uci,
-            }
-        })
+    .style(|s| s.width_full().row_gap(8.0).min_width(0.0))
 }
 
 fn playing(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -190,25 +277,38 @@ fn workspace(
         Stack::horizontal((
             board_pane(state, handles, show_clocks),
             sidebar.style(move |s| {
-                s.width_pct(layout::SIDE_PANE_PCT)
+                s.width(layout::SIDEBAR_IDEAL_PX)
+                    .min_width(layout::SIDEBAR_MIN_PX)
+                    .max_width(layout::SIDEBAR_MAX_PX)
                     .height_full()
-                    .min_width(0.0)
-                    .padding(12.0)
-                    .row_gap(8.0)
+                    .min_height(0.0)
+                    .padding(14.0)
+                    .row_gap(10.0)
                     .background(theme::rgba(pal().sidebar))
                     .border_left(1.0)
                     .border_color(theme::rgba(pal().border))
+                    .overflow_x(Overflow::Clip)
+                    .overflow_y(Overflow::Scroll)
             }),
         ))
         .style(|s| {
             s.width_full()
                 .flex_grow(1.0f32)
+                .min_width(0.0)
                 .min_height(0.0)
                 .items_stretch()
+                .overflow_x(Overflow::Clip)
         }),
         dock::bottom_dock(state),
     ))
-    .style(move |s| s.size_full().color(theme::rgba(pal().text_primary)))
+    .style(move |s| {
+        s.size_full()
+            .min_width(0.0)
+            .min_height(0.0)
+            .color(theme::rgba(pal().text_primary))
+            .overflow_x(Overflow::Clip)
+            .overflow_y(Overflow::Clip)
+    })
 }
 
 fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl IntoView {
@@ -228,48 +328,61 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
                 empty_board(state).into_any()
             }
         })
-        .style(|s| s.size_full().flex_grow(1.0f32).min_height(0.0)),
+        .style(|s| {
+            s.size_full()
+                .flex_grow(1.0f32)
+                .min_width(0.0)
+                .min_height(0.0)
+        }),
         Label::derived(move || state.status.get()).style(move |s| {
             s.font_size(11.0)
-                .padding_top(6.0)
+                .padding_top(4.0)
                 .color(theme::rgba(pal().text_secondary))
+                .text_ellipsis()
         }),
     ))
     .style(|s| {
-        s.width_pct(layout::BOARD_PANE_PCT)
+        s.flex_grow(1.0f32)
             .height_full()
             .min_width(0.0)
+            .min_height(0.0)
             .padding(12.0)
+            .overflow_x(Overflow::Clip)
+            .overflow_y(Overflow::Clip)
     })
 }
 
 fn empty_board(state: AppState) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    Stack::vertical((
-        Label::derived(move || {
-            (if state.screen.get() == Screen::Tournaments {
-                "Configure the tournament, then Start."
-            } else {
-                "Start a game from Home."
+    widgets::card(
+        state,
+        Stack::vertical((
+            widgets::curious_title("Board", 28.0),
+            Label::derived(move || {
+                (if state.screen.get() == Screen::Tournaments {
+                    "Configure the tournament, then Start."
+                } else {
+                    "Start a game from Home."
+                })
+                .to_owned()
             })
-            .to_owned()
-        })
-        .style(|s| s.font_size(16.0).font_bold()),
-        Label::derived(move || {
-            (if state.screen.get() == Screen::Tournaments {
-                "Games play with real clocks on one full board."
-            } else {
-                "The board fills this pane once a position is loaded."
+            .style(|s| s.font_size(15.0).font_bold()),
+            Label::derived(move || {
+                (if state.screen.get() == Screen::Tournaments {
+                    "Games play with real clocks on one full board."
+                } else {
+                    "The board fills this pane once a position is loaded."
+                })
+                .to_owned()
             })
-            .to_owned()
-        })
-        .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
-    ))
+            .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+        ))
+        .style(|s| s.row_gap(8.0).items_center()),
+    )
     .style(move |s| {
         s.size_full()
             .items_center()
             .justify_center()
-            .row_gap(8.0)
             .color(theme::rgba(pal().text_primary))
     })
 }
@@ -281,7 +394,9 @@ fn playing_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         pane_title("Engine"),
         engine_lines(state, handles),
         eval_graph::eval_graph(state),
-        Button::new("Coach review").action(move || actions::annotate_last_move(state)),
+        widgets::ghost_button(state, "Coach review", move || {
+            actions::annotate_last_move(state)
+        }),
         Label::derived(move || {
             let searching = if state.searching.get() {
                 "searching"
@@ -292,8 +407,7 @@ fn playing_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         })
         .style(|s| s.font_size(11.0)),
     ))
-    .style(|s| s.flex_col().row_gap(8.0).height_full().min_height(0.0))
-    .scroll()
+    .style(|s| s.flex_col().row_gap(8.0).width_full().min_height(0.0))
 }
 
 fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -317,15 +431,15 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         })
         .style(|s| s.font_size(12.0)),
         move_list(state),
-        Button::new("Re-run").action({
+        widgets::primary_button(state, "Re-run", {
             let handles = handles.clone();
             move || actions::analyze_game(state, &handles)
         }),
         Stack::horizontal((
-            Button::new("<<").action(move || {
+            widgets::ghost_button(state, "<<", move || {
                 state.review_ply.set(Some(0));
             }),
-            Button::new("<").action(move || {
+            widgets::ghost_button(state, "<", move || {
                 state.review_ply.update(|ply| {
                     *ply = Some(
                         ply.unwrap_or(state.move_log.get_untracked().len())
@@ -333,23 +447,22 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
                     );
                 });
             }),
-            Button::new(">").action(move || {
+            widgets::ghost_button(state, ">", move || {
                 let len = state.move_log.get_untracked().len();
                 state.review_ply.update(|ply| {
                     let next = ply.unwrap_or(0).saturating_add(1).min(len);
                     *ply = Some(next);
                 });
             }),
-            Button::new(">>").action(move || {
+            widgets::ghost_button(state, ">>", move || {
                 state
                     .review_ply
                     .set(Some(state.move_log.get_untracked().len()));
             }),
         ))
-        .style(|s| s.col_gap(4.0)),
+        .style(|s| s.col_gap(4.0).flex_wrap(FlexWrap::Wrap)),
     ))
-    .style(|s| s.flex_col().row_gap(8.0).height_full().min_height(0.0))
-    .scroll()
+    .style(|s| s.flex_col().row_gap(8.0).width_full().min_height(0.0))
 }
 
 fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -396,16 +509,17 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         move_list(state),
         eval_graph::eval_graph(state),
         Stack::horizontal((
-            Button::new("Setup").action(move || state.show_tournament_setup.set(true)),
-            Button::new("Cancel").action({
+            widgets::ghost_button(state, "Setup", move || {
+                state.show_tournament_setup.set(true)
+            }),
+            widgets::ghost_button(state, "Cancel", {
                 let handles = handles.clone();
                 move || actions::cancel_tournament(&handles)
             }),
         ))
-        .style(|s| s.col_gap(6.0)),
+        .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap)),
     ))
-    .style(|s| s.flex_col().row_gap(8.0).height_full().min_height(0.0))
-    .scroll()
+    .style(|s| s.flex_col().row_gap(8.0).width_full().min_height(0.0))
 }
 
 fn pane_title(label: &'static str) -> impl IntoView {
@@ -446,9 +560,12 @@ fn move_list(state: AppState) -> impl IntoView {
             .join("  ")
     })
     .style(move |s| {
-        s.font_size(12.0).color(theme::rgba(
-            theme::palette(state.settings.get().board_theme).text_primary,
-        ))
+        s.font_size(12.0)
+            .width_full()
+            .min_width(0.0)
+            .color(theme::rgba(
+                theme::palette(state.settings.get().board_theme).text_primary,
+            ))
     })
 }
 
@@ -480,27 +597,43 @@ fn engine_lines(state: AppState, handles: AppHandles) -> impl IntoView {
 fn study(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
-        Label::new("Study").style(|s| s.font_size(20.0).font_bold()),
-        Stack::horizontal((
-            TextInput::new(state.study_query).style(|s| s.width(280.0)),
-            Button::new("Search").action({
-                let handles = handles.clone();
-                move || actions::refresh_study(state, &handles)
+        widgets::curious_title("Study", 36.0),
+        Label::new("Search the library, import PGN, and train tactics.")
+            .style(move |s| s.font_size(13.0).color(theme::rgba(pal().text_secondary))),
+        widgets::card(
+            state,
+            Stack::horizontal((
+                TextInput::new(state.study_query).style(|s| {
+                    s.flex_grow(1.0f32)
+                        .min_width(160.0)
+                        .height(36.0)
+                        .border_radius(10.0)
+                }),
+                widgets::primary_button(state, "Search", {
+                    let handles = handles.clone();
+                    move || actions::refresh_study(state, &handles)
+                }),
+                widgets::ghost_button(state, "Import PGN", {
+                    let handles = handles.clone();
+                    move || actions::import_pgn(state, &handles)
+                }),
+                widgets::ghost_button(state, "Index openings", {
+                    let handles = handles.clone();
+                    move || actions::index_openings(state, &handles)
+                }),
+                widgets::ghost_button(state, "Train", {
+                    let handles = handles.clone();
+                    move || actions::start_puzzle(state, &handles)
+                }),
+            ))
+            .style(|s| {
+                s.width_full()
+                    .col_gap(8.0)
+                    .row_gap(8.0)
+                    .items_center()
+                    .flex_wrap(FlexWrap::Wrap)
             }),
-            Button::new("Import PGN").action({
-                let handles = handles.clone();
-                move || actions::import_pgn(state, &handles)
-            }),
-            Button::new("Index openings").action({
-                let handles = handles.clone();
-                move || actions::index_openings(state, &handles)
-            }),
-            Button::new("Train").action({
-                let handles = handles.clone();
-                move || actions::start_puzzle(state, &handles)
-            }),
-        ))
-        .style(|s| s.col_gap(8.0).items_center()),
+        ),
         Label::derived(move || {
             format!(
                 "{} games · {} openings indexed · {} puzzles due",
@@ -519,34 +652,46 @@ fn study(state: AppState, handles: AppHandles) -> impl IntoView {
                 .map(|summary| {
                     let id = summary.id.clone();
                     let (title, detail) = logic::game_summary_label(&summary);
-                    Button::new(format!("{title}\n{detail}")).action({
-                        let handles = handles.clone();
-                        move || actions::load_library_game(state, &handles, id.clone())
+                    Stack::vertical((
+                        Label::new(title).style(|s| s.font_size(13.0).font_bold()),
+                        Label::new(detail).style(move |s| {
+                            s.font_size(11.0).color(theme::rgba(pal().text_secondary))
+                        }),
+                        widgets::ghost_button(state, "Load game", {
+                            let handles = handles.clone();
+                            move || actions::load_library_game(state, &handles, id.clone())
+                        }),
+                    ))
+                    .style(move |s| {
+                        let pal = pal();
+                        s.width(260.0)
+                            .padding(12.0)
+                            .row_gap(6.0)
+                            .border_radius(12.0)
+                            .background(theme::rgba(pal.panel))
+                            .border(1.0)
+                            .border_color(theme::rgba(pal.border))
                     })
                 })
                 .collect::<Vec<_>>()
                 .into_view()
+                .style(|s| {
+                    s.width_full()
+                        .flex_row()
+                        .flex_wrap(FlexWrap::Wrap)
+                        .col_gap(10.0)
+                        .row_gap(10.0)
+                })
         }),
         Label::derived(move || state.status.get()),
     ))
     .style(move |s| {
         s.size_full()
-            .padding(20.0)
-            .row_gap(12.0)
+            .padding(24.0)
+            .row_gap(14.0)
+            .min_width(0.0)
+            .min_height(0.0)
             .color(theme::rgba(pal().text_primary))
     })
     .scroll()
-}
-
-fn cycle_enum(
-    _state: AppState,
-    label: &'static str,
-    value: impl Fn() -> String + Copy + 'static,
-    action: impl Fn() + 'static,
-) -> impl IntoView {
-    Stack::horizontal((
-        Label::new(label).style(|s| s.font_size(12.0)),
-        Button::new(Label::derived(value)).action(action),
-    ))
-    .style(|s| s.col_gap(8.0).items_center())
 }

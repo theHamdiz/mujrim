@@ -11,11 +11,21 @@ pub enum AnimPace {
 }
 
 impl AnimPace {
+    pub const ALL: [Self; 3] = [Self::Fast, Self::Normal, Self::Slow];
+
     pub fn from_setting(value: i32) -> Self {
         match value {
             0 => Self::Fast,
             2 => Self::Slow,
             _ => Self::Normal,
+        }
+    }
+
+    pub const fn to_setting(self) -> i32 {
+        match self {
+            Self::Fast => 0,
+            Self::Normal => 1,
+            Self::Slow => 2,
         }
     }
 
@@ -58,6 +68,12 @@ impl AnimPace {
     }
 }
 
+impl std::fmt::Display for AnimPace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// Landing / hub entrance fade progress from a start instant.
 pub fn hub_entrance(progress_ms: u64, duration_ms: u64) -> f32 {
     if duration_ms == 0 {
@@ -87,6 +103,11 @@ mod tests {
     fn pace_scales_duration() {
         assert!(AnimPace::Fast.quiet_move() < AnimPace::Normal.quiet_move());
         assert!(AnimPace::Slow.quiet_move() > AnimPace::Normal.quiet_move());
+        assert_eq!(
+            AnimPace::from_setting(AnimPace::Slow.to_setting()),
+            AnimPace::Slow
+        );
+        assert_eq!(AnimPace::ALL.len(), 3);
     }
 
     #[test]

@@ -4,9 +4,64 @@ use super::tournament_live::{LiveGameBoard, PlayedGame, format_clock_ms};
 
 pub const BOARD_PANE_PCT: f64 = 80.0;
 pub const SIDE_PANE_PCT: f64 = 20.0;
+pub const SIDEBAR_MIN_PX: f64 = 240.0;
+pub const SIDEBAR_IDEAL_PX: f64 = 280.0;
+pub const SIDEBAR_MAX_PX: f64 = 340.0;
+pub const BOARD_MIN_PX: f64 = 120.0;
+pub const TITLE_BAR_PX: f64 = 48.0;
+pub const OVERLAY_MAX_WIDTH: f64 = 720.0;
+pub const OVERLAY_PAD: f64 = 24.0;
 pub const DOCK_TAB_BAR_PX: f64 = 36.0;
 pub const DOCK_OPEN_PX: f64 = 220.0;
 pub const LOW_TIME_MS: u64 = 10_000;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoardGeom {
+    pub origin_x: f64,
+    pub origin_y: f64,
+    pub side: f64,
+}
+
+impl Default for BoardGeom {
+    fn default() -> Self {
+        Self {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            side: 560.0,
+        }
+    }
+}
+
+impl BoardGeom {
+    pub fn square(self) -> f64 {
+        self.side / 8.0
+    }
+
+    pub fn contains(self, x: f64, y: f64) -> bool {
+        x >= self.origin_x
+            && y >= self.origin_y
+            && x < self.origin_x + self.side
+            && y < self.origin_y + self.side
+    }
+}
+
+pub fn board_side(avail_width: f64, avail_height: f64) -> f64 {
+    avail_width.min(avail_height).max(BOARD_MIN_PX)
+}
+
+pub fn board_geom(avail_width: f64, avail_height: f64) -> BoardGeom {
+    let side = board_side(avail_width, avail_height);
+    BoardGeom {
+        origin_x: ((avail_width - side) * 0.5).max(0.0),
+        origin_y: ((avail_height - side) * 0.5).max(0.0),
+        side,
+    }
+}
+
+pub fn sidebar_width(window_width: f64) -> f64 {
+    let from_pct = window_width * SIDE_PANE_PCT / 100.0;
+    from_pct.clamp(SIDEBAR_MIN_PX, SIDEBAR_MAX_PX.min(window_width * 0.42))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockTab {
@@ -128,6 +183,25 @@ mod tests {
             assert!((BOARD_PANE_PCT + SIDE_PANE_PCT - 100.0).abs() < f64::EPSILON);
             assert!(BOARD_PANE_PCT > SIDE_PANE_PCT);
         }
+    }
+
+    #[test]
+    fn board_geom_letterboxes_to_a_square_inside_the_pane() {
+        let geom = board_geom(800.0, 500.0);
+        assert!((geom.side - 500.0).abs() < f64::EPSILON);
+        assert!((geom.origin_x - 150.0).abs() < f64::EPSILON);
+        assert!(geom.origin_y.abs() < f64::EPSILON);
+        assert!(geom.contains(150.0, 0.0));
+        assert!(!geom.contains(149.0, 0.0));
+        assert!((geom.square() - 62.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sidebar_stays_in_viewport_on_narrow_and_wide_windows() {
+        assert!(sidebar_width(800.0) >= SIDEBAR_MIN_PX);
+        assert!(sidebar_width(800.0) < 800.0 * 0.5);
+        assert!(sidebar_width(1920.0) <= SIDEBAR_MAX_PX);
+        assert!(sidebar_width(1920.0) >= SIDEBAR_IDEAL_PX - 40.0);
     }
 
     #[test]

@@ -125,6 +125,31 @@ pub fn bundled_engine_choices(engines: &[DiscoveredEngine]) -> Vec<BundledEngine
         .collect()
 }
 
+pub fn default_engine_player(bundled: &[DiscoveredEngine]) -> PlayerConfig {
+    bundled
+        .first()
+        .map_or(PlayerConfig::BuiltIn { depth: 16 }, |engine| {
+            PlayerConfig::External {
+                path: engine.path.to_string_lossy().into_owned(),
+                protocol: ExternalEngineProtocol::Uci,
+            }
+        })
+}
+
+pub fn players_for_mode(
+    mode: GameMode,
+    bundled: &[DiscoveredEngine],
+) -> (PlayerConfig, PlayerConfig) {
+    match mode {
+        GameMode::HumanVsHuman => (PlayerConfig::Human, PlayerConfig::Human),
+        GameMode::HumanVsEngine => (PlayerConfig::Human, default_engine_player(bundled)),
+        GameMode::EngineVsEngine => (
+            default_engine_player(bundled),
+            PlayerConfig::BuiltIn { depth: 12 },
+        ),
+    }
+}
+
 pub fn selected_bundled_engine(
     engines: &[DiscoveredEngine],
     player: &PlayerConfig,
@@ -375,5 +400,18 @@ mod tests {
         )
         .expect("bundled engine should be selected");
         assert_eq!(selected, choices[0]);
+    }
+
+    #[test]
+    fn players_for_mode_assigns_human_and_engine_sides() {
+        let (white, black) = players_for_mode(GameMode::HumanVsHuman, &[]);
+        assert!(matches!(white, PlayerConfig::Human));
+        assert!(matches!(black, PlayerConfig::Human));
+        let (white, black) = players_for_mode(GameMode::HumanVsEngine, &[]);
+        assert!(matches!(white, PlayerConfig::Human));
+        assert!(matches!(black, PlayerConfig::BuiltIn { depth: 16 }));
+        let (white, black) = players_for_mode(GameMode::EngineVsEngine, &[]);
+        assert!(matches!(white, PlayerConfig::BuiltIn { depth: 16 }));
+        assert!(matches!(black, PlayerConfig::BuiltIn { depth: 12 }));
     }
 }

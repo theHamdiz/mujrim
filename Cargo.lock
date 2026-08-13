@@ -6316,6 +6316,7 @@ dependencies = [
  "serde",
  "tokio",
  "toml 0.8.2",
+ "usvg 0.46.0",
  "xcap",
 ]
 

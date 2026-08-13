@@ -4,6 +4,7 @@ use floem::action::{drag_resize_window, drag_window, minimize_window, toggle_win
 use floem::prelude::*;
 use floem::window::{ResizeDirection, WindowId};
 
+use crate::app_core::layout;
 use crate::app_core::recording::RecordState;
 use crate::app_core::settings::Screen;
 
@@ -24,9 +25,14 @@ pub fn shell(
     Stack::new((
         Stack::vertical((
             title,
-            content.style(|s| s.flex_grow(1.0f32).min_height(0.0)),
+            content.style(|s| s.flex_grow(1.0f32).min_width(0.0).min_height(0.0)),
         ))
-        .style(move |s| s.size_full().background(theme::rgba(pal().bg))),
+        .style(move |s| {
+            s.size_full()
+                .min_width(0.0)
+                .min_height(0.0)
+                .background(theme::rgba(pal().bg))
+        }),
         edges,
     ))
     .style(|s| s.size_full())
@@ -51,13 +57,19 @@ fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl 
     Stack::horizontal((
         Stack::horizontal((logo, title_block))
             .style(|s| s.col_gap(8.0f32).items_center().padding_left(12.0)),
-        nav.style(|s| s.flex_grow(1.0f32).justify_center().items_center()),
+        nav.style(|s| {
+            s.flex_grow(1.0f32)
+                .min_width(0.0)
+                .justify_center()
+                .items_center()
+        }),
         controls,
     ))
     .style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
         s.width_full()
-            .height(40.0)
+            .height(layout::TITLE_BAR_PX)
+            .min_width(0.0)
             .items_center()
             .background(theme::rgba(pal.sidebar))
             .border_bottom(1.0)
@@ -94,6 +106,9 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             move || state.show_options.get(),
             move || {
                 state.show_options.update(|open| *open = !*open);
+                if state.show_options.get_untracked() {
+                    actions::refresh_updater_status(state);
+                }
             },
         ),
         dyn_view(move || {
@@ -192,7 +207,8 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             }
         }),
     ))
-    .style(|s| s.col_gap(3.0).items_center())
+    .style(|s| s.col_gap(3.0).items_center().min_width(0.0))
+    .scroll()
 }
 
 fn pill(

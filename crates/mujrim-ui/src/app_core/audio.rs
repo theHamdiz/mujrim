@@ -25,6 +25,10 @@ pub enum SoundTheme {
     Soft,
 }
 
+impl SoundTheme {
+    pub const ALL: [Self; 3] = [Self::Wood, Self::Crystal, Self::Soft];
+}
+
 impl std::fmt::Display for SoundTheme {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -44,6 +48,10 @@ pub enum GameMood {
     Joyful,
     /// Deep drone, Hijaz scale, ethereal shimmer.
     Mystique,
+}
+
+impl GameMood {
+    pub const ALL: [Self; 3] = [Self::Playful, Self::Joyful, Self::Mystique];
 }
 
 impl std::fmt::Display for GameMood {

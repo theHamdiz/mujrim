@@ -14,6 +14,10 @@ pub enum CaptureAnimStyle {
     Fire,
 }
 
+impl CaptureAnimStyle {
+    pub const ALL: [Self; 3] = [Self::Instant, Self::Explosion, Self::Fire];
+}
+
 impl std::fmt::Display for CaptureAnimStyle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -28,6 +32,10 @@ impl std::fmt::Display for CaptureAnimStyle {
 pub enum CoordPosition {
     Inside,
     Outside,
+}
+
+impl CoordPosition {
+    pub const ALL: [Self; 2] = [Self::Inside, Self::Outside];
 }
 
 impl std::fmt::Display for CoordPosition {
@@ -150,5 +158,8 @@ mod tests {
         assert_eq!(settings.board_theme, BoardTheme::Classic);
         assert_eq!(settings.piece_set, PieceSet::Cburnett);
         assert!(settings.piece_slide);
+        assert_eq!(BoardTheme::ALL.len(), 8);
+        assert_eq!(CaptureAnimStyle::ALL.len(), 3);
+        assert_eq!(CoordPosition::ALL.len(), 2);
     }
 }

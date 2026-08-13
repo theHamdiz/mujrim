@@ -10,13 +10,13 @@ use types::{Color, Move, Square};
 
 use crate::app_core::analysis::{AnalysisEngineSpec, AnalysisRequest, run_multi_engine_analysis};
 use crate::app_core::audio::BgmTrack;
-use crate::app_core::engine::{EngineConfig, PlayerConfig};
+use crate::app_core::engine::{GameMode, PlayerConfig, players_for_mode};
 use crate::app_core::game::GameState;
 use crate::app_core::gif_export;
 use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
 use crate::app_core::recording::RecordState;
-use crate::app_core::settings::Screen;
+use crate::app_core::settings::{AppSettings, Screen};
 use crate::app_core::uci_process::ExternalEngineProtocol;
 
 use super::engine;
@@ -691,8 +691,35 @@ pub fn download_nnue(state: AppState) {
     });
 }
 
-pub fn persist_engine(state: AppState, cfg: EngineConfig) {
-    state.engine_cfg.set(cfg);
+pub fn update_settings(state: AppState, patch: impl FnOnce(&mut AppSettings)) {
+    state.settings.update(patch);
+    state.persist_settings();
+}
+
+pub fn select_mode(
+    state: AppState,
+    bundled: &[mujrim_protocols::catalog::DiscoveredEngine],
+    mode: GameMode,
+) {
+    state.selected_mode.set(mode);
+    let (white, black) = players_for_mode(mode, bundled);
+    state.white_player.set(white);
+    state.black_player.set(black);
+}
+
+pub fn pick_external_engine(state: AppState, white: bool, protocol: ExternalEngineProtocol) {
+    let Some(path) = rfd::FileDialog::new().pick_file() else {
+        return;
+    };
+    let player = PlayerConfig::External {
+        path: path.to_string_lossy().into_owned(),
+        protocol,
+    };
+    if white {
+        state.white_player.set(player);
+    } else {
+        state.black_player.set(player);
+    }
 }
 
 pub fn annotate_last_move(state: AppState) {
@@ -722,5 +749,8 @@ mod tests {
     fn human_side_defaults_to_white_when_white_is_human() {
         // PlayerConfig Display stays stable for PGN headers.
         assert_eq!(PlayerConfig::Human.to_string(), "Human");
+        let (white, black) = players_for_mode(GameMode::HumanVsEngine, &[]);
+        assert!(matches!(white, PlayerConfig::Human));
+        assert!(matches!(black, PlayerConfig::BuiltIn { .. }));
     }
 }
