@@ -1,57 +1,62 @@
 [package]
-name = "kishmat"
+name = "mujrim"
 version = "1.0.0"
 edition = "2024"
 authors = ["Ahmad Hamdi Emara"]
 categories = ["games", "game-engines"]
 description = "The first Arabian chess engine written in Rust"
 license = "MIT"
-repository = "https://github.com/theHamdiz/kishmat"
+repository = "https://github.com/theHamdiz/mujrim"
 readme = "README.md"
 
 [workspace]
 members = [
-    "crates/kishmat-bench-ratings",
-    "crates/kishmat-types",
-    "crates/kishmat-eval",
-    "crates/kishmat-search",
-    "crates/kishmat-comms",
-    "crates/kishmat-protocols",
-    "crates/kishmat-tests",
-    "crates/kishmat-ui",
-    "crates/kishmat-updater",
-    "crates/kishmat-gpu",
-    "crates/kishmat-trainer",
-    "crates/kishmat-benchmarker",
-    "crates/kishmat-tooling",
-    "crates/kishmat-game",
-    "crates/kishmat-installer",
+    "crates/mujrim-bench-ratings",
+    "crates/mujrim-types",
+    "crates/mujrim-eval",
+    "crates/mujrim-native-v60",
+    "crates/mujrim-search",
+    "crates/mujrim-comms",
+    "crates/mujrim-protocols",
+    "crates/mujrim-tests",
+    "crates/mujrim-ui",
+    "crates/mujrim-updater",
+    "crates/mujrim-gpu",
+    "crates/mujrim-trainer",
+    "crates/mujrim-benchmarker",
+    "crates/mujrim-tooling",
+    "crates/mujrim-game",
+    "crates/mujrim-installer",
+    "crates/mujrim-study",
 ]
 
 [features]
-default = ["mimalloc", "trainer", "gpu", "xboard", "book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue"]
+default = ["trainer", "gpu", "xboard", "book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue"]
 mimalloc = ["dep:mimalloc"]
 trainer = ["dep:trainer"]
 gpu = ["dep:gpu"]
 xboard = ["comms/xboard"]
 book = ["comms/book"]
 nnue = ["comms/nnue"]
-simd = ["eval/simd"]
-akimbo-nnue = ["eval/akimbo-nnue"]
-stockfish-nnue = ["eval/stockfish-nnue"]
+simd = ["eval/simd", "search/simd"]
+akimbo-nnue = ["eval/akimbo-nnue", "search/akimbo-nnue"]
+stockfish-nnue = ["eval/stockfish-nnue", "comms/stockfish-nnue", "search/stockfish-nnue"]
+reckless-nnue = ["eval/reckless-nnue", "comms/reckless-nnue", "search/reckless-nnue"]
+embedded-networks = ["eval/embedded-networks", "search/embedded-networks"]
 
 [dependencies]
 clap = "4.6"
-kishmat-bench-ratings = { path = "crates/kishmat-bench-ratings" }
-mimalloc = { version = "0.1", default-features = false, optional = true }
+mujrim-bench-ratings = { path = "crates/mujrim-bench-ratings" }
+mujrim-protocols = { path = "crates/mujrim-protocols" }
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
 
 # Workspace crates — `package` rename lets source code keep short `use` names
-types = { package = "kishmat-types", path = "crates/kishmat-types" }
-comms = { package = "kishmat-comms", path = "crates/kishmat-comms" }
-search = { package = "kishmat-search", path = "crates/kishmat-search" }
-eval = { package = "kishmat-eval", path = "crates/kishmat-eval" }
-gpu = { package = "kishmat-gpu", path = "crates/kishmat-gpu", optional = true }
-trainer = { package = "kishmat-trainer", path = "crates/kishmat-trainer", optional = true }
+types = { package = "mujrim-types", path = "crates/mujrim-types" }
+comms = { package = "mujrim-comms", path = "crates/mujrim-comms", default-features = false }
+search = { package = "mujrim-search", path = "crates/mujrim-search", default-features = false }
+eval = { package = "mujrim-eval", path = "crates/mujrim-eval", default-features = false }
+gpu = { package = "mujrim-gpu", path = "crates/mujrim-gpu", optional = true }
+trainer = { package = "mujrim-trainer", path = "crates/mujrim-trainer", optional = true }
 
 [profile.release]
 opt-level = 3
@@ -59,6 +64,20 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Optimized tests without the multi-gigabyte fat-LTO test-harness link.
+[profile.release-test]
+inherits = "release"
+lto = false
+codegen-units = 8
+strip = false
+
+# Desktop binaries use thin LTO to retain cross-crate optimization while keeping
+# linker memory below the workstation safety ceiling.
+[profile.desktop-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
 
 # Optimize dependencies in dev mode so Bevy/GPU runs at usable speed
 [profile.dev.package."*"]

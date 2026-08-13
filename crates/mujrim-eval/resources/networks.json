@@ -1,0 +1,34 @@
+{
+  "sf_current": {
+    "id": "sf_current",
+    "url": "https://tests.stockfishchess.org/api/nn/nn-ab28990d4ea3.nnue",
+    "upstream_name": "nn-ab28990d4ea3.nnue",
+    "filename": "sf_current.nnue",
+    "downloaded_at": "epoch:1786047259",
+    "file_size": 95144073
+  },
+  "alex_default": {
+    "id": "alex_default",
+    "url": "https://github.com/PGG106/Alexandria-networks/releases/latest/download/nn.net",
+    "upstream_name": "nn.net",
+    "filename": "alex_default.net",
+    "downloaded_at": "epoch:1773936249",
+    "file_size": 37983776
+  },
+  "ak_default": {
+    "id": "ak_default",
+    "url": "https://github.com/jw1912/akimbo/raw/main/resources/net.bin",
+    "upstream_name": "net.bin",
+    "filename": "ak_default.bin",
+    "downloaded_at": "epoch:1773936233",
+    "file_size": 6297664
+  },
+  "viri_default": {
+    "id": "viri_default",
+    "url": "https://github.com/cosmobobak/viridithas-networks/releases/download/v104.1/velarised-2-b800.nnue.zst",
+    "upstream_name": "velarised-2-b800.nnue.zst",
+    "filename": "viri_default.nnue.zst",
+    "downloaded_at": "epoch:1773937035",
+    "file_size": 29564785
+  }
+}

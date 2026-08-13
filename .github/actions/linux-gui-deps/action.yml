@@ -1,0 +1,35 @@
+name: Linux GUI deps
+description: Install Floem / wgpu / GTK / ALSA packages needed to compile mujrim-ui on Linux.
+
+inputs:
+  extra-packages:
+    description: Additional apt packages (space-separated)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Linux GUI/build deps
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config \
+          libegl1-mesa-dev \
+          libgl1-mesa-dev \
+          libxkbcommon-dev \
+          libxkbcommon-x11-dev \
+          libwayland-dev \
+          libx11-dev \
+          libxi-dev \
+          libxcursor-dev \
+          libxrandr-dev \
+          libasound2-dev \
+          libudev-dev \
+          libpipewire-0.3-dev \
+          libgbm-dev \
+          libgtk-3-dev \
+          libvulkan-dev \
+          ${{ inputs.extra-packages }}

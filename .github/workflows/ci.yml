@@ -4,14 +4,17 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_MIN_STACK: "16777216"
 
 jobs:
-  # ── Quick checks (format, clippy, tests) on native runners ──
   check:
     strategy:
       fail-fast: false
@@ -19,39 +22,80 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
+            fmt: true
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64
+            fmt: false
           - os: macos-latest
             name: macOS ARM64
+            fmt: false
           - os: windows-latest
             name: Windows x86_64
+            fmt: false
+          - os: windows-11-arm
+            name: Windows ARM64
+            fmt: false
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux GUI/build deps (Floem / wgpu / GTK / ALSA)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-gui-deps
+
+      - uses: ./.github/actions/fetch-nnue
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Check formatting
+        if: matrix.fmt
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build
-        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build engine artifacts for smoke
+        run: cargo build -p mujrim -p mujrim-native-v60
+
+      - name: Prepare standalone fallback alias
+        shell: python
+        run: |
+          import os
+          import shutil
+          from pathlib import Path
+
+          suffix = ".exe" if os.name == "nt" else ""
+          debug = Path("target/debug")
+          source = debug / f"mujrim-v60{suffix}"
+          if not source.exists():
+              raise SystemExit(f"missing v60 adapter binary: {source}")
+          import platform
+          arch = platform.machine().lower().replace("amd64", "x86_64").replace("arm64", "aarch64")
+          if os.name == "nt" and arch == "x86_64":
+              arch = "x86_64-avx2"
+          shutil.copy2(source, debug / f"mujrim-v60-{arch}{suffix}")
 
       - name: Smoke test (UCI handshake)
         shell: python
+        env:
+          MUJRIM_UCI_SMOKE: "1"
         run: |
           import os
           import subprocess
           import sys
           from pathlib import Path
 
-          exe = Path("target/debug/kishmat")
+          exe = Path("target/debug/mujrim")
           if os.name == "nt":
               exe = exe.with_suffix(".exe")
           if not exe.exists():
@@ -59,23 +103,24 @@ jobs:
               sys.exit(1)
 
           proc = subprocess.run(
-              [str(exe), "uci"],
+              [str(exe), "--backend", "universal", "uci"],
               input="uci\nquit\n",
               capture_output=True,
               text=True,
               timeout=15,
               check=False,
+              env={**os.environ, "MUJRIM_UCI_SMOKE": "1"},
           )
           output = (proc.stdout or "") + (proc.stderr or "")
           if "uciok" not in output:
               print("uci smoke test failed, output:", file=sys.stderr)
               print(output, file=sys.stderr)
               sys.exit(1)
+          if "Mujrim 1.0.0" not in output:
+              print("uci smoke missing id name Mujrim 1.0.0:", file=sys.stderr)
+              print(output, file=sys.stderr)
+              sys.exit(1)
 
-      - name: Test
-        run: cargo test --workspace
-
-  # ── Cross-compile check for ARM/MUSL targets ──
   cross-check:
     runs-on: ubuntu-latest
     strategy:
@@ -95,10 +140,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-on-failure: true
+
+      - uses: ./.github/actions/fetch-nnue
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
-      # Only build the CLI engine for cross targets (UI needs native GPU libs)
-      - name: Cross build (engine only)
-        run: cross build --release --target ${{ matrix.target }} -p kishmat
+      - name: Cross build (engine + updater)
+        run: |
+          cross build --release --target ${{ matrix.target }} \
+            -p mujrim -p mujrim-native-v60 -p mujrim-updater
+
+      - name: Smoke test via cross run (UCI handshake)
+        run: |
+          set -euo pipefail
+          export CROSS_CONTAINER_OPTS="${CROSS_CONTAINER_OPTS:-} -e MUJRIM_UCI_SMOKE=1"
+          output="$(cross run --release --target ${{ matrix.target }} -p mujrim -- uci 2>&1)"
+          echo "$output"
+          echo "$output" | grep -q 'uciok'
+          echo "$output" | grep -q 'Mujrim 1.0.0'

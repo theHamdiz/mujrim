@@ -1,0 +1,15 @@
+[package]
+name = "mujrim-study"
+version = "1.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Reusable chess study, coaching, annotation, and tournament models"
+license = "MIT"
+
+[lib]
+name = "mujrim_study"
+path = "src/lib.rs"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+types = { package = "mujrim-types", path = "../mujrim-types" }

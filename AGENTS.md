@@ -1,6 +1,6 @@
-# KishMat Agent Guide
+# Mujrim Agent Guide
 
-Updated: 2026-04-08
+Updated: 2026-08-13
 
 ## Repository Rules
 - Always check latest dependency versions from the internet and read their docs before implementing updates.
@@ -11,19 +11,22 @@ Updated: 2026-04-08
 - Prefer modular, trait-based designs with no unnecessary runtime overhead.
 
 ## Current State
-- A structured AI-agent tool surface is implemented in `kishmat-tooling`.
-- Entry point: `kishmat-tooling agent`.
+- Multi-adapter in-process engine: Stockfish / Reckless / Akimbo / Mujrim HCE each bind eval + matching search via `EvalSearchAdapter`.
+- Product surfaces: `--backend universal` (selectable), `--backend mujrim-hce` (classical HCE), `--backend v60`/`v10`/`akimbo` (packaged adapters), external upstream passthrough.
+- Do not use “native” as an engine/backend product name (`RuntimeCompatibility::Native` is host-ISA packaging only).
+- A structured AI-agent tool surface is implemented in `mujrim-tooling`.
+- Entry point: `mujrim-tooling agent`.
 - Output contract: JSON (machine-readable for agent orchestration).
 - Tool domains are split by responsibility:
   - `engine.*`
   - `gui.*`
   - `tooling.*`
   - `updater.*`
-
-## Agent Tool Commands
-- `kishmat-tooling agent list [--pretty]`
-- `kishmat-tooling agent describe <tool> [--pretty]`
-- `kishmat-tooling agent call <tool> --input '<json-object>' [--pretty]`
+- Default desktop GUI is Floem (`cargo run --release -p mujrim-ui`); Iced is `--no-default-features --features iced-ui,book,nnue`.
+- Title-bar icons are embedded Lucide SVGs on the Floem path.
+- `mujrim-tooling agent list [--pretty]`
+- `mujrim-tooling agent describe <tool> [--pretty]`
+- `mujrim-tooling agent call <tool> --input '<json-object>' [--pretty]`
 
 ## Implemented Tool Set
 - `engine.analyze`
@@ -38,17 +41,18 @@ Updated: 2026-04-08
 - `updater.tuning.read`
 
 ## Open UI Workstream
-- Add multiple high-quality piece sets under separate folders (`default` + additional sets) and expose runtime switching in GUI settings.
-- Replace emoji-based UI icons with professional vector iconography suitable for `iced`.
+- Additional piece sets live under `crates/mujrim-ui/assets/pieces/` and switch at runtime in Options.
 
 ## CI/CD Baseline (Required)
-- CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test.
+- CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test (`uciok` + `Mujrim 1.0.0`).
+- Native CI matrix: Linux x86_64 + Linux aarch64 (`ubuntu-24.04-arm`) + macOS ARM64 + Windows x86_64 + Windows ARM64 (`windows-11-arm`).
+- Cross CI/release matrix: Linux `armv7`, `x86_64-musl`, `aarch64-musl` (engine + updater; UCI smoke via `cross run`).
 - Release pipeline must produce artifacts for major platforms, including:
   - macOS `aarch64` + `x86_64` + universal bundle
-  - Linux `x86_64` + `aarch64` (gnu and musl variants)
-  - Windows `x86_64`
+  - Linux `x86_64` + `aarch64` (gnu full with UI; musl engine-only) + `armv7` engine-only
+  - Windows `x86_64` + Windows `aarch64`
 - Every release artifact should contain engine + UI (when supported) + updater + NNUE payload/metadata.
-- Smoke validation in release jobs should verify `kishmat` responds correctly to UCI handshake input.
+- Smoke validation in release jobs should verify `mujrim` responds correctly to UCI handshake input.
 
 ## Current Iteration Commands
 - Quality gate:

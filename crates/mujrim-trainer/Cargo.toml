@@ -1,0 +1,16 @@
+[package]
+name = "mujrim-trainer"
+version = "1.0.0"
+edition = "2024"
+description = "NNUE training pipeline for Mujrim — self-play datagen and bullet trainer integration"
+
+[features]
+default = ["nnue"]
+nnue = ["eval/nnue"]
+
+[dependencies]
+types = { package = "mujrim-types", path = "../mujrim-types" }
+search = { package = "mujrim-search", path = "../mujrim-search" }
+eval = { package = "mujrim-eval", path = "../mujrim-eval" }
+gpu = { package = "mujrim-gpu", path = "../mujrim-gpu" }
+rand = "0.9"

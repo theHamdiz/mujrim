@@ -1,0 +1,38 @@
+[package]
+name = "mujrim-installer"
+version = "1.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "GUI installer for the Mujrim chess engine suite"
+license = "MIT"
+
+[[bin]]
+name = "mujrim-installer"
+path = "src/main.rs"
+test = false
+
+[lib]
+name = "mujrim_setup"
+path = "src/lib.rs"
+
+[features]
+default = []
+embed = []
+
+[dependencies]
+iced = { version = "0.14", features = ["canvas", "image", "tokio"] }
+iced_fonts = { version = "0.3", features = ["lucide"] }
+updater = { package = "mujrim-updater", path = "../mujrim-updater" }
+dirs = "6"
+image = "0.25"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
+[lints.rust]
+# objc 0.2 `msg_send!` expands `#[cfg(feature = "cargo-clippy")]` at call sites.
+# Declare it so macOS `clippy -D warnings` does not fail on unexpected_cfgs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

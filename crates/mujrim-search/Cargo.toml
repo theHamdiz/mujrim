@@ -1,0 +1,26 @@
+[package]
+name = "mujrim-search"
+version = "1.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Search engine for the Mujrim chess engine"
+license = "MIT"
+
+[features]
+# Format loaders are defaulted for tests/tools; embedded-networks stays off so
+# dependents do not silently grow by ~150 MB via feature unification.
+default = ["book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue"]
+book = []
+nnue = ["eval/nnue"]
+simd = ["eval/simd"]
+akimbo-nnue = ["eval/akimbo-nnue"]
+stockfish-nnue = ["eval/stockfish-nnue"]
+reckless-nnue = ["eval/reckless-nnue"]
+embedded-networks = ["eval/embedded-networks"]
+
+[dependencies]
+types = { package = "mujrim-types", path = "../mujrim-types" }
+eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false }
+rayon = "1.12"
+toml = "0.8"
+sha2 = "0.10"

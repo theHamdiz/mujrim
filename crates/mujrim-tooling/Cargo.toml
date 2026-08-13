@@ -1,0 +1,21 @@
+[package]
+name = "mujrim-tooling"
+version = "1.0.0"
+edition = "2024"
+authors = ["Ahmad Hamdi Emara"]
+description = "Trait-based developer tooling for Mujrim recipes"
+license = "MIT"
+
+[[bin]]
+name = "mujrim-tooling"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+mujrim-protocols = { path = "../mujrim-protocols" }
+mujrim-updater = { path = "../mujrim-updater" }
+dirs = "6.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+types = { package = "mujrim-types", path = "../mujrim-types" }
+search = { package = "mujrim-search", path = "../mujrim-search" }

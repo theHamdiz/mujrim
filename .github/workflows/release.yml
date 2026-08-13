@@ -3,12 +3,19 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0). Leave empty to dry-run package only."
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && (inputs.tag != '' && inputs.tag || format('dryrun-{0}', github.sha)) || github.ref_name }}
 
 jobs:
   # ══════════════════════════════════════════════════════════════
@@ -20,25 +27,41 @@ jobs:
       matrix:
         include:
           # ── macOS ──
+          # macos-latest is Apple Silicon; macos-13 remains the Intel host image.
           - os: macos-latest
             target: aarch64-apple-darwin
+            arch: aarch64
             name: macOS ARM64 (Apple Silicon)
             suffix: ""
           - os: macos-13
             target: x86_64-apple-darwin
+            arch: x86_64
             name: macOS x86_64 (Intel)
             suffix: ""
 
           # ── Linux ──
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            arch: x86_64
             name: Linux x86_64
+            suffix: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            name: Linux ARM64
             suffix: ""
 
           # ── Windows ──
+          # windows-11-arm ships VS 2022 + ARM64 MSVC toolchains for native builds.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            arch: x86_64-avx2
             name: Windows x86_64
+            suffix: ".exe"
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            arch: aarch64
+            name: Windows ARM64
             suffix: ".exe"
 
     runs-on: ${{ matrix.os }}
@@ -47,6 +70,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Linux GUI/build deps (Floem / wgpu / GTK / ALSA)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-gui-deps
+        with:
+          extra-packages: p7zip-full
+
+      - uses: ./.github/actions/fetch-nnue
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -54,19 +85,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          cache-on-failure: true
 
-      - name: Build release (full workspace)
-        run: cargo build --release --workspace --target ${{ matrix.target }}
+      - name: Build optimized release
+        run: |
+          # Workspace tools first, then product engines last (so defaults don't overwrite).
+          cargo build --release --workspace --exclude mujrim --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer --target ${{ matrix.target }}
+          # Product engines: never enable embedded-networks on top of default features.
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}"
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,stockfish-nnue,embedded-networks --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-elite${{ matrix.suffix }}"
+          cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,akimbo-nnue,embedded-networks --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-ak${{ matrix.suffix }}"
+          cargo build --release -p mujrim-native-v60 --features syzygy,embedded-network --target ${{ matrix.target }}
+          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}"
+          cargo build --release -p mujrim-ui --target ${{ matrix.target }}
+          cargo build --release -p mujrim-game --target ${{ matrix.target }}
+          cargo build --release -p mujrim-installer --features embed --target ${{ matrix.target }}
+
+      - name: Prepare standalone fallback alias
+        shell: python
+        run: |
+          from pathlib import Path
+
+          suffix = "${{ matrix.suffix }}"
+          arch = "${{ matrix.arch }}"
+          release = Path("target/${{ matrix.target }}/release")
+          source = release / f"mujrim-v60{suffix}"
+          if not source.exists():
+              raise SystemExit(f"missing v60 adapter binary: {source}")
+          arch_named = release / f"mujrim-v60-{arch}{suffix}"
+          if not arch_named.exists():
+              raise SystemExit(f"missing arch-suffixed adapter binary: {arch_named}")
 
       - name: Smoke test (UCI handshake)
         shell: python
+        env:
+          MUJRIM_UCI_SMOKE: "1"
         run: |
           import os
           import subprocess
           import sys
           from pathlib import Path
 
-          exe = Path("target/${{ matrix.target }}/release/kishmat")
+          exe = Path("target/${{ matrix.target }}/release/mujrim")
           if os.name == "nt":
               exe = exe.with_suffix(".exe")
           if not exe.exists():
@@ -74,43 +138,58 @@ jobs:
               sys.exit(1)
 
           proc = subprocess.run(
-              [str(exe), "uci"],
+              [str(exe), "--backend", "universal", "uci"],
               input="uci\nquit\n",
               capture_output=True,
               text=True,
               timeout=15,
               check=False,
+              env={**os.environ, "MUJRIM_UCI_SMOKE": "1"},
           )
           output = (proc.stdout or "") + (proc.stderr or "")
           if "uciok" not in output:
               print("uci smoke test failed, output:", file=sys.stderr)
               print(output, file=sys.stderr)
               sys.exit(1)
+          if "Mujrim 1.0.0" not in output:
+              print("uci smoke missing id name Mujrim 1.0.0:", file=sys.stderr)
+              print(output, file=sys.stderr)
+              sys.exit(1)
 
       - name: Package binaries
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          DIR="kishmat-${TAG}-${{ matrix.target }}"
+          TAG="${RELEASE_TAG}"
+          DIR="mujrim-${TAG}-${{ matrix.target }}"
           mkdir -p "$DIR"
 
-          # Copy all binaries
-          cp "target/${{ matrix.target }}/release/kishmat${{ matrix.suffix }}"         "$DIR/"
-          cp "target/${{ matrix.target }}/release/kishmat-ui${{ matrix.suffix }}"      "$DIR/" 2>/dev/null || true
-          cp "target/${{ matrix.target }}/release/kishmat-updater${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
+          # Product set: elite (SF net), external (no net), v60 (Reckless), ak (Akimbo).
+          cp "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}" "$DIR/mujrim-external${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-elite${{ matrix.suffix }}" "$DIR/mujrim-elite${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-ak${{ matrix.suffix }}" "$DIR/mujrim-ak${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "$DIR/mujrim${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "$DIR/mujrim-v60${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
+          cp "target/${{ matrix.target }}/release/mujrim-ui${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/mujrim-game${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/mujrim-installer${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/mujrim-updater${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
 
           # Include NNUE payload metadata and optional runtime net directory.
           mkdir -p "$DIR/nnue"
-          cp "crates/kishmat-eval/resources/networks.json" "$DIR/nnue/" 2>/dev/null || true
+          cp "crates/mujrim-eval/resources/networks.json" "$DIR/nnue/" 2>/dev/null || true
           if [[ -d "nnue" ]]; then
             cp -R "nnue/." "$DIR/nnue/" 2>/dev/null || true
           fi
 
           # Copy docs
           cp README.md License.md "$DIR/" 2>/dev/null || true
+          cp crates/mujrim-native-v60/LICENSE "$DIR/LICENSE-v60" 2>/dev/null || true
+          cp crates/mujrim-ui/assets/pieces/ATTRIBUTION.md "$DIR/PIECE-SETS-ATTRIBUTION.md"
+          cp crates/mujrim-ui/assets/pieces/LICENSE-LILA.md "$DIR/LICENSE-LILA.md"
 
           # Create archive
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
             7z a "${DIR}.zip" "$DIR"
           else
             tar czf "${DIR}.tar.gz" "$DIR"
@@ -120,11 +199,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: kishmat-*-${{ matrix.target }}.*
+          path: mujrim-*-${{ matrix.target }}.*
 
   # ══════════════════════════════════════════════════════════════
-  # Cross-compiled builds — engine-only (no GUI, needs no GPU)
-  # For ARM SBCs, Buildroot, embedded Linux, Raspberry Pi, etc.
+  # Cross-compiled builds — engine + updater (no GUI)
+  # For SBCs, Buildroot, Alpine/musl, Raspberry Pi armhf, etc.
+  # Linux aarch64 glibc full (with UI) is built natively above.
   # ══════════════════════════════════════════════════════════════
   build-cross:
     runs-on: ubuntu-latest
@@ -132,19 +212,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── ARM64 Linux (Raspberry Pi 3/4/5, Pine64, etc.) ──
-          - target: aarch64-unknown-linux-gnu
-            name: Linux ARM64 (aarch64)
-
           # ── ARM32 Linux (Raspberry Pi 2, older SBCs) ──
           - target: armv7-unknown-linux-gnueabihf
+            arch: armv7
             name: Linux ARMv7 (armhf)
 
           # ── Static MUSL builds (Buildroot, Alpine, any Linux) ──
           - target: x86_64-unknown-linux-musl
+            arch: x86_64
             name: Linux x86_64 (static/musl)
 
           - target: aarch64-unknown-linux-musl
+            arch: aarch64
             name: Linux ARM64 (static/musl)
 
     name: ${{ matrix.name }}
@@ -159,35 +238,57 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          cache-on-failure: true
+
+      - uses: ./.github/actions/fetch-nnue
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Cross build (engine + updater)
         run: |
-          cross build --release --target ${{ matrix.target }} -p kishmat
-          cross build --release --target ${{ matrix.target }} -p kishmat-updater
+          cross build --release --target ${{ matrix.target }} \
+            -p mujrim -p mujrim-native-v60 -p mujrim-updater
 
       - name: Verify cross build outputs
         shell: bash
         run: |
-          test -f "target/${{ matrix.target }}/release/kishmat"
-          test -f "target/${{ matrix.target }}/release/kishmat-updater"
+          test -f "target/${{ matrix.target }}/release/mujrim"
+          test -f "target/${{ matrix.target }}/release/mujrim-v60"
+          test -f "target/${{ matrix.target }}/release/mujrim-updater"
+          cp "target/${{ matrix.target }}/release/mujrim-v60" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}"
+
+      - name: Smoke test via cross run (UCI handshake)
+        run: |
+          set -euo pipefail
+          # Forward smoke env into the cross container/qemu guest.
+          export CROSS_CONTAINER_OPTS="${CROSS_CONTAINER_OPTS:-} -e MUJRIM_UCI_SMOKE=1"
+          output="$(cross run --release --target ${{ matrix.target }} -p mujrim -- uci 2>&1)"
+          echo "$output"
+          echo "$output" | grep -q 'uciok'
+          echo "$output" | grep -q 'Mujrim 1.0.0'
 
       - name: Package binaries
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          DIR="kishmat-${TAG}-${{ matrix.target }}"
+          TAG="${RELEASE_TAG}"
+          DIR="mujrim-${TAG}-${{ matrix.target }}"
           mkdir -p "$DIR"
 
-          cp "target/${{ matrix.target }}/release/kishmat"         "$DIR/"
-          cp "target/${{ matrix.target }}/release/kishmat-updater" "$DIR/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/mujrim" "$DIR/mujrim"
+          cp "target/${{ matrix.target }}/release/mujrim-v60" "$DIR/mujrim-v60"
+          cp "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}" "$DIR/mujrim-v60-${{ matrix.arch }}"
+          cp "target/${{ matrix.target }}/release/mujrim-updater" "$DIR/" 2>/dev/null || true
           mkdir -p "$DIR/nnue"
-          cp "crates/kishmat-eval/resources/networks.json" "$DIR/nnue/" 2>/dev/null || true
+          cp "crates/mujrim-eval/resources/networks.json" "$DIR/nnue/" 2>/dev/null || true
           if [[ -d "nnue" ]]; then
             cp -R "nnue/." "$DIR/nnue/" 2>/dev/null || true
           fi
           cp README.md License.md "$DIR/" 2>/dev/null || true
+          cp crates/mujrim-native-v60/LICENSE "$DIR/LICENSE-v60" 2>/dev/null || true
+          cp crates/mujrim-ui/assets/pieces/ATTRIBUTION.md "$DIR/PIECE-SETS-ATTRIBUTION.md"
+          cp crates/mujrim-ui/assets/pieces/LICENSE-LILA.md "$DIR/LICENSE-LILA.md"
 
           tar czf "${DIR}.tar.gz" "$DIR"
 
@@ -195,7 +296,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: kishmat-*-${{ matrix.target }}.*
+          path: mujrim-*-${{ matrix.target }}.*
 
   # ══════════════════════════════════════════════════════════════
   # macOS universal binary (x86_64 + aarch64 lipo'd together)
@@ -214,37 +315,65 @@ jobs:
 
       - name: Create universal binary
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          set -euo pipefail
+          TAG="${RELEASE_TAG}"
+          UNI_DIR="mujrim-${TAG}-universal-apple-darwin"
+          mkdir -p "$UNI_DIR"
 
           # Extract both macOS archives
           cd artifacts
-          tar xzf "aarch64-apple-darwin/kishmat-${TAG}-aarch64-apple-darwin.tar.gz" 2>/dev/null || true
-          tar xzf "x86_64-apple-darwin/kishmat-${TAG}-x86_64-apple-darwin.tar.gz" 2>/dev/null || true
+          tar xzf "aarch64-apple-darwin/mujrim-${TAG}-aarch64-apple-darwin.tar.gz"
+          tar xzf "x86_64-apple-darwin/mujrim-${TAG}-x86_64-apple-darwin.tar.gz"
 
-          ARM_DIR="kishmat-${TAG}-aarch64-apple-darwin"
-          X86_DIR="kishmat-${TAG}-x86_64-apple-darwin"
-          UNI_DIR="../kishmat-${TAG}-universal-apple-darwin"
-          mkdir -p "$UNI_DIR"
+          ARM_DIR="mujrim-${TAG}-aarch64-apple-darwin"
+          X86_DIR="mujrim-${TAG}-x86_64-apple-darwin"
 
-          # Lipo each binary
-          for bin in kishmat kishmat-ui kishmat-updater; do
+          # Lipo every shared binary present on both arches.
+          bins=(
+            mujrim
+            mujrim-external
+            mujrim-elite
+            mujrim-ak
+            mujrim-v60
+            mujrim-ui
+            mujrim-game
+            mujrim-updater
+            mujrim-installer
+          )
+          for bin in "${bins[@]}"; do
             if [ -f "$ARM_DIR/$bin" ] && [ -f "$X86_DIR/$bin" ]; then
-              lipo -create "$ARM_DIR/$bin" "$X86_DIR/$bin" -output "$UNI_DIR/$bin"
-              echo "✓ Created universal: $bin"
+              lipo -create "$ARM_DIR/$bin" "$X86_DIR/$bin" -output "../$UNI_DIR/$bin"
+              echo "Created universal: $bin"
             elif [ -f "$ARM_DIR/$bin" ]; then
-              cp "$ARM_DIR/$bin" "$UNI_DIR/$bin"
+              cp "$ARM_DIR/$bin" "../$UNI_DIR/$bin"
+              echo "Copied ARM-only: $bin"
+            elif [ -f "$X86_DIR/$bin" ]; then
+              cp "$X86_DIR/$bin" "../$UNI_DIR/$bin"
+              echo "Copied x86-only: $bin"
             fi
           done
+
+          # Arch-suffixed adapter names differ per slice; lipo matching pairs when present.
+          if [ -f "$ARM_DIR/mujrim-v60-aarch64" ] && [ -f "$X86_DIR/mujrim-v60-x86_64" ]; then
+            lipo -create "$ARM_DIR/mujrim-v60-aarch64" "$X86_DIR/mujrim-v60-x86_64" -output "../$UNI_DIR/mujrim-v60-universal"
+          fi
+
+          mkdir -p "../$UNI_DIR/nnue"
+          if [ -d "$ARM_DIR/nnue" ]; then
+            cp -R "$ARM_DIR/nnue/." "../$UNI_DIR/nnue/" 2>/dev/null || true
+          fi
           cd ..
 
           cp README.md License.md "$UNI_DIR/" 2>/dev/null || true
-          tar czf "kishmat-${TAG}-universal-apple-darwin.tar.gz" "$UNI_DIR"
+          cp crates/mujrim-ui/assets/pieces/ATTRIBUTION.md "$UNI_DIR/PIECE-SETS-ATTRIBUTION.md"
+          cp crates/mujrim-ui/assets/pieces/LICENSE-LILA.md "$UNI_DIR/LICENSE-LILA.md"
+          tar czf "mujrim-${TAG}-universal-apple-darwin.tar.gz" "$UNI_DIR"
 
       - name: Upload universal artifact
         uses: actions/upload-artifact@v4
         with:
           name: universal-apple-darwin
-          path: kishmat-*-universal-apple-darwin.tar.gz
+          path: mujrim-*-universal-apple-darwin.tar.gz
 
   # ══════════════════════════════════════════════════════════════
   # Create GitHub Release with all artifacts
@@ -253,6 +382,7 @@ jobs:
     needs: [build-native, build-cross, build-macos-universal]
     runs-on: ubuntu-latest
     name: Publish Release
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     steps:
       - uses: actions/checkout@v4
 
@@ -268,6 +398,7 @@ jobs:
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-assets/ \;
           echo "Release assets:"
           ls -la release-assets/
+          test "$(ls -A release-assets)" 
 
       - name: Generate checksums
         run: |
@@ -278,10 +409,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: release-assets/*
           generate_release_notes: true
           body: |
-            ## KishMat Chess Engine ${{ github.ref_name }}
+            ## Mujrim Chess Engine ${{ env.RELEASE_TAG }}
 
             ### Downloads
 
@@ -291,19 +423,20 @@ jobs:
             | macOS | Apple Silicon (aarch64) | Full | Engine + GUI + Updater |
             | macOS | Intel (x86_64) | Full | Engine + GUI + Updater |
             | Linux | x86_64 (glibc) | Full | Engine + GUI + Updater |
+            | Linux | ARM64 (glibc) | Full | Engine + GUI + Updater |
             | Linux | x86_64 (static/musl) | Engine | Engine + Updater |
-            | Linux | ARM64 (glibc) | Engine | Engine + Updater |
             | Linux | ARM64 (static/musl) | Engine | Engine + Updater |
             | Linux | ARMv7 (armhf) | Engine | Engine + Updater |
             | Windows | x86_64 | Full | Engine + GUI + Updater |
+            | Windows | ARM64 | Full | Engine + GUI + Updater + Installer |
 
             **Book & NNUE network are embedded in the binary — no external files needed.**
 
             ### Install
             ```bash
             # Extract and run
-            tar xzf kishmat-${{ github.ref_name }}-<platform>.tar.gz
-            ./kishmat uci         # UCI engine
-            ./kishmat-ui          # GUI
-            ./kishmat-updater check  # Check for updates
+            tar xzf mujrim-${{ env.RELEASE_TAG }}-<platform>.tar.gz
+            ./mujrim uci         # UCI engine
+            ./mujrim-ui          # GUI
+            ./mujrim-updater check  # Check for updates
             ```
