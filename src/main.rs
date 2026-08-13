@@ -124,6 +124,17 @@ fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Res
         &current_dir,
         explicit_path.map(PathBuf::as_path),
     )?;
+    // Never passthrough to ourselves — that re-enters the same stockfish/elite fallback loop.
+    if let (Ok(self_path), Ok(engine_path)) = (
+        std::fs::canonicalize(&executable),
+        std::fs::canonicalize(&engine),
+    ) && self_path == engine_path
+    {
+        return Err(format!(
+            "refusing to passthrough '{engine_id}' to the current executable ({})",
+            executable.display()
+        ));
+    }
     let environment: &[(&str, &str)] = if engine_id == "mujrim-v60" {
         &[(V60_PASSTHROUGH_MARKER, "1")]
     } else {
@@ -190,10 +201,10 @@ fn main() {
                     "akimbo",
                     "ethereal",
                 ])
-                .default_value("stockfish")
+                .default_value("universal")
                 .global(true)
                 .help(
-                    "Search backend to expose over UCI (v60/v10/akimbo prefer Mujrim adapters; mujrim-hce is in-process HCE)",
+                    "Search backend to expose over UCI (default: in-process universal; v60/v10/akimbo prefer Mujrim adapters; mujrim-hce is in-process HCE)",
                 ),
         )
         .arg(
@@ -285,7 +296,7 @@ fn main() {
         matches.subcommand().is_none() || matches!(matches.subcommand(), Some(("uci", _)));
     let backend = matches
         .get_one::<String>("backend")
-        .map_or("stockfish", String::as_str);
+        .map_or("universal", String::as_str);
     let passthrough_active = std::env::var_os(V60_PASSTHROUGH_MARKER).is_some();
     let uci_smoke = std::env::var_os("MUJRIM_UCI_SMOKE").is_some();
     if !uci_smoke
@@ -424,6 +435,11 @@ mod tests {
         assert_eq!(fallback_engine_id("mujrim-hce", false), None);
         assert_eq!(fallback_engine_id("akimbo", false), None);
         assert_eq!(fallback_engine_id("stockfish", true), None);
+    }
+
+    #[test]
+    fn default_uci_backend_is_in_process_universal() {
+        assert_eq!(passthrough_engine_id("universal", true, false), None);
     }
 
     #[test]
