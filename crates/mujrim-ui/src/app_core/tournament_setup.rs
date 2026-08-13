@@ -28,6 +28,12 @@ pub struct TournamentSetup {
     pub pgn_output: String,
 }
 
+pub const GUI_TOURNAMENT_MAX_HASH_MB: u32 = 64;
+pub const GUI_TOURNAMENT_MAX_THREADS: u32 = 1;
+pub const GUI_TOURNAMENT_ENGINE_MEMORY_MB: u32 = 256;
+pub const GUI_TOURNAMENT_MATCH_MEMORY_MB: u32 = 512;
+pub const GUI_TOURNAMENT_DEFAULT_ENGINES: usize = 2;
+
 /// Real-time Fischer clocks with a secondary control after move 40.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeControlPreset {
@@ -82,7 +88,7 @@ impl Default for TournamentSetup {
             concurrency: 1,
             swap_sides: true,
             time_control: TimeControlPreset::ThreePlusTwo,
-            hash_mb: 64,
+            hash_mb: 32,
             engine_threads: 1,
             max_plies: 400,
             selected_engine_paths: Vec::new(),
@@ -105,18 +111,32 @@ impl TournamentSetup {
         Ok(())
     }
 
+    pub fn sanitize_for_gui(&mut self) {
+        self.concurrency = 1;
+        self.hash_mb = self.hash_mb.clamp(16, GUI_TOURNAMENT_MAX_HASH_MB);
+        self.engine_threads = 1;
+        self.games_per_encounter = self.games_per_encounter.clamp(1, 4);
+        self.max_plies = self.max_plies.clamp(1, 400);
+    }
+
     pub fn to_match_config(&self) -> MatchConfig {
-        let clock = self.time_control.match_clock();
+        let mut setup = self.clone();
+        setup.sanitize_for_gui();
+        let clock = setup.time_control.match_clock();
         let read_timeout = clock.initial + clock.bonus + Duration::from_secs(90);
+        let hash_mb = mujrim_benchmarker::strength::bounded_engine_hash_mb(
+            setup.hash_mb as usize,
+            GUI_TOURNAMENT_ENGINE_MEMORY_MB as usize,
+        );
         MatchConfig {
-            pairs: self.games_per_encounter.max(1) as usize,
+            pairs: setup.games_per_encounter as usize,
             concurrency: 1,
-            hash_mb: self.hash_mb.max(1) as usize,
-            engine_threads: self.engine_threads.max(1) as usize,
-            max_engine_memory_mb: 384,
-            max_match_memory_mb: 768,
+            hash_mb,
+            engine_threads: 1,
+            max_engine_memory_mb: GUI_TOURNAMENT_ENGINE_MEMORY_MB as usize,
+            max_match_memory_mb: GUI_TOURNAMENT_MATCH_MEMORY_MB as usize,
             session_pairs: 1,
-            max_plies: self.max_plies.max(1) as usize,
+            max_plies: setup.max_plies as usize,
             early_stop: false,
             checkpoint_path: None,
             stop_flag: None,
@@ -166,5 +186,54 @@ mod tests {
         assert_eq!(three.initial, Duration::from_secs(3 * 60));
         assert_eq!(three.increment, Duration::from_secs(2));
         assert_eq!(three.bonus, Duration::from_secs(3 * 60));
+    }
+
+    #[test]
+    fn gui_match_config_never_overcommits_host_memory() {
+        let setup = TournamentSetup {
+            selected_engine_paths: vec![PathBuf::from("a"), PathBuf::from("b")],
+            hash_mb: 512,
+            engine_threads: 8,
+            concurrency: 1,
+            ..TournamentSetup::default()
+        };
+        let config = setup.to_match_config();
+        assert_eq!(config.concurrency, 1);
+        assert_eq!(config.engine_threads, 1);
+        assert!(config.hash_mb <= GUI_TOURNAMENT_MAX_HASH_MB as usize);
+        assert_eq!(
+            config.max_engine_memory_mb,
+            GUI_TOURNAMENT_ENGINE_MEMORY_MB as usize
+        );
+        assert_eq!(
+            config.max_match_memory_mb,
+            GUI_TOURNAMENT_MATCH_MEMORY_MB as usize
+        );
+        assert!(
+            config
+                .concurrency
+                .saturating_mul(2)
+                .saturating_mul(config.max_engine_memory_mb)
+                <= config.max_match_memory_mb
+        );
+        assert!(config.hash_mb + 128 <= config.max_engine_memory_mb);
+    }
+
+    #[test]
+    fn sanitize_for_gui_clamps_hash_threads_and_concurrency() {
+        let mut setup = TournamentSetup {
+            hash_mb: 512,
+            engine_threads: 8,
+            concurrency: 4,
+            games_per_encounter: 99,
+            max_plies: 9_000,
+            ..TournamentSetup::default()
+        };
+        setup.sanitize_for_gui();
+        assert_eq!(setup.concurrency, 1);
+        assert_eq!(setup.engine_threads, 1);
+        assert_eq!(setup.hash_mb, GUI_TOURNAMENT_MAX_HASH_MB);
+        assert_eq!(setup.games_per_encounter, 4);
+        assert_eq!(setup.max_plies, 400);
     }
 }

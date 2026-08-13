@@ -538,9 +538,30 @@ pub fn cancel_all_pondering() {
     }
 }
 
+pub fn shutdown_external_engines() {
+    CANCEL_EPOCH.fetch_add(1, Ordering::AcqRel);
+    let Some(pool) = ENGINE_POOL.get() else {
+        return;
+    };
+    let mut pool = match pool.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => match pool.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        },
+    };
+    pool.clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_external_engines_is_safe_when_the_pool_is_empty() {
+        shutdown_external_engines();
+        shutdown_external_engines();
+    }
 
     #[test]
     fn test_protocol_display() {

@@ -671,6 +671,51 @@ mod tests {
     }
 
     #[test]
+    fn missing_engine_binaries_forfeit_and_the_event_continues() {
+        let engines = vec![
+            TournamentEngine {
+                engine: EngineSpec::new(PathBuf::from("/no/such/mujrim-tournament-a")),
+                established_elo: None,
+                search_limits: SearchLimitSupport::STANDARD,
+            },
+            TournamentEngine {
+                engine: EngineSpec::new(PathBuf::from("/no/such/mujrim-tournament-b")),
+                established_elo: None,
+                search_limits: SearchLimitSupport::STANDARD,
+            },
+        ];
+        let match_config = MatchConfig {
+            pairs: 1,
+            concurrency: 1,
+            hash_mb: 16,
+            engine_threads: 1,
+            max_engine_memory_mb: 256,
+            max_match_memory_mb: 512,
+            max_plies: 2,
+            nodes_per_move: 1,
+            read_timeout: std::time::Duration::from_secs(2),
+            early_stop: false,
+            ..MatchConfig::default()
+        };
+        let summary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_tournament(
+                engines,
+                TournamentConfig {
+                    match_config,
+                    checkpoint_directory: None,
+                    format: TournamentFormat::RoundRobin,
+                    swiss_rounds: None,
+                },
+            )
+        }))
+        .expect("a missing engine must forfeit, not abort the tournament");
+        assert_eq!(summary.matches.len(), 1);
+        assert!(summary.matches[0].scores.games() >= 1);
+        assert!(summary.matches[0].error.is_some());
+        assert!(!summary.cancelled);
+    }
+
+    #[test]
     fn checkpoint_names_are_filesystem_safe() {
         assert_eq!(safe_name("Stockfish 18 / AVX2"), "stockfish-18---avx2");
     }

@@ -9,7 +9,7 @@ use floem::prelude::{RwSignal, SignalGet, SignalUpdate};
 use mujrim_protocols::catalog::DiscoveredEngine;
 use mujrim_study::annotation::MoveAnnotation;
 use mujrim_study::database::{EngineMetadata, GameSummary, StudyDatabase};
-use mujrim_study::opening::OpeningExplorer;
+use mujrim_study::opening::{OpeningExplorer, PrepSide, SavedLine};
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
 use types::Square;
 
@@ -79,6 +79,17 @@ pub struct AppState {
     pub hub_progress: RwSignal<f32>,
     pub coin_flip: RwSignal<CoinFlipState>,
     pub engine_retries: RwSignal<u8>,
+    pub bgm_on: RwSignal<bool>,
+    pub tournament_event: RwSignal<String>,
+    pub tournament_site: RwSignal<String>,
+    pub analysis_engines_selected: RwSignal<Vec<String>>,
+    pub analysis_multipv: RwSignal<i32>,
+    pub active_gambit_id: RwSignal<Option<String>>,
+    pub gambit_ply: RwSignal<usize>,
+    pub saved_lines: RwSignal<Vec<SavedLine>>,
+    pub line_name: RwSignal<String>,
+    pub prep_notes: RwSignal<String>,
+    pub prep_side: RwSignal<PrepSide>,
 }
 
 #[derive(Clone)]
@@ -110,9 +121,7 @@ impl AppState {
             engine.set_volume(settings.bgm_volume as f32 / 100.0);
             engine.set_mood(settings.game_mood);
             engine.set_sound_theme(settings.sound_theme);
-            if settings.sfx_on {
-                engine.play_bgm(BgmTrack::Menu);
-            }
+            engine.play_bgm(BgmTrack::Menu);
         }
         let bundled = mujrim_protocols::catalog::discover_bundled_engines_from_environment()
             .unwrap_or_default();
@@ -166,6 +175,17 @@ impl AppState {
             hub_progress: RwSignal::new(0.0),
             coin_flip: RwSignal::new(CoinFlipState::Idle),
             engine_retries: RwSignal::new(match_controller::DEFAULT_ENGINE_RETRIES),
+            bgm_on: RwSignal::new(true),
+            tournament_event: RwSignal::new("Mujrim Tournament".to_owned()),
+            tournament_site: RwSignal::new(String::new()),
+            analysis_engines_selected: RwSignal::new(vec!["builtin".to_owned()]),
+            analysis_multipv: RwSignal::new(3),
+            active_gambit_id: RwSignal::new(None),
+            gambit_ply: RwSignal::new(0),
+            saved_lines: RwSignal::new(Vec::new()),
+            line_name: RwSignal::new("New preparation".to_owned()),
+            prep_notes: RwSignal::new(String::new()),
+            prep_side: RwSignal::new(PrepSide::White),
         };
         let study_path = crate::app_core::logic::study_database_path();
         let study = StudyDatabase::open(&study_path).ok();
@@ -182,6 +202,11 @@ impl AppState {
             .map(|store| store.due(crate::app_core::logic::today_day(), 32))
             .unwrap_or_default();
         state.training_due.set(due);
+        if let Some(database) = study.as_ref()
+            && let Ok(lines) = database.list_lines()
+        {
+            state.saved_lines.set(lines);
+        }
         let handles = AppHandles {
             assets: Rc::new(PieceAssets::load()),
             sound: Rc::new(RefCell::new(sound_cell)),

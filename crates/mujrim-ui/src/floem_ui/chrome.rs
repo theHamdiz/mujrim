@@ -2,6 +2,7 @@
 
 use floem::action::{drag_resize_window, minimize_window, toggle_window_maximized};
 use floem::prelude::*;
+use floem::taffy::style::FlexWrap;
 use floem::views::drag_window_area;
 use floem::window::{ResizeDirection, WindowId};
 
@@ -100,7 +101,12 @@ fn title_bar(
 }
 
 fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
-    let playing = move || matches!(state.screen.get(), Screen::Playing | Screen::Analysis);
+    let board = move || {
+        matches!(
+            state.screen.get(),
+            Screen::Playing | Screen::Analysis | Screen::Study | Screen::Learn
+        )
+    };
     Stack::horizontal((
         pill(
             state,
@@ -115,14 +121,57 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             "Options",
             move || state.show_options.get(),
             move || {
-                state.show_options.update(|open| *open = !*open);
-                if state.show_options.get_untracked() {
+                let open = !state.show_options.get_untracked();
+                state.show_options.set(open);
+                if open {
                     actions::refresh_updater_status(state);
                 }
             },
         ),
+        pill(
+            state,
+            icons::SEARCH,
+            "Analyze",
+            move || matches!(state.screen.get(), Screen::Analysis),
+            move || state.screen.set(Screen::Analysis),
+        ),
+        pill(
+            state,
+            icons::DATABASE,
+            "Study",
+            move || matches!(state.screen.get(), Screen::Study),
+            move || {
+                actions::ensure_study_board(state);
+                state.screen.set(Screen::Study);
+            },
+        ),
+        pill(
+            state,
+            icons::SPARKLES,
+            "Learn",
+            move || matches!(state.screen.get(), Screen::Learn),
+            move || {
+                actions::ensure_study_board(state);
+                state.screen.set(Screen::Learn);
+            },
+        ),
+        pill(
+            state,
+            icons::TROPHY,
+            "Tournaments",
+            move || matches!(state.screen.get(), Screen::Tournaments),
+            {
+                let handles = handles.clone();
+                move || {
+                    state.screen.set(Screen::Tournaments);
+                    if !state.tournament_snapshot.get_untracked().running {
+                        actions::open_tournament_setup(state, &handles);
+                    }
+                }
+            },
+        ),
         dyn_view(move || {
-            if playing() {
+            if board() {
                 Stack::horizontal((
                     pill(state, icons::CAMERA, "Shot", || false, {
                         let handles = handles.clone();
@@ -189,36 +238,16 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
                 .style(|s| s.col_gap(3.0).items_center())
                 .into_any()
             } else {
-                Stack::horizontal((
-                    pill(
-                        state,
-                        icons::SEARCH,
-                        "Analyze",
-                        move || matches!(state.screen.get(), Screen::Analysis),
-                        move || state.screen.set(Screen::Analysis),
-                    ),
-                    pill(
-                        state,
-                        icons::DATABASE,
-                        "Study",
-                        move || matches!(state.screen.get(), Screen::Study),
-                        move || state.screen.set(Screen::Study),
-                    ),
-                    pill(
-                        state,
-                        icons::TROPHY,
-                        "Tournaments",
-                        move || matches!(state.screen.get(), Screen::Tournaments),
-                        move || state.screen.set(Screen::Tournaments),
-                    ),
-                ))
-                .style(|s| s.col_gap(3.0).items_center())
-                .into_any()
+                Empty::new().into_any()
             }
         }),
     ))
-    .style(|s| s.col_gap(3.0).items_center().min_width(0.0))
-    .scroll()
+    .style(|s| {
+        s.col_gap(3.0)
+            .items_center()
+            .min_width(0.0)
+            .flex_wrap(FlexWrap::Wrap)
+    })
 }
 
 fn pill(
@@ -338,5 +367,9 @@ mod tests {
         );
         assert!(!production.contains("new_window"));
         assert!(!production.contains("drag_window()"));
+        assert!(
+            production.contains("open_tournament_setup"),
+            "Tournaments nav must open the setup overlay"
+        );
     }
 }

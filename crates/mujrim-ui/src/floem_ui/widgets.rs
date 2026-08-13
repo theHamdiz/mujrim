@@ -227,18 +227,20 @@ pub fn stepper_row(
     label: &'static str,
     unit: &'static str,
     value: impl Fn() -> i32 + Copy + 'static,
-    on_change: impl Fn(i32) + Copy + 'static,
+    on_change: impl Fn(i32) + Clone + 'static,
     min: i32,
     max: i32,
 ) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
+    let on_minus = on_change.clone();
+    let on_plus = on_change;
     Stack::horizontal((
         Label::new(label).style(move |s| {
             s.width(110.0)
                 .font_size(13.0)
                 .color(theme::rgba(pal().text_secondary))
         }),
-        Button::new("−").action(move || on_change((value() - 1).clamp(min, max))),
+        Button::new("−").action(move || on_minus((value() - 1).clamp(min, max))),
         Label::derived(move || {
             if unit.is_empty() {
                 value().to_string()
@@ -251,7 +253,7 @@ pub fn stepper_row(
                 .font_size(13.0)
                 .color(theme::rgba(pal().text_primary))
         }),
-        Button::new("+").action(move || on_change((value() + 1).clamp(min, max))),
+        Button::new("+").action(move || on_plus((value() + 1).clamp(min, max))),
     ))
     .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0))
 }
@@ -278,6 +280,17 @@ pub fn toggle_row(
     .style(|s| s.width_full().col_gap(12.0).items_center())
 }
 
+pub fn overlay_layer_style(style: floem::style::Style) -> floem::style::Style {
+    style
+        .size_full()
+        .absolute()
+        .inset_left(0.0)
+        .inset_top(0.0)
+        .inset_right(0.0)
+        .inset_bottom(0.0)
+        .z_index(80)
+}
+
 pub fn overlay_frame(
     state: AppState,
     on_close: impl Fn() + 'static,
@@ -293,7 +306,7 @@ pub fn overlay_frame(
                 let pal = pal();
                 s.width(layout::OVERLAY_MAX_WIDTH)
                     .max_width_pct(92.0)
-                    .min_width(0.0)
+                    .min_width(280.0)
                     .padding(layout::OVERLAY_PAD)
                     .border_radius(18.0)
                     .background(theme::rgba(pal.panel))
@@ -304,18 +317,11 @@ pub fn overlay_frame(
             .style(|s| {
                 s.max_width_pct(92.0)
                     .max_height_pct(88.0)
-                    .min_width(0.0)
-                    .min_height(0.0)
+                    .min_width(280.0)
+                    .min_height(160.0)
             }),
     ))
-    .style(|s| {
-        s.size_full()
-            .absolute()
-            .items_center()
-            .justify_center()
-            .z_index(40)
-            .padding(16.0)
-    })
+    .style(|s| s.size_full().items_center().justify_center().padding(16.0))
 }
 
 #[cfg(test)]
@@ -328,7 +334,13 @@ mod tests {
             !production.contains("Dropdown"),
             "in-flow picker must not use Dropdown overlays"
         );
-        assert!(!production.contains("new_window"));
-        assert!(!production.contains("Application::window"));
+        assert!(
+            production.contains("z_index(80)"),
+            "modal overlay must sit above the shell"
+        );
+        assert!(
+            production.contains("min_height(160.0)"),
+            "modal panel must have a visible minimum size"
+        );
     }
 }

@@ -1593,8 +1593,9 @@ impl App {
                     tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
                 if self.tournament_setup.selected_engine_paths.is_empty() {
                     self.tournament_setup.selected_engine_paths =
-                        roster.iter().map(|engine| engine.path.clone()).collect();
+                        crate::app_core::logic::default_tournament_engine_paths(&roster);
                 }
+                self.tournament_setup.sanitize_for_gui();
                 if let Err(error) = self.tournament_setup.validate() {
                     self.tournament_status = error;
                     return Task::none();
@@ -1602,22 +1603,19 @@ impl App {
                 let engines = roster
                     .into_iter()
                     .filter(|engine| {
-                        self.tournament_setup
-                            .selected_engine_paths
-                            .iter()
-                            .any(|path| path == &engine.path)
+                        crate::app_core::logic::engine_is_selected(
+                            &self.tournament_setup.selected_engine_paths,
+                            &engine.path,
+                        )
                     })
                     .collect::<Vec<_>>();
-                let selected_count = engines.len();
-                let engines = match preflight_tournament_engines(engines) {
-                    Ok(engines) => engines,
-                    Err(error) => {
-                        self.tournament_status = error;
-                        return Task::none();
-                    }
-                };
-                let skipped = selected_count.saturating_sub(engines.len());
-                // Keep selection aligned with engines that actually launched.
+                if engines.len() < 2 {
+                    self.tournament_status =
+                        "Select at least two engines. Failed engines forfeit that game.".to_owned();
+                    return Task::none();
+                }
+                crate::app_core::uci_process::cancel_all_pondering();
+                crate::app_core::uci_process::shutdown_external_engines();
                 self.tournament_setup.selected_engine_paths =
                     engines.iter().map(|engine| engine.path.clone()).collect();
                 let handle =
@@ -1631,21 +1629,12 @@ impl App {
                 self.tournament_setup_drag = None;
                 self.tournament_setup.concurrency = 1;
                 self.tournament_format = self.tournament_setup.format;
-                self.tournament_status = if skipped == 0 {
-                    format!(
-                        "Running {} — {} · {} engines · one full board, real clocks.",
-                        self.tournament_setup.event,
-                        self.tournament_setup.time_control.label(),
-                        engines.len()
-                    )
-                } else {
-                    format!(
-                        "Running {} — {} · {} engines (skipped {skipped} that failed preflight) · one full board, real clocks.",
-                        self.tournament_setup.event,
-                        self.tournament_setup.time_control.label(),
-                        engines.len()
-                    )
-                };
+                self.tournament_status = format!(
+                    "Running {} — {} · {} engines · one board · forfeit on engine errors.",
+                    self.tournament_setup.event,
+                    self.tournament_setup.time_control.label(),
+                    engines.len()
+                );
                 let setup = self.tournament_setup.clone();
                 Task::perform(run_quick_tournament(engines, setup, handle), |summary| {
                     Msg::QuickTournamentFinished(Box::new(summary))
@@ -6497,6 +6486,7 @@ fn run_quick_tournament_body(
         .map(|engine| {
             let mut spec = EngineSpec::new(engine.path.clone());
             spec.name = engine.name;
+            spec.args = crate::app_core::logic::gui_safe_engine_args(&engine.path);
             spec.uci_options = uci_process::uci_resource_options(&engine.path, false, true, None);
             TournamentEngine {
                 engine: spec,
@@ -6735,46 +6725,6 @@ fn format_tournament_summary(summary: &mujrim_benchmarker::strength::TournamentS
     } else {
         format!("{} · {podium}", summary.format)
     }
-}
-
-/// Probe each selected engine before a tournament so Arm64/Prism spawn failures
-/// never take down the UI mid-event.
-fn preflight_tournament_engines(
-    engines: Vec<QuickTournamentEngine>,
-) -> Result<Vec<QuickTournamentEngine>, String> {
-    use mujrim_protocols::{EngineSession, ProtocolKind};
-
-    const PREFLIGHT_MEMORY: u64 = 256 * 1024 * 1024;
-    let mut healthy = Vec::with_capacity(engines.len());
-    let mut failures = Vec::new();
-    for engine in engines {
-        match EngineSession::spawn_with_args_and_memory_limit(
-            &engine.path,
-            &[],
-            ProtocolKind::Uci,
-            Some(PREFLIGHT_MEMORY),
-        ) {
-            Ok(_session) => healthy.push(engine),
-            Err(error) => failures.push(format!("{} ({})", engine.name, error)),
-        }
-    }
-    if healthy.len() < 2 {
-        let detail = if failures.is_empty() {
-            "need at least two engines that can start".to_owned()
-        } else {
-            format!(
-                "only {} ready; failed: {}",
-                healthy.len(),
-                failures.join("; ")
-            )
-        };
-        return Err(format!("Tournament preflight failed — {detail}"));
-    }
-    if !failures.is_empty() {
-        // Keep going with healthy engines; surface skips in the status via Err only when <2.
-        let _ = failures;
-    }
-    Ok(healthy)
 }
 
 async fn analyze_game(initial_fen: String, moves: Vec<String>) -> Result<Vec<AnalyzedPly>, String> {

@@ -106,6 +106,19 @@ impl StudyDatabase {
             )
             .map_err(|error| format!("failed to initialize SQLite engine catalog: {error}"))?;
         crate::tournament_store::ensure_schema(&sqlite)?;
+        sqlite
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS repertoire_lines (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    initial_fen TEXT NOT NULL,
+                    moves TEXT NOT NULL,
+                    notes TEXT NOT NULL,
+                    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );",
+            )
+            .map_err(|error| format!("failed to initialize repertoire table: {error}"))?;
         let mut database = Self {
             root,
             games: BTreeMap::new(),
@@ -128,7 +141,8 @@ impl StudyDatabase {
                  DELETE FROM tournament_entrants;
                  DELETE FROM tournaments;
                  DELETE FROM engines;
-                 DELETE FROM games;",
+                 DELETE FROM games;
+                 DELETE FROM repertoire_lines;",
             )
             .map_err(|error| format!("failed to clear study history: {error}"))?;
         self.games.clear();
@@ -220,6 +234,62 @@ impl StudyDatabase {
         id: &str,
     ) -> Result<Option<crate::tournament_store::StoredTournament>, String> {
         crate::tournament_store::load_tournament(&self.sqlite, id)
+    }
+
+    pub fn save_line(&mut self, line: &crate::opening::SavedLine) -> Result<(), String> {
+        line.to_repertoire().validate(&line.initial_fen)?;
+        self.sqlite
+            .execute(
+                "INSERT OR REPLACE INTO repertoire_lines
+                 (id, name, side, initial_fen, moves, notes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    line.id,
+                    line.name,
+                    line.side.as_str(),
+                    line.initial_fen,
+                    line.moves.join(" "),
+                    line.notes,
+                ],
+            )
+            .map_err(|error| format!("failed to save preparation: {error}"))?;
+        Ok(())
+    }
+
+    pub fn list_lines(&self) -> Result<Vec<crate::opening::SavedLine>, String> {
+        let mut stmt = self
+            .sqlite
+            .prepare(
+                "SELECT id, name, side, initial_fen, moves, notes
+                 FROM repertoire_lines
+                 ORDER BY created_at DESC, name ASC",
+            )
+            .map_err(|error| format!("failed to list preparations: {error}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(crate::opening::SavedLine {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    side: crate::opening::PrepSide::parse(&row.get::<_, String>(2)?),
+                    initial_fen: row.get(3)?,
+                    moves: row
+                        .get::<_, String>(4)?
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect(),
+                    notes: row.get(5)?,
+                })
+            })
+            .map_err(|error| format!("failed to read preparations: {error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("invalid preparation row: {error}"))
+    }
+
+    pub fn delete_line(&mut self, id: &str) -> Result<(), String> {
+        self.sqlite
+            .execute("DELETE FROM repertoire_lines WHERE id = ?1", params![id])
+            .map_err(|error| format!("failed to delete preparation: {error}"))?;
+        Ok(())
     }
 
     pub fn import_pgn(&mut self, metadata: GameMetadata, pgn: &str) -> Result<String, String> {
@@ -588,6 +658,42 @@ mod tests {
             database.load_game(&summaries[0].id).unwrap().moves[0],
             "d2d4"
         );
+        drop(database);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn repertoire_lines_round_trip_and_reject_illegal_moves() {
+        let root = temporary_database();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        let line = crate::opening::SavedLine::from_current(
+            "Ruy Lopez".to_owned(),
+            crate::opening::PrepSide::White,
+            crate::opening::START_FEN.to_owned(),
+            vec![
+                "e2e4".into(),
+                "e7e5".into(),
+                "g1f3".into(),
+                "b8c6".into(),
+                "f1b5".into(),
+            ],
+            "Spanish Game".to_owned(),
+        );
+        database.save_line(&line).unwrap();
+        let listed = database.list_lines().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Ruy Lopez");
+        assert_eq!(listed[0].moves.len(), 5);
+        let illegal = crate::opening::SavedLine::from_current(
+            "Bad".to_owned(),
+            crate::opening::PrepSide::Black,
+            crate::opening::START_FEN.to_owned(),
+            vec!["e2e5".into()],
+            String::new(),
+        );
+        assert!(database.save_line(&illegal).is_err());
+        database.delete_line(&line.id).unwrap();
+        assert!(database.list_lines().unwrap().is_empty());
         drop(database);
         fs::remove_dir_all(&root).unwrap();
     }

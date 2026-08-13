@@ -10,6 +10,89 @@ pub struct RepertoireLine {
     pub moves: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrepSide {
+    White,
+    Black,
+}
+
+impl PrepSide {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::White => "white",
+            Self::Black => "black",
+        }
+    }
+
+    pub const ALL: [Self; 2] = [Self::White, Self::Black];
+
+    pub fn parse(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("black") {
+            Self::Black
+        } else {
+            Self::White
+        }
+    }
+}
+
+impl std::fmt::Display for PrepSide {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::White => "White",
+            Self::Black => "Black",
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedLine {
+    pub id: String,
+    pub name: String,
+    pub side: PrepSide,
+    pub initial_fen: String,
+    pub moves: Vec<String>,
+    pub notes: String,
+}
+
+impl SavedLine {
+    pub fn from_current(
+        name: String,
+        side: PrepSide,
+        initial_fen: String,
+        moves: Vec<String>,
+        notes: String,
+    ) -> Self {
+        let id = format!(
+            "{:016x}",
+            fnv1a64(format!("{name}\0{initial_fen}\0{}", moves.join(" ")).as_bytes())
+        );
+        Self {
+            id,
+            name,
+            side,
+            initial_fen,
+            moves,
+            notes,
+        }
+    }
+
+    pub fn to_repertoire(&self) -> RepertoireLine {
+        RepertoireLine {
+            name: self.name.clone(),
+            moves: self.moves.clone(),
+        }
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MoveStatistics {
     pub games: u64,
@@ -130,5 +213,26 @@ mod tests {
         assert_eq!(moves[0].0, "e2e4");
         assert_eq!(moves[0].1.games, 2);
         assert_eq!(moves[1].1.draws, 1);
+    }
+
+    #[test]
+    fn saved_line_validates_before_identity() {
+        let line = SavedLine::from_current(
+            "Italian".to_owned(),
+            PrepSide::White,
+            START_FEN.to_owned(),
+            vec![
+                "e2e4".into(),
+                "e7e5".into(),
+                "g1f3".into(),
+                "b8c6".into(),
+                "f1c4".into(),
+            ],
+            String::new(),
+        );
+        assert!(line.to_repertoire().validate(START_FEN).is_ok());
+        assert!(!line.id.is_empty());
+        assert_eq!(PrepSide::parse("black"), PrepSide::Black);
+        assert_eq!(PrepSide::White.to_string(), "White");
     }
 }

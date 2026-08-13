@@ -76,6 +76,48 @@ impl MoveAnnotation {
     pub const fn shows_board_badge(self) -> bool {
         !matches!(self, Self::Ok)
     }
+
+    /// Chess.com-style destination-square badge as a self-contained SVG.
+    pub fn board_badge_svg(self) -> String {
+        let (r, g, b) = self.chess_com_rgb();
+        let glyph = self.badge_glyph_paths();
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="14.2" fill="rgb({r},{g},{b})" stroke="#fff" stroke-width="2.2"/>
+  {glyph}
+</svg>"##
+        )
+    }
+
+    fn badge_glyph_paths(self) -> &'static str {
+        match self {
+            Self::Aura | Self::Brilliant => {
+                r##"<path fill="#fff" d="M10.2 8.2h2.2l.35 8.4h-2.9zm1.1 10.3a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9zm8.3-10.3h2.2l.35 8.4h-2.9zm1.1 10.3a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9z"/>"##
+            }
+            Self::Great => {
+                r##"<path fill="#fff" d="M14.9 8.2h2.2l.35 8.4h-2.9zm1.1 10.3a1.45 1.45 0 1 1 0 2.9 1.45 1.45 0 0 1 0-2.9z"/>"##
+            }
+            Self::Best | Self::Excellent => {
+                r##"<path fill="#fff" d="M16 7.4 18.1 13h6.1l-4.9 3.6 1.9 5.8L16 18.9 10.8 22.4l1.9-5.8L7.8 13h6.1z"/>"##
+            }
+            Self::Good => {
+                r##"<path fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" d="M9.5 16.2 13.6 20.2 22.5 11.4"/>"##
+            }
+            Self::Book | Self::Novelty => {
+                r##"<path fill="#fff" d="M8.5 9.2h6.2c1.6 0 2.9.8 2.9 2.4v11.2c-1.2-.7-2.4-1-3.6-1H8.5zm15 0h-6.2c-1.6 0-2.9.8-2.9 2.4v11.2c1.2-.7 2.4-1 3.6-1h5.5z"/>"##
+            }
+            Self::Inaccuracy => {
+                r##"<path fill="#fff" d="M9.4 20.6c0-3.4 2.2-5.3 5.2-7.1 1.8-1.1 2.6-1.8 2.6-3.1 0-1.2-.9-2-2.3-2s-2.5.9-2.7 2.4H9.4C9.7 7.8 12.1 6 16 6c3.6 0 5.8 2 5.8 4.7 0 2.5-1.6 4-4.4 5.7-2.1 1.2-3 2.1-3 3.6v.6zm2.9 4.6a1.7 1.7 0 1 1 3.4 0 1.7 1.7 0 0 1-3.4 0z"/>"##
+            }
+            Self::Mistake => {
+                r##"<path fill="#fff" d="M14.6 7.2h2.8v11.2h-2.8zm1.4 13.4a1.7 1.7 0 1 1 0 3.4 1.7 1.7 0 0 1 0-3.4z"/>"##
+            }
+            Self::Blunder => {
+                r##"<path fill="#fff" d="M10.2 7.2h2.8v11.2h-2.8zm1.4 13.4a1.7 1.7 0 1 1 0 3.4 1.7 1.7 0 0 1 0-3.4zm7.6-13.4h2.8v11.2h-2.8zm1.4 13.4a1.7 1.7 0 1 1 0 3.4 1.7 1.7 0 0 1 0-3.4z"/>"##
+            }
+            Self::Ok => "",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -188,6 +230,14 @@ mod tests {
         assert_eq!(MoveAnnotation::Blunder.chess_com_rgb(), (224, 40, 40));
         assert!(!MoveAnnotation::Ok.shows_board_badge());
         assert!(MoveAnnotation::Brilliant.shows_board_badge());
+        let svg = MoveAnnotation::Blunder.board_badge_svg();
+        assert!(svg.contains("viewBox"));
+        assert!(svg.contains("rgb(224,40,40)") || svg.contains("rgb(224, 40, 40)"));
+        assert!(
+            MoveAnnotation::Brilliant
+                .board_badge_svg()
+                .contains("<path")
+        );
     }
 
     #[test]

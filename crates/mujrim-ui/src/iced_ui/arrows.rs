@@ -262,18 +262,35 @@ fn draw_board_arrow(
         arrow.color
     };
     let (fill, outline) = mark_colors(color, arrow.resolved_opacity());
-    let scale = appearance.size.scale();
-    if appearance.shape == ArrowShape::Smart
-        && is_knight_move(from_file, from_rank, to_file, to_rank)
-    {
-        draw_knight_arrow(
-            frame, arrow.from, arrow.to, sq_size, flipped, scale, fill, outline,
-        );
-    } else {
-        draw_straight_arrow(frame, p_from, p_to, sq_size, scale, fill, outline);
-    }
-    if let Some(step) = arrow.step.filter(|_| arrow.role.shows_step()) {
-        draw_step_badge(frame, p_to, sq_size, step, fill);
+    let appearance_core = crate::app_core::arrows::ArrowAppearance {
+        shape: match appearance.shape {
+            ArrowShape::Smart => crate::app_core::arrows::ArrowShape::Smart,
+            ArrowShape::Straight => crate::app_core::arrows::ArrowShape::Straight,
+        },
+        color: appearance.color.into(),
+        size: match appearance.size {
+            ArrowSize::Slim => crate::app_core::arrows::ArrowSize::Slim,
+            ArrowSize::Normal => crate::app_core::arrows::ArrowSize::Normal,
+            ArrowSize::Bold => crate::app_core::arrows::ArrowSize::Bold,
+        },
+    };
+    for geom in crate::app_core::arrows::arrow_geometry(arrow, sq_size, flipped, appearance_core) {
+        if let Some(body) = geom.body.filter(|body| body.len() >= 3) {
+            let path = Path::new(|builder| {
+                builder.move_to(Point::new(body[0].x, body[0].y));
+                for point in &body[1..] {
+                    builder.line_to(Point::new(point.x, point.y));
+                }
+                builder.close();
+            });
+            frame.fill(&path, fill);
+            frame.stroke(&path, Stroke::default().with_color(outline).with_width(1.4));
+        } else {
+            draw_straight_arrow(frame, p_from, p_to, sq_size, scale, fill, outline);
+        }
+        if let Some(step) = arrow.step.filter(|_| arrow.role.shows_step()) {
+            draw_step_badge(frame, p_to, sq_size, step, fill);
+        }
     }
 }
 

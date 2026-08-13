@@ -6,7 +6,7 @@ use std::sync::Arc;
 use mujrim_protocols::catalog::{DiscoveredEngine, RuntimeCompatibility};
 use mujrim_study::annotation::{AnnotationContext, MoveAnnotation};
 use mujrim_study::database::{EngineMetadata, GameQuery, GameSummary, StudyDatabase};
-use mujrim_study::opening::OpeningExplorer;
+use mujrim_study::opening::{MoveStatistics, OpeningExplorer, PrepSide, SavedLine};
 use mujrim_study::tournament::TournamentFormat;
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::TrainingStore;
@@ -58,6 +58,116 @@ pub fn review_annotation_badge(
     }
     let played = find_logged_move(&mut board, moves.get(ply - 1)?)?;
     Some((played.to, annotation))
+}
+
+pub fn apply_uci_move(board: &mut types::Board, uci: &str) -> Result<types::Move, String> {
+    let mv = find_logged_move(board, uci)
+        .ok_or_else(|| format!("Opening move '{uci}' is no longer legal."))?;
+    board.make_move(mv);
+    Ok(mv)
+}
+
+pub fn opening_white_score(stats: &MoveStatistics) -> u64 {
+    stats
+        .white_wins
+        .saturating_mul(100)
+        .saturating_add(stats.draws.saturating_mul(50))
+        .checked_div(stats.games)
+        .unwrap_or(0)
+}
+
+pub fn displayed_study_fen(
+    initial_fen: &str,
+    moves: &[String],
+    review_ply: Option<usize>,
+    live_fen: Option<String>,
+) -> String {
+    let ply = review_ply.unwrap_or(moves.len());
+    board_at_ply(initial_fen, moves, ply.min(moves.len()))
+        .map(|board| board.to_fen())
+        .ok()
+        .or(live_fen)
+        .unwrap_or_else(|| mujrim_study::opening::START_FEN.to_owned())
+}
+
+pub fn san_annotated_moves(
+    initial_fen: &str,
+    moves: &[String],
+    annotations: &[Option<MoveAnnotation>],
+) -> Vec<String> {
+    types::init();
+    let Ok(mut board) = types::Board::from_fen(initial_fen) else {
+        return moves
+            .iter()
+            .enumerate()
+            .map(|(index, notation)| {
+                annotated_move_label(notation, annotations.get(index).copied().flatten())
+            })
+            .collect();
+    };
+    let mut labels = Vec::with_capacity(moves.len());
+    for (index, uci) in moves.iter().enumerate() {
+        let san = uci_to_san(&board, uci);
+        labels.push(annotated_move_label(
+            &san,
+            annotations.get(index).copied().flatten(),
+        ));
+        let _ = apply_uci_move(&mut board, uci);
+    }
+    labels
+}
+
+pub fn uci_to_san(board: &types::Board, uci: &str) -> String {
+    let Some(mv) = find_logged_move(&mut board.clone(), uci) else {
+        return uci.to_owned();
+    };
+    match mv.flag {
+        types::chess_move::MoveFlag::KingCastle => return "O-O".to_owned(),
+        types::chess_move::MoveFlag::QueenCastle => return "O-O-O".to_owned(),
+        _ => {}
+    }
+    let Some((piece, _)) = board.piece_on(mv.from) else {
+        return uci.to_owned();
+    };
+    let dest = mv.to.to_string();
+    let capture = mv.is_capture() || board.piece_on(mv.to).is_some();
+    let promo = mv
+        .promotion
+        .map(|piece| format!("={}", piece.to_char().to_ascii_uppercase()))
+        .unwrap_or_default();
+    match piece {
+        types::Piece::Pawn => {
+            if capture {
+                format!("{}x{dest}{promo}", file_char(mv.from))
+            } else {
+                format!("{dest}{promo}")
+            }
+        }
+        _ => {
+            let letter = piece.to_char().to_ascii_uppercase();
+            if capture {
+                format!("{letter}x{dest}{promo}")
+            } else {
+                format!("{letter}{dest}{promo}")
+            }
+        }
+    }
+}
+
+fn file_char(square: types::Square) -> char {
+    (b'a' + square.file()) as char
+}
+
+pub fn save_current_line(
+    name: String,
+    side: PrepSide,
+    initial_fen: String,
+    moves: Vec<String>,
+    notes: String,
+) -> Result<SavedLine, String> {
+    let line = SavedLine::from_current(name, side, initial_fen, moves, notes);
+    line.to_repertoire().validate(&line.initial_fen)?;
+    Ok(line)
 }
 
 pub fn replay_study_game(initial_fen: &str, moves: &[String]) -> Result<GameState, String> {
@@ -174,16 +284,45 @@ pub fn list_engine_binaries_in_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
             })
             .then_with(|| left.cmp(right))
     });
-    let mut seen_stems = std::collections::HashSet::new();
-    candidates.retain(|path| {
-        let stem = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        seen_stems.insert(stem)
-    });
+    candidates.retain(|path| !is_product_engine_binary(path));
+    let mut seen_ids = std::collections::HashSet::new();
+    candidates.retain(|path| seen_ids.insert(engine_identity_key(path)));
     candidates.truncate(64);
     candidates
+}
+
+pub fn engine_identity_key(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    mujrim_protocols::catalog::canonical_engine_id(&stem).to_ascii_lowercase()
+}
+
+pub fn is_product_engine_binary(path: &Path) -> bool {
+    matches!(
+        engine_identity_key(path).as_str(),
+        "mujrim-ui"
+            | "mujrim-updater"
+            | "mujrim-tooling"
+            | "mujrim-benchmarker"
+            | "mujrim-external"
+    )
+}
+
+pub fn engine_is_selected(selected: &[PathBuf], path: &Path) -> bool {
+    let key = engine_identity_key(path);
+    selected.iter().any(|item| engine_identity_key(item) == key)
+}
+
+pub fn toggle_engine_selection(selected: &mut Vec<PathBuf>, path: PathBuf) {
+    let key = engine_identity_key(&path);
+    if selected.iter().any(|item| engine_identity_key(item) == key) {
+        selected.retain(|item| engine_identity_key(item) != key);
+    } else {
+        selected.push(path);
+    }
 }
 
 pub fn engine_path_rank(path: &Path, preferred: &[String]) -> usize {
@@ -426,18 +565,20 @@ pub fn tournament_engine_roster(
 ) -> Vec<QuickTournamentEngine> {
     let mut roster = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
-    let mut seen_stems = std::collections::HashSet::new();
+    let mut seen_ids = std::collections::HashSet::new();
     for path in list_local_engine_binaries() {
-        if !path_is_under_local_engines(&path) || !seen_paths.insert(path.clone()) {
+        if !path_is_under_local_engines(&path) {
+            continue;
+        }
+        let path_key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let identity = engine_identity_key(&path);
+        if !seen_paths.insert(path_key) || !seen_ids.insert(identity) {
             continue;
         }
         let stem = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| "engine".to_owned());
-        if !seen_stems.insert(stem.clone()) {
-            continue;
-        }
         let mut name = catalog_display_name(&stem, bundled);
         if !mujrim_protocols::is_host_native_binary(&path)
             && !name.to_ascii_lowercase().contains("emulation")
@@ -458,15 +599,12 @@ pub fn tournament_engine_roster(
     }
     for engine in discovered {
         let path = PathBuf::from(&engine.path);
-        let stem = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| engine.name.clone());
+        let identity = engine_identity_key(&path);
         if engine.protocol.eq_ignore_ascii_case("UCI")
             && path.is_file()
             && path_is_under_local_engines(&path)
-            && seen_paths.insert(path.clone())
-            && seen_stems.insert(stem)
+            && seen_paths.insert(path.canonicalize().unwrap_or_else(|_| path.clone()))
+            && seen_ids.insert(identity)
         {
             roster.push(QuickTournamentEngine {
                 name: engine.name.clone(),
@@ -515,6 +653,23 @@ pub fn players_for_detected_engines(
             engine_player_from_roster(&roster, 0, 16),
             engine_player_from_roster(&roster, 1, 12),
         ),
+    }
+}
+
+pub fn default_tournament_engine_paths(roster: &[QuickTournamentEngine]) -> Vec<PathBuf> {
+    roster
+        .iter()
+        .take(crate::app_core::tournament_setup::GUI_TOURNAMENT_DEFAULT_ENGINES)
+        .map(|engine| engine.path.clone())
+        .collect()
+}
+
+pub fn gui_safe_engine_args(path: &Path) -> Vec<String> {
+    let key = engine_identity_key(path);
+    if key == "lc0" || key.contains("lc0") || key.contains("leela") {
+        vec!["--backend=eigen".to_owned(), "--nncache=20000".to_owned()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -588,6 +743,7 @@ fn run_quick_tournament_body(
         .map(|engine| {
             let mut spec = EngineSpec::new(engine.path.clone());
             spec.name = engine.name;
+            spec.args = gui_safe_engine_args(&engine.path);
             spec.uci_options = uci_process::uci_resource_options(&engine.path, false, true, None);
             TournamentEngine {
                 engine: spec,
@@ -1129,12 +1285,83 @@ mod tests {
         let roots = vec![root.join("engines")];
         let found = list_engine_binaries_in_roots(&roots);
         assert_eq!(found, vec![engine.clone()]);
+        assert_eq!(engine_identity_key(&engine), "stockfish");
         assert!(path_is_under_engine_roots(&engine, &roots));
         assert!(!path_is_under_engine_roots(
             Path::new("/tmp/not-an-engine"),
             &roots
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn engine_identity_dedupes_aliases_and_skips_product_bins() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-ui-engine-identity-{}-{}",
+            std::process::id(),
+            stamp
+        ));
+        let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let write_bin = |folder: &str, name: &str| {
+            let bin = root.join(folder).join(name).join("bin").join(&target);
+            std::fs::create_dir_all(&bin).unwrap();
+            let path = bin.join(name);
+            std::fs::write(&path, b"engine").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&path, perms).unwrap();
+            }
+            path
+        };
+        let cwd_stockfish = write_bin("engines-a", "stockfish");
+        write_bin("engines-b", "stockfish");
+        write_bin("engines-a", "mujrim");
+        write_bin("engines-b", "mujrim-elite");
+        write_bin("engines-a", "mujrim-ui");
+        let roots = vec![root.join("engines-a"), root.join("engines-b")];
+        let found = list_engine_binaries_in_roots(&roots);
+        let ids: Vec<_> = found.iter().map(|path| engine_identity_key(path)).collect();
+        assert_eq!(ids.iter().filter(|id| *id == "stockfish").count(), 1);
+        assert_eq!(ids.iter().filter(|id| *id == "mujrim-elite").count(), 1);
+        assert!(!ids.iter().any(|id| id == "mujrim-ui"));
+        assert_eq!(found.len(), 2);
+        let other_stockfish = root
+            .join("engines-b")
+            .join("stockfish")
+            .join("bin")
+            .join(&target)
+            .join("stockfish");
+        assert!(engine_is_selected(
+            std::slice::from_ref(&cwd_stockfish),
+            &other_stockfish
+        ));
+        let mut selected = vec![cwd_stockfish.clone()];
+        toggle_engine_selection(&mut selected, cwd_stockfish.clone());
+        assert!(selected.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_uci_move_and_opening_score_are_legal() {
+        types::init();
+        let mut board = types::Board::new();
+        let played = apply_uci_move(&mut board, "e2e4").expect("e4");
+        assert_eq!(played.to_uci(), "e2e4");
+        assert!(apply_uci_move(&mut board, "e2e4").is_err());
+        let stats = MoveStatistics {
+            games: 10,
+            white_wins: 4,
+            draws: 4,
+            black_wins: 2,
+        };
+        assert_eq!(opening_white_score(&stats), 60);
     }
 
     #[test]
@@ -1164,5 +1391,94 @@ mod tests {
         let empty = players_for_detected_engines(GameMode::HumanVsHuman, &[], &[]);
         assert!(matches!(empty.0, PlayerConfig::Human));
         assert!(matches!(empty.1, PlayerConfig::Human));
+    }
+
+    #[test]
+    fn default_tournament_selection_is_two_engines() {
+        let roster: Vec<QuickTournamentEngine> = (0..5)
+            .map(|i| QuickTournamentEngine {
+                name: format!("e{i}"),
+                path: PathBuf::from(format!("/tmp/e{i}")),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            })
+            .collect();
+        let selected = default_tournament_engine_paths(&roster);
+        assert_eq!(
+            selected.len(),
+            crate::app_core::tournament_setup::GUI_TOURNAMENT_DEFAULT_ENGINES
+        );
+        assert_eq!(selected[0], PathBuf::from("/tmp/e0"));
+        assert_eq!(selected[1], PathBuf::from("/tmp/e1"));
+        assert!(default_tournament_engine_paths(&[]).is_empty());
+    }
+
+    #[test]
+    fn lc0_gui_args_force_cpu_backend() {
+        let args = gui_safe_engine_args(Path::new("/engines/lc0"));
+        assert!(args.iter().any(|arg| arg == "--backend=eigen"));
+        assert!(args.iter().any(|arg| arg.contains("nncache")));
+        assert!(
+            gui_safe_engine_args(Path::new("/engines/lc0-cuda"))
+                .iter()
+                .any(|arg| arg == "--backend=eigen")
+        );
+        assert!(gui_safe_engine_args(Path::new("/engines/stockfish")).is_empty());
+        assert!(gui_safe_engine_args(Path::new("/engines/mujrim")).is_empty());
+    }
+
+    #[test]
+    fn uci_to_san_covers_pawn_knight_and_castle() {
+        types::init();
+        let board = types::Board::new();
+        assert_eq!(uci_to_san(&board, "e2e4"), "e4");
+        assert_eq!(uci_to_san(&board, "g1f3"), "Nf3");
+        let labels = san_annotated_moves(
+            mujrim_study::opening::START_FEN,
+            &["e2e4".into(), "e7e5".into(), "g1f3".into()],
+            &[
+                None,
+                None,
+                Some(mujrim_study::annotation::MoveAnnotation::Book),
+            ],
+        );
+        assert_eq!(labels, ["e4", "e5", "Nf3 B"]);
+        let mut after_e4 = board.clone();
+        let mv = find_logged_move(&mut after_e4, "e2e4").unwrap();
+        after_e4.make_move(mv);
+        assert_eq!(uci_to_san(&after_e4, "e7e5"), "e5");
+    }
+
+    #[test]
+    fn displayed_study_fen_follows_review_ply() {
+        types::init();
+        let moves = vec!["e2e4".to_owned(), "e7e5".to_owned()];
+        let start = displayed_study_fen(mujrim_study::opening::START_FEN, &moves, Some(0), None);
+        assert!(start.contains(" w "));
+        let after_one =
+            displayed_study_fen(mujrim_study::opening::START_FEN, &moves, Some(1), None);
+        assert!(after_one.contains(" b "));
+    }
+
+    #[test]
+    fn save_current_line_rejects_illegal_prep() {
+        assert!(
+            save_current_line(
+                "Bad".into(),
+                mujrim_study::opening::PrepSide::White,
+                mujrim_study::opening::START_FEN.to_owned(),
+                vec!["e2e5".into()],
+                String::new(),
+            )
+            .is_err()
+        );
+        let ok = save_current_line(
+            "Open".into(),
+            mujrim_study::opening::PrepSide::White,
+            mujrim_study::opening::START_FEN.to_owned(),
+            vec!["e2e4".into()],
+            "notes".into(),
+        )
+        .unwrap();
+        assert_eq!(ok.moves, vec!["e2e4".to_owned()]);
     }
 }

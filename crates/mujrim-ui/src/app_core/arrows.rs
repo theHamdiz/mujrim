@@ -169,6 +169,9 @@ pub struct Triangle {
 pub struct ArrowGeometry {
     pub shaft: Poly,
     pub head: Triangle,
+    /// Closed outline for a single-unit arrow. When present, paint this instead of
+    /// `shaft` + `head` (used for knight L-arrows with a rounded joint).
+    pub body: Option<Vec<Point>>,
     pub fill: Rgba,
     pub outline: Rgba,
     pub step: Option<(Point, u8, Rgba)>,
@@ -267,6 +270,7 @@ fn straight_geometry(
                 shaft_end_y - py * head_half_w,
             ),
         },
+        body: None,
         fill,
         outline,
         step: None,
@@ -296,53 +300,118 @@ fn knight_geometry(
         (from_file, to_rank)
     };
     let corner = sq_center(corner_file as u8, corner_rank as u8, sq_size, flipped);
-    let mut out = Vec::new();
-    if let Some(leg) = leg_geometry(from, corner, sq_size * 0.25 * scale, fill, outline) {
-        out.push(leg);
-    }
-    if let Some(head) = straight_geometry(corner, to, sq_size, scale, fill, outline) {
-        out.push(head);
-    }
-    out
-}
-
-fn leg_geometry(
-    from: Point,
-    to: Point,
-    shaft_w: f32,
-    fill: Rgba,
-    outline: Rgba,
-) -> Option<ArrowGeometry> {
-    let dx = to.x - from.x;
-    let dy = to.y - from.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1.0 {
-        return None;
-    }
-    let ux = dx / len;
-    let uy = dy / len;
-    let px = -uy;
-    let py = ux;
-    let ext = shaft_w * 0.5;
-    let to_ext = Point::new(to.x + ux * ext, to.y + uy * ext);
-    Some(ArrowGeometry {
+    let shaft_w = sq_size * 0.25 * scale;
+    let Some(body) = rounded_knight_body(from, corner, to, shaft_w, sq_size * 0.40) else {
+        return Vec::new();
+    };
+    vec![ArrowGeometry {
         shaft: Poly {
-            points: [
-                Point::new(from.x + px * shaft_w * 0.5, from.y + py * shaft_w * 0.5),
-                Point::new(to_ext.x + px * shaft_w * 0.5, to_ext.y + py * shaft_w * 0.5),
-                Point::new(to_ext.x - px * shaft_w * 0.5, to_ext.y - py * shaft_w * 0.5),
-                Point::new(from.x - px * shaft_w * 0.5, from.y - py * shaft_w * 0.5),
-            ],
+            points: [body[0], body[0], body[0], body[0]],
         },
         head: Triangle {
             a: to,
             b: to,
             c: to,
         },
+        body: Some(body),
         fill,
         outline,
         step: None,
-    })
+    }]
+}
+
+fn add(a: Point, b: Point) -> Point {
+    Point::new(a.x + b.x, a.y + b.y)
+}
+
+fn sub(a: Point, b: Point) -> Point {
+    Point::new(a.x - b.x, a.y - b.y)
+}
+
+fn scale_pt(a: Point, s: f32) -> Point {
+    Point::new(a.x * s, a.y * s)
+}
+
+fn length(a: Point) -> f32 {
+    (a.x * a.x + a.y * a.y).sqrt()
+}
+
+fn normalize(a: Point) -> Option<Point> {
+    let len = length(a);
+    (len > 1.0).then(|| scale_pt(a, 1.0 / len))
+}
+
+fn sample_arc(center: Point, start: Point, end: Point, steps: usize) -> Vec<Point> {
+    let a0 = (start.y - center.y).atan2(start.x - center.x);
+    let a1 = (end.y - center.y).atan2(end.x - center.x);
+    let mut delta = a1 - a0;
+    const PI: f32 = std::f32::consts::PI;
+    while delta > PI {
+        delta -= 2.0 * PI;
+    }
+    while delta < -PI {
+        delta += 2.0 * PI;
+    }
+    let radius = length(sub(start, center)).max(1.0);
+    let steps = steps.max(2);
+    (1..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32;
+            let angle = a0 + delta * t;
+            Point::new(
+                center.x + radius * angle.cos(),
+                center.y + radius * angle.sin(),
+            )
+        })
+        .collect()
+}
+
+/// Single closed L-arrow: round start cap, quarter-circle elbow, chevron head.
+fn rounded_knight_body(
+    from: Point,
+    corner: Point,
+    to: Point,
+    shaft_w: f32,
+    head_len: f32,
+) -> Option<Vec<Point>> {
+    let u = normalize(sub(corner, from))?;
+    let v = normalize(sub(to, corner))?;
+    let n_u = Point::new(-u.y, u.x);
+    let n_v = Point::new(-v.y, v.x);
+    let turn = u.x * v.y - u.y * v.x;
+    if turn.abs() < 0.2 {
+        return None;
+    }
+    let sign = turn.signum();
+    let outer_u = scale_pt(n_u, -sign);
+    let outer_v = scale_pt(n_v, -sign);
+    let inner_u = scale_pt(n_u, sign);
+    let inner_v = scale_pt(n_v, sign);
+    let w = shaft_w * 0.5;
+    let head_half = w * 2.4;
+    let head_base = sub(to, scale_pt(v, head_len));
+    let start_outer = add(from, scale_pt(outer_u, w));
+    let start_inner = add(from, scale_pt(inner_u, w));
+    let cap_back = sub(from, scale_pt(u, w));
+    let outer_in = add(corner, scale_pt(outer_u, w));
+    let outer_out = add(corner, scale_pt(outer_v, w));
+    let inner_out = add(corner, scale_pt(inner_v, w));
+    let inner_in = add(corner, scale_pt(inner_u, w));
+    let mut body = Vec::with_capacity(40);
+    body.push(start_inner);
+    body.extend(sample_arc(from, start_inner, cap_back, 6));
+    body.extend(sample_arc(from, cap_back, start_outer, 6));
+    body.push(outer_in);
+    body.extend(sample_arc(corner, outer_in, outer_out, 8));
+    body.push(add(head_base, scale_pt(outer_v, w)));
+    body.push(add(head_base, scale_pt(outer_v, head_half)));
+    body.push(to);
+    body.push(add(head_base, scale_pt(inner_v, head_half)));
+    body.push(add(head_base, scale_pt(inner_v, w)));
+    body.push(inner_out);
+    body.extend(sample_arc(corner, inner_out, inner_in, 8));
+    body.push(start_inner);
+    Some(body)
 }
 
 /// Eval-graph polyline in unit space (x in 0..width, y in 0..height).
@@ -437,6 +506,43 @@ mod tests {
                 size: ArrowSize::Normal,
             },
         );
-        assert!(!geom.is_empty());
+        assert_eq!(geom.len(), 1);
+        let body = geom[0].body.as_ref().expect("knight arrow is one path");
+        assert!(
+            body.len() >= 16,
+            "rounded elbow must be sampled, not two rectangles"
+        );
+        let df = (arrow.to.file() as i32 - arrow.from.file() as i32).abs();
+        let dr = (arrow.to.rank() as i32 - arrow.from.rank() as i32).abs();
+        let elbow = if df > dr {
+            sq_center(arrow.to.file(), arrow.from.rank(), 64.0, false)
+        } else {
+            sq_center(arrow.from.file(), arrow.to.rank(), 64.0, false)
+        };
+        let min_elbow = body
+            .iter()
+            .map(|point| {
+                let dx = point.x - elbow.x;
+                let dy = point.y - elbow.y;
+                (dx * dx + dy * dy).sqrt()
+            })
+            .fold(f32::MAX, f32::min);
+        assert!(
+            min_elbow < 64.0 * 0.20,
+            "joint stays on a rounded fillet around the elbow, got {min_elbow}"
+        );
+    }
+
+    #[test]
+    fn rounded_knight_body_is_a_closed_loop() {
+        let from = Point::new(40.0, 520.0);
+        let corner = Point::new(40.0, 360.0);
+        let to = Point::new(200.0, 360.0);
+        let body = rounded_knight_body(from, corner, to, 16.0, 24.0).unwrap();
+        let first = body.first().unwrap();
+        let last = body.last().unwrap();
+        assert!((first.x - last.x).abs() < 0.5);
+        assert!((first.y - last.y).abs() < 0.5);
+        assert_eq!(body.iter().filter(|p| **p == to).count(), 1);
     }
 }

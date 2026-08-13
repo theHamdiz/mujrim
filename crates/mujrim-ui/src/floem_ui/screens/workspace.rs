@@ -35,6 +35,24 @@ pub fn analysis(state: AppState, handles: AppHandles) -> impl IntoView {
     )
 }
 
+pub fn study(state: AppState, handles: AppHandles) -> impl IntoView {
+    workspace(
+        state,
+        handles.clone(),
+        false,
+        super::study::study_sidebar(state, handles),
+    )
+}
+
+pub fn learn(state: AppState, handles: AppHandles) -> impl IntoView {
+    workspace(
+        state,
+        handles.clone(),
+        false,
+        super::study::learn_sidebar(state, handles),
+    )
+}
+
 pub fn tournaments(state: AppState, handles: AppHandles) -> impl IntoView {
     workspace(
         state,
@@ -103,7 +121,7 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
             if state.game.get().is_some() {
                 board::board_view(state, handles.clone()).into_any()
             } else {
-                empty_board(state).into_any()
+                empty_board(state, handles.clone()).into_any()
             }
         })
         .style(|s| {
@@ -130,7 +148,7 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
     })
 }
 
-fn empty_board(state: AppState) -> impl IntoView {
+fn empty_board(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     widgets::card(
         state,
@@ -139,6 +157,8 @@ fn empty_board(state: AppState) -> impl IntoView {
             Label::derived(move || {
                 (if state.screen.get() == Screen::Tournaments {
                     "Configure the tournament, then Start."
+                } else if matches!(state.screen.get(), Screen::Study | Screen::Learn) {
+                    "Explorer, library, and saved lines load onto this board."
                 } else {
                     "Start a game from Home."
                 })
@@ -154,6 +174,20 @@ fn empty_board(state: AppState) -> impl IntoView {
                 .to_owned()
             })
             .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+            dyn_view({
+                let handles = handles.clone();
+                move || {
+                    if state.screen.get() == Screen::Tournaments {
+                        widgets::primary_button(state, "Tournament setup", {
+                            let handles = handles.clone();
+                            move || actions::open_tournament_setup(state, &handles)
+                        })
+                        .into_any()
+                    } else {
+                        Empty::new().into_any()
+                    }
+                }
+            }),
         ))
         .style(|s| s.row_gap(8.0).items_center()),
     )
@@ -191,7 +225,7 @@ fn playing_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
 fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
     let telemetry = handles.telemetry.clone();
     Stack::vertical((
-        pane_title("Analysis"),
+        pane_title("Multi-Engine Studio"),
         eval_graph::eval_graph(state),
         Label::derived(move || {
             state
@@ -208,39 +242,126 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
                 .unwrap_or_default()
         })
         .style(|s| s.font_size(12.0)),
-        move_list(state),
-        widgets::primary_button(state, "Re-run", {
+        widgets::stepper_row(
+            state,
+            "MultiPV",
+            "",
+            move || state.analysis_multipv.get(),
+            move |value| state.analysis_multipv.set(value),
+            1,
+            5,
+        ),
+        analysis_engine_toggles(state, handles.clone()),
+        widgets::primary_button(state, "Run Multi-Engine Analysis", {
             let handles = handles.clone();
             move || actions::analyze_game(state, &handles)
         }),
-        Stack::horizontal((
-            widgets::ghost_button(state, "<<", move || {
-                state.review_ply.set(Some(0));
-            }),
-            widgets::ghost_button(state, "<", move || {
-                state.review_ply.update(|ply| {
-                    *ply = Some(
-                        ply.unwrap_or(state.move_log.get_untracked().len())
-                            .saturating_sub(1),
-                    );
-                });
-            }),
-            widgets::ghost_button(state, ">", move || {
-                let len = state.move_log.get_untracked().len();
-                state.review_ply.update(|ply| {
-                    let next = ply.unwrap_or(0).saturating_add(1).min(len);
-                    *ply = Some(next);
-                });
-            }),
-            widgets::ghost_button(state, ">>", move || {
-                state
-                    .review_ply
-                    .set(Some(state.move_log.get_untracked().len()));
-            }),
-        ))
-        .style(|s| s.col_gap(4.0).flex_wrap(FlexWrap::Wrap)),
+        widgets::ghost_button(state, "Review Current Game", {
+            let handles = handles.clone();
+            move || actions::analyze_game(state, &handles)
+        }),
+        pane_title("Engine PV arrows"),
+        Label::derived(move || {
+            state.analysis.get().map_or_else(
+                || "No multi-engine arrows yet.".to_owned(),
+                |snap| {
+                    snap.arrows
+                        .iter()
+                        .take(12)
+                        .map(|arrow| {
+                            let label = arrow
+                                .label
+                                .clone()
+                                .unwrap_or_else(|| format!("{}→{}", arrow.from, arrow.to));
+                            format!("{}. {label}", arrow.step.unwrap_or(0))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                },
+            )
+        })
+        .style(|s| s.font_size(12.0)),
+        pane_title("Gambit coach"),
+        gambit_controls(state),
+        move_list(state),
+        ply_nav(state),
     ))
     .style(|s| s.flex_col().row_gap(8.0).width_full().min_height(0.0))
+}
+
+fn analysis_engine_toggles(state: AppState, handles: AppHandles) -> impl IntoView {
+    dyn_view(move || {
+        let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+        let mut rows = vec![
+            widgets::toggle_row(
+                state,
+                "Mujrim (built-in)",
+                move || {
+                    state
+                        .analysis_engines_selected
+                        .get()
+                        .iter()
+                        .any(|id| id == "builtin")
+                },
+                move |_| actions::toggle_analysis_engine(state, "builtin".to_owned()),
+            )
+            .into_any(),
+        ];
+        for engine in roster {
+            let id = engine.path.to_string_lossy().into_owned();
+            let name = engine.name;
+            rows.push(
+                widgets::toggle_row(
+                    state,
+                    name,
+                    {
+                        let id = id.clone();
+                        move || {
+                            state
+                                .analysis_engines_selected
+                                .get()
+                                .iter()
+                                .any(|selected| selected == &id)
+                        }
+                    },
+                    {
+                        let id = id.clone();
+                        move |_| actions::toggle_analysis_engine(state, id.clone())
+                    },
+                )
+                .into_any(),
+            );
+        }
+        rows.into_view()
+            .style(|s| s.width_full().row_gap(6.0).flex_col())
+            .into_any()
+    })
+}
+
+fn gambit_controls(state: AppState) -> impl IntoView {
+    dyn_view(move || {
+        let Some(id) = state.active_gambit_id.get() else {
+            return Label::new("Load a gambit from Study for stepped coaching arrows.")
+                .style(|s| s.font_size(12.0))
+                .into_any();
+        };
+        let Some(lesson) = mujrim_study::gambit::find_gambit(&id) else {
+            return Empty::new().into_any();
+        };
+        Stack::vertical((
+            Label::new(format!("{} · {}", lesson.name, lesson.eco)).style(|s| s.font_size(14.0)),
+            Label::new(lesson.summary).style(|s| s.font_size(12.0)),
+            Stack::horizontal((
+                widgets::ghost_button(state, "◀ Step", move || actions::gambit_step(state, -1)),
+                Label::derived(move || format!("Ply {}", state.gambit_ply.get()))
+                    .style(|s| s.font_size(13.0)),
+                widgets::ghost_button(state, "Step ▶", move || actions::gambit_step(state, 1)),
+            ))
+            .style(|s| s.col_gap(8.0).items_center()),
+        ))
+        .style(|s| s.row_gap(8.0).width_full())
+        .into_any()
+    })
 }
 
 fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -286,8 +407,27 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         pane_title("Moves"),
         move_list(state),
         eval_graph::eval_graph(state),
+        pane_title("Standings"),
+        Label::derived(move || {
+            let snap = state.tournament_snapshot.get();
+            if snap.standings.is_empty() {
+                "Standings appear after the first finished pairing.".to_owned()
+            } else {
+                snap.standings
+                    .iter()
+                    .map(|row| {
+                        format!(
+                            "{}. {}  {:.1}  ({}-{}-{})",
+                            row.rank, row.name, row.points, row.wins, row.draws, row.losses
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        })
+        .style(|s| s.font_size(11.0)),
         Stack::horizontal((
-            widgets::ghost_button(state, "Setup", {
+            widgets::primary_button(state, "Tournament setup", {
                 let handles = handles.clone();
                 move || actions::open_tournament_setup(state, &handles)
             }),
@@ -305,47 +445,99 @@ fn pane_title(label: &'static str) -> impl IntoView {
     Label::new(label).style(|s| s.font_size(12.0).font_bold())
 }
 
-fn move_list(state: AppState) -> impl IntoView {
-    Label::derived(move || {
+pub(super) fn ply_nav(state: AppState) -> impl IntoView {
+    Stack::horizontal((
+        widgets::ghost_button(state, "<<", move || actions::view_ply(state, 0)),
+        widgets::ghost_button(state, "<", move || {
+            let len = state.move_log.get_untracked().len();
+            let current = state.review_ply.get_untracked().unwrap_or(len);
+            actions::view_ply(state, current.saturating_sub(1));
+        }),
+        widgets::ghost_button(state, ">", move || {
+            let len = state.move_log.get_untracked().len();
+            let current = state.review_ply.get_untracked().unwrap_or(len);
+            actions::view_ply(state, current.saturating_add(1).min(len));
+        }),
+        widgets::ghost_button(state, ">>", move || {
+            actions::view_ply(state, state.move_log.get_untracked().len());
+        }),
+    ))
+    .style(|s| s.col_gap(4.0).flex_wrap(FlexWrap::Wrap))
+}
+
+pub(super) fn move_list(state: AppState) -> impl IntoView {
+    dyn_view(move || {
         let moves = state.move_log.get();
+        let annotations = state.move_annotations.get();
+        let pal = theme::palette(state.settings.get().board_theme);
         if moves.is_empty() {
-            return "No moves yet.".to_owned();
+            return Label::new("No moves yet.")
+                .style(move |s| s.font_size(12.0).color(theme::rgba(pal.text_secondary)))
+                .into_any();
         }
-        moves
+        let labels = logic::san_annotated_moves(&state.initial_fen.get(), &moves, &annotations);
+        let current = state.review_ply.get().unwrap_or(labels.len());
+        labels
             .chunks(2)
             .enumerate()
             .map(|(idx, pair)| {
-                let white = logic::annotated_move_label(
-                    &pair[0],
-                    state.move_annotations.get().get(idx * 2).copied().flatten(),
-                );
-                let black = pair.get(1).map(|mv| {
-                    logic::annotated_move_label(
-                        mv,
-                        state
-                            .move_annotations
-                            .get()
-                            .get(idx * 2 + 1)
-                            .copied()
-                            .flatten(),
-                    )
-                });
-                match black {
-                    Some(black) => format!("{}. {white} {black}", idx + 1),
-                    None => format!("{}. {white}", idx + 1),
-                }
+                let white_ply = idx * 2 + 1;
+                let black_ply = idx * 2 + 2;
+                let white = pair[0].clone();
+                let black = pair.get(1).cloned();
+                Stack::horizontal((
+                    Label::new(format!("{}.", idx + 1))
+                        .style(move |s| {
+                            s.font_size(11.0)
+                                .width(28.0)
+                                .color(theme::rgba(pal.text_secondary))
+                        })
+                        .into_any(),
+                    ply_button(state, white, white_ply, current == white_ply).into_any(),
+                    black.map_or_else(
+                        || {
+                            Label::new("…")
+                                .style(move |s| {
+                                    s.font_size(12.0)
+                                        .width(88.0)
+                                        .color(theme::rgba(pal.text_secondary))
+                                })
+                                .into_any()
+                        },
+                        |black| {
+                            ply_button(state, black, black_ply, current == black_ply).into_any()
+                        },
+                    ),
+                ))
+                .style(|s| s.width_full().col_gap(6.0).items_center().min_width(0.0))
             })
             .collect::<Vec<_>>()
-            .join("  ")
+            .into_view()
+            .style(|s| s.width_full().row_gap(2.0).flex_col().max_height(220.0))
+            .scroll()
+            .into_any()
     })
-    .style(move |s| {
-        s.font_size(12.0)
-            .width_full()
-            .min_width(0.0)
-            .color(theme::rgba(
-                theme::palette(state.settings.get().board_theme).text_primary,
-            ))
-    })
+}
+
+fn ply_button(state: AppState, label: String, ply: usize, active: bool) -> impl IntoView {
+    Button::new(label)
+        .action(move || actions::view_ply(state, ply))
+        .style(move |s| {
+            let pal = theme::palette(state.settings.get().board_theme);
+            s.min_width(72.0)
+                .padding_horiz(8.0)
+                .padding_vert(4.0)
+                .border_radius(8.0)
+                .border(0.0)
+                .font_size(12.0)
+                .background(if active {
+                    theme::rgba(pal.accent)
+                } else {
+                    Color::TRANSPARENT
+                })
+                .color(theme::rgba(pal.text_primary))
+                .hover(|s| s.background(theme::rgba(pal.panel)))
+        })
 }
 
 fn engine_lines(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -371,4 +563,22 @@ fn engine_lines(state: AppState, handles: AppHandles) -> impl IntoView {
             theme::palette(state.settings.get().board_theme).text_secondary,
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn clickable_move_list_navigates_board_plies() {
+        let src = include_str!("workspace.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        for needle in [
+            "actions::view_ply",
+            "san_annotated_moves",
+            "pub fn study",
+            "pub fn learn",
+            "ply_button",
+        ] {
+            assert!(production.contains(needle), "missing {needle}");
+        }
+    }
 }

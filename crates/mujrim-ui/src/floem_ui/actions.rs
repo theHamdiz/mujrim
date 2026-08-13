@@ -1,6 +1,7 @@
 //! Side-effecting UI actions shared by Floem screens and chrome.
 
-use std::path::PathBuf;
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use floem::ext_event::create_ext_action;
@@ -118,8 +119,18 @@ pub fn on_board_press(state: AppState, handles: &AppHandles, square: Square) {
     let Some(mut game) = state.game.get_untracked() else {
         return;
     };
-    if game.game_over || state.review_ply.get_untracked().is_some() {
+    if game.game_over {
         return;
+    }
+    if state.review_ply.get_untracked().is_some() {
+        if matches!(
+            state.screen.get_untracked(),
+            Screen::Study | Screen::Learn | Screen::Analysis
+        ) {
+            resume_from_review(state);
+        } else {
+            return;
+        }
     }
     let stm = game.board.side_to_move;
     let human_turn = player_is_human(state, stm);
@@ -191,6 +202,7 @@ pub fn apply_engine_move(
         }
     });
     state.move_log.update(|log| log.push(mv.to_uci()));
+    state.move_annotations.update(|items| items.push(None));
     engine::begin_slide(state, mv.from, mv.to, captured);
     try_flush_premoves(state);
 }
@@ -210,6 +222,7 @@ fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: 
         }
     }
     state.move_log.update(|log| log.push(mv.to_uci()));
+    state.move_annotations.update(|items| items.push(None));
     engine::begin_slide(state, mv.from, mv.to, captured);
     overlay_last_move(state);
     if state
@@ -313,33 +326,50 @@ pub fn analyze_game(state: AppState, handles: &AppHandles) {
         .map(|game| game.board.to_fen())
         .unwrap_or_else(|| state.initial_fen.get_untracked());
     let cfg = state.engine_cfg.get_untracked();
-    let mut engines = vec![AnalysisEngineSpec {
-        id: "builtin".into(),
-        name: "Mujrim".into(),
-        path: None,
-        protocol: ExternalEngineProtocol::Uci,
-        builtin: true,
-    }];
-    if let PlayerConfig::External { path, protocol } = state.black_player.get_untracked() {
-        let name = PathBuf::from(&path)
-            .file_stem()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.clone());
+    let selected = state.analysis_engines_selected.get_untracked();
+    let mut engines = Vec::new();
+    if selected.iter().any(|id| id == "builtin") {
         engines.push(AnalysisEngineSpec {
-            id: path.clone(),
-            name,
-            path: Some(PathBuf::from(path)),
-            protocol,
-            builtin: false,
+            id: "builtin".into(),
+            name: "Mujrim".into(),
+            path: None,
+            protocol: ExternalEngineProtocol::Uci,
+            builtin: true,
+        });
+    }
+    let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    for engine in roster {
+        let id = engine.path.to_string_lossy().into_owned();
+        if selected.iter().any(|selected| {
+            selected == &id
+                || logic::engine_identity_key(Path::new(selected))
+                    == logic::engine_identity_key(&engine.path)
+        }) {
+            engines.push(AnalysisEngineSpec {
+                id,
+                name: engine.name,
+                path: Some(engine.path),
+                protocol: ExternalEngineProtocol::Uci,
+                builtin: false,
+            });
+        }
+    }
+    if engines.is_empty() {
+        engines.push(AnalysisEngineSpec {
+            id: "builtin".into(),
+            name: "Mujrim".into(),
+            path: None,
+            protocol: ExternalEngineProtocol::Uci,
+            builtin: true,
         });
     }
     let request = AnalysisRequest {
         fen,
         depth: cfg.max_depth.min(16),
-        movetime: Duration::from_millis(400),
+        movetime: Duration::from_millis((cfg.time_per_move.max(1) * 1000) as u64),
         hash_mb: crate::app_core::engine::bounded_hash_mb(cfg.hash_mb),
         threads: cfg.threads.max(1) as usize,
-        multipv: 3,
+        multipv: state.analysis_multipv.get_untracked().clamp(1, 5) as u32,
         engines,
         max_pv_plies: 8,
     };
@@ -539,9 +569,16 @@ pub fn load_library_game(state: AppState, handles: &AppHandles, id: String) {
                 state.white_player.set(PlayerConfig::Human);
                 state.black_player.set(PlayerConfig::Human);
                 state.initial_fen.set(game.initial_fen);
-                state.move_log.set(game.moves);
+                state.move_log.set(game.moves.clone());
+                state.move_annotations.set(vec![None; game.moves.len()]);
                 state.game.set(Some(board));
-                state.screen.set(Screen::Playing);
+                state.review_ply.set(Some(game.moves.len()));
+                if !matches!(
+                    state.screen.get_untracked(),
+                    Screen::Study | Screen::Learn | Screen::Analysis
+                ) {
+                    state.screen.set(Screen::Study);
+                }
                 state.status.set("Loaded library game.".to_owned());
             }
             Err(error) => state.status.set(error),
@@ -559,16 +596,324 @@ pub fn start_puzzle(state: AppState, handles: &AppHandles) {
         .unwrap_or_default();
     state.training_due.set(due.clone());
     if let Some(item) = due.into_iter().next() {
-        if let Ok(game) = logic::replay_study_game(&item.puzzle.fen, &[]) {
-            state.game.set(Some(game));
-        }
-        state.puzzle_line.set(Vec::new());
-        state.active_puzzle.set(Some(item));
-        state.screen.set(Screen::Playing);
-        state.status.set("Solve the puzzle.".to_owned());
+        start_training(state, handles, item.puzzle.id);
     } else {
         state.status.set("No puzzles due.".to_owned());
     }
+}
+
+pub fn seed_training(state: AppState, handles: &AppHandles) {
+    let mut training = handles.training.borrow_mut();
+    state.status.set(match training.as_mut() {
+        Some(store) => match logic::seed_training(store) {
+            Ok(added) => format!("Added {added} starter training positions."),
+            Err(error) => format!("Training setup failed: {error}"),
+        },
+        None => "Training database is unavailable.".to_owned(),
+    });
+    drop(training);
+    refresh_training_due(state, handles);
+}
+
+fn refresh_training_due(state: AppState, handles: &AppHandles) {
+    let due = handles
+        .training
+        .borrow()
+        .as_ref()
+        .map(|store| store.due(logic::today_day(), 32))
+        .unwrap_or_default();
+    state.training_due.set(due);
+}
+
+pub fn start_training(state: AppState, handles: &AppHandles, id: String) {
+    let item = handles
+        .training
+        .borrow()
+        .as_ref()
+        .and_then(|store| store.get(&id).cloned());
+    match item {
+        Some(item) => match logic::replay_study_game(&item.puzzle.fen, &[]) {
+            Ok(game) => {
+                state.white_player.set(PlayerConfig::Human);
+                state.black_player.set(PlayerConfig::Human);
+                state.initial_fen.set(item.puzzle.fen.clone());
+                state.move_log.set(Vec::new());
+                state.move_annotations.set(Vec::new());
+                state.game.set(Some(game));
+                state.active_puzzle.set(Some(item.clone()));
+                state.puzzle_line.set(Vec::new());
+                state.active_gambit_id.set(None);
+                state.screen.set(Screen::Learn);
+                state.status.set(format!(
+                    "Training: {}. Find the best continuation.",
+                    item.puzzle.themes.join(", ")
+                ));
+            }
+            Err(error) => state
+                .status
+                .set(format!("Could not load training: {error}")),
+        },
+        None => state
+            .status
+            .set(format!("Training position '{id}' was not found.")),
+    }
+}
+
+pub fn resume_from_review(state: AppState) {
+    let Some(ply) = state.review_ply.get_untracked() else {
+        return;
+    };
+    let len = state.move_log.get_untracked().len();
+    if ply < len {
+        state.move_log.update(|moves| moves.truncate(ply));
+        state.move_annotations.update(|items| items.truncate(ply));
+    }
+    state.review_ply.set(None);
+}
+
+pub fn study_opening_move(state: AppState, uci: String) {
+    types::init();
+    resume_from_review(state);
+    let continuing = state.game.get_untracked().is_some();
+    let mut board = state
+        .game
+        .get_untracked()
+        .map_or_else(types::Board::new, |game| game.board.clone());
+    match logic::apply_uci_move(&mut board, &uci) {
+        Ok(mv) => {
+            let mut game = GameState::new(board);
+            game.last_move_squares = vec![mv.from, mv.to];
+            if !continuing {
+                state
+                    .initial_fen
+                    .set(mujrim_study::opening::START_FEN.to_owned());
+                state.move_log.set(Vec::new());
+                state.move_annotations.set(Vec::new());
+            }
+            state.move_log.update(|moves| moves.push(uci));
+            state.move_annotations.update(|items| items.push(None));
+            state.game.set(Some(game));
+            state.active_puzzle.set(None);
+            state.active_gambit_id.set(None);
+            state
+                .status
+                .set("Opening move played on the study board.".to_owned());
+            if !matches!(state.screen.get_untracked(), Screen::Study | Screen::Learn) {
+                state.screen.set(Screen::Study);
+            }
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn ensure_study_board(state: AppState) {
+    if state.game.get_untracked().is_some() {
+        return;
+    }
+    types::init();
+    state
+        .initial_fen
+        .set(mujrim_study::opening::START_FEN.to_owned());
+    state.move_log.set(Vec::new());
+    state.move_annotations.set(Vec::new());
+    state.review_ply.set(None);
+    state.game.set(Some(GameState::new(types::Board::new())));
+}
+
+pub fn view_ply(state: AppState, ply: usize) {
+    let fen = state.initial_fen.get_untracked();
+    let moves = state.move_log.get_untracked();
+    match logic::board_at_ply(&fen, &moves, ply) {
+        Ok(board) => {
+            state.review_ply.set(Some(ply));
+            let last_move = if ply > 0 {
+                logic::board_at_ply(&fen, &moves, ply - 1)
+                    .ok()
+                    .and_then(|mut previous| {
+                        logic::apply_uci_move(&mut previous, &moves[ply - 1])
+                            .ok()
+                            .map(|mv| vec![mv.from, mv.to])
+                    })
+            } else {
+                None
+            };
+            state.game.update(|game| {
+                if let Some(game) = game.as_mut() {
+                    game.board = board;
+                    if let Some(squares) = last_move {
+                        game.last_move_squares = squares;
+                    }
+                }
+            });
+            state.status.set(format!("Reviewing ply {ply}."));
+        }
+        Err(error) => state.status.set(format!("Could not navigate: {error}")),
+    }
+}
+
+pub fn refresh_saved_lines(state: AppState, handles: &AppHandles) {
+    if let Some(database) = handles.study.borrow().as_ref()
+        && let Ok(lines) = database.list_lines()
+    {
+        state.saved_lines.set(lines);
+    }
+}
+
+pub fn save_preparation(state: AppState, handles: &AppHandles) {
+    let name = state.line_name.get_untracked();
+    let name = if name.trim().is_empty() {
+        "Untitled line".to_owned()
+    } else {
+        name
+    };
+    match logic::save_current_line(
+        name,
+        state.prep_side.get_untracked(),
+        state.initial_fen.get_untracked(),
+        state.move_log.get_untracked(),
+        state.prep_notes.get_untracked(),
+    ) {
+        Ok(line) => {
+            let result = handles
+                .study
+                .borrow_mut()
+                .as_mut()
+                .ok_or_else(|| "Study library is unavailable.".to_owned())
+                .and_then(|database| database.save_line(&line));
+            match result {
+                Ok(()) => {
+                    state
+                        .status
+                        .set(format!("Saved preparation '{}'.", line.name));
+                    refresh_saved_lines(state, handles);
+                }
+                Err(error) => state.status.set(error),
+            }
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn load_preparation(state: AppState, handles: &AppHandles, id: String) {
+    let line = state
+        .saved_lines
+        .get_untracked()
+        .into_iter()
+        .find(|line| line.id == id);
+    let Some(line) = line else {
+        refresh_saved_lines(state, handles);
+        state
+            .status
+            .set("That preparation is no longer available.".to_owned());
+        return;
+    };
+    match logic::replay_study_game(&line.initial_fen, &line.moves) {
+        Ok(game) => {
+            state.initial_fen.set(line.initial_fen);
+            state.move_log.set(line.moves.clone());
+            state.move_annotations.set(vec![None; line.moves.len()]);
+            state.line_name.set(line.name.clone());
+            state.prep_notes.set(line.notes.clone());
+            state.prep_side.set(line.side);
+            state.review_ply.set(Some(line.moves.len()));
+            state.game.set(Some(game));
+            state.screen.set(Screen::Study);
+            state.status.set(format!("Loaded '{}'.", line.name));
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn delete_preparation(state: AppState, handles: &AppHandles, id: String) {
+    let result = handles
+        .study
+        .borrow_mut()
+        .as_mut()
+        .ok_or_else(|| "Study library is unavailable.".to_owned())
+        .and_then(|database| database.delete_line(&id));
+    match result {
+        Ok(()) => {
+            state.status.set("Deleted preparation.".to_owned());
+            refresh_saved_lines(state, handles);
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn start_gambit_lesson(state: AppState, id: String) {
+    let Some(lesson) = mujrim_study::gambit::find_gambit(&id) else {
+        state.status.set(format!("Gambit '{id}' was not found."));
+        return;
+    };
+    let ply = lesson.key_ply.min(lesson.moves.len());
+    match lesson.fen_after_plies(ply) {
+        Ok(fen) => match types::Board::from_fen(&fen) {
+            Ok(board) => {
+                let mut game = GameState::new(board);
+                if let Ok(arrows) = lesson.coaching_arrows(ply.max(1)) {
+                    game.overlay_arrows = arrows;
+                }
+                state.game.set(Some(game));
+                state.initial_fen.set(fen);
+                state.move_log.set(
+                    lesson.moves[..ply]
+                        .iter()
+                        .map(|mv| (*mv).to_owned())
+                        .collect(),
+                );
+                state.move_annotations.set(vec![None; ply]);
+                state.active_gambit_id.set(Some(id));
+                state.gambit_ply.set(ply);
+                state.active_puzzle.set(None);
+                state.screen.set(Screen::Learn);
+                state
+                    .status
+                    .set(format!("Gambit: {} ({})", lesson.name, lesson.eco));
+            }
+            Err(error) => state.status.set(error),
+        },
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn gambit_step(state: AppState, delta: i32) {
+    let Some(id) = state.active_gambit_id.get_untracked() else {
+        return;
+    };
+    let Some(lesson) = mujrim_study::gambit::find_gambit(&id) else {
+        return;
+    };
+    let next = (state.gambit_ply.get_untracked() as i32 + delta).clamp(0, lesson.moves.len() as i32)
+        as usize;
+    if let Ok(fen) = lesson.fen_after_plies(next)
+        && let Ok(board) = types::Board::from_fen(&fen)
+    {
+        state.game.update(|game| {
+            if let Some(game) = game.as_mut() {
+                game.board = board;
+                game.overlay_arrows = lesson.coaching_arrows(next.max(1)).unwrap_or_default();
+            }
+        });
+        state.initial_fen.set(fen);
+        state.move_log.set(
+            lesson.moves[..next]
+                .iter()
+                .map(|mv| (*mv).to_owned())
+                .collect(),
+        );
+        state.move_annotations.set(vec![None; next]);
+        state.gambit_ply.set(next);
+    }
+}
+
+pub fn toggle_analysis_engine(state: AppState, id: String) {
+    state.analysis_engines_selected.update(|selected| {
+        if let Some(index) = selected.iter().position(|existing| existing == &id) {
+            selected.remove(index);
+        } else {
+            selected.push(id);
+        }
+    });
 }
 
 pub fn index_openings(state: AppState, handles: &AppHandles) {
@@ -585,27 +930,35 @@ pub fn index_openings(state: AppState, handles: &AppHandles) {
 }
 
 pub fn start_tournament(state: AppState, handles: &AppHandles) {
+    if state.tournament_snapshot.get_untracked().running {
+        state
+            .tournament_status
+            .set("A tournament is already running. Cancel it first.".to_owned());
+        return;
+    }
     let mut setup = state.tournament_setup.get_untracked();
+    setup.event = state.tournament_event.get_untracked();
+    setup.site = state.tournament_site.get_untracked();
+    setup.sanitize_for_gui();
+    state.tournament_setup.set(setup.clone());
     let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
     if setup.selected_engine_paths.is_empty() {
-        setup.selected_engine_paths = roster.iter().map(|engine| engine.path.clone()).collect();
+        setup.selected_engine_paths = logic::default_tournament_engine_paths(&roster);
         state.tournament_setup.set(setup.clone());
     }
     let selected: Vec<_> = roster
         .into_iter()
-        .filter(|engine| {
-            setup
-                .selected_engine_paths
-                .iter()
-                .any(|path| path == &engine.path)
-        })
+        .filter(|engine| logic::engine_is_selected(&setup.selected_engine_paths, &engine.path))
         .collect();
     if selected.len() < 2 {
-        state
-            .tournament_status
-            .set("Select at least two engines.".to_owned());
+        state.tournament_status.set(
+            "Select at least two engines. Failures forfeit the game; they will not crash the UI."
+                .to_owned(),
+        );
         return;
     }
+    uci_process::cancel_all_pondering();
+    uci_process::shutdown_external_engines();
     state.selected_tournament_game_id.set(None);
     state.analysis_scores.set(Vec::new());
     state.move_log.set(Vec::new());
@@ -616,39 +969,76 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     *handles.tournament.borrow_mut() = Some(handle.clone());
     state.show_tournament_setup.set(false);
     state.screen.set(Screen::Tournaments);
+    state.tournament_status.set(format!(
+        "Starting {} engines · 1 board · forfeit on engine errors.",
+        selected.len()
+    ));
     let snapshot = handle.clone();
     let on_done = create_ext_action(handles.ui_scope, move |summary| {
-        state
-            .tournament_status
-            .set(logic::format_tournament_summary(&summary));
-        if let Ok(guard) = snapshot.snapshot.lock() {
-            state.tournament_snapshot.set(guard.clone());
-        }
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            state
+                .tournament_status
+                .set(logic::format_tournament_summary(&summary));
+            if let Ok(guard) = snapshot.snapshot.lock() {
+                state.tournament_snapshot.set(guard.clone());
+            }
+        }));
     });
-    std::thread::Builder::new()
+    if std::thread::Builder::new()
+        .name("mujrim-tournament-ui".to_owned())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let summary = logic::run_quick_tournament(selected, setup, handle);
+            let format = setup.format;
+            let summary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                logic::run_quick_tournament(selected, setup, handle)
+            }))
+            .unwrap_or_else(|_| mujrim_benchmarker::strength::TournamentSummary {
+                format,
+                engines: Vec::new(),
+                matches: Vec::new(),
+                standings: Vec::new(),
+                game_results: Vec::new(),
+                cancelled: false,
+                error: Some(
+                    "Tournament failed unexpectedly. Engine errors forfeit the game; the UI stayed up."
+                        .to_owned(),
+                ),
+            });
             on_done(summary);
         })
-        .ok();
+        .is_err()
+    {
+        state
+            .tournament_status
+            .set("Could not start the tournament worker.".to_owned());
+        *handles.tournament.borrow_mut() = None;
+        return;
+    }
     poll_tournament(state, handles.clone());
 }
 
 fn poll_tournament(state: AppState, handles: AppHandles) {
     floem::action::exec_after(Duration::from_millis(250), move |_| {
-        if let Some(handle) = handles.tournament.borrow().as_ref()
-            && let Ok(guard) = handle.snapshot.lock()
-        {
+        let keep_polling = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let handle = handles.tournament.borrow().clone();
+            let Some(handle) = handle else {
+                return false;
+            };
+            let guard = match handle.snapshot.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             let running = guard.running;
             state.tournament_snapshot.set(guard.clone());
             state.tournament_status.set(guard.status_line.clone());
             if match_controller::should_sync_tournament_board(state.screen.get_untracked()) {
                 sync_tournament_board(state, &guard);
             }
-            if running {
-                poll_tournament(state, handles.clone());
-            }
+            running
+        }))
+        .unwrap_or(false);
+        if keep_polling {
+            poll_tournament(state, handles.clone());
         }
     });
 }
@@ -780,14 +1170,22 @@ pub fn open_tournament_setup(state: AppState, handles: &AppHandles) {
     let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
     state.tournament_setup.update(|setup| {
         if setup.selected_engine_paths.is_empty() {
-            setup.selected_engine_paths = roster.iter().map(|engine| engine.path.clone()).collect();
+            setup.selected_engine_paths = logic::default_tournament_engine_paths(&roster);
         }
+        if setup.event.trim().is_empty() {
+            setup.event = "Mujrim Tournament".to_owned();
+        }
+        setup.sanitize_for_gui();
     });
-    state.status.set(if roster.is_empty() {
+    let setup = state.tournament_setup.get_untracked();
+    state.tournament_event.set(setup.event);
+    state.tournament_site.set(setup.site);
+    state.tournament_status.set(if roster.is_empty() {
         "No local engines found. Vendor them with scripts/vendor-linux-engines.sh.".to_owned()
     } else {
         format!("Detected {} local engines.", roster.len())
     });
+    state.status.set(state.tournament_status.get_untracked());
     state.show_tournament_setup.set(true);
 }
 

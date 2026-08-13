@@ -835,6 +835,14 @@ fn validate_resource_budget(config: &MatchConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Hash must fit inside the per-engine RSS cap with room for NNUE and process overhead.
+pub fn bounded_engine_hash_mb(hash_mb: usize, max_engine_memory_mb: usize) -> usize {
+    const HASH_RESERVE_MB: usize = 128;
+    hash_mb
+        .max(1)
+        .min(max_engine_memory_mb.saturating_sub(HASH_RESERVE_MB).max(1))
+}
+
 pub fn run_match(
     candidate: EngineSpec,
     reference: EngineSpec,
@@ -1174,8 +1182,11 @@ fn spawn_sessions(
     )
     .map_err(|error| (FailedEngine::Reference, error))?;
     let common_options = EngineOptions {
-        hash_mb: Some(config.hash_mb),
-        threads: Some(config.engine_threads),
+        hash_mb: Some(bounded_engine_hash_mb(
+            config.hash_mb,
+            config.max_engine_memory_mb,
+        )),
+        threads: Some(config.engine_threads.max(1)),
         own_book: Some(false),
         custom: Vec::new(),
     };
@@ -2001,6 +2012,39 @@ mod tests {
         assert_eq!(MatchConfig::default().max_engine_memory_mb, 384);
         assert_eq!(MatchConfig::default().max_match_memory_mb, 768);
         assert_eq!(MatchConfig::default().session_pairs, 1);
+    }
+
+    #[test]
+    fn engine_hash_stays_inside_the_process_memory_cap() {
+        assert_eq!(bounded_engine_hash_mb(512, 384), 256);
+        assert_eq!(bounded_engine_hash_mb(32, 384), 32);
+        assert_eq!(bounded_engine_hash_mb(0, 128), 1);
+    }
+
+    #[test]
+    fn missing_binaries_become_a_scored_forfeit_without_panicking() {
+        let candidate = EngineSpec::new(PathBuf::from("/no/such/mujrim-candidate-engine"));
+        let reference = EngineSpec::new(PathBuf::from("/no/such/mujrim-reference-engine"));
+        let config = MatchConfig {
+            pairs: 1,
+            concurrency: 1,
+            hash_mb: 16,
+            engine_threads: 1,
+            max_engine_memory_mb: 256,
+            max_match_memory_mb: 512,
+            max_plies: 2,
+            nodes_per_move: 1,
+            read_timeout: Duration::from_secs(2),
+            early_stop: false,
+            ..MatchConfig::default()
+        };
+        let summary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_match(candidate.clone(), reference.clone(), None, config)
+        }))
+        .expect("run_match must not panic when engines are missing");
+        let scored = ensure_scored_match(summary, &candidate, &reference);
+        assert!(scored.scores.games() >= 1);
+        assert!(scored.error.is_some());
     }
 
     #[test]

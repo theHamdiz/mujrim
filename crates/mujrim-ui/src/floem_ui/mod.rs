@@ -16,7 +16,7 @@ mod widgets;
 mod windowing;
 
 use floem::prelude::*;
-use floem::taffy::style::Overflow;
+use floem::taffy::style::{Display, Overflow};
 use floem::text::FONT_CONTEXT;
 use floem::window::WindowId;
 use tokio::runtime::Runtime;
@@ -66,33 +66,27 @@ fn app_view(window_id: WindowId) -> impl IntoView {
     tick_hub(state);
     let content = screens::root_content(state, handles.clone());
     let shell = chrome::shell(window_id, state, handles.clone(), content);
-    let options_handles = handles.clone();
-    let tournament_handles = handles.clone();
-    Stack::new((
-        shell,
-        dyn_view(move || {
-            if state.show_options.get() {
-                modals::options_modal(state, options_handles.clone()).into_any()
-            } else {
-                Empty::new().into_any()
-            }
-        }),
-        dyn_view(move || {
-            if state.show_tournament_setup.get() {
-                modals::tournament_setup_modal(state, tournament_handles.clone()).into_any()
-            } else {
-                Empty::new().into_any()
-            }
-        }),
-    ))
-    .style(|s| {
-        s.size_full()
-            .min_width(0.0)
-            .min_height(0.0)
-            .overflow_x(Overflow::Clip)
-            .overflow_y(Overflow::Clip)
-    })
-    .window_title(|| "Mujrim Chess".to_owned())
+    let options = modals::options_modal(state, handles.clone())
+        .style(move |s| overlay_host_style(s, state.show_options.get()));
+    let tournament = modals::tournament_setup_modal(state, handles)
+        .style(move |s| overlay_host_style(s, state.show_tournament_setup.get()));
+    Stack::new((shell.style(|s| s.size_full()), options, tournament))
+        .style(|s| {
+            s.size_full()
+                .min_width(0.0)
+                .min_height(0.0)
+                .overflow_x(Overflow::Clip)
+                .overflow_y(Overflow::Clip)
+        })
+        .window_title(|| "Mujrim Chess".to_owned())
+}
+
+fn overlay_host_style(style: floem::style::Style, open: bool) -> floem::style::Style {
+    if open {
+        widgets::overlay_layer_style(style)
+    } else {
+        style.display(Display::None)
+    }
 }
 
 fn tick_hub(state: AppState) {
@@ -137,6 +131,24 @@ mod tests {
         assert!(
             manifest.contains(r#"cfg(feature, values("cargo-clippy"))"#),
             "objc 0.2 msg_send! expands feature=\"cargo-clippy\"; declare it so macOS clippy -D warnings passes"
+        );
+    }
+
+    #[test]
+    fn overlay_host_collapses_when_closed() {
+        let src = include_str!("mod.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(
+            production.contains("overlay_host_style"),
+            "Options and tournament setup must share a window-sized overlay host"
+        );
+        assert!(
+            production.contains("Display::None"),
+            "closed overlays must stay mounted and hidden instead of swapping Empty views"
+        );
+        assert!(
+            !production.contains("Empty::new().into_any()"),
+            "creating overlay widgets inside dyn_view leaves them without a window root"
         );
     }
 }

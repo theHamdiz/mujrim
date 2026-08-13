@@ -24,6 +24,7 @@ use super::theme;
 
 thread_local! {
     static PIECE_TREES: RefCell<HashMap<usize, usvg::Tree>> = RefCell::new(HashMap::new());
+    static BADGE_TREES: RefCell<HashMap<&'static str, usvg::Tree>> = RefCell::new(HashMap::new());
 }
 
 pub fn board_view(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -186,36 +187,80 @@ fn paint_board(
     if settings.draw_arrows {
         for arrow in game.arrows.iter().chain(game.overlay_arrows.iter()) {
             for geom_arrow in arrow_geometry(arrow, sq as f32, game.flipped, appearance) {
-                let mut path = BezPath::new();
-                path.move_to((
-                    geom.origin_x + geom_arrow.shaft.points[0].x as f64,
-                    geom.origin_y + geom_arrow.shaft.points[0].y as f64,
-                ));
-                for point in &geom_arrow.shaft.points[1..] {
-                    path.line_to((
-                        geom.origin_x + point.x as f64,
-                        geom.origin_y + point.y as f64,
+                if let Some(body) = geom_arrow.body.as_ref().filter(|body| body.len() >= 3) {
+                    let mut path = BezPath::new();
+                    path.move_to((
+                        geom.origin_x + body[0].x as f64,
+                        geom.origin_y + body[0].y as f64,
                     ));
+                    for point in &body[1..] {
+                        path.line_to((
+                            geom.origin_x + point.x as f64,
+                            geom.origin_y + point.y as f64,
+                        ));
+                    }
+                    path.close_path();
+                    cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
+                    cx.stroke(&path, theme::rgba(geom_arrow.outline), &Stroke::new(1.4));
+                } else {
+                    let mut path = BezPath::new();
+                    path.move_to((
+                        geom.origin_x + geom_arrow.shaft.points[0].x as f64,
+                        geom.origin_y + geom_arrow.shaft.points[0].y as f64,
+                    ));
+                    for point in &geom_arrow.shaft.points[1..] {
+                        path.line_to((
+                            geom.origin_x + point.x as f64,
+                            geom.origin_y + point.y as f64,
+                        ));
+                    }
+                    path.close_path();
+                    cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
+                    let mut head = BezPath::new();
+                    head.move_to((
+                        geom.origin_x + geom_arrow.head.a.x as f64,
+                        geom.origin_y + geom_arrow.head.a.y as f64,
+                    ));
+                    head.line_to((
+                        geom.origin_x + geom_arrow.head.b.x as f64,
+                        geom.origin_y + geom_arrow.head.b.y as f64,
+                    ));
+                    head.line_to((
+                        geom.origin_x + geom_arrow.head.c.x as f64,
+                        geom.origin_y + geom_arrow.head.c.y as f64,
+                    ));
+                    head.close_path();
+                    cx.fill(&head, theme::rgba(geom_arrow.fill), 0.0);
                 }
-                path.close_path();
-                cx.fill(&path, theme::rgba(geom_arrow.fill), 0.0);
-                let mut head = BezPath::new();
-                head.move_to((
-                    geom.origin_x + geom_arrow.head.a.x as f64,
-                    geom.origin_y + geom_arrow.head.a.y as f64,
-                ));
-                head.line_to((
-                    geom.origin_x + geom_arrow.head.b.x as f64,
-                    geom.origin_y + geom_arrow.head.b.y as f64,
-                ));
-                head.line_to((
-                    geom.origin_x + geom_arrow.head.c.x as f64,
-                    geom.origin_y + geom_arrow.head.c.y as f64,
-                ));
-                head.close_path();
-                cx.fill(&head, theme::rgba(geom_arrow.fill), 0.0);
+                if let Some((tip, step, fill)) = geom_arrow.step {
+                    let center =
+                        Point::new(geom.origin_x + tip.x as f64, geom.origin_y + tip.y as f64);
+                    cx.fill(
+                        &Circle::new(center, sq * 0.16),
+                        Color::from_rgba8(20, 20, 24, 210),
+                        0.0,
+                    );
+                    cx.stroke(
+                        &Circle::new(center, sq * 0.16),
+                        theme::rgba(fill),
+                        &Stroke::new(1.5),
+                    );
+                    let _ = step;
+                }
             }
         }
+    }
+    if let Some((square, annotation)) = crate::app_core::logic::review_annotation_badge(
+        &state.initial_fen.get(),
+        &state.move_log.get(),
+        state.review_ply.get(),
+        &state.move_annotations.get(),
+    ) {
+        let (row, col) = square_display(square, game.flipped);
+        let size = sq * 0.38;
+        let x = geom.origin_x + (col as f64 + 1.0) * sq - size - sq * 0.04;
+        let y = geom.origin_y + row as f64 * sq + sq * 0.04;
+        draw_annotation_badge(cx, annotation, x, y, size);
     }
     let burst = state.capture_burst.get();
     if burst > 0.0
@@ -237,6 +282,35 @@ fn paint_board(
             &Stroke::new(3.0),
         );
     }
+}
+
+fn draw_annotation_badge(
+    cx: &mut floem::context::PaintCx<'_>,
+    annotation: mujrim_study::annotation::MoveAnnotation,
+    x: f64,
+    y: f64,
+    size: f64,
+) {
+    let key = annotation.label();
+    let svg = annotation.board_badge_svg();
+    BADGE_TREES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(key)
+            && let Ok(tree) = usvg::Tree::from_str(&svg, &usvg::Options::default())
+        {
+            cache.insert(key, tree);
+        }
+        if let Some(tree) = cache.get(key) {
+            cx.draw_svg(
+                floem::RendererSvg {
+                    tree,
+                    hash: key.as_bytes(),
+                },
+                Rect::new(x, y, x + size, y + size),
+                None::<&floem::peniko::Brush>,
+            );
+        }
+    });
 }
 
 fn draw_piece(cx: &mut floem::context::PaintCx<'_>, svg: &str, x: f64, y: f64, size: f64) {

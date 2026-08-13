@@ -15,7 +15,8 @@ pub fn root_content(state: AppState, handles: AppHandles) -> impl IntoView {
     dyn_view(move || match state.screen.get() {
         Screen::Menu => home::menu(state, handles.clone()).into_any(),
         Screen::Playing => workspace::playing(state, handles.clone()).into_any(),
-        Screen::Study => study::study(state, handles.clone()).into_any(),
+        Screen::Study => workspace::study(state, handles.clone()).into_any(),
+        Screen::Learn => workspace::learn(state, handles.clone()).into_any(),
         Screen::Tournaments => workspace::tournaments(state, handles.clone()).into_any(),
         Screen::Analysis => workspace::analysis(state, handles.clone()).into_any(),
     })

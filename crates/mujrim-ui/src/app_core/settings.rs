@@ -52,6 +52,7 @@ pub enum Screen {
     Menu,
     Playing,
     Study,
+    Learn,
     Tournaments,
     Analysis,
 }
