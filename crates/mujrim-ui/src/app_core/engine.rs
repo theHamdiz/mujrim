@@ -66,7 +66,7 @@ impl GameMode {
     ];
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerConfig {
     Human,
     BuiltIn {
@@ -143,10 +143,17 @@ pub fn players_for_mode(
     match mode {
         GameMode::HumanVsHuman => (PlayerConfig::Human, PlayerConfig::Human),
         GameMode::HumanVsEngine => (PlayerConfig::Human, default_engine_player(bundled)),
-        GameMode::EngineVsEngine => (
-            default_engine_player(bundled),
-            PlayerConfig::BuiltIn { depth: 12 },
-        ),
+        GameMode::EngineVsEngine => {
+            let white = default_engine_player(bundled);
+            let black = bundled.get(1).map_or_else(
+                || PlayerConfig::BuiltIn { depth: 12 },
+                |engine| PlayerConfig::External {
+                    path: engine.path.to_string_lossy().into_owned(),
+                    protocol: ExternalEngineProtocol::Uci,
+                },
+            );
+            (white, black)
+        }
     }
 }
 

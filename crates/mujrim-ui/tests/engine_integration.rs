@@ -398,3 +398,41 @@ fn test_search_midgame_time_limited_spawned_thread() {
     );
     assert!(result.nodes > 0, "Should have searched nodes");
 }
+
+#[test]
+fn engine_vs_engine_continues_for_four_plies() {
+    setup();
+    let mut board = Board::new();
+    for ply in 0..4 {
+        let legal = board.generate_legal_moves();
+        assert!(
+            !legal.is_empty(),
+            "game must still have legal moves at ply {ply}"
+        );
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn({
+                let mut search_board = board.clone();
+                move || {
+                    types::init();
+                    let mut engine = search::SearchEngine::new(16, 1);
+                    engine.search_time(&mut search_board, std::time::Duration::from_millis(250), 8)
+                }
+            })
+            .expect("engine thread");
+        let result = handle.join().expect("engine thread should not panic");
+        let mv = result.best_move;
+        assert!(
+            legal
+                .iter()
+                .any(|candidate| candidate.from == mv.from && candidate.to == mv.to),
+            "ply {ply} move must be legal"
+        );
+        board.make_move(mv);
+        assert!(
+            !board.is_game_over(),
+            "opening four plies must not end the game"
+        );
+    }
+    assert_eq!(board.side_to_move, Color::White);
+}

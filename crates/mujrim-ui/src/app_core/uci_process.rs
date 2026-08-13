@@ -14,7 +14,7 @@ const EXTERNAL_ENGINE_MEMORY_OVERHEAD_MB: usize = 192;
 /// Cap is intentionally high: large NNUE nets + hash must not OOM-kill engines
 /// mid-game the way a 768 MiB ceiling did for mujrim / Stockfish stacks.
 const MAX_EXTERNAL_ENGINE_MEMORY_MB: usize = 4096;
-const MAX_CACHED_ENGINE_SESSIONS: usize = 2;
+const MAX_CACHED_ENGINE_SESSIONS: usize = 8;
 
 static ENGINE_POOL: OnceLock<Mutex<Vec<CachedExternalEngine>>> = OnceLock::new();
 static CANCEL_EPOCH: AtomicU64 = AtomicU64::new(0);

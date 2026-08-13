@@ -1,12 +1,14 @@
-//! Undecorated title bar, nav pills, window controls, and edge resize.
+//! In-app tab strip. Compositor decorations on Linux; CSD drag only on undecorated hosts.
 
-use floem::action::{drag_resize_window, drag_window, minimize_window, toggle_window_maximized};
+use floem::action::{drag_resize_window, minimize_window, toggle_window_maximized};
 use floem::prelude::*;
+use floem::views::drag_window_area;
 use floem::window::{ResizeDirection, WindowId};
 
 use crate::app_core::layout;
 use crate::app_core::recording::RecordState;
 use crate::app_core::settings::Screen;
+use crate::app_core::windowing::WindowPolicy;
 
 use super::actions;
 use super::icons;
@@ -20,25 +22,33 @@ pub fn shell(
     content: impl IntoView + 'static,
 ) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    let title = title_bar(window_id, state, handles.clone());
-    let edges = resize_edges(window_id);
-    Stack::new((
-        Stack::vertical((
-            title,
-            content.style(|s| s.flex_grow(1.0f32).min_width(0.0).min_height(0.0)),
-        ))
-        .style(move |s| {
-            s.size_full()
-                .min_width(0.0)
-                .min_height(0.0)
-                .background(theme::rgba(pal().bg))
-        }),
-        edges,
+    let policy = WindowPolicy::current();
+    let title = title_bar(window_id, state, handles.clone(), policy);
+    let body = Stack::vertical((
+        title,
+        content.style(|s| s.flex_grow(1.0f32).min_width(0.0).min_height(0.0)),
     ))
-    .style(|s| s.size_full())
+    .style(move |s| {
+        s.size_full()
+            .min_width(0.0)
+            .min_height(0.0)
+            .background(theme::rgba(pal().bg))
+    });
+    if policy.client_resize_edges {
+        Stack::new((body, resize_edges()))
+            .style(|s| s.size_full())
+            .into_any()
+    } else {
+        body.style(|s| s.size_full()).into_any()
+    }
 }
 
-fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl IntoView {
+fn title_bar(
+    window_id: WindowId,
+    state: AppState,
+    handles: AppHandles,
+    policy: WindowPolicy,
+) -> impl IntoView {
     let logo_bytes = handles.logo.clone();
     let logo = img(move || logo_bytes.clone()).style(|s| s.size(24, 24));
     let title_block = Stack::vertical((
@@ -50,20 +60,32 @@ fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl 
         }),
     ))
     .style(|s| s.row_gap(1.0));
+    let brand = Stack::horizontal((logo, title_block))
+        .style(|s| s.col_gap(8.0f32).items_center().padding_left(12.0));
+    let brand = if policy.undecorated {
+        drag_window_area(brand).into_any()
+    } else {
+        brand.into_any()
+    };
 
-    let nav = nav_pills(state, handles.clone());
-    let controls = window_controls(window_id, state);
+    let nav = nav_pills(state, handles);
+    let trailing = if policy.client_window_controls {
+        window_controls(window_id, state).into_any()
+    } else {
+        Empty::new()
+            .style(|s| s.width(12.0).height(24.0))
+            .into_any()
+    };
 
     Stack::horizontal((
-        Stack::horizontal((logo, title_block))
-            .style(|s| s.col_gap(8.0f32).items_center().padding_left(12.0)),
+        brand,
         nav.style(|s| {
             s.flex_grow(1.0f32)
                 .min_width(0.0)
                 .justify_center()
                 .items_center()
         }),
-        controls,
+        trailing,
     ))
     .style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
@@ -75,18 +97,6 @@ fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl 
             .border_bottom(1.0)
             .border_color(theme::rgba(pal.border))
     })
-    .on_event_stop(
-        el::PointerMove,
-        move |_, event: &floem::ui_events::pointer::PointerUpdate| {
-            if event
-                .current
-                .buttons
-                .contains(floem::ui_events::pointer::PointerButton::Primary)
-            {
-                drag_window();
-            }
-        },
-    )
 }
 
 fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -279,7 +289,7 @@ fn icon_btn(state: AppState, icon: &'static str, action: impl Fn() + 'static) ->
         })
 }
 
-fn resize_edges(_window_id: WindowId) -> impl IntoView {
+fn resize_edges() -> impl IntoView {
     let edge = |dir: ResizeDirection, style: fn(floem::style::Style) -> floem::style::Style| {
         Empty::new()
             .style(move |s| style(s.absolute().z_index(20)))
@@ -313,5 +323,20 @@ fn resize_edges(_window_id: WindowId) -> impl IntoView {
             s.inset_bottom(0).inset_right(0).size(10, 10)
         }),
     ))
-    .style(|s| s.size_full().absolute().pointer_events_none())
+    .style(|s| s.size_full().absolute())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn title_bar_does_not_drag_on_pointer_move() {
+        let src = include_str!("chrome.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(
+            !production.contains("PointerMove"),
+            "title-bar PointerMove drag detaches niri windows"
+        );
+        assert!(!production.contains("new_window"));
+        assert!(!production.contains("drag_window()"));
+    }
 }

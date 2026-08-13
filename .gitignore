@@ -51,16 +51,17 @@ crates/mujrim-installer/target/*
 
 # SPRT test results
 sprt/results.pgn
-/dist/**
+
+# Dist trees (built locally; do not commit binaries)
+/dist/
 
 # Local scratch / downloaded third-party engine trees
 .tmp*/
 .tmp-*
 .tmp*
 
-# Packaged foreign engine binaries/trees (runtime download / local packaging only)
+# Vendored engines (download via scripts/vendor-linux-engines.sh)
 /engines/
-/dist/engines/
 
 # Local Windows cross SDK cache (cargo-xwin / packaging helpers)
 .xwin-cache/

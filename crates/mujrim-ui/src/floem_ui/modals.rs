@@ -358,7 +358,7 @@ fn engine_rows(state: AppState) -> impl IntoView {
     .style(|s| s.row_gap(10.0).width_full())
 }
 
-fn tools_tab(state: AppState, _handles: AppHandles) -> impl IntoView {
+fn tools_tab(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
         widgets::section_label("Syzygy", pal),
@@ -374,13 +374,15 @@ fn tools_tab(state: AppState, _handles: AppHandles) -> impl IntoView {
             ],
             move |set| state.syzygy_piece_set.set(set),
         ),
-        widgets::primary_button(state, "Download Syzygy", move || {
-            actions::download_syzygy(state)
+        widgets::primary_button(state, "Download Syzygy", {
+            let handles = handles.clone();
+            move || actions::download_syzygy(state, &handles)
         }),
         widgets::section_label("NNUE", pal),
         Label::derived(move || state.nnue_status.get()),
-        widgets::primary_button(state, "Download NNUE nets", move || {
-            actions::download_nnue(state)
+        widgets::primary_button(state, "Download NNUE nets", {
+            let handles = handles.clone();
+            move || actions::download_nnue(state, &handles)
         }),
         widgets::section_label("Tuning", pal),
         Label::derived(move || state.tuning_status.get()),

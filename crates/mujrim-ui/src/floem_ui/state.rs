@@ -17,14 +17,15 @@ use crate::app_core::analysis::AnalysisSnapshot;
 use crate::app_core::audio::{BgmTrack, SoundEngine};
 use crate::app_core::engine::{EngineConfig, GameMode, PlayerConfig};
 use crate::app_core::game::GameState;
+use crate::app_core::hub::CoinFlipState;
 use crate::app_core::layout::DockTab;
+use crate::app_core::match_controller;
 use crate::app_core::motion::AnimPace;
 use crate::app_core::pieces::PieceAssets;
 use crate::app_core::recording::RecordingEngine;
 use crate::app_core::settings::{AppSettings, OptionsTab, Screen};
 use crate::app_core::tournament_live::{LiveTournamentHandle, LiveTournamentSnapshot};
 use crate::app_core::tournament_setup::TournamentSetup;
-use crate::app_core::uci_process::ExternalEngineProtocol;
 
 #[derive(Clone, Copy)]
 pub struct SlideAnim {
@@ -76,6 +77,8 @@ pub struct AppState {
     pub syzygy_piece_set: RwSignal<updater::syzygy::SyzygyPieceSet>,
     pub recording_label: RwSignal<String>,
     pub hub_progress: RwSignal<f32>,
+    pub coin_flip: RwSignal<CoinFlipState>,
+    pub engine_retries: RwSignal<u8>,
 }
 
 #[derive(Clone)]
@@ -91,6 +94,8 @@ pub struct AppHandles {
     pub catalog: Rc<RefCell<Vec<EngineMetadata>>>,
     pub telemetry: ArcRwSignal<crate::app_core::engine::TelemetrySnapshot>,
     pub logo: Vec<u8>,
+    pub chess_bg: Vec<u8>,
+    pub ui_scope: floem::reactive::Scope,
     #[cfg(feature = "book")]
     pub book: Rc<Option<search::book::OpeningBook>>,
 }
@@ -111,14 +116,12 @@ impl AppState {
         }
         let bundled = mujrim_protocols::catalog::discover_bundled_engines_from_environment()
             .unwrap_or_default();
-        let white = if bundled.is_empty() {
-            PlayerConfig::BuiltIn { depth: 16 }
-        } else {
-            PlayerConfig::External {
-                path: bundled[0].path.to_string_lossy().into_owned(),
-                protocol: ExternalEngineProtocol::Uci,
-            }
-        };
+        let black = crate::app_core::logic::players_for_detected_engines(
+            GameMode::HumanVsEngine,
+            &bundled,
+            &[],
+        )
+        .1;
         let state = Self {
             screen: RwSignal::new(Screen::Menu),
             game: RwSignal::new(None),
@@ -126,7 +129,7 @@ impl AppState {
             searching: RwSignal::new(false),
             selected_mode: RwSignal::new(GameMode::HumanVsEngine),
             white_player: RwSignal::new(PlayerConfig::Human),
-            black_player: RwSignal::new(white),
+            black_player: RwSignal::new(black),
             engine_cfg: RwSignal::new(EngineConfig::default()),
             settings: RwSignal::new(settings),
             show_options: RwSignal::new(false),
@@ -161,6 +164,8 @@ impl AppState {
             syzygy_piece_set: RwSignal::new(updater::syzygy::SyzygyPieceSet::Standard),
             recording_label: RwSignal::new("Record".to_owned()),
             hub_progress: RwSignal::new(0.0),
+            coin_flip: RwSignal::new(CoinFlipState::Idle),
+            engine_retries: RwSignal::new(match_controller::DEFAULT_ENGINE_RETRIES),
         };
         let study_path = crate::app_core::logic::study_database_path();
         let study = StudyDatabase::open(&study_path).ok();
@@ -189,6 +194,8 @@ impl AppState {
             catalog: Rc::new(RefCell::new(Vec::new())),
             telemetry: ArcRwSignal::new(crate::app_core::engine::TelemetrySnapshot::default()),
             logo: include_bytes!("../../../../assets/branding/mujrim-icon.png").to_vec(),
+            chess_bg: crate::app_core::noise::chess_blur_background(512, 384).bytes,
+            ui_scope: floem::reactive::Scope::current(),
             #[cfg(feature = "book")]
             book: Rc::new(search::book::OpeningBook::load_embedded().ok()),
         };

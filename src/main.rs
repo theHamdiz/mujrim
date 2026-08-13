@@ -28,6 +28,11 @@ const EXTERNAL_BACKENDS: &[&str] = &[
     "obsidian",
     "reckless",
     "ethereal",
+    "lc0",
+    "viridithas",
+    "hobbes",
+    "integral",
+    "velvet",
 ];
 const MUJRIM_ADAPTERS: &[&str] = &["mujrim-elite", "mujrim-external", "mujrim-v60", "mujrim-ak"];
 const V60_PASSTHROUGH_MARKER: &str = "MUJRIM_V60_PASSTHROUGH_ACTIVE";
@@ -377,7 +382,7 @@ mod tests {
 
     #[test]
     fn every_bundled_engine_is_available_as_a_backend() {
-        assert_eq!(EXTERNAL_BACKENDS.len(), 5);
+        assert_eq!(EXTERNAL_BACKENDS.len(), 10);
         for engine in mujrim_protocols::catalog::BUNDLED_ENGINES {
             assert!(
                 matches!(

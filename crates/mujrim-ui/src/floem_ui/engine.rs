@@ -11,6 +11,7 @@ use crate::app_core::engine::{
     EngineConfig, PlayerConfig, TelemetrySnapshot, apply_search_info, builtin_engine_search,
 };
 use crate::app_core::game::GameState;
+use crate::app_core::match_controller::{self, FinishOutcome, MatchAction, MatchSnapshot};
 use crate::app_core::uci_process::{self, ExternalSearchConfig};
 
 use super::actions;
@@ -23,21 +24,34 @@ pub fn maybe_start_engine_turn(state: AppState, handles: &AppHandles) {
     let Some(game) = state.game.get_untracked() else {
         return;
     };
-    if game.game_over || state.searching.get_untracked() {
+    let snap = MatchSnapshot::from_game(
+        state.game_generation.get_untracked(),
+        state.searching.get_untracked(),
+        state.engine_retries.get_untracked(),
+        &game,
+        &state.white_player.get_untracked(),
+        &state.black_player.get_untracked(),
+    );
+    if match_controller::next_action(&snap) != MatchAction::Think {
         return;
     }
     let player = match game.board.side_to_move {
         types::Color::White => state.white_player.get_untracked(),
         types::Color::Black => state.black_player.get_untracked(),
     };
-    if matches!(player, PlayerConfig::Human) {
-        return;
-    }
     start_search(state, handles, player, game);
 }
 
+fn schedule_next_turn(state: AppState, handles: AppHandles) {
+    floem::action::exec_after(Duration::from_millis(0), move |_| {
+        maybe_start_engine_turn(state, &handles);
+    });
+}
+
 fn start_search(state: AppState, handles: &AppHandles, player: PlayerConfig, game: GameState) {
-    state.searching.set(true);
+    let mut searching = state.searching.get_untracked();
+    match_controller::begin_search(&mut searching);
+    state.searching.set(searching);
     let generation = state.game_generation.get_untracked();
     let cfg = state.engine_cfg.get_untracked();
     let telemetry = handles.telemetry.clone();
@@ -64,7 +78,7 @@ fn start_search(state: AppState, handles: &AppHandles, player: PlayerConfig, gam
     }
 
     let handles_done = handles.clone();
-    let on_done = create_ext_action(floem::reactive::Scope::current(), move |result| {
+    let on_done = create_ext_action(handles.ui_scope, move |result| {
         finish_move(state, handles_done, generation, result)
     });
     let mut board = game.board.clone();
@@ -150,12 +164,17 @@ fn search_side(
 }
 
 fn finish_move(state: AppState, handles: AppHandles, generation: u64, result: EngineSearchOutcome) {
-    state.searching.set(false);
-    if generation != state.game_generation.get_untracked() {
-        return;
-    }
-    match result {
-        Ok((mv, info, ponder, _hit)) => {
+    let mut searching = state.searching.get_untracked();
+    let mut retries = state.engine_retries.get_untracked();
+    let live = state.game_generation.get_untracked();
+    let ok = result.is_ok();
+    let outcome =
+        match_controller::finish_search(generation, live, &mut searching, &mut retries, ok);
+    state.searching.set(searching);
+    state.engine_retries.set(retries);
+    match (outcome, result) {
+        (FinishOutcome::Stale, _) => {}
+        (FinishOutcome::Applied, Ok((mv, info, ponder, hit))) => {
             handles
                 .telemetry
                 .set(TelemetrySnapshot::from_label(info.clone()));
@@ -173,9 +192,20 @@ fn finish_move(state: AppState, handles: AppHandles, generation: u64, result: En
                 sound.play_move();
             }
             actions::apply_engine_move(state, mv, ponder, captured);
-            maybe_start_engine_turn(state, &handles);
+            if match_controller::should_cancel_ponder(state.engine_cfg.get_untracked().ponder, hit)
+            {
+                uci_process::cancel_all_pondering();
+            }
+            schedule_next_turn(state, handles);
         }
-        Err(error) => state.status.set(error),
+        (FinishOutcome::Retry, Err(error)) => {
+            state
+                .status
+                .set(format!("Engine failed: {error} — retrying…"));
+            schedule_next_turn(state, handles);
+        }
+        (FinishOutcome::Failed, Err(error)) => state.status.set(error),
+        _ => {}
     }
 }
 
@@ -233,5 +263,14 @@ mod tests {
         assert_eq!(snap.hashfull, 400);
         assert_eq!(snap.pv.len(), 2);
         assert!(snap.label.contains("g1f3"));
+    }
+
+    #[test]
+    fn next_search_is_scheduled_outside_the_completion_callback() {
+        let src = include_str!("engine.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("exec_after"));
+        assert!(production.contains("handles.ui_scope"));
+        assert!(!production.contains("Scope::current()"));
     }
 }

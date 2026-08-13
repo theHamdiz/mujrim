@@ -67,6 +67,7 @@ pub fn sidebar_width(window_width: f64) -> f64 {
 pub enum DockTab {
     Results,
     Histogram,
+    EngineLog,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,6 +223,10 @@ mod tests {
         assert_eq!(
             next_dock_state(DockTab::Histogram, false, DockTab::Results),
             (DockTab::Results, true)
+        );
+        assert_eq!(
+            next_dock_state(DockTab::Results, true, DockTab::EngineLog),
+            (DockTab::EngineLog, true)
         );
     }
 

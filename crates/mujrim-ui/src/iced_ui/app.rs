@@ -6242,110 +6242,8 @@ async fn probe_adjacent_engines() -> Vec<EngineMetadata> {
         .unwrap_or_default()
 }
 
-fn preferred_engine_arch_folders() -> Vec<String> {
-    let mut folders = Vec::with_capacity(6);
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        folders.push("windows-x86_64-avx2".to_owned());
-    }
-    folders.push(format!(
-        "{}-{}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    ));
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    {
-        folders.push("windows-arm64".to_owned());
-        // After native ARM picks, allow x64 engines via Prism.
-        folders.push("windows-x86_64-avx2".to_owned());
-        folders.push("windows-x86_64".to_owned());
-    }
-    folders
-}
-
-/// Executables under `<ui>/engines/`, one binary per stem, native arch preferred.
 fn list_local_engine_binaries() -> Vec<PathBuf> {
-    let Some(root) = std::env::current_exe()
-        .ok()
-        .as_ref()
-        .and_then(|exe| mujrim_protocols::catalog::local_engines_root(exe))
-    else {
-        return Vec::new();
-    };
-    if !root.is_dir() {
-        return Vec::new();
-    }
-
-    let mut candidates = Vec::new();
-    collect_engine_executables(&root, 0, &mut candidates);
-    let preferred = preferred_engine_arch_folders();
-    candidates.sort_by(|left, right| {
-        engine_path_rank(left, &preferred)
-            .cmp(&engine_path_rank(right, &preferred))
-            .then_with(|| {
-                // Prefer host-native PE when ranks tie.
-                let left_native = mujrim_protocols::is_host_native_binary(left);
-                let right_native = mujrim_protocols::is_host_native_binary(right);
-                right_native.cmp(&left_native)
-            })
-            .then_with(|| left.cmp(right))
-    });
-    let mut seen_stems = std::collections::HashSet::new();
-    candidates.retain(|path| {
-        let stem = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        seen_stems.insert(stem)
-    });
-    candidates.truncate(64);
-    candidates
-}
-
-fn engine_path_rank(path: &std::path::Path, preferred: &[String]) -> usize {
-    path.components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .find_map(|component| {
-            preferred
-                .iter()
-                .position(|folder| folder.eq_ignore_ascii_case(component))
-        })
-        .unwrap_or(usize::MAX)
-}
-
-fn collect_engine_executables(root: &std::path::Path, depth: usize, output: &mut Vec<PathBuf>) {
-    if depth > 5 || output.len() >= 128 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_engine_executables(&path, depth + 1, output);
-        } else if is_engine_executable(&path) {
-            // Include foreign-ISA binaries under the local engines tree (e.g. x64 on ARM).
-            output.push(path);
-        }
-        if output.len() >= 128 {
-            return;
-        }
-    }
-}
-
-fn is_engine_executable(path: &std::path::Path) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        path.extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-    }
+    crate::app_core::logic::list_local_engine_binaries()
 }
 
 fn probe_engine_protocol(path: &std::path::Path) -> Option<EngineMetadata> {
@@ -6435,15 +6333,7 @@ fn seed_training(store: &mut TrainingStore) -> Result<usize, String> {
 }
 
 fn path_is_under_local_engines(path: &Path) -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-    let Some(root) = mujrim_protocols::catalog::local_engines_root(&exe) else {
-        return false;
-    };
-    let root = root.canonicalize().unwrap_or(root);
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    path.starts_with(&root)
+    crate::app_core::logic::path_is_under_local_engines(path)
 }
 
 fn catalog_display_name(stem: &str, bundled: &[DiscoveredEngine]) -> String {
@@ -7287,7 +7177,7 @@ mod tests {
     use super::{
         EngineConfig, ExternalEngineProtocol, PlayerConfig, analyze_game_at_depth,
         annotated_move_label, apply_opening_move, board_at_ply, bounded_hash_mb,
-        build_annotated_pgn, build_pgn, bundled_engine_choices, engine_path_rank, find_logged_move,
+        build_annotated_pgn, build_pgn, bundled_engine_choices, find_logged_move,
         format_tournament_summary, game_summary_label, main_window_settings, normalize_logged_uci,
         puzzle_line_matches, replay_study_game, review_annotation_badge, selected_bundled_engine,
         starter_puzzles, tournament_directory_name,
@@ -7348,7 +7238,10 @@ mod tests {
         let primary =
             PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-aarch64\mujrim-elite.exe");
         let alias = PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-arm64\mujrim-elite.exe");
-        assert!(engine_path_rank(&primary, &preferred) < engine_path_rank(&alias, &preferred));
+        assert!(
+            crate::app_core::logic::engine_path_rank(&primary, &preferred)
+                < crate::app_core::logic::engine_path_rank(&alias, &preferred)
+        );
     }
 
     #[test]

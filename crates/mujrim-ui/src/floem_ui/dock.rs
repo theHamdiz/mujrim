@@ -11,11 +11,11 @@ use crate::app_core::logic;
 use crate::app_core::tournament_results;
 
 use super::eval_graph;
-use super::state::AppState;
+use super::state::{AppHandles, AppState};
 use super::theme;
 
-pub fn bottom_dock(state: AppState) -> impl IntoView {
-    Stack::vertical((tab_bar(state), dock_body(state))).style(move |s| {
+pub fn bottom_dock(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::vertical((tab_bar(state), dock_body(state, handles))).style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
         let height = layout::dock_height(state.dock_open.get());
         s.width_full()
@@ -37,6 +37,7 @@ fn tab_bar(state: AppState) -> impl IntoView {
         Stack::horizontal((
             dock_tab(state, DockTab::Results, "Results"),
             dock_tab(state, DockTab::Histogram, "Histogram"),
+            dock_tab(state, DockTab::EngineLog, "Engine"),
         ))
         .style(|s| s.col_gap(4.0).items_center()),
         Button::new(Label::derived(move || {
@@ -94,10 +95,11 @@ fn dock_tab(state: AppState, tab: DockTab, label: &'static str) -> impl IntoView
         })
 }
 
-fn dock_body(state: AppState) -> impl IntoView {
+fn dock_body(state: AppState, handles: AppHandles) -> impl IntoView {
     dyn_view(move || match state.dock_tab.get() {
         DockTab::Results => results_pane(state).into_any(),
         DockTab::Histogram => eval_graph::eval_histogram(state, 148.0).into_any(),
+        DockTab::EngineLog => engine_log_pane(state, handles.clone()).into_any(),
     })
     .style(|s| {
         s.width_full()
@@ -178,4 +180,22 @@ fn results_pane(state: AppState) -> impl IntoView {
         .scroll(),
     ))
     .style(|s| s.size_full().col_gap(16.0).min_height(0.0))
+}
+
+fn engine_log_pane(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Label::derived(move || {
+        let tel = handles.telemetry.get();
+        if tel.label.is_empty() {
+            state.status.get()
+        } else {
+            tel.label
+        }
+    })
+    .style(move |s| {
+        s.font_size(12.0)
+            .width_full()
+            .min_width(0.0)
+            .color(theme::rgba(pal().text_primary))
+    })
 }

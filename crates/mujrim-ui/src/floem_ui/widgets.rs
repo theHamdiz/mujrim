@@ -1,7 +1,6 @@
-//! Shared Floem chrome: cards, buttons, pickers, and overlay frames.
+//! Shared Floem chrome: cards, buttons, in-flow pickers, and overlay frames.
 
 use floem::prelude::*;
-use floem::views::dropdown::Dropdown;
 
 use crate::app_core::layout;
 use crate::app_core::palette::GuiPalette;
@@ -34,6 +33,19 @@ pub fn card(state: AppState, child: impl IntoView + 'static) -> impl IntoView {
         s.padding(18.0)
             .row_gap(10.0)
             .border_radius(16.0)
+            .background(theme::rgba(pal.panel))
+            .border(1.0)
+            .border_color(theme::rgba(pal.border))
+            .min_width(0.0)
+    })
+}
+
+pub fn glass_card(state: AppState, child: impl IntoView + 'static) -> impl IntoView {
+    child.style(move |s| {
+        let pal = theme::palette(state.settings.get().board_theme);
+        s.padding(18.0)
+            .row_gap(10.0)
+            .border_radius(18.0)
             .background(theme::rgba(pal.panel))
             .border(1.0)
             .border_color(theme::rgba(pal.border))
@@ -100,6 +112,7 @@ pub fn ghost_button(
     })
 }
 
+/// In-flow expander. Never creates an OS window or Floem overlay toplevel.
 pub fn picker<T>(
     state: AppState,
     active: impl Fn() -> T + 'static,
@@ -109,18 +122,82 @@ pub fn picker<T>(
 where
     T: Clone + PartialEq + std::fmt::Display + std::fmt::Debug + 'static,
 {
-    Dropdown::new(active, items)
-        .on_accept(on_accept)
+    let open = RwSignal::new(false);
+    let items: Vec<T> = items.into_iter().collect();
+    let active = std::rc::Rc::new(active);
+    let on_accept = std::rc::Rc::new(on_accept);
+    Stack::vertical((
+        Button::new({
+            let active = active.clone();
+            Label::derived(move || format!("{}  {}", active(), if open.get() { "▴" } else { "▾" }))
+        })
+        .action(move || open.update(|value| *value = !*value))
         .style(move |s| {
             let pal = theme::palette(state.settings.get().board_theme);
             s.width_full()
                 .min_width(0.0)
+                .padding_horiz(10.0)
+                .padding_vert(8.0)
                 .border_radius(10.0)
                 .background(theme::rgba(pal.bg))
                 .border(1.0)
                 .border_color(theme::rgba(pal.border))
                 .color(theme::rgba(pal.text_primary))
-        })
+        }),
+        dyn_view({
+            let items = items.clone();
+            let on_accept = on_accept.clone();
+            let active = active.clone();
+            move || {
+                if !open.get() {
+                    return Empty::new().into_any();
+                }
+                let list = items
+                    .iter()
+                    .map(|item| {
+                        let selected = active() == item.clone();
+                        let on_accept = on_accept.clone();
+                        Button::new(item.to_string())
+                            .action({
+                                let item = item.clone();
+                                move || {
+                                    on_accept(item.clone());
+                                    open.set(false);
+                                }
+                            })
+                            .style(move |s| {
+                                let pal = theme::palette(state.settings.get().board_theme);
+                                s.width_full()
+                                    .padding_horiz(10.0)
+                                    .padding_vert(6.0)
+                                    .border(0.0)
+                                    .border_radius(8.0)
+                                    .background(if selected {
+                                        theme::rgba(pal.accent)
+                                    } else {
+                                        Color::TRANSPARENT
+                                    })
+                                    .color(theme::rgba(pal.text_primary))
+                                    .hover(|s| s.background(theme::rgba(pal.panel)))
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                Stack::vertical(list)
+                    .style(move |s| {
+                        let pal = theme::palette(state.settings.get().board_theme);
+                        s.width_full()
+                            .row_gap(2.0)
+                            .padding(4.0)
+                            .border_radius(10.0)
+                            .background(theme::rgba(pal.bg))
+                            .border(1.0)
+                            .border_color(theme::rgba(pal.border))
+                    })
+                    .into_any()
+            }
+        }),
+    ))
+    .style(|s| s.width_full().row_gap(4.0).min_width(0.0))
 }
 
 pub fn picker_row<T>(
@@ -143,6 +220,40 @@ where
         picker(state, active, items, on_accept).style(|s| s.flex_grow(1.0f32).min_width(0.0)),
     ))
     .style(|s| s.width_full().col_gap(12.0).items_center().min_width(0.0))
+}
+
+pub fn stepper_row(
+    state: AppState,
+    label: &'static str,
+    unit: &'static str,
+    value: impl Fn() -> i32 + Copy + 'static,
+    on_change: impl Fn(i32) + Copy + 'static,
+    min: i32,
+    max: i32,
+) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::horizontal((
+        Label::new(label).style(move |s| {
+            s.width(110.0)
+                .font_size(13.0)
+                .color(theme::rgba(pal().text_secondary))
+        }),
+        Button::new("−").action(move || on_change((value() - 1).clamp(min, max))),
+        Label::derived(move || {
+            if unit.is_empty() {
+                value().to_string()
+            } else {
+                format!("{} {unit}", value())
+            }
+        })
+        .style(move |s| {
+            s.width(72.0)
+                .font_size(13.0)
+                .color(theme::rgba(pal().text_primary))
+        }),
+        Button::new("+").action(move || on_change((value() + 1).clamp(min, max))),
+    ))
+    .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0))
 }
 
 pub fn toggle_row(
@@ -205,4 +316,19 @@ pub fn overlay_frame(
             .z_index(40)
             .padding(16.0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn picker_stays_in_the_view_tree() {
+        let src = include_str!("widgets.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(
+            !production.contains("Dropdown"),
+            "in-flow picker must not use Dropdown overlays"
+        );
+        assert!(!production.contains("new_window"));
+        assert!(!production.contains("Application::window"));
+    }
 }

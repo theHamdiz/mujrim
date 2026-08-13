@@ -11,11 +11,11 @@ use mujrim_study::tournament::TournamentFormat;
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::TrainingStore;
 
-use super::engine::{QuickTournamentEngine, bundled_engine_label};
+use super::engine::{GameMode, PlayerConfig, QuickTournamentEngine, bundled_engine_label};
 use super::game::GameState;
 use super::tournament_live::{self, LiveTournamentHandle};
 use super::tournament_setup::TournamentSetup;
-use super::uci_process;
+use super::uci_process::{self, ExternalEngineProtocol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnalyzedPly {
@@ -149,18 +149,20 @@ pub fn preferred_engine_arch_folders() -> Vec<String> {
 }
 
 pub fn list_local_engine_binaries() -> Vec<PathBuf> {
-    let Some(root) = std::env::current_exe()
-        .ok()
-        .as_ref()
-        .and_then(|exe| mujrim_protocols::catalog::local_engines_root(exe))
-    else {
+    let Ok(exe) = std::env::current_exe() else {
         return Vec::new();
     };
-    if !root.is_dir() {
-        return Vec::new();
-    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    list_engine_binaries_in_roots(&mujrim_protocols::catalog::engine_search_roots(&exe, &cwd))
+}
+
+pub fn list_engine_binaries_in_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    collect_engine_executables(&root, 0, &mut candidates);
+    for root in roots {
+        if root.is_dir() {
+            collect_engine_executables(root, 0, &mut candidates);
+        }
+    }
     let preferred = preferred_engine_arch_folders();
     candidates.sort_by(|left, right| {
         engine_path_rank(left, &preferred)
@@ -213,7 +215,7 @@ fn collect_engine_executables(root: &Path, depth: usize, output: &mut Vec<PathBu
 }
 
 fn is_engine_executable(path: &Path) -> bool {
-    if !path.is_file() {
+    if !path.is_file() || is_engine_sidecar(path) {
         return false;
     }
     #[cfg(windows)]
@@ -362,16 +364,36 @@ pub fn seed_training(store: &mut TrainingStore) -> Result<usize, String> {
     Ok(added)
 }
 
+fn is_engine_sidecar(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".pb.gz")
+        || name.ends_with(".nnue")
+        || name.ends_with(".json")
+        || name.ends_with(".txt")
+        || name.contains("weights")
+}
+
 pub fn path_is_under_local_engines(path: &Path) -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
-    let Some(root) = mujrim_protocols::catalog::local_engines_root(&exe) else {
-        return false;
-    };
-    let root = root.canonicalize().unwrap_or(root);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    path_is_under_engine_roots(
+        path,
+        &mujrim_protocols::catalog::engine_search_roots(&exe, &cwd),
+    )
+}
+
+pub fn path_is_under_engine_roots(path: &Path, roots: &[PathBuf]) -> bool {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    path.starts_with(&root)
+    roots.iter().any(|root| {
+        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        path.starts_with(&root)
+    })
 }
 
 pub fn catalog_display_name(stem: &str, bundled: &[DiscoveredEngine]) -> String {
@@ -459,6 +481,41 @@ pub fn tournament_engine_roster(
             .cmp(&right.name.to_ascii_lowercase())
     });
     roster
+}
+
+pub fn engine_player_from_roster(
+    roster: &[QuickTournamentEngine],
+    index: usize,
+    builtin_depth: i32,
+) -> PlayerConfig {
+    roster
+        .get(index)
+        .map(|engine| PlayerConfig::External {
+            path: engine.path.to_string_lossy().into_owned(),
+            protocol: ExternalEngineProtocol::Uci,
+        })
+        .unwrap_or(PlayerConfig::BuiltIn {
+            depth: builtin_depth,
+        })
+}
+
+pub fn players_for_detected_engines(
+    mode: GameMode,
+    bundled: &[DiscoveredEngine],
+    catalog: &[EngineMetadata],
+) -> (PlayerConfig, PlayerConfig) {
+    let roster = tournament_engine_roster(bundled, catalog);
+    match mode {
+        GameMode::HumanVsHuman => (PlayerConfig::Human, PlayerConfig::Human),
+        GameMode::HumanVsEngine => (
+            PlayerConfig::Human,
+            engine_player_from_roster(&roster, 0, 16),
+        ),
+        GameMode::EngineVsEngine => (
+            engine_player_from_roster(&roster, 0, 16),
+            engine_player_from_roster(&roster, 1, 12),
+        ),
+    }
 }
 
 pub fn run_quick_tournament(
@@ -938,6 +995,7 @@ pub fn build_annotated_pgn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_core::engine::{GameMode, PlayerConfig, QuickTournamentEngine};
     use mujrim_study::annotation::MoveAnnotation;
     use mujrim_study::database::{GameMetadata, GameSummary};
 
@@ -1036,5 +1094,75 @@ mod tests {
         let (title, detail) = game_summary_label(&summary);
         assert!(title.contains("A vs B"));
         assert!(detail.contains("C20"));
+    }
+
+    #[test]
+    fn list_engine_binaries_scans_cwd_layout_and_skips_sidecars() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-ui-engines-{}-{}",
+            std::process::id(),
+            stamp
+        ));
+        let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let bin = root
+            .join("engines")
+            .join("stockfish")
+            .join("bin")
+            .join(&target);
+        std::fs::create_dir_all(&bin).unwrap();
+        let engine = bin.join("stockfish");
+        let weights = bin.join("weights.pb.gz");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&weights, b"net").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&engine).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&engine, perms.clone()).unwrap();
+            std::fs::set_permissions(&weights, perms).unwrap();
+        }
+        let roots = vec![root.join("engines")];
+        let found = list_engine_binaries_in_roots(&roots);
+        assert_eq!(found, vec![engine.clone()]);
+        assert!(path_is_under_engine_roots(&engine, &roots));
+        assert!(!path_is_under_engine_roots(
+            Path::new("/tmp/not-an-engine"),
+            &roots
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detected_engines_drive_home_and_tournament_player_assignment() {
+        let roster = vec![
+            QuickTournamentEngine {
+                name: "Stockfish".into(),
+                path: PathBuf::from("/tmp/engines/stockfish"),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            },
+            QuickTournamentEngine {
+                name: "Lc0".into(),
+                path: PathBuf::from("/tmp/engines/lc0"),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            },
+        ];
+        assert!(matches!(
+            engine_player_from_roster(&roster, 0, 16),
+            PlayerConfig::External { ref path, .. } if path.ends_with("stockfish")
+        ));
+        let (white, black) = (
+            engine_player_from_roster(&roster, 0, 16),
+            engine_player_from_roster(&roster, 1, 12),
+        );
+        assert!(matches!(white, PlayerConfig::External { .. }));
+        assert!(matches!(black, PlayerConfig::External { .. }));
+        let empty = players_for_detected_engines(GameMode::HumanVsHuman, &[], &[]);
+        assert!(matches!(empty.0, PlayerConfig::Human));
+        assert!(matches!(empty.1, PlayerConfig::Human));
     }
 }

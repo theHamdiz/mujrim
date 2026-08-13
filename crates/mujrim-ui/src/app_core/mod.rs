@@ -11,8 +11,10 @@ pub mod audio;
 pub mod engine;
 pub mod game;
 pub mod gif_export;
+pub mod hub;
 pub mod layout;
 pub mod logic;
+pub mod match_controller;
 pub mod motion;
 pub mod noise;
 pub mod palette;
@@ -25,6 +27,7 @@ pub mod tournament_live;
 pub mod tournament_results;
 pub mod tournament_setup;
 pub mod uci_process;
+pub mod windowing;
 
 #[allow(unused_imports)]
 pub use engine::{

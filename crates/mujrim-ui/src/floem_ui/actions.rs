@@ -10,35 +10,62 @@ use types::{Color, Move, Square};
 
 use crate::app_core::analysis::{AnalysisEngineSpec, AnalysisRequest, run_multi_engine_analysis};
 use crate::app_core::audio::BgmTrack;
-use crate::app_core::engine::{GameMode, PlayerConfig, players_for_mode};
+use crate::app_core::engine::{GameMode, PlayerConfig};
 use crate::app_core::game::GameState;
 use crate::app_core::gif_export;
+use crate::app_core::hub::{self, CoinFlipState};
 use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
+use crate::app_core::match_controller;
 use crate::app_core::recording::RecordState;
 use crate::app_core::settings::{AppSettings, Screen};
-use crate::app_core::uci_process::ExternalEngineProtocol;
+use crate::app_core::uci_process::{self, ExternalEngineProtocol};
 
 use super::engine;
 use super::state::{AppHandles, AppState};
 
 pub fn new_game(state: AppState, handles: &AppHandles) {
     types::init();
-    state.game_generation.update(|generation| *generation += 1);
-    state.searching.set(false);
+    uci_process::cancel_all_pondering();
+    let mut generation = state.game_generation.get_untracked();
+    let mut searching = state.searching.get_untracked();
+    let mut retries = state.engine_retries.get_untracked();
+    match_controller::bump_generation(&mut generation, &mut searching, &mut retries);
+    state.game_generation.set(generation);
+    state.searching.set(searching);
+    state.engine_retries.set(retries);
+    state.selected_tournament_game_id.set(None);
+
+    let mut white = state.white_player.get_untracked();
+    let mut black = state.black_player.get_untracked();
+    let mut flipped = false;
+    let mut status = "New game.".to_owned();
+    if matches!(state.selected_mode.get_untracked(), GameMode::HumanVsEngine)
+        && let CoinFlipState::Done { heads } = state.coin_flip.get_untracked()
+    {
+        let assigned = hub::apply_coin_flip(heads, white, black);
+        white = assigned.white;
+        black = assigned.black;
+        flipped = assigned.flip_board;
+        status = assigned.status.to_owned();
+    }
+    state.white_player.set(white.clone());
+    state.black_player.set(black.clone());
+
     let mut game = GameState::new(types::Board::new());
     let settings = state.settings.get_untracked();
-    if settings.auto_flip_black
-        && matches!(state.white_player.get_untracked(), PlayerConfig::Human)
-        && !matches!(state.black_player.get_untracked(), PlayerConfig::Human)
-    {
-        game.flipped = false;
-    }
-    if settings.auto_flip_black
-        && matches!(state.black_player.get_untracked(), PlayerConfig::Human)
-        && !matches!(state.white_player.get_untracked(), PlayerConfig::Human)
+    if flipped
+        || (settings.auto_flip_black
+            && matches!(black, PlayerConfig::Human)
+            && !matches!(white, PlayerConfig::Human))
     {
         game.flipped = true;
+    }
+    if settings.auto_flip_black
+        && matches!(white, PlayerConfig::Human)
+        && !matches!(black, PlayerConfig::Human)
+    {
+        game.flipped = false;
     }
     state.game.set(Some(game));
     state.move_log.set(Vec::new());
@@ -50,11 +77,28 @@ pub fn new_game(state: AppState, handles: &AppHandles) {
         .initial_fen
         .set(mujrim_study::opening::START_FEN.to_owned());
     state.screen.set(Screen::Playing);
-    state.status.set("New game.".to_owned());
+    state.status.set(status);
     if let Some(sound) = handles.sound.borrow_mut().as_mut() {
         sound.play_bgm(BgmTrack::Game);
     }
-    engine::maybe_start_engine_turn(state, handles);
+    let handles = handles.clone();
+    floem::action::exec_after(Duration::from_millis(0), move |_| {
+        engine::maybe_start_engine_turn(state, &handles);
+    });
+}
+
+pub fn start_coin_flip(state: AppState) {
+    use rand::Rng;
+    let heads = rand::rng().random_bool(0.5);
+    state.coin_flip.set(CoinFlipState::Flipping);
+    floem::action::exec_after(Duration::from_millis(1500), move |_| {
+        state.coin_flip.set(CoinFlipState::Done { heads });
+        state.status.set(if heads {
+            "Heads! You play White.".to_owned()
+        } else {
+            "Tails! You play Black.".to_owned()
+        });
+    });
 }
 
 pub fn resign(state: AppState, handles: &AppHandles) {
@@ -300,7 +344,7 @@ pub fn analyze_game(state: AppState, handles: &AppHandles) {
         max_pv_plies: 8,
     };
     let on_done = create_ext_action(
-        floem::reactive::Scope::current(),
+        handles.ui_scope,
         move |snapshot: crate::app_core::analysis::AnalysisSnapshot| {
             state.game.update(|game| {
                 if let Some(game) = game.as_mut() {
@@ -310,7 +354,6 @@ pub fn analyze_game(state: AppState, handles: &AppHandles) {
             state.analysis.set(Some(snapshot));
         },
     );
-    let _ = handles;
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
@@ -416,31 +459,56 @@ fn tick_recording(state: AppState, handles: AppHandles) {
 }
 
 pub fn import_pgn(state: AppState, handles: &AppHandles) {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("PGN", &["pgn", "txt"])
-        .pick_file()
-    else {
-        return;
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        state.status.set("Could not read PGN.".to_owned());
-        return;
-    };
-    let mut study = handles.study.borrow_mut();
-    let Some(database) = study.as_mut() else {
-        state.status.set("Study library is unavailable.".to_owned());
-        return;
-    };
-    match database.import_pgn_text(&text) {
-        Ok(report) => {
-            state.status.set(format!(
-                "Imported {} / {} games.",
-                report.imported, report.discovered
-            ));
-            refresh_study(state, handles);
+    let handles = handles.clone();
+    let on_done = create_ext_action(handles.ui_scope, move |path: Option<PathBuf>| {
+        let Some(path) = path else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            state.status.set("Could not read PGN.".to_owned());
+            return;
+        };
+        let mut study = handles.study.borrow_mut();
+        let Some(database) = study.as_mut() else {
+            state.status.set("Study library is unavailable.".to_owned());
+            return;
+        };
+        match database.import_pgn_text(&text) {
+            Ok(report) => {
+                state.status.set(format!(
+                    "Imported {} / {} games.",
+                    report.imported, report.discovered
+                ));
+                drop(study);
+                refresh_study(state, &handles);
+            }
+            Err(error) => state.status.set(error),
         }
-        Err(error) => state.status.set(error),
-    }
+    });
+    std::thread::spawn(move || {
+        on_done(
+            rfd::FileDialog::new()
+                .add_filter("PGN", &["pgn", "txt"])
+                .pick_file(),
+        );
+    });
+}
+
+pub fn pick_eval_file(state: AppState, handles: &AppHandles) {
+    let on_done = create_ext_action(handles.ui_scope, move |path: Option<PathBuf>| {
+        if let Some(path) = path {
+            state
+                .engine_cfg
+                .update(|cfg| cfg.eval_file = Some(path.to_string_lossy().into_owned()));
+        }
+    });
+    std::thread::spawn(move || {
+        on_done(rfd::FileDialog::new().pick_file());
+    });
+}
+
+pub fn clear_eval_file(state: AppState) {
+    state.engine_cfg.update(|cfg| cfg.eval_file = None);
 }
 
 pub fn refresh_study(state: AppState, handles: &AppHandles) {
@@ -506,22 +574,23 @@ pub fn start_puzzle(state: AppState, handles: &AppHandles) {
 pub fn index_openings(state: AppState, handles: &AppHandles) {
     let path = logic::study_database_path();
     let handles = handles.clone();
-    let on_done = create_ext_action(
-        floem::reactive::Scope::current(),
-        move |(explorer, count)| {
-            *handles.explorer.borrow_mut() = explorer;
-            state.opening_indexed.set(count);
-            state.status.set(format!("Indexed {count} opening games."));
-        },
-    );
+    let on_done = create_ext_action(handles.ui_scope, move |(explorer, count)| {
+        *handles.explorer.borrow_mut() = explorer;
+        state.opening_indexed.set(count);
+        state.status.set(format!("Indexed {count} opening games."));
+    });
     std::thread::spawn(move || {
         on_done(logic::index_openings(path));
     });
 }
 
 pub fn start_tournament(state: AppState, handles: &AppHandles) {
-    let setup = state.tournament_setup.get_untracked();
+    let mut setup = state.tournament_setup.get_untracked();
     let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    if setup.selected_engine_paths.is_empty() {
+        setup.selected_engine_paths = roster.iter().map(|engine| engine.path.clone()).collect();
+        state.tournament_setup.set(setup.clone());
+    }
     let selected: Vec<_> = roster
         .into_iter()
         .filter(|engine| {
@@ -548,7 +617,7 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     state.show_tournament_setup.set(false);
     state.screen.set(Screen::Tournaments);
     let snapshot = handle.clone();
-    let on_done = create_ext_action(floem::reactive::Scope::current(), move |summary| {
+    let on_done = create_ext_action(handles.ui_scope, move |summary| {
         state
             .tournament_status
             .set(logic::format_tournament_summary(&summary));
@@ -574,7 +643,9 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
             let running = guard.running;
             state.tournament_snapshot.set(guard.clone());
             state.tournament_status.set(guard.status_line.clone());
-            sync_tournament_board(state, &guard);
+            if match_controller::should_sync_tournament_board(state.screen.get_untracked()) {
+                sync_tournament_board(state, &guard);
+            }
             if running {
                 poll_tournament(state, handles.clone());
             }
@@ -654,11 +725,11 @@ pub fn refresh_updater_status(state: AppState) {
         });
 }
 
-pub fn download_syzygy(state: AppState) {
+pub fn download_syzygy(state: AppState, handles: &AppHandles) {
     let dest = updater::syzygy::default_syzygy_path();
     let piece_set = state.syzygy_piece_set.get_untracked();
     let on_done = create_ext_action(
-        floem::reactive::Scope::current(),
+        handles.ui_scope,
         move |result: Result<(), String>| match result {
             Ok(()) => {
                 refresh_updater_status(state);
@@ -672,10 +743,10 @@ pub fn download_syzygy(state: AppState) {
     });
 }
 
-pub fn download_nnue(state: AppState) {
+pub fn download_nnue(state: AppState, handles: &AppHandles) {
     let dest = updater::nnue::default_nnue_path();
     let on_done = create_ext_action(
-        floem::reactive::Scope::current(),
+        handles.ui_scope,
         move |result: Result<updater::nnue::DownloadSummary, String>| match result {
             Ok(summary) => {
                 refresh_updater_status(state);
@@ -696,30 +767,53 @@ pub fn update_settings(state: AppState, patch: impl FnOnce(&mut AppSettings)) {
     state.persist_settings();
 }
 
-pub fn select_mode(
-    state: AppState,
-    bundled: &[mujrim_protocols::catalog::DiscoveredEngine],
-    mode: GameMode,
-) {
+pub fn select_mode(state: AppState, handles: &AppHandles, mode: GameMode) {
     state.selected_mode.set(mode);
-    let (white, black) = players_for_mode(mode, bundled);
+    let (white, black) =
+        logic::players_for_detected_engines(mode, &handles.bundled, &handles.catalog.borrow());
     state.white_player.set(white);
     state.black_player.set(black);
+    state.coin_flip.set(CoinFlipState::Idle);
 }
 
-pub fn pick_external_engine(state: AppState, white: bool, protocol: ExternalEngineProtocol) {
-    let Some(path) = rfd::FileDialog::new().pick_file() else {
-        return;
-    };
-    let player = PlayerConfig::External {
-        path: path.to_string_lossy().into_owned(),
-        protocol,
-    };
-    if white {
-        state.white_player.set(player);
+pub fn open_tournament_setup(state: AppState, handles: &AppHandles) {
+    let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    state.tournament_setup.update(|setup| {
+        if setup.selected_engine_paths.is_empty() {
+            setup.selected_engine_paths = roster.iter().map(|engine| engine.path.clone()).collect();
+        }
+    });
+    state.status.set(if roster.is_empty() {
+        "No local engines found. Vendor them with scripts/vendor-linux-engines.sh.".to_owned()
     } else {
-        state.black_player.set(player);
-    }
+        format!("Detected {} local engines.", roster.len())
+    });
+    state.show_tournament_setup.set(true);
+}
+
+pub fn pick_external_engine(
+    state: AppState,
+    handles: &AppHandles,
+    white: bool,
+    protocol: ExternalEngineProtocol,
+) {
+    let on_done = create_ext_action(handles.ui_scope, move |path: Option<PathBuf>| {
+        let Some(path) = path else {
+            return;
+        };
+        let player = PlayerConfig::External {
+            path: path.to_string_lossy().into_owned(),
+            protocol,
+        };
+        if white {
+            state.white_player.set(player);
+        } else {
+            state.black_player.set(player);
+        }
+    });
+    std::thread::spawn(move || {
+        on_done(rfd::FileDialog::new().pick_file());
+    });
 }
 
 pub fn annotate_last_move(state: AppState) {
@@ -744,6 +838,7 @@ pub fn annotate_last_move(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_core::engine::players_for_mode;
 
     #[test]
     fn human_side_defaults_to_white_when_white_is_human() {

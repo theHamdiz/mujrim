@@ -13,15 +13,16 @@ mod screens;
 mod state;
 mod theme;
 mod widgets;
+mod windowing;
 
-use floem::kurbo::Size;
 use floem::prelude::*;
 use floem::taffy::style::Overflow;
 use floem::text::FONT_CONTEXT;
-use floem::window::{Theme, WindowConfig, WindowId};
+use floem::window::WindowId;
 use tokio::runtime::Runtime;
 
 use self::state::AppState;
+use crate::app_core::windowing::WindowPolicy;
 
 const CURIOUS_FONT: &[u8] = include_bytes!("../../assets/CuriousTrack.ttf");
 
@@ -37,16 +38,7 @@ pub fn run() {
                     .collection
                     .register_fonts(CURIOUS_FONT.to_vec().into(), None);
             }
-            let mut config = WindowConfig::default()
-                .size(Size::new(1280.0, 850.0))
-                .min_size(Size::new(800.0, 600.0))
-                .show_titlebar(false)
-                .undecorated(true)
-                .undecorated_shadow(true)
-                .title("Mujrim Chess")
-                .resizable(true)
-                .theme_override(Theme::Dark)
-                .apply_default_theme(false);
+            let mut config = windowing::main_window_config(WindowPolicy::current());
             if let Some(icon) = load_window_icon() {
                 config = config.window_icon(icon);
             }

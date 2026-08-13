@@ -18,6 +18,11 @@ pub const BUNDLED_ENGINES: &[(&str, &str)] = &[
     ("reckless", "Reckless"),
     ("akimbo", "Akimbo"),
     ("ethereal", "Ethereal"),
+    ("lc0", "Lc0"),
+    ("viridithas", "Viridithas"),
+    ("hobbes", "Hobbes"),
+    ("integral", "Integral"),
+    ("velvet", "Velvet"),
 ];
 
 /// In-process classical evaluator + HCE search stack (not a separate binary).
@@ -226,28 +231,32 @@ fn runtime_targets() -> Vec<(String, RuntimeCompatibility)> {
     targets
 }
 
+fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    if !roots.iter().any(|existing| existing == &root) {
+        roots.push(root);
+    }
+}
+
 /// Engine roots searched for packaged binaries.
 ///
-/// UI/product discovery is local-only: `<exe_dir>/engines`. When the executable
-/// itself lives under a packaged `engines/<id>/bin/<arch>/` tree (CLI adapters),
-/// that `engines` ancestor is also included so siblings remain discoverable.
-/// Parent folders, cwd, and `dist/engines` are intentionally not searched — those
-/// caused duplicate Mujrim entries across arch alias folders.
-fn engine_roots(executable: &Path, _current_dir: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::with_capacity(2);
+/// Order: `<exe_dir>/engines`, then a packaged `engines/` ancestor when the
+/// executable itself lives under `engines/<id>/bin/<arch>/`, then
+/// `<cwd>/engines` so `cargo run` from the repo finds the vendored tree.
+/// Parent folders of the UI (for example `C:/Mujrim/engines` when the binary
+/// is in `C:/Mujrim/windows-aarch64/`) are not walked — those duplicated
+/// arch alias copies.
+pub fn engine_search_roots(executable: &Path, current_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::with_capacity(3);
     if let Some(executable_dir) = executable.parent() {
-        let local = executable_dir.join("engines");
-        roots.push(local);
+        push_unique_root(&mut roots, executable_dir.join("engines"));
         if let Some(packaged_root) = executable_dir
             .ancestors()
             .find(|path| path.file_name().is_some_and(|name| name == "engines"))
         {
-            let packaged_root = packaged_root.to_path_buf();
-            if !roots.iter().any(|root| root == &packaged_root) {
-                roots.push(packaged_root);
-            }
+            push_unique_root(&mut roots, packaged_root.to_path_buf());
         }
     }
+    push_unique_root(&mut roots, current_dir.join("engines"));
     roots
 }
 
@@ -326,7 +335,7 @@ pub fn engine_candidate_details(
             );
         }
     }
-    for root in engine_roots(executable, current_dir) {
+    for root in engine_search_roots(executable, current_dir) {
         for (target_directory, compatibility) in runtime_targets() {
             let filename = packaged_executable_filename(product_id, &target_directory);
             let path = root
@@ -537,10 +546,50 @@ mod tests {
 
     #[test]
     fn upstream_comparison_engines_remain_unsuffixed() {
-        for upstream in ["stockfish", "akimbo", "reckless"] {
+        for upstream in [
+            "stockfish",
+            "akimbo",
+            "reckless",
+            "lc0",
+            "viridithas",
+            "hobbes",
+            "integral",
+            "velvet",
+        ] {
             assert_eq!(
-                packaged_executable_filename(upstream, "windows-x86_64-avx2"),
+                packaged_executable_filename(upstream, "linux-x86_64"),
                 executable_filename(upstream)
+            );
+        }
+    }
+
+    #[test]
+    fn linux_x86_64_catalog_layout_resolves_new_engines() {
+        let exe = Path::new("/opt/mujrim/mujrim-ui");
+        for id in [
+            "lc0",
+            "viridithas",
+            "hobbes",
+            "integral",
+            "velvet",
+            "stockfish",
+        ] {
+            let candidates = engine_candidates(id, exe, Path::new("/tmp"), None);
+            let expected = Path::new("/opt/mujrim")
+                .join("engines")
+                .join(id)
+                .join("bin")
+                .join("linux-x86_64")
+                .join(id);
+            let host = Path::new("/opt/mujrim")
+                .join("engines")
+                .join(id)
+                .join("bin")
+                .join(RuntimePlatform::current().directory_name())
+                .join(id);
+            assert!(
+                candidates.contains(&expected) || candidates.contains(&host),
+                "missing linux layout for {id}; got {candidates:?}"
             );
         }
     }
@@ -619,21 +668,72 @@ mod tests {
     }
 
     #[test]
-    fn engine_roots_are_local_to_executable_engines_dir() {
-        let roots = engine_roots(
+    fn engine_roots_include_exe_local_and_cwd_not_parent_trees() {
+        let roots = engine_search_roots(
             Path::new("C:/Mujrim/windows-aarch64/mujrim-ui.exe"),
             Path::new("D:/src/mujrim"),
         );
         assert_eq!(
             roots,
-            vec![PathBuf::from("C:/Mujrim/windows-aarch64/engines")]
+            vec![
+                PathBuf::from("C:/Mujrim/windows-aarch64/engines"),
+                PathBuf::from("D:/src/mujrim/engines"),
+            ]
         );
         assert!(
-            !roots.iter().any(|root| root.ends_with("dist/engines")
-                || root == Path::new("D:/src/mujrim/engines")
-                || root == Path::new("C:/Mujrim/engines")),
-            "must not search parent/cwd/dist engine trees: {roots:?}"
+            !roots.iter().any(
+                |root| root.ends_with("dist/engines") || root == Path::new("C:/Mujrim/engines")
+            ),
+            "must not search parent/dist engine trees: {roots:?}"
         );
+    }
+
+    #[test]
+    fn discover_bundled_engines_finds_cwd_vendor_tree() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-catalog-cwd-{}-{}",
+            std::process::id(),
+            stamp
+        ));
+        let target = RuntimePlatform::current().directory_name();
+        let bin_dir = root
+            .join("engines")
+            .join("velvet")
+            .join("bin")
+            .join(&target);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let engine = bin_dir.join(executable_filename("velvet"));
+        let native_machine = match crate::binary_arch::BinaryArch::host() {
+            crate::binary_arch::BinaryArch::Aarch64 => 0xB7,
+            _ => 0x3E,
+        };
+        std::fs::write(
+            &engine,
+            crate::binary_arch::synthetic_elf_bytes(native_machine),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&engine).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&engine, perms).unwrap();
+        }
+        let ui = root.join("elsewhere").join("mujrim-ui");
+        std::fs::create_dir_all(ui.parent().unwrap()).unwrap();
+        std::fs::write(&ui, []).unwrap();
+        let found = discover_bundled_engines(&ui, &root);
+        let ids: Vec<&str> = found.iter().map(|engine| engine.id).collect();
+        assert!(
+            ids.contains(&"velvet"),
+            "cwd engines/ must be discovered when the UI binary has no sibling engines/: {ids:?}"
+        );
+        assert_eq!(found[0].path, engine);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -654,6 +754,11 @@ mod tests {
         assert!(ids.contains(&"mujrim-external"));
         assert!(ids.contains(&"mujrim-v60"));
         assert!(ids.contains(&"mujrim-ak"));
+        assert!(ids.contains(&"lc0"));
+        assert!(ids.contains(&"viridithas"));
+        assert!(ids.contains(&"hobbes"));
+        assert!(ids.contains(&"integral"));
+        assert!(ids.contains(&"velvet"));
         assert!(!ids.contains(&"mujrim-v10"));
         assert!(!ids.iter().any(|id| id.contains("native")));
         assert!(
@@ -662,6 +767,45 @@ mod tests {
                 .any(|(_, display)| display.to_ascii_lowercase().contains("native"))
         );
         assert_eq!(MUJRIM_HCE_DISPLAY_NAME, "Mujrim HCE");
+    }
+
+    #[test]
+    fn host_arch_filter_rejects_wrong_elf_in_linux_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-catalog-elf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let target = RuntimePlatform::current().directory_name();
+        let bin_dir = root
+            .join("engines")
+            .join("velvet")
+            .join("bin")
+            .join(&target);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let engine = bin_dir.join(executable_filename("velvet"));
+        let foreign_machine =
+            if crate::binary_arch::BinaryArch::host() == crate::binary_arch::BinaryArch::Aarch64 {
+                0x3E
+            } else {
+                0xB7
+            };
+        std::fs::write(
+            &engine,
+            crate::binary_arch::synthetic_elf_bytes(foreign_machine),
+        )
+        .unwrap();
+        let ui = root.join("mujrim-ui");
+        std::fs::write(&ui, []).unwrap();
+        let err = discover_engine_details("velvet", &ui, &root, None).unwrap_err();
+        assert!(
+            err.contains("could not find velvet"),
+            "wrong ELF machine must not be selected: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
@@ -710,5 +854,47 @@ mod tests {
                 "missing {id} beside dist UI; discovered {ids:?}"
             );
         }
+    }
+
+    #[test]
+    fn vendored_linux_x86_64_bins_are_elf_when_present() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../engines");
+        if !root.is_dir() {
+            return;
+        }
+        let mut found = 0usize;
+        for id in [
+            "stockfish",
+            "akimbo",
+            "reckless",
+            "ethereal",
+            "obsidian",
+            "lc0",
+            "viridithas",
+            "hobbes",
+            "integral",
+            "velvet",
+        ] {
+            let path = root.join(id).join("bin").join("linux-x86_64").join(id);
+            if !path.is_file() {
+                continue;
+            }
+            found += 1;
+            let magic = std::fs::read(&path).unwrap();
+            assert!(
+                magic.len() >= 4 && magic[..4] == [0x7F, b'E', b'L', b'F'],
+                "{} must be ELF: {}",
+                id,
+                path.display()
+            );
+            assert!(
+                crate::binary_arch::detect_binary_arch(&path)
+                    == Some(crate::binary_arch::BinaryArch::X86_64),
+                "{} must be ELF x86_64: {}",
+                id,
+                path.display()
+            );
+        }
+        let _ = found;
     }
 }

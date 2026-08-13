@@ -116,6 +116,19 @@ fn detect_macho_arch(file: &mut File, magic: [u8; 4]) -> Option<BinaryArch> {
     })
 }
 
+/// Build a minimal ELF header for tests (x86_64 = 0x3E, aarch64 = 0xB7).
+#[cfg(test)]
+pub fn synthetic_elf_bytes(machine: u16) -> Vec<u8> {
+    let mut bytes = vec![0u8; 24];
+    bytes[0] = 0x7F;
+    bytes[1] = b'E';
+    bytes[2] = b'L';
+    bytes[3] = b'F';
+    bytes[18] = (machine & 0xFF) as u8;
+    bytes[19] = (machine >> 8) as u8;
+    bytes
+}
+
 /// Build a minimal PE header for tests (x64 or arm64).
 #[cfg(test)]
 pub fn synthetic_pe_bytes(machine: u16) -> Vec<u8> {
@@ -144,6 +157,27 @@ mod tests {
         std::fs::write(&arm, synthetic_pe_bytes(0xAA64)).unwrap();
         assert_eq!(detect_binary_arch(&x64), Some(BinaryArch::X86_64));
         assert_eq!(detect_binary_arch(&arm), Some(BinaryArch::Aarch64));
+    }
+
+    #[test]
+    fn host_match_rejects_wrong_elf_machine() {
+        let dir = tempfile_dir();
+        let foreign = dir.join("foreign-elf");
+        let machine = if BinaryArch::host() == BinaryArch::Aarch64 {
+            0x3E
+        } else {
+            0xB7
+        };
+        std::fs::write(&foreign, synthetic_elf_bytes(machine)).unwrap();
+        assert!(!is_host_native_binary(&foreign));
+        let native = dir.join("native-elf");
+        let host_machine = match BinaryArch::host() {
+            BinaryArch::Aarch64 => 0xB7,
+            BinaryArch::X86_64 => 0x3E,
+            _ => 0x3E,
+        };
+        std::fs::write(&native, synthetic_elf_bytes(host_machine)).unwrap();
+        assert!(is_host_native_binary(&native));
     }
 
     #[test]
