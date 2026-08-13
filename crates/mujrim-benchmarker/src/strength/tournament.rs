@@ -10,11 +10,11 @@ use mujrim_study::tournament::{
     knockout_round, schedule, standings, swiss_round,
 };
 
+use super::runner::FailedEngine;
 use super::{
     EngineSpec, GameProgressEvent, MatchConfig, MatchSummary, ensure_scored_match,
     forfeit_match_summary, run_match,
 };
-use super::runner::FailedEngine;
 
 #[derive(Clone, Debug)]
 pub struct TournamentEngine {

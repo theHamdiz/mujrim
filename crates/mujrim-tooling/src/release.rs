@@ -831,7 +831,10 @@ mod tests {
             assert!(!stem.contains("native"), "{stem}");
             assert_eq!(stem, adapter);
         }
-        assert_eq!(adapter_binary_stem("mujrim-v10", "x86_64-avx2"), "mujrim-elite");
+        assert_eq!(
+            adapter_binary_stem("mujrim-v10", "x86_64-avx2"),
+            "mujrim-elite"
+        );
         assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
     }
 }

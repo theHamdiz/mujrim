@@ -930,11 +930,7 @@ pub fn run_match(
                         Ok(sessions) => Some(sessions),
                         Err((failed, message)) => {
                             let forfeited = forfeit_match_summary(
-                                &candidate,
-                                &reference,
-                                &config,
-                                failed,
-                                message,
+                                &candidate, &reference, &config, failed, message,
                             );
                             if let Some(pair) = forfeited.pairs.into_iter().next() {
                                 let mut pair = pair;
@@ -973,14 +969,11 @@ pub fn run_match(
                 if let Some(message) = resource_limit_detail(&white) {
                     // Record the forfeited game, skip the return game, and stop the match.
                     *lock_recover(&error) = Some(message.to_string());
-                    let black_forfeit_side = match classify_engine_failure(
-                        &candidate,
-                        &reference,
-                        message,
-                    ) {
-                        FailedEngine::Candidate => Color::Black,
-                        FailedEngine::Reference => Color::White,
-                    };
+                    let black_forfeit_side =
+                        match classify_engine_failure(&candidate, &reference, message) {
+                            FailedEngine::Candidate => Color::Black,
+                            FailedEngine::Reference => Color::White,
+                        };
                     let black = forfeit(
                         false,
                         black_forfeit_side,

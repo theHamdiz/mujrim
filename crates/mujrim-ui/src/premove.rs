@@ -49,10 +49,18 @@ pub fn projected_board(board: &Board, queue: &[Premove], human: Color) -> Board 
 }
 
 /// Pseudo-legal destination squares for a piece on the projected board.
-pub fn premove_destinations(board: &Board, queue: &[Premove], human: Color, from: Square) -> Vec<Square> {
+pub fn premove_destinations(
+    board: &Board,
+    queue: &[Premove],
+    human: Color,
+    from: Square,
+) -> Vec<Square> {
     let mut projected = projected_board(board, queue, human);
     projected.side_to_move = human;
-    if projected.piece_on(from).is_none_or(|(_, color)| color != human) {
+    if projected
+        .piece_on(from)
+        .is_none_or(|(_, color)| color != human)
+    {
         return Vec::new();
     }
     let mut targets = Vec::new();
@@ -97,18 +105,14 @@ pub fn make_premove(
 
 /// Resolve a queued premove against the live board for execution (legal moves only).
 pub fn resolve_legal(board: &mut Board, premove: Premove) -> Option<Move> {
-    board
-        .generate_legal_moves()
-        .iter()
-        .copied()
-        .find(|mv| {
-            mv.from == premove.from
-                && mv.to == premove.to
-                && match premove.promotion {
-                    Some(piece) => mv.promotion == Some(piece),
-                    None => true,
-                }
-        })
+    board.generate_legal_moves().iter().copied().find(|mv| {
+        mv.from == premove.from
+            && mv.to == premove.to
+            && match premove.promotion {
+                Some(piece) => mv.promotion == Some(piece),
+                None => true,
+            }
+    })
 }
 
 fn resolve_premove(board: &Board, premove: Premove, human: Color) -> Option<Move> {
@@ -156,10 +160,7 @@ mod tests {
         let queue = [Premove::new(e2, e4)];
         let projected = projected_board(&board, &queue, Color::White);
         assert!(projected.piece_on(e2).is_none());
-        assert_eq!(
-            projected.piece_on(e4).map(|(p, c)| (p, c)),
-            Some((Piece::Pawn, Color::White))
-        );
+        assert_eq!(projected.piece_on(e4), Some((Piece::Pawn, Color::White)));
     }
 
     #[test]

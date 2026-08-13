@@ -371,11 +371,7 @@ mod tests {
             assert!(
                 matches!(
                     engine.0,
-                    "mujrim-elite"
-                        | "mujrim-external"
-                        | "mujrim-v60"
-                        | "mujrim-ak"
-                        | "akimbo"
+                    "mujrim-elite" | "mujrim-external" | "mujrim-v60" | "mujrim-ak" | "akimbo"
                 ) || EXTERNAL_BACKENDS.contains(&engine.0)
             );
         }

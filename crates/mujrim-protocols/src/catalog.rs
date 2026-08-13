@@ -388,21 +388,18 @@ pub fn discover_engine_details(
     let emulated = candidates.iter().find(|candidate| {
         candidate.compatibility == RuntimeCompatibility::Emulated && candidate.path.is_file()
     });
-    native
-        .or(emulated)
-        .cloned()
-        .ok_or_else(|| {
-            let searched = candidates
-                .iter()
-                .map(|candidate| candidate.path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "could not find {} for {} (searched: {searched})",
-                canonical_engine_id(engine_id),
-                RuntimePlatform::current().directory_name()
-            )
-        })
+    native.or(emulated).cloned().ok_or_else(|| {
+        let searched = candidates
+            .iter()
+            .map(|candidate| candidate.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "could not find {} for {} (searched: {searched})",
+            canonical_engine_id(engine_id),
+            RuntimePlatform::current().directory_name()
+        )
+    })
 }
 
 pub fn discover_engine(
@@ -594,7 +591,10 @@ mod tests {
 
     #[test]
     fn adapter_binary_stem_is_product_id() {
-        assert_eq!(adapter_binary_stem("mujrim-v60", "x86_64-avx2"), "mujrim-v60");
+        assert_eq!(
+            adapter_binary_stem("mujrim-v60", "x86_64-avx2"),
+            "mujrim-v60"
+        );
         assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
         assert_eq!(adapter_binary_stem("mujrim", "x86_64"), "mujrim-elite");
     }

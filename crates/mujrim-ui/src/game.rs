@@ -126,21 +126,12 @@ impl GameState {
     /// Select a piece for the next premove on the projected board.
     pub fn select_premove_square(&mut self, sq: Square, human: Color) {
         self.selected_square = Some(sq);
-        self.legal_highlights = premove::premove_destinations(
-            &self.board,
-            &self.premove_queue,
-            human,
-            sq,
-        );
+        self.legal_highlights =
+            premove::premove_destinations(&self.board, &self.premove_queue, human, sq);
     }
 
     /// Queue a premove to `target` from the current selection.
-    pub fn queue_premove(
-        &mut self,
-        target: Square,
-        human: Color,
-        allow_multi: bool,
-    ) -> bool {
+    pub fn queue_premove(&mut self, target: Square, human: Color, allow_multi: bool) -> bool {
         let Some(from) = self.selected_square else {
             return false;
         };

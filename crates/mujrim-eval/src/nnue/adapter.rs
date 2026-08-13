@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
     feature = "stockfish-nnue",
     feature = "reckless-nnue"
 ))]
+use sha2::{Digest, Sha256};
+#[cfg(any(
+    not(feature = "embedded-networks"),
+    feature = "stockfish-nnue",
+    feature = "reckless-nnue"
+))]
 use std::fs::File;
 #[cfg(any(
     not(feature = "embedded-networks"),
@@ -15,12 +21,6 @@ use std::fs::File;
     feature = "reckless-nnue"
 ))]
 use std::io::Read;
-#[cfg(any(
-    not(feature = "embedded-networks"),
-    feature = "stockfish-nnue",
-    feature = "reckless-nnue"
-))]
-use sha2::{Digest, Sha256};
 
 use super::network::{HIDDEN, NUM_BUCKETS, Network, net};
 #[cfg(feature = "reckless-nnue")]

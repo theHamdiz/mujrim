@@ -302,30 +302,25 @@ fn annotation_badge_stack<'a>(
     } else {
         symbol.to_owned()
     };
-    let badge = container(
-        text(label)
-            .size(font_size)
-            .color(Color::WHITE)
-            .center(),
-    )
-    .center_x(badge_size)
-    .center_y(badge_size)
-    .width(badge_size)
-    .height(badge_size)
-    .style(move |_theme| container::Style {
-        background: Some(iced::Background::Color(Color::from_rgb8(r, g, b))),
-        border: iced::Border {
-            radius: (badge_size * 0.5).into(),
-            width: 1.5,
-            color: Color::from_rgba(1.0, 1.0, 1.0, 0.92),
-        },
-        shadow: iced::Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-            offset: iced::Vector::new(0.0, 1.0),
-            blur_radius: 2.0,
-        },
-        ..Default::default()
-    });
+    let badge = container(text(label).size(font_size).color(Color::WHITE).center())
+        .center_x(badge_size)
+        .center_y(badge_size)
+        .width(badge_size)
+        .height(badge_size)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgb8(r, g, b))),
+            border: iced::Border {
+                radius: (badge_size * 0.5).into(),
+                width: 1.5,
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.92),
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                offset: iced::Vector::new(0.0, 1.0),
+                blur_radius: 2.0,
+            },
+            ..Default::default()
+        });
     let badge_row = row![
         Space::new().width(Length::Fill),
         column![badge, Space::new().height(Length::Fill)]
@@ -424,8 +419,8 @@ pub fn view_board<'a>(
             let is_last_move = show_last_move && gs.last_move_squares.contains(&sq);
             let is_premove_from = gs.premove_queue.iter().any(|pm| pm.from == sq);
             let is_premove_to = gs.premove_queue.iter().any(|pm| pm.to == sq);
-            let is_premove_ghost = projected_owned.is_some()
-                && (live_board.piece_on(sq) != board.piece_on(sq));
+            let is_premove_ghost =
+                projected_owned.is_some() && (live_board.piece_on(sq) != board.piece_on(sq));
 
             // Capture flash effect — vivid orange/red for Explosion, warm glow for Fire
             let capture_flash = match capture_anim_style {
@@ -602,9 +597,8 @@ pub fn view_board<'a>(
             let has_rank_label = show_inside_coords && display_col == 0;
             let has_file_label = show_inside_coords && display_row == 7;
 
-            let badge = annotation_badge.filter(|(target, ann)| {
-                *target == sq && ann.shows_board_badge()
-            });
+            let badge =
+                annotation_badge.filter(|(target, ann)| *target == sq && ann.shows_board_badge());
             let cell_content = if let Some((_, annotation)) = badge {
                 annotation_badge_stack(cell_content, annotation, sq_size)
             } else {

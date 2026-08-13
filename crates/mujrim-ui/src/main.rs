@@ -882,10 +882,10 @@ impl App {
                 &self.live_tournament_view.live_games,
                 self.tournament_setup.concurrency as usize,
             );
-            if let Some(live) = visible.last().cloned() {
-                if let Err(error) = self.load_live_tournament_board(&live) {
-                    self.tournament_status = format!("Could not open live board: {error}");
-                }
+            if let Some(live) = visible.last().cloned()
+                && let Err(error) = self.load_live_tournament_board(&live)
+            {
+                self.tournament_status = format!("Could not open live board: {error}");
             }
             // Never auto-follow/analyze finished boards while a tournament is live —
             // stacking review workers was crashing the UI under engine load.
@@ -1776,7 +1776,11 @@ impl App {
                             .file_stem()
                             .map(|stem| stem.to_string_lossy().into_owned())
                     })
-                    .chain(self.bundled_engines.iter().map(|engine| engine.id.to_owned()))
+                    .chain(
+                        self.bundled_engines
+                            .iter()
+                            .map(|engine| engine.id.to_owned()),
+                    )
                     .collect();
                 let engines: Vec<_> = engines
                     .into_iter()
@@ -1958,11 +1962,8 @@ impl App {
                             let human = gs.board.side_to_move.opponent();
                             let clicked_sq = game::display_to_square(row, col, gs.flipped);
                             if gs.selected_square.is_some() {
-                                if gs.queue_premove(
-                                    clicked_sq,
-                                    human,
-                                    self.settings.multi_premoves,
-                                ) {
+                                if gs.queue_premove(clicked_sq, human, self.settings.multi_premoves)
+                                {
                                     self.status = if self.settings.multi_premoves {
                                         format!(
                                             "Premoves queued ({}/{}).",
@@ -2778,12 +2779,7 @@ impl App {
                     let piece_present = if is_human {
                         gs.board.piece_on(sq).is_some()
                     } else {
-                        premove::can_select_for_premove(
-                            &gs.board,
-                            &gs.premove_queue,
-                            human,
-                            sq,
-                        )
+                        premove::can_select_for_premove(&gs.board, &gs.premove_queue, human, sq)
                     };
                     if piece_present {
                         if is_human {
@@ -6542,7 +6538,11 @@ fn tournament_engine_roster(
             });
         }
     }
-    roster.sort_by(|left, right| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()));
+    roster.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    });
     roster
 }
 
@@ -6616,8 +6616,7 @@ fn run_quick_tournament_body(
         .map(|engine| {
             let mut spec = EngineSpec::new(engine.path.clone());
             spec.name = engine.name;
-            spec.uci_options =
-                uci_process::uci_resource_options(&engine.path, false, true, None);
+            spec.uci_options = uci_process::uci_resource_options(&engine.path, false, true, None);
             TournamentEngine {
                 engine: spec,
                 established_elo: None,
@@ -6631,74 +6630,62 @@ fn run_quick_tournament_body(
         move |event: TournamentEvent| {
             let snapshot = Arc::clone(&snapshot);
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let Ok(mut guard) = snapshot.lock() else {
-                return;
-            };
-            match event {
-                TournamentEvent::Planned {
-                    total_matches,
-                    engine_names,
-                } => {
-                    guard.total_matches = total_matches;
-                    guard.engine_names = engine_names;
-                    guard.status_line =
-                        format!("Scheduled {total_matches} pairings. Starting…");
-                }
-                TournamentEvent::MatchStarted {
-                    index,
-                    total,
-                    round,
-                    white,
-                    black,
-                } => {
-                    guard.total_matches = total.max(guard.total_matches);
-                    guard.current_round = round;
-                    guard.current_white = white.clone();
-                    guard.current_black = black.clone();
-                    guard.status_line = format!(
-                        "Playing {index}/{total} · Round {round} · {white} vs {black}"
-                    );
-                }
-                TournamentEvent::GameStarted {
-                    game_key,
-                    match_index,
-                    round,
-                    white,
-                    black,
-                    initial_fen,
-                } => {
-                    guard.upsert_live_game(tournament_live::LiveGameBoard {
+                let Ok(mut guard) = snapshot.lock() else {
+                    return;
+                };
+                match event {
+                    TournamentEvent::Planned {
+                        total_matches,
+                        engine_names,
+                    } => {
+                        guard.total_matches = total_matches;
+                        guard.engine_names = engine_names;
+                        guard.status_line =
+                            format!("Scheduled {total_matches} pairings. Starting…");
+                    }
+                    TournamentEvent::MatchStarted {
+                        index,
+                        total,
+                        round,
+                        white,
+                        black,
+                    } => {
+                        guard.total_matches = total.max(guard.total_matches);
+                        guard.current_round = round;
+                        guard.current_white = white.clone();
+                        guard.current_black = black.clone();
+                        guard.status_line =
+                            format!("Playing {index}/{total} · Round {round} · {white} vs {black}");
+                    }
+                    TournamentEvent::GameStarted {
                         game_key,
                         match_index,
                         round,
-                        white: white.clone(),
-                        black: black.clone(),
+                        white,
+                        black,
                         initial_fen,
-                        moves: Vec::new(),
-                        last_uci: String::new(),
-                        score_cp: 0,
-                        depth: 0,
-                        nodes: 0,
-                        white_clock_ms: Some(initial_clock_ms),
-                        black_clock_ms: Some(initial_clock_ms),
-                    });
-                    guard.current_round = round;
-                    guard.current_white = white;
-                    guard.current_black = black;
-                }
-                TournamentEvent::PlyPlayed {
-                    game_key,
-                    ply,
-                    uci,
-                    score_cp,
-                    depth,
-                    nodes,
-                    moves,
-                    white_clock_ms,
-                    black_clock_ms,
-                } => {
-                    guard.apply_ply(
-                        &game_key,
+                    } => {
+                        guard.upsert_live_game(tournament_live::LiveGameBoard {
+                            game_key,
+                            match_index,
+                            round,
+                            white: white.clone(),
+                            black: black.clone(),
+                            initial_fen,
+                            moves: Vec::new(),
+                            last_uci: String::new(),
+                            score_cp: 0,
+                            depth: 0,
+                            nodes: 0,
+                            white_clock_ms: Some(initial_clock_ms),
+                            black_clock_ms: Some(initial_clock_ms),
+                        });
+                        guard.current_round = round;
+                        guard.current_white = white;
+                        guard.current_black = black;
+                    }
+                    TournamentEvent::PlyPlayed {
+                        game_key,
                         ply,
                         uci,
                         score_cp,
@@ -6707,76 +6694,87 @@ fn run_quick_tournament_body(
                         moves,
                         white_clock_ms,
                         black_clock_ms,
-                    );
-                }
-                TournamentEvent::GameFinished {
-                    game_key,
-                    white_score,
-                    moves,
-                } => {
-                    guard.finish_live_game(&game_key, white_score, moves);
-                }
-                TournamentEvent::MatchFinished {
-                    index,
-                    total,
-                    round,
-                    white,
-                    black,
-                    white_points,
-                    black_points,
-                    error,
-                    standings,
-                    game_results,
-                    games,
-                } => {
-                    guard.completed_matches = index;
-                    guard.total_matches = total.max(guard.total_matches);
-                    guard
-                        .finished_matches
-                        .push(tournament_live::FinishedMatchRow {
-                            index,
-                            round,
-                            white: white.clone(),
-                            black: black.clone(),
-                            white_points,
-                            black_points,
-                            error: error.clone(),
-                        });
-                    guard.standings =
-                        tournament_live::standing_rows(&guard.engine_names, &standings);
-                    guard.game_results = game_results;
-                    let already_live = guard
-                        .played_games
-                        .iter()
-                        .any(|game| game.match_index == index);
-                    if !already_live {
-                        guard.append_games(games);
+                    } => {
+                        guard.apply_ply(
+                            &game_key,
+                            ply,
+                            uci,
+                            score_cp,
+                            depth,
+                            nodes,
+                            moves,
+                            white_clock_ms,
+                            black_clock_ms,
+                        );
                     }
-                    guard.current_white.clear();
-                    guard.current_black.clear();
-                    guard.status_line = if let Some(error) = error {
-                        format!("Match {index}/{total}: {error}")
-                    } else {
-                        format!(
-                            "Finished {index}/{total} · {white} {} {}",
-                            tournament_live::score_label(white_points, black_points),
-                            black
-                        )
-                    };
+                    TournamentEvent::GameFinished {
+                        game_key,
+                        white_score,
+                        moves,
+                    } => {
+                        guard.finish_live_game(&game_key, white_score, moves);
+                    }
+                    TournamentEvent::MatchFinished {
+                        index,
+                        total,
+                        round,
+                        white,
+                        black,
+                        white_points,
+                        black_points,
+                        error,
+                        standings,
+                        game_results,
+                        games,
+                    } => {
+                        guard.completed_matches = index;
+                        guard.total_matches = total.max(guard.total_matches);
+                        guard
+                            .finished_matches
+                            .push(tournament_live::FinishedMatchRow {
+                                index,
+                                round,
+                                white: white.clone(),
+                                black: black.clone(),
+                                white_points,
+                                black_points,
+                                error: error.clone(),
+                            });
+                        guard.standings =
+                            tournament_live::standing_rows(&guard.engine_names, &standings);
+                        guard.game_results = game_results;
+                        let already_live = guard
+                            .played_games
+                            .iter()
+                            .any(|game| game.match_index == index);
+                        if !already_live {
+                            guard.append_games(games);
+                        }
+                        guard.current_white.clear();
+                        guard.current_black.clear();
+                        guard.status_line = if let Some(error) = error {
+                            format!("Match {index}/{total}: {error}")
+                        } else {
+                            format!(
+                                "Finished {index}/{total} · {white} {} {}",
+                                tournament_live::score_label(white_points, black_points),
+                                black
+                            )
+                        };
+                    }
+                    TournamentEvent::Cancelled {
+                        standings,
+                        game_results,
+                    } => {
+                        guard.cancelled = true;
+                        guard.running = false;
+                        guard.standings =
+                            tournament_live::standing_rows(&guard.engine_names, &standings);
+                        guard.game_results = game_results;
+                        guard.status_line =
+                            "Tournament cancelled. Partial standings are available.".to_owned();
+                    }
                 }
-                TournamentEvent::Cancelled {
-                    standings,
-                    game_results,
-                } => {
-                    guard.cancelled = true;
-                    guard.running = false;
-                    guard.standings =
-                        tournament_live::standing_rows(&guard.engine_names, &standings);
-                    guard.game_results = game_results;
-                    guard.status_line =
-                        "Tournament cancelled. Partial standings are available.".to_owned();
-                }
-            }
             }));
         }
     });
@@ -7355,15 +7353,10 @@ mod tests {
 
     #[test]
     fn engine_path_rank_prefers_primary_host_arch_folder() {
-        let preferred = vec![
-            "windows-aarch64".to_owned(),
-            "windows-arm64".to_owned(),
-        ];
-        let primary = PathBuf::from(
-            r"C:\Mujrim\engines\mujrim\bin\windows-aarch64\mujrim-elite.exe",
-        );
-        let alias =
-            PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-arm64\mujrim-elite.exe");
+        let preferred = vec!["windows-aarch64".to_owned(), "windows-arm64".to_owned()];
+        let primary =
+            PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-aarch64\mujrim-elite.exe");
+        let alias = PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-arm64\mujrim-elite.exe");
         assert!(engine_path_rank(&primary, &preferred) < engine_path_rank(&alias, &preferred));
     }
 

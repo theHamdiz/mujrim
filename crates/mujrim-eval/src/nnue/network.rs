@@ -9,6 +9,11 @@
 //! Quantization: QA=255 (feature transformer), QB=64 (output layer)
 //! Output formula: (sum / QA + bias) * SCALE / QAB
 
+#[cfg(not(feature = "embedded-networks"))]
+use std::io::Read;
+#[cfg(not(feature = "embedded-networks"))]
+use std::sync::OnceLock;
+
 /// Hidden layer size (per perspective).
 pub const HIDDEN: usize = 1024;
 
@@ -245,7 +250,3 @@ mod tests {
         }
     }
 }
-#[cfg(not(feature = "embedded-networks"))]
-use std::io::Read;
-#[cfg(not(feature = "embedded-networks"))]
-use std::sync::OnceLock;
