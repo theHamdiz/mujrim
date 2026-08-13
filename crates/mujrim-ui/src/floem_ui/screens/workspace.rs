@@ -467,78 +467,104 @@ pub(super) fn ply_nav(state: AppState) -> impl IntoView {
 }
 
 pub(super) fn move_list(state: AppState) -> impl IntoView {
-    dyn_view(move || {
-        let moves = state.move_log.get();
-        let annotations = state.move_annotations.get();
-        let pal = theme::palette(state.settings.get().board_theme);
-        if moves.is_empty() {
-            return Label::new("No moves yet.")
-                .style(move |s| s.font_size(12.0).color(theme::rgba(pal.text_secondary)))
-                .into_any();
-        }
-        let labels = logic::san_annotated_moves(&state.initial_fen.get(), &moves, &annotations);
-        let current = state.review_ply.get().unwrap_or(labels.len());
-        labels
-            .chunks(2)
-            .enumerate()
-            .map(|(idx, pair)| {
-                let white_ply = idx * 2 + 1;
-                let black_ply = idx * 2 + 2;
-                let white = pair[0].clone();
-                let black = pair.get(1).cloned();
-                Stack::horizontal((
-                    Label::new(format!("{}.", idx + 1))
-                        .style(move |s| {
-                            s.font_size(11.0)
-                                .width(28.0)
-                                .color(theme::rgba(pal.text_secondary))
-                        })
-                        .into_any(),
-                    ply_button(state, white, white_ply, current == white_ply).into_any(),
-                    black.map_or_else(
-                        || {
-                            Label::new("…")
-                                .style(move |s| {
-                                    s.font_size(12.0)
-                                        .width(88.0)
-                                        .color(theme::rgba(pal.text_secondary))
-                                })
-                                .into_any()
-                        },
-                        |black| {
-                            ply_button(state, black, black_ply, current == black_ply).into_any()
-                        },
-                    ),
-                ))
-                .style(|s| s.width_full().col_gap(6.0).items_center().min_width(0.0))
+    const MOVE_LIST_PAIRS: usize = 64;
+    let rows = (0..MOVE_LIST_PAIRS)
+        .map(|idx| {
+            Stack::horizontal((
+                Label::derived(move || {
+                    if state.move_log.get().len() > idx * 2 {
+                        format!("{}.", idx + 1)
+                    } else {
+                        String::new()
+                    }
+                })
+                .style(move |s| {
+                    s.font_size(11.0).width(28.0).color(theme::rgba(
+                        theme::palette(state.settings.get().board_theme).text_secondary,
+                    ))
+                }),
+                ply_slot(state, idx * 2),
+                ply_slot(state, idx * 2 + 1),
+            ))
+            .style(move |s| {
+                let s = s.width_full().col_gap(6.0).items_center().min_width(0.0);
+                if state.move_log.get().len() > idx * 2 {
+                    s
+                } else {
+                    s.display(Display::None)
+                }
             })
-            .collect::<Vec<_>>()
-            .into_view()
-            .style(|s| s.width_full().row_gap(2.0).flex_col().max_height(220.0))
-            .scroll()
-            .into_any()
-    })
-}
-
-fn ply_button(state: AppState, label: String, ply: usize, active: bool) -> impl IntoView {
-    Button::new(label)
-        .action(move || actions::view_ply(state, ply))
+        })
+        .collect::<Vec<_>>();
+    Stack::vertical((
+        Label::derived(move || {
+            if state.move_log.get().is_empty() {
+                "No moves yet.".to_owned()
+            } else {
+                String::new()
+            }
+        })
         .style(move |s| {
             let pal = theme::palette(state.settings.get().board_theme);
-            s.min_width(72.0)
-                .padding_horiz(8.0)
-                .padding_vert(4.0)
-                .border_radius(8.0)
-                .border(0.0)
-                .font_size(12.0)
-                .background(if active {
-                    theme::rgba(pal.accent)
-                } else {
-                    Color::TRANSPARENT
-                })
-                .color(theme::rgba(pal.text_primary))
-                .hover(|s| s.background(theme::rgba(pal.panel)))
-        })
+            let s = s.font_size(12.0).color(theme::rgba(pal.text_secondary));
+            if state.move_log.get().is_empty() {
+                s
+            } else {
+                s.display(Display::None)
+            }
+        }),
+        rows.into_view()
+            .style(|s| s.width_full().row_gap(2.0).flex_col().max_height(220.0))
+            .scroll(),
+    ))
+    .style(|s| s.width_full().row_gap(2.0).min_width(0.0))
+}
+
+fn ply_slot(state: AppState, ply_index: usize) -> impl IntoView {
+    let ply = ply_index + 1;
+    Button::new(Label::derived(move || {
+        let moves = state.move_log.get();
+        if ply_index >= moves.len() {
+            return String::new();
+        }
+        logic::san_annotated_moves(
+            &state.initial_fen.get(),
+            &moves,
+            &state.move_annotations.get(),
+        )
+        .get(ply_index)
+        .cloned()
+        .unwrap_or_default()
+    }))
+    .action(move || {
+        if ply_index < state.move_log.get_untracked().len() {
+            actions::view_ply(state, ply);
+        }
+    })
+    .style(move |s| {
+        let pal = theme::palette(state.settings.get().board_theme);
+        let len = state.move_log.get().len();
+        let current = state.review_ply.get().unwrap_or(len);
+        let s = s
+            .min_width(72.0)
+            .padding_horiz(8.0)
+            .padding_vert(4.0)
+            .border_radius(8.0)
+            .border(0.0)
+            .font_size(12.0)
+            .background(if current == ply && ply_index < len {
+                theme::rgba(pal.accent)
+            } else {
+                Color::TRANSPARENT
+            })
+            .color(theme::rgba(pal.text_primary))
+            .hover(|s| s.background(theme::rgba(pal.panel)));
+        if ply_index < len {
+            s
+        } else {
+            s.display(Display::None)
+        }
+    })
 }
 
 fn engine_lines(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -577,7 +603,8 @@ mod tests {
             "san_annotated_moves",
             "pub fn study",
             "pub fn learn",
-            "ply_button",
+            "ply_slot",
+            "MOVE_LIST_PAIRS",
             "board::board_view",
             "display(Display::None)",
         ] {
@@ -586,6 +613,18 @@ mod tests {
         assert!(
             !production.contains("board::board_view(state, handles.clone()).into_any()"),
             "creating the board canvas inside dyn_view panics when a tournament position loads"
+        );
+        assert!(
+            !production.contains("pub(super) fn move_list")
+                || !production
+                    .split("pub(super) fn move_list")
+                    .nth(1)
+                    .unwrap()
+                    .split("fn ply_slot")
+                    .next()
+                    .unwrap()
+                    .contains("dyn_view"),
+            "move_list must not create ply buttons inside dyn_view"
         );
     }
 }

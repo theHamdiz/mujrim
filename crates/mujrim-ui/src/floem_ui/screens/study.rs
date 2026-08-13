@@ -1,7 +1,7 @@
 //! Study and Learn sidebars: explorer, library, preparations, training, gambits.
 
 use floem::prelude::*;
-use floem::taffy::style::FlexWrap;
+use floem::taffy::style::{Display, FlexWrap};
 use mujrim_study::gambit;
 use mujrim_study::opening::PrepSide;
 
@@ -284,114 +284,179 @@ fn opening_card(state: AppState, handles: AppHandles) -> impl IntoView {
                 let handles = handles.clone();
                 move || actions::index_openings(state, &handles)
             }),
-            dyn_view({
+            Label::derived({
                 let handles = handles.clone();
                 move || {
-                    types::init();
-                    let fen = logic::displayed_study_fen(
-                        &state.initial_fen.get(),
-                        &state.move_log.get(),
-                        state.review_ply.get(),
-                        state.game.get().map(|game| game.board.to_fen()),
-                    );
-                    let board = types::Board::from_fen(&fen).ok();
-                    let rows: Vec<(String, String, u64, u64, u64, u64)> = {
-                        let explorer = handles.explorer.borrow();
-                        explorer
-                            .moves(&fen)
-                            .into_iter()
-                            .take(16)
-                            .map(|(uci, stats)| {
-                                let san = board
-                                    .as_ref()
-                                    .map(|board| logic::uci_to_san(board, uci))
-                                    .unwrap_or_else(|| uci.to_owned());
-                                (
-                                    uci.to_owned(),
-                                    san,
-                                    stats.games,
-                                    stats.white_wins,
-                                    stats.draws,
-                                    stats.black_wins,
-                                )
-                            })
-                            .collect()
-                    };
-                    if rows.is_empty() {
-                        return Label::new("No library games reach this position.")
-                            .style(move |s| {
-                                s.font_size(12.0)
-                                    .color(theme::rgba(pal().text_secondary))
-                            })
-                            .into_any();
+                    if explorer_entry(state, &handles, 0).is_some() {
+                        String::new()
+                    } else {
+                        "No library games reach this position.".to_owned()
                     }
-                    rows.into_iter()
-                        .map(|(uci, san, games, white, draws, black)| {
-                            let label = uci.clone();
-                            let score = white
-                                .saturating_mul(100)
-                                .saturating_add(draws.saturating_mul(50))
-                                .checked_div(games)
-                                .unwrap_or(0);
-                            Button::new(
-                                Stack::vertical((
-                                    Stack::horizontal((
-                                        Label::new(san).style(|s| s.font_size(14.0).font_bold()),
-                                        Label::new(format!("{games} · {score}% White")).style(
-                                            move |s| {
-                                                s.font_size(11.0)
-                                                    .flex_grow(1.0f32)
-                                                    .color(theme::rgba(pal().text_secondary))
-                                            },
-                                        ),
-                                    ))
-                                    .style(|s| {
-                                        s.width_full().col_gap(8.0).items_center().min_width(0.0)
-                                    }),
-                                    result_bar(white, draws, black),
-                                ))
-                                .style(|s| s.width_full().row_gap(4.0).min_width(0.0)),
-                            )
-                            .action(move || actions::study_opening_move(state, label.clone()))
-                            .style(move |s| {
-                                let pal = pal();
-                                s.width_full()
-                                    .padding(8.0)
-                                    .border(0.0)
-                                    .border_radius(10.0)
-                                    .background(theme::rgba(pal.bg))
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                        .into_view()
-                        .style(|s| s.width_full().row_gap(6.0).flex_col().max_height(260.0))
-                        .scroll()
-                        .into_any()
+                }
+            })
+            .style({
+                let handles = handles.clone();
+                move |s| {
+                    let pal = pal();
+                    let s = s.font_size(12.0).color(theme::rgba(pal.text_secondary));
+                    if explorer_entry(state, &handles, 0).is_some() {
+                        s.display(Display::None)
+                    } else {
+                        s
+                    }
                 }
             }),
+            (0..16)
+                .map(|index| explorer_slot(state, handles.clone(), index, pal))
+                .collect::<Vec<_>>()
+                .into_view()
+                .style(|s| s.width_full().row_gap(6.0).flex_col().max_height(260.0))
+                .scroll(),
         )),
     )
 }
 
-fn result_bar(white: u64, draws: u64, black: u64) -> impl IntoView {
-    let total = white.saturating_add(draws).saturating_add(black).max(1);
+fn explorer_entry(
+    state: AppState,
+    handles: &AppHandles,
+    index: usize,
+) -> Option<(String, String, u64, u64, u64, u64)> {
+    types::init();
+    let fen = logic::displayed_study_fen(
+        &state.initial_fen.get(),
+        &state.move_log.get(),
+        state.review_ply.get(),
+        state.game.get().map(|game| game.board.to_fen()),
+    );
+    let board = types::Board::from_fen(&fen).ok();
+    let explorer = handles.explorer.borrow();
+    explorer
+        .moves(&fen)
+        .into_iter()
+        .nth(index)
+        .map(|(uci, stats)| {
+            let san = board
+                .as_ref()
+                .map(|board| logic::uci_to_san(board, uci))
+                .unwrap_or_else(|| uci.to_owned());
+            (
+                uci.to_owned(),
+                san,
+                stats.games,
+                stats.white_wins,
+                stats.draws,
+                stats.black_wins,
+            )
+        })
+}
+
+fn explorer_slot(
+    state: AppState,
+    handles: AppHandles,
+    index: usize,
+    pal: impl Fn() -> crate::app_core::palette::GuiPalette + Copy + 'static,
+) -> impl IntoView {
+    Button::new(
+        Stack::vertical((
+            Stack::horizontal((
+                Label::derived({
+                    let handles = handles.clone();
+                    move || {
+                        explorer_entry(state, &handles, index)
+                            .map(|(_, san, _, _, _, _)| san)
+                            .unwrap_or_default()
+                    }
+                })
+                .style(|s| s.font_size(14.0).font_bold()),
+                Label::derived({
+                    let handles = handles.clone();
+                    move || {
+                        explorer_entry(state, &handles, index)
+                            .map(|(_, _, games, white, draws, _)| {
+                                let score = white
+                                    .saturating_mul(100)
+                                    .saturating_add(draws.saturating_mul(50))
+                                    .checked_div(games)
+                                    .unwrap_or(0);
+                                format!("{games} · {score}% White")
+                            })
+                            .unwrap_or_default()
+                    }
+                })
+                .style(move |s| {
+                    s.font_size(11.0)
+                        .flex_grow(1.0f32)
+                        .color(theme::rgba(pal().text_secondary))
+                }),
+            ))
+            .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0)),
+            explorer_result_bar(state, handles.clone(), index),
+        ))
+        .style(|s| s.width_full().row_gap(4.0).min_width(0.0)),
+    )
+    .action({
+        let handles = handles.clone();
+        move || {
+            if let Some((uci, _, _, _, _, _)) = explorer_entry(state, &handles, index) {
+                actions::study_opening_move(state, uci);
+            }
+        }
+    })
+    .style(move |s| {
+        let pal = pal();
+        let s = s
+            .width_full()
+            .padding(8.0)
+            .border(0.0)
+            .border_radius(10.0)
+            .background(theme::rgba(pal.bg));
+        if explorer_entry(state, &handles, index).is_some() {
+            s
+        } else {
+            s.display(Display::None)
+        }
+    })
+}
+
+fn explorer_result_bar(state: AppState, handles: AppHandles, index: usize) -> impl IntoView {
     Stack::horizontal((
-        Empty::new().style(move |s| {
-            s.height(7.0)
-                .flex_grow((white as f32 / total as f32).max(0.001))
-                .border_radius(4.0)
-                .background(Color::from_rgb8(236, 236, 236))
+        Empty::new().style({
+            let handles = handles.clone();
+            move |s| {
+                let (white, draws, black) = explorer_entry(state, &handles, index)
+                    .map(|(_, _, _, white, draws, black)| (white, draws, black))
+                    .unwrap_or((0, 0, 0));
+                let total = white.saturating_add(draws).saturating_add(black).max(1);
+                s.height(7.0)
+                    .flex_grow((white as f32 / total as f32).max(0.001))
+                    .border_radius(4.0)
+                    .background(Color::from_rgb8(236, 236, 236))
+            }
         }),
-        Empty::new().style(move |s| {
-            s.height(7.0)
-                .flex_grow((draws as f32 / total as f32).max(0.001))
-                .background(Color::from_rgb8(128, 128, 128))
+        Empty::new().style({
+            let handles = handles.clone();
+            move |s| {
+                let (white, draws, black) = explorer_entry(state, &handles, index)
+                    .map(|(_, _, _, white, draws, black)| (white, draws, black))
+                    .unwrap_or((0, 0, 0));
+                let total = white.saturating_add(draws).saturating_add(black).max(1);
+                s.height(7.0)
+                    .flex_grow((draws as f32 / total as f32).max(0.001))
+                    .background(Color::from_rgb8(128, 128, 128))
+            }
         }),
-        Empty::new().style(move |s| {
-            s.height(7.0)
-                .flex_grow((black as f32 / total as f32).max(0.001))
-                .border_radius(4.0)
-                .background(Color::from_rgb8(48, 48, 48))
+        Empty::new().style({
+            let handles = handles.clone();
+            move |s| {
+                let (white, draws, black) = explorer_entry(state, &handles, index)
+                    .map(|(_, _, _, white, draws, black)| (white, draws, black))
+                    .unwrap_or((0, 0, 0));
+                let total = white.saturating_add(draws).saturating_add(black).max(1);
+                s.height(7.0)
+                    .flex_grow((black as f32 / total as f32).max(0.001))
+                    .border_radius(4.0)
+                    .background(Color::from_rgb8(48, 48, 48))
+            }
         }),
     ))
     .style(|s| {
@@ -552,7 +617,7 @@ mod tests {
             "Save current",
             "Preparations",
             "Save line",
-            "result_bar",
+            "explorer_slot",
             "uci_to_san",
             "study_opening_move",
         ] {
