@@ -131,7 +131,6 @@ function Use-LlvmMingwEnv() {
 
 function Clear-BuildCaches() {
     Write-Host "==> Cleaning cargo targets and dist program binaries (keeping dist/engines)"
-    $env:CARGO_BUILD_JOBS = "1"
     if (Test-Path $TargetDir) {
         Write-Host "  removing $TargetDir"
         Remove-Item -Recurse -Force $TargetDir
@@ -191,7 +190,6 @@ function Build-Core([string]$Triple) {
     if ($installed -notcontains $Triple) {
         rustup target add $Triple
     }
-    $env:CARGO_BUILD_JOBS = "1"
     $hostTriple = (rustc -vV | Select-String "host:").ToString().Split(":")[1].Trim()
 
     if ($Triple -eq "x86_64-pc-windows-gnullvm") {
@@ -233,7 +231,6 @@ function Build-Variants([string]$Triple) {
     Write-Host "==> Building Mujrim product engines for $Triple"
     Write-Host "  product set: mujrim-elite, mujrim-external, mujrim-v60, mujrim-ak"
     Write-Host "  note: never add embedded-networks on top of default features (that embeds every net)"
-    $env:CARGO_BUILD_JOBS = "1"
     $release = Join-Path $TargetDir "$Triple\release"
     Ensure-Dir $release
 

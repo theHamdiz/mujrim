@@ -13,10 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_MIN_STACK: "16777216"
-  CARGO_BUILD_JOBS: "1"
 
 jobs:
-  # ── Quick checks (format, clippy, tests) on native runners ──
   check:
     strategy:
       fail-fast: false
@@ -24,14 +22,19 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
+            fmt: true
           - os: ubuntu-24.04-arm
             name: Linux ARM64
+            fmt: false
           - os: macos-latest
             name: macOS ARM64
+            fmt: false
           - os: windows-latest
             name: Windows x86_64
+            fmt: false
           - os: windows-11-arm
             name: Windows ARM64
+            fmt: false
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.name }}
     steps:
@@ -39,56 +42,30 @@ jobs:
 
       - name: Install Linux GUI/build deps (Floem / wgpu / GTK / ALSA)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libegl1-mesa-dev \
-            libgl1-mesa-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxi-dev \
-            libxcursor-dev \
-            libxrandr-dev \
-            libasound2-dev \
-            libudev-dev \
-            libpipewire-0.3-dev \
-            libgbm-dev \
-            libgtk-3-dev \
-            libvulkan-dev
+        uses: ./.github/actions/linux-gui-deps
 
-      - name: Fetch Stockfish NNUE required for compile-time embed
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p crates/mujrim-eval/resources
-          NET="crates/mujrim-eval/resources/nn-ab28990d4ea3.nnue"
-          if [[ ! -f "$NET" ]]; then
-            curl -fsSL --retry 5 --retry-delay 2 \
-              -o "$NET" \
-              "https://tests.stockfishchess.org/api/nn/nn-ab28990d4ea3.nnue"
-          fi
-          test -s "$NET"
+      - uses: ./.github/actions/fetch-nnue
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Check formatting
+        if: matrix.fmt
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --release --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build optimized artifacts
-        run: |
-          cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer
-          cargo build --release -p mujrim-ui
-          cargo build --release -p mujrim-game
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build engine artifacts for smoke
+        run: cargo build -p mujrim -p mujrim-native-v60
 
       - name: Prepare standalone fallback alias
         shell: python
@@ -98,16 +75,15 @@ jobs:
           from pathlib import Path
 
           suffix = ".exe" if os.name == "nt" else ""
-          release = Path("target/release")
-          source = release / f"mujrim-v60{suffix}"
+          debug = Path("target/debug")
+          source = debug / f"mujrim-v60{suffix}"
           if not source.exists():
               raise SystemExit(f"missing v60 adapter binary: {source}")
-          # Keep an explicit arch-suffixed dist name for packaged layouts.
           import platform
           arch = platform.machine().lower().replace("amd64", "x86_64").replace("arm64", "aarch64")
           if os.name == "nt" and arch == "x86_64":
               arch = "x86_64-avx2"
-          shutil.copy2(source, release / f"mujrim-v60-{arch}{suffix}")
+          shutil.copy2(source, debug / f"mujrim-v60-{arch}{suffix}")
 
       - name: Smoke test (UCI handshake)
         shell: python
@@ -119,15 +95,13 @@ jobs:
           import sys
           from pathlib import Path
 
-          exe = Path("target/release/mujrim")
+          exe = Path("target/debug/mujrim")
           if os.name == "nt":
               exe = exe.with_suffix(".exe")
           if not exe.exists():
               print(f"missing engine executable: {exe}", file=sys.stderr)
               sys.exit(1)
 
-          # Prefer the in-process universal backend so CI never depends on
-          # third-party Stockfish binaries or self-passthrough fallbacks.
           proc = subprocess.run(
               [str(exe), "--backend", "universal", "uci"],
               input="uci\nquit\n",
@@ -147,10 +121,6 @@ jobs:
               print(output, file=sys.stderr)
               sys.exit(1)
 
-      - name: Test
-        run: cargo test --profile release-test --workspace
-
-  # ── Cross-compile check for ARM/MUSL engine + updater targets ──
   cross-check:
     runs-on: ubuntu-latest
     strategy:
@@ -170,33 +140,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-on-failure: true
 
-      - name: Fetch Stockfish NNUE required for compile-time embed
-        run: |
-          set -euo pipefail
-          mkdir -p crates/mujrim-eval/resources
-          NET="crates/mujrim-eval/resources/nn-ab28990d4ea3.nnue"
-          if [[ ! -f "$NET" ]]; then
-            curl -fsSL --retry 5 --retry-delay 2 \
-              -o "$NET" \
-              "https://tests.stockfishchess.org/api/nn/nn-ab28990d4ea3.nnue"
-          fi
-          test -s "$NET"
+      - uses: ./.github/actions/fetch-nnue
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
-      # Engine + v60 + updater (rustls). UI needs native GPU libs.
       - name: Cross build (engine + updater)
         run: |
-          cross build --release --target ${{ matrix.target }} -p mujrim
-          cross build --release --target ${{ matrix.target }} -p mujrim-native-v60
-          cross build --release --target ${{ matrix.target }} -p mujrim-updater
+          cross build --release --target ${{ matrix.target }} \
+            -p mujrim -p mujrim-native-v60 -p mujrim-updater
 
       - name: Smoke test via cross run (UCI handshake)
         run: |
           set -euo pipefail
-          # Forward smoke env into the cross container/qemu guest.
           export CROSS_CONTAINER_OPTS="${CROSS_CONTAINER_OPTS:-} -e MUJRIM_UCI_SMOKE=1"
           output="$(cross run --release --target ${{ matrix.target }} -p mujrim -- uci 2>&1)"
           echo "$output"

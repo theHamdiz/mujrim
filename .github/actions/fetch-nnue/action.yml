@@ -1,0 +1,23 @@
+name: Fetch NNUE
+description: Restore or download the Stockfish NNUE blob required for compile-time embed.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@v4
+      with:
+        path: crates/mujrim-eval/resources/nn-ab28990d4ea3.nnue
+        key: nnue-ab28990d4ea3
+
+    - name: Download NNUE if missing
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p crates/mujrim-eval/resources
+        NET="crates/mujrim-eval/resources/nn-ab28990d4ea3.nnue"
+        if [[ ! -f "$NET" ]]; then
+          curl -fsSL --retry 5 --retry-delay 2 \
+            -o "$NET" \
+            "https://tests.stockfishchess.org/api/nn/nn-ab28990d4ea3.nnue"
+        fi
+        test -s "$NET"

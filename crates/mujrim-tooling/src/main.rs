@@ -2,6 +2,8 @@ mod action;
 mod agent;
 mod agent_tools;
 mod build_variant;
+#[cfg(test)]
+mod github_ci;
 mod install;
 mod nnue;
 mod process;
