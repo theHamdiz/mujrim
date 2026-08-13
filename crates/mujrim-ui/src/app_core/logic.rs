@@ -996,9 +996,16 @@ mod tests {
     #[test]
     fn engine_path_rank_prefers_primary_host_arch_folder() {
         let preferred = vec!["windows-aarch64".to_owned(), "windows-arm64".to_owned()];
-        let primary =
-            PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-aarch64\mujrim-elite.exe");
-        let alias = PathBuf::from(r"C:\Mujrim\engines\mujrim\bin\windows-arm64\mujrim-elite.exe");
+        let primary = PathBuf::from("engines")
+            .join("mujrim")
+            .join("bin")
+            .join("windows-aarch64")
+            .join("mujrim-elite.exe");
+        let alias = PathBuf::from("engines")
+            .join("mujrim")
+            .join("bin")
+            .join("windows-arm64")
+            .join("mujrim-elite.exe");
         assert!(engine_path_rank(&primary, &preferred) < engine_path_rank(&alias, &preferred));
     }
 
@@ -1011,6 +1018,7 @@ mod tests {
         assert_eq!(puzzles[2].solution[0], "d8h4");
     }
 
+    #[test]
     fn game_summary_label_uses_players_and_result() {
         let summary = GameSummary {
             id: "1".into(),
