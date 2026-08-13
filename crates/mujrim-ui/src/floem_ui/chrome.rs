@@ -57,7 +57,7 @@ fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl 
     .style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
         s.width_full()
-            .height(44.0)
+            .height(40.0)
             .items_center()
             .background(theme::rgba(pal.sidebar))
             .border_bottom(1.0)
@@ -204,27 +204,35 @@ fn pill(
 ) -> impl IntoView {
     Button::new(
         Stack::horizontal((
-            svg(move || icon.to_owned()).style(|s| s.size(14, 14)),
-            Label::new(label).style(|s| s.font_size(12.0)),
+            svg(move || icon.to_owned()).style(|s| s.size(13, 13)),
+            Label::new(label).style(|s| s.font_size(11.0)),
         ))
         .style(|s| {
-            s.col_gap(6.0)
+            s.col_gap(5.0)
                 .items_center()
-                .padding_horiz(10.0)
-                .padding_vert(6.0)
+                .padding_horiz(8.0)
+                .padding_vert(4.0)
         }),
     )
     .action(action)
     .style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
-        s.border_radius(16.0)
+        s.border_radius(10.0)
             .background(if active() {
                 theme::rgba(pal.accent)
             } else {
-                theme::rgba(pal.panel)
+                Color::TRANSPARENT
             })
-            .color(theme::rgba(pal.text_primary))
+            .color(if active() {
+                theme::rgba(pal.text_primary)
+            } else {
+                theme::rgba(pal.text_secondary)
+            })
             .border(0.0)
+            .hover(|s| {
+                s.background(theme::rgba(pal.panel))
+                    .color(theme::rgba(pal.text_primary))
+            })
     })
 }
 
@@ -242,12 +250,16 @@ fn icon_btn(state: AppState, icon: &'static str, action: impl Fn() + 'static) ->
         .action(action)
         .style(move |s| {
             let pal = theme::palette(state.settings.get().board_theme);
-            s.size(32, 28)
+            s.size(28, 24)
                 .background(Color::TRANSPARENT)
                 .color(theme::rgba(pal.text_secondary))
                 .border(0.0)
                 .items_center()
                 .justify_center()
+                .hover(|s| {
+                    s.background(theme::rgba(pal.panel))
+                        .color(theme::rgba(pal.text_primary))
+                })
         })
 }
 

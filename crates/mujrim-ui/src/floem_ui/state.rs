@@ -17,6 +17,7 @@ use crate::app_core::analysis::AnalysisSnapshot;
 use crate::app_core::audio::{BgmTrack, SoundEngine};
 use crate::app_core::engine::{EngineConfig, GameMode, PlayerConfig};
 use crate::app_core::game::GameState;
+use crate::app_core::layout::DockTab;
 use crate::app_core::motion::AnimPace;
 use crate::app_core::pieces::PieceAssets;
 use crate::app_core::recording::RecordingEngine;
@@ -66,6 +67,9 @@ pub struct AppState {
     pub tournament_setup: RwSignal<TournamentSetup>,
     pub tournament_snapshot: RwSignal<LiveTournamentSnapshot>,
     pub tournament_status: RwSignal<String>,
+    pub selected_tournament_game_id: RwSignal<Option<usize>>,
+    pub dock_open: RwSignal<bool>,
+    pub dock_tab: RwSignal<DockTab>,
     pub syzygy_status: RwSignal<String>,
     pub nnue_status: RwSignal<String>,
     pub tuning_status: RwSignal<String>,
@@ -148,6 +152,9 @@ impl AppState {
             tournament_setup: RwSignal::new(TournamentSetup::default()),
             tournament_snapshot: RwSignal::new(LiveTournamentSnapshot::default()),
             tournament_status: RwSignal::new(String::new()),
+            selected_tournament_game_id: RwSignal::new(None),
+            dock_open: RwSignal::new(false),
+            dock_tab: RwSignal::new(DockTab::Histogram),
             syzygy_status: RwSignal::new(String::new()),
             nnue_status: RwSignal::new(String::new()),
             tuning_status: RwSignal::new(String::new()),

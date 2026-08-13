@@ -11,6 +11,7 @@ pub mod audio;
 pub mod engine;
 pub mod game;
 pub mod gif_export;
+pub mod layout;
 pub mod logic;
 pub mod motion;
 pub mod noise;

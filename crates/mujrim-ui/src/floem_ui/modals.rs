@@ -39,18 +39,18 @@ pub fn options_modal(state: AppState, handles: AppHandles) -> impl IntoView {
     .style(move |s| {
         let pal = pal();
         s.absolute()
-            .inset_top(64.0)
+            .inset_top(52.0)
             .inset_left(80.0)
-            .width(720.0)
-            .max_height(640.0)
-            .padding(16.0)
-            .border_radius(12.0)
+            .width(680.0)
+            .max_height(600.0)
+            .padding(14.0)
+            .border_radius(10.0)
             .background(theme::rgba(pal.panel))
             .border(1.0)
             .border_color(theme::rgba(pal.border))
             .z_index(30)
             .flex_col()
-            .row_gap(12.0)
+            .row_gap(10.0)
     })
     .scroll()
 }
@@ -438,7 +438,7 @@ fn tools_tab(state: AppState, _handles: AppHandles) -> impl IntoView {
 pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
-        Label::new("Tournament setup").style(|s| s.font_size(18.0).font_bold()),
+        Label::new("Tournament setup").style(|s| s.font_size(16.0).font_bold()),
         cycle_row(
             state,
             "Format",
@@ -502,16 +502,16 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
     .style(move |s| {
         let pal = pal();
         s.absolute()
-            .inset_top(90.0)
-            .inset_left(120.0)
-            .width(520.0)
-            .padding(16.0)
-            .border_radius(12.0)
+            .inset_top(72.0)
+            .inset_left(140.0)
+            .width(460.0)
+            .padding(14.0)
+            .border_radius(10.0)
             .background(theme::rgba(pal.panel))
             .border(1.0)
             .border_color(theme::rgba(pal.border))
             .z_index(30)
-            .row_gap(10.0)
+            .row_gap(8.0)
     })
 }
 

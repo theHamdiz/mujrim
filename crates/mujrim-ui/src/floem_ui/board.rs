@@ -16,6 +16,23 @@ use super::state::{AppHandles, AppState};
 use super::theme;
 
 pub fn board_view(state: AppState, handles: AppHandles) -> impl IntoView {
+    let measure = canvas(move |_, size| {
+        let side = size.width.min(size.height).max(120.0);
+        if (state.board_px.get_untracked() - side).abs() > 0.5 {
+            state.board_px.set(side);
+        }
+    })
+    .style(|s| s.size_full().absolute());
+    Stack::new((measure, board_stack(state, handles))).style(|s| {
+        s.size_full()
+            .items_center()
+            .justify_center()
+            .min_width(0.0)
+            .min_height(0.0)
+    })
+}
+
+fn board_stack(state: AppState, handles: AppHandles) -> impl IntoView {
     let painted = canvas(move |cx, size| {
         let settings = state.settings.get();
         let Some(game) = state.game.get() else {

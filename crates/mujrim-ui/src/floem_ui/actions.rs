@@ -13,6 +13,7 @@ use crate::app_core::audio::BgmTrack;
 use crate::app_core::engine::{EngineConfig, PlayerConfig};
 use crate::app_core::game::GameState;
 use crate::app_core::gif_export;
+use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
 use crate::app_core::recording::RecordState;
 use crate::app_core::settings::Screen;
@@ -536,6 +537,12 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
             .set("Select at least two engines.".to_owned());
         return;
     }
+    state.selected_tournament_game_id.set(None);
+    state.analysis_scores.set(Vec::new());
+    state.move_log.set(Vec::new());
+    state.game.set(None);
+    state.dock_tab.set(DockTab::Histogram);
+    state.dock_open.set(true);
     let handle = crate::app_core::tournament_live::LiveTournamentHandle::new(setup.format);
     *handles.tournament.borrow_mut() = Some(handle.clone());
     state.show_tournament_setup.set(false);
@@ -567,11 +574,49 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
             let running = guard.running;
             state.tournament_snapshot.set(guard.clone());
             state.tournament_status.set(guard.status_line.clone());
+            sync_tournament_board(state, &guard);
             if running {
                 poll_tournament(state, handles.clone());
             }
         }
     });
+}
+
+fn sync_tournament_board(
+    state: AppState,
+    snap: &crate::app_core::tournament_live::LiveTournamentSnapshot,
+) {
+    if let Some(id) = state.selected_tournament_game_id.get_untracked()
+        && let Some(played) = snap.game(id).cloned()
+        && let Ok(game) = logic::replay_study_game(&played.initial_fen, &played.moves)
+    {
+        state.game.set(Some(game));
+        state.move_log.set(played.moves);
+        state.initial_fen.set(played.initial_fen);
+        return;
+    }
+    if let Some(live) = layout::focused_live_game(&snap.live_games).cloned() {
+        if (state.move_log.get_untracked() != live.moves
+            || state.initial_fen.get_untracked() != live.initial_fen)
+            && let Ok(game) = logic::replay_study_game(&live.initial_fen, &live.moves)
+        {
+            state.game.set(Some(game));
+            state.move_log.set(live.moves.clone());
+            state.initial_fen.set(live.initial_fen.clone());
+        }
+        let mut scores = state.analysis_scores.get_untracked();
+        layout::extend_histogram(&mut scores, live.moves.len(), live.score_cp);
+        state.analysis_scores.set(scores);
+        return;
+    }
+    if !snap.running
+        && let Some(played) = snap.played_games.last().cloned()
+        && let Ok(game) = logic::replay_study_game(&played.initial_fen, &played.moves)
+    {
+        state.game.set(Some(game));
+        state.move_log.set(played.moves);
+        state.initial_fen.set(played.initial_fen);
+    }
 }
 
 pub fn cancel_tournament(handles: &AppHandles) {

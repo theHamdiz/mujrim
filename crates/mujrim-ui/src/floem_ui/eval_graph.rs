@@ -9,6 +9,10 @@ use super::state::AppState;
 use super::theme;
 
 pub fn eval_graph(state: AppState) -> impl IntoView {
+    eval_histogram(state, 56.0)
+}
+
+pub fn eval_histogram(state: AppState, height: f64) -> impl IntoView {
     canvas(move |cx, size| {
         let pal = theme::palette(state.settings.get().board_theme);
         cx.fill(
@@ -28,5 +32,5 @@ pub fn eval_graph(state: AppState) -> impl IntoView {
         }
         cx.stroke(&path, theme::rgba(pal.accent), &Stroke::new(2.0));
     })
-    .style(|s| s.width_full().height(72.0).border_radius(6.0))
+    .style(move |s| s.width_full().height(height).border_radius(8.0))
 }
