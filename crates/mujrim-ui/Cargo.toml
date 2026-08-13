@@ -3,26 +3,30 @@ name = "mujrim-ui"
 version = "1.0.0"
 edition = "2024"
 authors = ["Ahmad Hamdi Emara"]
-description = "GUI for the Mujrim chess engine using iced"
+description = "GUI for the Mujrim chess engine (Floem default, Iced behind iced-ui)"
 license = "MIT"
 
 [features]
-default = ["book", "nnue"]
+default = ["floem-ui", "book", "nnue"]
 book = ["search/book"]
 nnue = ["search/nnue"]
+floem-ui = ["dep:floem"]
+iced-ui = ["dep:iced", "dep:iced_fonts"]
 
 [[bin]]
 name = "mujrim-ui"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.14", features = ["canvas", "image", "svg", "tokio"] }
-iced_fonts = { version = "0.3", features = ["lucide"] }
+floem = { git = "https://github.com/lapce/floem", rev = "778bb5f2aa08429e579ee2e6ac97e84fbf18b618", features = ["tokio", "default-image-formats", "vger", "editor"], optional = true }
+iced = { version = "0.14", features = ["canvas", "image", "svg", "tokio"], optional = true }
+iced_fonts = { version = "0.3", features = ["lucide"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 types = { package = "mujrim-types", path = "../mujrim-types" }
 search = { package = "mujrim-search", path = "../mujrim-search" }
 # GUI loads nets from dist/nnue at runtime — do not unify embedded-networks into the workspace.
 eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, features = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue"] }
-rfd = "0.15"
+rfd = "0.17"
 image = "0.25"
 rand = "0.9"
 arboard = "3.6.1"

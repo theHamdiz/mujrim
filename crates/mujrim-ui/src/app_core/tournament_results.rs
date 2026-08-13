@@ -1,6 +1,6 @@
 //! Helpers for the Tournament Studio Results panel.
 
-use crate::tournament_live::{LiveTournamentSnapshot, StandingRow};
+use super::tournament_live::{LiveTournamentSnapshot, StandingRow};
 
 /// Whether the Results panel should render standings/game tables.
 pub fn panel_open(snapshot: &LiveTournamentSnapshot, forced: bool) -> bool {

@@ -3,8 +3,8 @@
 use mujrim_study::board_marks::{ArrowRole, BoardArrow, MarkColor};
 use types::{Board, Color, Square};
 
-use crate::arrows::{ArrowColor, user_arrow};
-use crate::premove::{self, MAX_PREMOVES, Premove};
+use super::arrows::{ArrowColor, user_arrow};
+use super::premove::{self, MAX_PREMOVES, Premove};
 
 /// Maps a board display cell `(row, col)` (0 = top/left of the widget) to a chess square.
 pub fn display_to_square(row: usize, col: usize, flipped: bool) -> Square {
@@ -28,6 +28,7 @@ pub fn point_to_display(x: f32, y: f32, sq_size: f32) -> Option<(usize, usize)> 
 }
 
 /// Holds the current game state.
+#[derive(Clone)]
 pub struct GameState {
     pub board: Board,
     /// Currently selected square (for move input).

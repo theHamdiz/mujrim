@@ -26,6 +26,8 @@ cd mujrim
 cargo build --release -p mujrim
 ./target/release/mujrim uci
 cargo run --release -p mujrim-ui
+# Iced fallback:
+cargo run --release -p mujrim-ui --no-default-features --features iced-ui,book,nnue
 ```
 
 ## Workspace

@@ -15,10 +15,11 @@ use iced::{Alignment, Color, Element, Length};
 use mujrim_study::annotation::MoveAnnotation;
 use mujrim_study::board_marks::BoardArrow;
 
-use crate::game::GameState;
-use crate::motion::AnimPace;
-use crate::pieces::{PieceAssets, PieceSet};
-use crate::{CaptureAnimStyle, CoordPosition, Msg};
+use crate::app_core::game::GameState;
+use crate::app_core::motion::AnimPace;
+
+use super::app::{CaptureAnimStyle, CoordPosition, Msg};
+use super::pieces::{PieceAssets, PieceSet};
 
 /// Board color theme — also controls the entire GUI palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -264,7 +265,7 @@ pub struct BoardViewOptions<'a> {
     pub piece_set: PieceSet,
     pub overlay_arrows: &'a [BoardArrow],
     pub user_arrows: &'a [BoardArrow],
-    pub arrow_appearance: crate::arrows::ArrowAppearance,
+    pub arrow_appearance: super::arrows::ArrowAppearance,
     /// Optional immutable review position. The live game state remains intact.
     pub display_board: Option<&'a types::Board>,
     pub show_legal_moves: bool,
@@ -703,14 +704,14 @@ pub fn view_board<'a>(
     let board_px = sq_size * 8.0;
     let board_elem: Element<'a, Msg> = if let Some(anim) = anim {
         let eased = AnimPace::ease(anim.progress);
-        let from = crate::arrows::sq_center(
+        let from = super::arrows::sq_center(
             anim.from_sq.file(),
             anim.from_sq.rank(),
             sq_size,
             gs.flipped,
         );
         let to =
-            crate::arrows::sq_center(anim.to_sq.file(), anim.to_sq.rank(), sq_size, gs.flipped);
+            super::arrows::sq_center(anim.to_sq.file(), anim.to_sq.rank(), sq_size, gs.flipped);
         let x = from.x + (to.x - from.x) * eased - sq_size * 0.5;
         let y = from.y + (to.y - from.y) * eased - sq_size * 0.5;
         let piece_sz = if anim._piece == types::Piece::Pawn {
@@ -738,7 +739,7 @@ pub fn view_board<'a>(
         .height(Length::Fixed(board_px));
         stack![
             board_elem,
-            crate::arrows::arrow_canvas(
+            super::arrows::arrow_canvas(
                 overlay_arrows,
                 user_arrows,
                 sq_size,
@@ -753,7 +754,7 @@ pub fn view_board<'a>(
     } else {
         stack![
             board_elem,
-            crate::arrows::arrow_canvas(
+            super::arrows::arrow_canvas(
                 overlay_arrows,
                 user_arrows,
                 sq_size,

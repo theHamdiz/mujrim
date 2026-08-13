@@ -81,12 +81,19 @@ nps:
     @echo "NPS Benchmark (depth 16, startpos, JSON summary)..."
     @cargo run --release -p mujrim-benchmarker -- bench -d 16 --time 5 --json --quiet
 
-# Build and run the GUI application
+# Build and run the GUI application (Floem default)
 ui:
     @echo "Building Mujrim GUI..."
     CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-ui
     @echo "Launching Mujrim Chess GUI..."
     cargo run --release -p mujrim-ui
+
+# Build and run the Iced GUI fallback
+ui-iced:
+    @echo "Building Mujrim GUI (Iced)..."
+    CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-ui --no-default-features --features iced-ui,book,nnue
+    @echo "Launching Mujrim Chess GUI (Iced)..."
+    cargo run --release -p mujrim-ui --no-default-features --features iced-ui,book,nnue
 
 # Package dual-arch Windows dist trees (windows-aarch64 + windows-x86_64)
 # Build + assemble dist/windows-aarch64 and dist/windows-x86_64 replicas.

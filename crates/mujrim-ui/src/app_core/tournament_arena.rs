@@ -1,6 +1,6 @@
 //! Arena helpers for hybrid live tournament boards.
 
-use crate::tournament_live::{LiveGameBoard, PlayedGame};
+use super::tournament_live::{LiveGameBoard, PlayedGame};
 
 /// Cap concurrent live boards shown in the arena grid.
 pub fn visible_live_boards(live: &[LiveGameBoard], concurrency: usize) -> Vec<LiveGameBoard> {

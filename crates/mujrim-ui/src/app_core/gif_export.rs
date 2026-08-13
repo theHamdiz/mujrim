@@ -45,18 +45,18 @@ impl GifPieceAssets {
         }
 
         Ok(Self {
-            white_king: decode_and_resize(include_bytes!("../assets/pieces/wK.png"))?,
-            white_queen: decode_and_resize(include_bytes!("../assets/pieces/wQ.png"))?,
-            white_rook: decode_and_resize(include_bytes!("../assets/pieces/wR.png"))?,
-            white_bishop: decode_and_resize(include_bytes!("../assets/pieces/wB.png"))?,
-            white_knight: decode_and_resize(include_bytes!("../assets/pieces/wN.png"))?,
-            white_pawn: decode_and_resize(include_bytes!("../assets/pieces/wP.png"))?,
-            black_king: decode_and_resize(include_bytes!("../assets/pieces/bK.png"))?,
-            black_queen: decode_and_resize(include_bytes!("../assets/pieces/bQ.png"))?,
-            black_rook: decode_and_resize(include_bytes!("../assets/pieces/bR.png"))?,
-            black_bishop: decode_and_resize(include_bytes!("../assets/pieces/bB.png"))?,
-            black_knight: decode_and_resize(include_bytes!("../assets/pieces/bN.png"))?,
-            black_pawn: decode_and_resize(include_bytes!("../assets/pieces/bP.png"))?,
+            white_king: decode_and_resize(include_bytes!("../../assets/pieces/wK.png"))?,
+            white_queen: decode_and_resize(include_bytes!("../../assets/pieces/wQ.png"))?,
+            white_rook: decode_and_resize(include_bytes!("../../assets/pieces/wR.png"))?,
+            white_bishop: decode_and_resize(include_bytes!("../../assets/pieces/wB.png"))?,
+            white_knight: decode_and_resize(include_bytes!("../../assets/pieces/wN.png"))?,
+            white_pawn: decode_and_resize(include_bytes!("../../assets/pieces/wP.png"))?,
+            black_king: decode_and_resize(include_bytes!("../../assets/pieces/bK.png"))?,
+            black_queen: decode_and_resize(include_bytes!("../../assets/pieces/bQ.png"))?,
+            black_rook: decode_and_resize(include_bytes!("../../assets/pieces/bR.png"))?,
+            black_bishop: decode_and_resize(include_bytes!("../../assets/pieces/bB.png"))?,
+            black_knight: decode_and_resize(include_bytes!("../../assets/pieces/bN.png"))?,
+            black_pawn: decode_and_resize(include_bytes!("../../assets/pieces/bP.png"))?,
         })
     }
 

@@ -854,6 +854,14 @@ pub enum EngineSearchState {
     Pondering,
 }
 
+/// One step of an in-flight search, including incremental `info` lines.
+#[derive(Clone, Debug)]
+pub enum SearchStep {
+    Pending,
+    Info(SearchInfo),
+    Done(SearchInfo),
+}
+
 pub struct EngineSession {
     io: EngineIo,
     driver: Box<dyn ProtocolDriver + Send>,
@@ -959,18 +967,29 @@ impl EngineSession {
     pub fn poll_search(&mut self) -> Result<Option<SearchInfo>, String> {
         self.require_active("poll a search")?;
         loop {
-            let line = match self.io.try_read_line() {
-                Ok(Some(line)) => line,
-                Ok(None) => return Ok(None),
-                Err(error) => {
-                    self.reset_search_state();
-                    return Err(error);
-                }
-            };
-            if let Some(result) = self.consume_search_line(&line) {
-                return Ok(Some(result));
+            match self.poll_search_step()? {
+                SearchStep::Pending => return Ok(None),
+                SearchStep::Info(_) => {}
+                SearchStep::Done(info) => return Ok(Some(info)),
             }
         }
+    }
+
+    /// One non-blocking read: idle, an updated `info` snapshot, or `bestmove`.
+    pub fn poll_search_step(&mut self) -> Result<SearchStep, String> {
+        self.require_active("poll a search")?;
+        let line = match self.io.try_read_line() {
+            Ok(Some(line)) => line,
+            Ok(None) => return Ok(SearchStep::Pending),
+            Err(error) => {
+                self.reset_search_state();
+                return Err(error);
+            }
+        };
+        if let Some(result) = self.consume_search_line(&line) {
+            return Ok(SearchStep::Done(result));
+        }
+        Ok(SearchStep::Info(self.pending_info.clone()))
     }
 
     pub fn wait_for_bestmove(&mut self) -> Result<SearchInfo, String> {
@@ -1429,6 +1448,24 @@ mod tests {
         assert_eq!(info.current_move.as_deref(), Some("e2e4"));
         assert_eq!(info.current_move_number, 4);
         assert_eq!(info.pv, ["e2e4", "e7e5"]);
+    }
+
+    #[test]
+    fn search_step_carries_incremental_and_final_info() {
+        let info = SearchInfo {
+            depth: 8,
+            best_move: "e2e4".into(),
+            ..SearchInfo::default()
+        };
+        match SearchStep::Info(info.clone()) {
+            SearchStep::Info(snapshot) => assert_eq!(snapshot.depth, 8),
+            other => panic!("expected info, got {other:?}"),
+        }
+        match SearchStep::Done(info) {
+            SearchStep::Done(done) => assert_eq!(done.best_move, "e2e4"),
+            other => panic!("expected done, got {other:?}"),
+        }
+        assert!(matches!(SearchStep::Pending, SearchStep::Pending));
     }
 
     #[test]

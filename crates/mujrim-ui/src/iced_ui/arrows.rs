@@ -6,7 +6,7 @@ use iced::{Color, Element, Event, Length, Point, mouse};
 
 use mujrim_study::board_marks::{ArrowRole, BoardArrow, MarkColor};
 
-use crate::Msg;
+use super::app::Msg;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArrowShape {
@@ -38,6 +38,17 @@ impl ArrowColor {
             Self::Green => MarkColor::Green,
             Self::Blue => MarkColor::Blue,
             Self::Red => MarkColor::Red,
+        }
+    }
+}
+
+impl From<ArrowColor> for crate::app_core::arrows::ArrowColor {
+    fn from(color: ArrowColor) -> Self {
+        match color {
+            ArrowColor::Orange => Self::Orange,
+            ArrowColor::Green => Self::Green,
+            ArrowColor::Blue => Self::Blue,
+            ArrowColor::Red => Self::Red,
         }
     }
 }
@@ -134,9 +145,10 @@ pub fn sq_center(file: u8, rank: u8, sq_size: f32, flipped: bool) -> Point {
 
 /// Maps a point inside the board canvas to a display-row/col used by board messages.
 pub fn display_square_at(point: Point, sq_size: f32) -> Option<(usize, usize)> {
-    crate::game::point_to_display(point.x, point.y, sq_size)
+    crate::app_core::game::point_to_display(point.x, point.y, sq_size)
 }
 
+#[allow(dead_code)]
 pub fn user_arrow(from: types::Square, to: types::Square, color: ArrowColor) -> BoardArrow {
     BoardArrow::new(from, to, color.to_mark(), ArrowRole::User)
 }

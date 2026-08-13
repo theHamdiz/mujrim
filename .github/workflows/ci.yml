@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux GUI/build deps (iced / EGL / ALSA)
+      - name: Install Linux GUI/build deps (Floem / wgpu / GTK / ALSA)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -55,7 +55,9 @@ jobs:
             libasound2-dev \
             libudev-dev \
             libpipewire-0.3-dev \
-            libgbm-dev
+            libgbm-dev \
+            libgtk-3-dev \
+            libvulkan-dev
 
       - name: Fetch Stockfish NNUE required for compile-time embed
         shell: bash

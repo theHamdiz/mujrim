@@ -14,15 +14,15 @@ const BINS: &[&str] = &[
 ];
 
 /// Binaries that require host GPU/windowing libraries and cannot be
-/// cross-compiled for non-host Linux (iced/EGL/OpenGL).
+/// cross-compiled for non-host Linux (Floem/wgpu).
 const HOST_ONLY_BINS: &[&str] = &["mujrim-ui"];
 
 /// Packages to `--exclude` when cross-compiling for Linux.
-/// mujrim-ui depends on EGL/OpenGL (iced). Updater uses rustls and can cross.
+/// mujrim-ui depends on Floem/wgpu. Updater uses rustls and can cross.
 const CROSS_EXCLUDE_LINUX: &[&str] = &["mujrim-ui"];
 
 /// Packages to `--exclude` when cross-compiling for Windows/macOS.
-/// Only mujrim-ui (iced).
+/// Only mujrim-ui (Floem/wgpu).
 const CROSS_EXCLUDE_OTHER: &[&str] = &["mujrim-ui"];
 
 /// Packages that are dev-only and never distributed.

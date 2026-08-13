@@ -3,7 +3,7 @@
 use iced::widget::canvas::{self, Cache, Canvas, Frame, Geometry, Path, Stroke};
 use iced::{Color, Element, Length, Point, Rectangle, mouse};
 
-use crate::Msg;
+use super::app::Msg;
 
 pub fn view(scores: &[Option<i32>], height: f32) -> Element<'_, Msg> {
     Canvas::new(EvaluationGraph {

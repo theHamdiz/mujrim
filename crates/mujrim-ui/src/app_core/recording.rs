@@ -307,7 +307,7 @@ fn save_as_gif(frames: &[CapturedFrame], fps: u32, output_path: &Path) -> Result
         };
 
         // Simple quantization: build a palette from the image
-        let (palette, indices) = crate::gif_export::quantize_frame(&resized);
+        let (palette, indices) = super::gif_export::quantize_frame(&resized);
 
         let frame = gif::Frame {
             width: new_w as u16,

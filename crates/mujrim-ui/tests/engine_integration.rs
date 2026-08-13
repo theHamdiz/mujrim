@@ -3,11 +3,24 @@
 //! These tests verify that the UI's game state correctly integrates
 //! with the engine's search and evaluation without requiring a GUI.
 
+use std::path::PathBuf;
+
 use types::{Board, Color, Piece, Square};
 
 /// Initialize types once for all tests.
 fn setup() {
     types::init();
+}
+
+fn load_opening_book() -> search::book::OpeningBook {
+    let crate_book = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("mujrim-search")
+        .join("book")
+        .join("book.bin");
+    search::book::OpeningBook::load(&crate_book)
+        .or_else(|_| search::book::OpeningBook::load_embedded())
+        .expect("Opening book should load from mujrim-search/book or a books/ directory")
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -268,8 +281,7 @@ fn test_fen_round_trip() {
 #[test]
 fn test_opening_book_returns_move_for_startpos() {
     setup();
-    let book =
-        search::book::OpeningBook::load_embedded().expect("Embedded opening book should load");
+    let book = load_opening_book();
     let board = Board::new();
     let mv = book.probe(&board);
     assert!(
@@ -281,8 +293,7 @@ fn test_opening_book_returns_move_for_startpos() {
 #[test]
 fn test_opening_book_move_is_legal() {
     setup();
-    let book =
-        search::book::OpeningBook::load_embedded().expect("Embedded opening book should load");
+    let book = load_opening_book();
     let mut board = Board::new();
     let book_move = book
         .probe(&board)
@@ -300,8 +311,7 @@ fn test_opening_book_move_is_legal() {
 #[test]
 fn test_opening_book_move_after_e4() {
     setup();
-    let book =
-        search::book::OpeningBook::load_embedded().expect("Embedded opening book should load");
+    let book = load_opening_book();
     // Play 1. e4 and check that book has a response
     let mut board = Board::new();
     let e2 = Square::from_index(12);

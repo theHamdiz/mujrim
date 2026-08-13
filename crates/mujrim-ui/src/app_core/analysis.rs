@@ -9,7 +9,7 @@ use mujrim_study::engine_opinion::{
     EngineLine, EngineOpinion, MultiEngineAnalysis, color_for_engine_slot,
 };
 
-use crate::uci_process::{ExternalEngineProtocol, ExternalSearchConfig, query_best_move};
+use super::uci_process::{ExternalEngineProtocol, ExternalSearchConfig, query_best_move};
 
 #[derive(Debug, Clone)]
 pub struct AnalysisEngineSpec {

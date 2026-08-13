@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use mujrim_protocols::{
     EngineOptions, EngineSearchState, EngineSession, ProtocolKind, SearchInfo, SearchRequest,
+    SearchStep,
 };
 
 const EXTERNAL_ENGINE_MEMORY_OVERHEAD_MB: usize = 192;
@@ -349,6 +350,137 @@ fn run_cached_search(
     } else {
         engine.cancel_active_search()?;
         engine.session.search(request)?
+    };
+    engine.predicted_fen = None;
+
+    if ponder
+        && CANCEL_EPOCH.load(Ordering::Acquire) == cancel_epoch
+        && engine.key.protocol == ExternalEngineProtocol::Uci
+        && let Some(predicted_fen) =
+            predicted_position_fen(&request.fen, &info.best_move, info.ponder_move.as_deref())
+    {
+        let ponder_request = SearchRequest {
+            fen: predicted_fen.clone(),
+            moves: Vec::new(),
+            depth: request.depth,
+            movetime: None,
+            node_limit: None,
+            clock: None,
+        };
+        if engine.session.start_ponder(&ponder_request).is_ok() {
+            engine.predicted_fen = Some(predicted_fen);
+        }
+    }
+
+    Ok((info, ponder_hit))
+}
+
+/// Like [`query_best_move`], but invokes `on_info` for each incremental UCI info line.
+#[allow(clippy::too_many_arguments)]
+pub fn query_best_move_streaming(
+    engine_path: &str,
+    protocol: ExternalEngineProtocol,
+    fen: &str,
+    depth: i32,
+    movetime: Duration,
+    hash_mb: usize,
+    threads: usize,
+    search: &ExternalSearchConfig,
+    mut on_info: impl FnMut(&SearchInfo),
+) -> Result<ExternalMoveResult, String> {
+    let cancel_epoch = CANCEL_EPOCH.load(Ordering::Acquire);
+    let key = EngineSessionKey {
+        path: engine_path.to_owned(),
+        protocol,
+        hash_mb,
+        threads,
+        use_nnue: search.use_nnue,
+        own_book: search.own_book,
+        eval_file: search.eval_file.clone(),
+    };
+    let mut pool = engine_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = match pool.iter().position(|entry| entry.key == key) {
+        Some(index) => index,
+        None => {
+            if pool.len() == MAX_CACHED_ENGINE_SESSIONS {
+                pool.remove(0);
+            }
+            pool.push(CachedExternalEngine::spawn(key)?);
+            pool.len() - 1
+        }
+    };
+    let request = SearchRequest {
+        fen: fen.to_string(),
+        moves: Vec::new(),
+        depth,
+        movetime: Some(movetime),
+        node_limit: None,
+        clock: None,
+    };
+    let result = run_cached_search_streaming(
+        &mut pool[index],
+        &request,
+        search.ponder,
+        cancel_epoch,
+        &mut on_info,
+    );
+    if result.is_err() {
+        pool.remove(index);
+    }
+    let (info, ponder_hit) = result?;
+    Ok(ExternalMoveResult {
+        best_move: info.best_move,
+        ponder_move: info.ponder_move,
+        depth: info.depth,
+        seldepth: info.seldepth,
+        score: info.score,
+        nodes: info.nodes,
+        nps: info.nps,
+        time_ms: info.time_ms,
+        hashfull: info.hashfull,
+        tablebase_hits: info.tablebase_hits,
+        current_move: info.current_move,
+        pv: info.pv,
+        ponder_hit,
+    })
+}
+
+fn run_cached_search_streaming(
+    engine: &mut CachedExternalEngine,
+    request: &SearchRequest,
+    ponder: bool,
+    cancel_epoch: u64,
+    on_info: &mut impl FnMut(&SearchInfo),
+) -> Result<(SearchInfo, bool), String> {
+    if engine.ponder_enabled != ponder {
+        engine.cancel_active_search()?;
+        engine.configure(ponder)?;
+    }
+
+    let ponder_hit = engine.session.search_state() == EngineSearchState::Pondering
+        && engine.predicted_fen.as_deref() == Some(request.fen.as_str())
+        && ponder;
+    let info = if ponder_hit {
+        engine.session.ponder_hit()?;
+        loop {
+            match engine.session.poll_search_step()? {
+                SearchStep::Pending => std::thread::sleep(Duration::from_millis(8)),
+                SearchStep::Info(snapshot) => on_info(&snapshot),
+                SearchStep::Done(done) => break done,
+            }
+        }
+    } else {
+        engine.cancel_active_search()?;
+        engine.session.start_search(request)?;
+        loop {
+            match engine.session.poll_search_step()? {
+                SearchStep::Pending => std::thread::sleep(Duration::from_millis(8)),
+                SearchStep::Info(snapshot) => on_info(&snapshot),
+                SearchStep::Done(done) => break done,
+            }
+        }
     };
     engine.predicted_fen = None;
 

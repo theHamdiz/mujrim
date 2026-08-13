@@ -1,6 +1,6 @@
 # Mujrim Agent Guide
 
-Updated: 2026-04-08
+Updated: 2026-08-13
 
 ## Repository Rules
 - Always check latest dependency versions from the internet and read their docs before implementing updates.
@@ -22,8 +22,8 @@ Updated: 2026-04-08
   - `gui.*`
   - `tooling.*`
   - `updater.*`
-
-## Agent Tool Commands
+- Default desktop GUI is Floem (`cargo run --release -p mujrim-ui`); Iced is `--no-default-features --features iced-ui,book,nnue`.
+- Title-bar icons are embedded Lucide SVGs on the Floem path.
 - `mujrim-tooling agent list [--pretty]`
 - `mujrim-tooling agent describe <tool> [--pretty]`
 - `mujrim-tooling agent call <tool> --input '<json-object>' [--pretty]`
@@ -41,8 +41,7 @@ Updated: 2026-04-08
 - `updater.tuning.read`
 
 ## Open UI Workstream
-- Add multiple high-quality piece sets under separate folders (`default` + additional sets) and expose runtime switching in GUI settings.
-- Replace emoji-based UI icons with professional vector iconography suitable for `iced`.
+- Additional piece sets live under `crates/mujrim-ui/assets/pieces/` and switch at runtime in Options.
 
 ## CI/CD Baseline (Required)
 - CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test (`uciok` + `Mujrim 1.0.0`).
