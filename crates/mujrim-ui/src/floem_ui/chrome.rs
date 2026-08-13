@@ -2,12 +2,11 @@
 
 use floem::action::{drag_resize_window, minimize_window, toggle_window_maximized};
 use floem::prelude::*;
-use floem::taffy::style::FlexWrap;
+use floem::taffy::style::{Display, FlexWrap};
 use floem::views::drag_window_area;
 use floem::window::{ResizeDirection, WindowId};
 
 use crate::app_core::layout;
-use crate::app_core::recording::RecordState;
 use crate::app_core::settings::Screen;
 use crate::app_core::windowing::WindowPolicy;
 
@@ -170,76 +169,68 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
                 }
             },
         ),
-        dyn_view(move || {
-            if board() {
-                Stack::horizontal((
-                    pill(state, icons::CAMERA, "Shot", || false, {
-                        let handles = handles.clone();
-                        move || actions::screenshot(state, &handles)
-                    }),
-                    pill(state, icons::PLUS, "New", || false, {
-                        let handles = handles.clone();
-                        move || actions::new_game(state, &handles)
-                    }),
-                    pill(
-                        state,
-                        icons::ARROW_UP_DOWN,
-                        "Flip",
-                        || false,
-                        move || {
-                            state.game.update(|game| {
-                                if let Some(game) = game.as_mut() {
-                                    game.flipped = !game.flipped;
-                                }
-                            });
-                        },
-                    ),
-                    pill(state, icons::FLAG, "Resign", || true, {
-                        let handles = handles.clone();
-                        move || actions::resign(state, &handles)
-                    }),
-                    pill(
-                        state,
-                        icons::CLIPBOARD,
-                        "PGN",
-                        || false,
-                        move || actions::export_pgn(state),
-                    ),
-                    pill(state, icons::DATABASE, "Library", || false, {
-                        let handles = handles.clone();
-                        move || actions::save_to_library(state, &handles)
-                    }),
-                    pill(state, icons::SPARKLES, "Review", || false, {
-                        let handles = handles.clone();
-                        move || actions::analyze_game(state, &handles)
-                    }),
-                    pill(
-                        state,
-                        icons::FILM,
-                        "GIF",
-                        || false,
-                        move || actions::export_gif(state),
-                    ),
-                    pill(
-                        state,
-                        if handles.recorder.state() == RecordState::Recording {
-                            icons::CIRCLE_STOP
-                        } else {
-                            icons::CIRCLE
-                        },
-                        "Rec",
-                        || false,
-                        {
-                            let handles = handles.clone();
-                            move || actions::toggle_recording(state, &handles)
-                        },
-                    ),
-                ))
-                .style(|s| s.col_gap(3.0).items_center())
-                .into_any()
-            } else {
-                Empty::new().into_any()
-            }
+        Stack::horizontal((
+            pill(state, icons::CAMERA, "Shot", || false, {
+                let handles = handles.clone();
+                move || actions::screenshot(state, &handles)
+            }),
+            pill(state, icons::PLUS, "New", || false, {
+                let handles = handles.clone();
+                move || actions::new_game(state, &handles)
+            }),
+            pill(
+                state,
+                icons::ARROW_UP_DOWN,
+                "Flip",
+                || false,
+                move || {
+                    state.game.update(|game| {
+                        if let Some(game) = game.as_mut() {
+                            game.flipped = !game.flipped;
+                        }
+                    });
+                },
+            ),
+            pill(state, icons::FLAG, "Resign", || true, {
+                let handles = handles.clone();
+                move || actions::resign(state, &handles)
+            }),
+            pill(
+                state,
+                icons::CLIPBOARD,
+                "PGN",
+                || false,
+                move || actions::export_pgn(state),
+            ),
+            pill(state, icons::DATABASE, "Library", || false, {
+                let handles = handles.clone();
+                move || actions::save_to_library(state, &handles)
+            }),
+            pill(state, icons::SPARKLES, "Review", || false, {
+                let handles = handles.clone();
+                move || actions::analyze_game(state, &handles)
+            }),
+            pill(
+                state,
+                icons::FILM,
+                "GIF",
+                || false,
+                move || actions::export_gif(state),
+            ),
+            pill(
+                state,
+                icons::CIRCLE,
+                "Rec",
+                move || state.recording_label.get() != "Record",
+                {
+                    let handles = handles.clone();
+                    move || actions::toggle_recording(state, &handles)
+                },
+            ),
+        ))
+        .style(move |s| {
+            let s = s.col_gap(3.0).items_center();
+            if board() { s } else { s.display(Display::None) }
         }),
     ))
     .style(|s| {
@@ -370,6 +361,14 @@ mod tests {
         assert!(
             production.contains("open_tournament_setup"),
             "Tournaments nav must open the setup overlay"
+        );
+        assert!(
+            production.contains("display(Display::None)"),
+            "board tools must stay mounted and hidden instead of swapping Empty views"
+        );
+        assert!(
+            !production.contains("dyn_view"),
+            "creating nav widgets inside dyn_view leaves them without a window root"
         );
     }
 }
