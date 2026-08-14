@@ -229,6 +229,24 @@ mod tests {
     }
 
     #[test]
+    fn viridithas_preset_installs_sandhi_when_the_file_is_present() {
+        if eval::nnue::discover_named_network("sandhi-s2-b200.nnue.zst").is_none()
+            && eval::nnue::discover_named_network("viri_default.nnue.zst").is_none()
+        {
+            return;
+        }
+        let mut viri = SearchEngine::new(4, 1);
+        configure_engine_eval(&mut viri, "viridithas", None, true);
+        let info = viri.nnue_info();
+        assert_eq!(info.format, eval::nnue::NetworkFormat::Viridithas);
+        assert!(
+            info.architecture.contains("sandhi"),
+            "viridithas preset must install sandhi, got {}",
+            info.architecture
+        );
+    }
+
+    #[test]
     fn stockfish_eval_preset_installs_stockfish_network_and_params() {
         let mut engine = SearchEngine::new(4, 1);
         configure_engine_eval(&mut engine, "stockfish", None, true);

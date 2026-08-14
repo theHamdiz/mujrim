@@ -105,6 +105,8 @@ impl NNUEState {
             NnueNetworkParameters::Viridithas(_) => None,
             #[cfg(feature = "obsidian-nnue")]
             NnueNetworkParameters::Obsidian(_) => None,
+            #[cfg(feature = "plentychess-nnue")]
+            NnueNetworkParameters::PlentyChess(_) => None,
         };
         #[cfg(feature = "reckless-nnue")]
         let reckless = matches!(parameters, NnueNetworkParameters::Reckless(_))
@@ -268,6 +270,10 @@ impl NNUEState {
             ActiveNetwork::ExternalObsidian { network, .. } => {
                 return network.evaluate(board);
             }
+            #[cfg(feature = "plentychess-nnue")]
+            ActiveNetwork::ExternalPlentyChess { network, .. } => {
+                return network.evaluate(board);
+            }
         }
 
         let net = match self.source.parameters() {
@@ -276,7 +282,8 @@ impl NNUEState {
                 feature = "stockfish-nnue",
                 feature = "reckless-nnue",
                 feature = "viridithas-nnue",
-                feature = "obsidian-nnue"
+                feature = "obsidian-nnue",
+                feature = "plentychess-nnue"
             ))]
             _ => unreachable!("non-Akimbo backends are handled above"),
         };
@@ -490,6 +497,8 @@ impl NNUEState {
             ActiveNetwork::ExternalViridithas { .. } => return,
             #[cfg(feature = "obsidian-nnue")]
             ActiveNetwork::ExternalObsidian { .. } => return,
+            #[cfg(feature = "plentychess-nnue")]
+            ActiveNetwork::ExternalPlentyChess { .. } => return,
         }
 
         let net = match self.source.parameters() {
@@ -498,7 +507,8 @@ impl NNUEState {
                 feature = "stockfish-nnue",
                 feature = "reckless-nnue",
                 feature = "viridithas-nnue",
-                feature = "obsidian-nnue"
+                feature = "obsidian-nnue",
+                feature = "plentychess-nnue"
             ))]
             _ => unreachable!("non-Akimbo backends are handled above"),
         };

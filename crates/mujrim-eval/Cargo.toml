@@ -7,14 +7,15 @@ description = "Evaluation functions for the Mujrim engine"
 license = "MIT"
 
 [features]
-default = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "viridithas-nnue", "obsidian-nnue"]
+default = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "viridithas-nnue", "obsidian-nnue", "plentychess-nnue"]
 nnue = []
 simd = []
 akimbo-nnue = ["nnue"]
 stockfish-nnue = ["nnue"]
 reckless-nnue = ["nnue"]
-viridithas-nnue = ["nnue", "dep:zstd"]
+viridithas-nnue = ["nnue", "dep:zstd", "stockfish-nnue"]
 obsidian-nnue = ["nnue"]
+plentychess-nnue = ["nnue", "stockfish-nnue"]
 embedded-networks = ["nnue"]
 
 [dependencies]

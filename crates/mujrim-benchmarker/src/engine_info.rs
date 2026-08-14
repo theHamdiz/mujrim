@@ -39,6 +39,7 @@ impl NnueInfo {
             eval::nnue::NetworkFormat::Reckless => eval::nnue::NnueSearchProfile::Reckless,
             eval::nnue::NetworkFormat::Viridithas => eval::nnue::NnueSearchProfile::Viridithas,
             eval::nnue::NetworkFormat::Obsidian => eval::nnue::NnueSearchProfile::Obsidian,
+            eval::nnue::NetworkFormat::PlentyChess => eval::nnue::NnueSearchProfile::PlentyChess,
             eval::nnue::NetworkFormat::Embedded | eval::nnue::NetworkFormat::Akimbo => {
                 eval::nnue::NnueSearchProfile::Akimbo
             }
@@ -293,6 +294,76 @@ mod tests {
         assert_eq!(
             display.search_profile,
             eval::nnue::NnueSearchProfile::Akimbo
+        );
+    }
+
+    #[test]
+    fn from_runtime_maps_viridithas_search_profile() {
+        let info = NnueNetworkInfo {
+            name: "velarised-2".into(),
+            format: NetworkFormat::Viridithas,
+            architecture:
+                "704×16hm → 2560 pairwise-CReLU → 16 HardSwish6 → 32 SwiGLU → 1 ×8 (velarised)"
+                    .into(),
+            hidden_size: 2560,
+            num_buckets: 16,
+            qa: 255,
+            qb: 64,
+            scale: 240,
+            file_size: 58_040_864,
+        };
+        let display = NnueInfo::from_runtime(info);
+        assert_eq!(display.format, "Viridithas");
+        assert_eq!(
+            display.search_profile,
+            eval::nnue::NnueSearchProfile::Viridithas
+        );
+        assert!(display.architecture.contains("velarised"));
+    }
+
+    #[test]
+    fn from_runtime_maps_sandhi_viridithas_search_profile() {
+        let info = NnueNetworkInfo {
+            name: "sandhi-s2-b200".into(),
+            format: NetworkFormat::Viridithas,
+            architecture:
+                "704×16hm + (59808+4560)hm → 1024 pairwise-CReLU → 32 HardSwish6 → 32 SwiGLU → 1 ×8 (sandhi)"
+                    .into(),
+            hidden_size: 1024,
+            num_buckets: 16,
+            qa: 255,
+            qb: 64,
+            scale: 240,
+            file_size: 89_315_360,
+        };
+        let display = NnueInfo::from_runtime(info);
+        assert_eq!(display.format, "Viridithas");
+        assert_eq!(
+            display.search_profile,
+            eval::nnue::NnueSearchProfile::Viridithas
+        );
+        assert!(display.architecture.contains("sandhi"));
+        assert!(display.architecture.contains("59808"));
+    }
+
+    #[test]
+    fn from_runtime_maps_plentychess_search_profile() {
+        let info = NnueNetworkInfo {
+            name: "0179r".into(),
+            format: NetworkFormat::PlentyChess,
+            architecture: "768×12 + 4560 pawn-pair + 59808 threat → 1024 → 16 → 32 → 1 ×8".into(),
+            hidden_size: 1024,
+            num_buckets: 12,
+            qa: 255,
+            qb: 64,
+            scale: 287,
+            file_size: 76_368_704,
+        };
+        let display = NnueInfo::from_runtime(info);
+        assert_eq!(display.format, "PlentyChess");
+        assert_eq!(
+            display.search_profile,
+            eval::nnue::NnueSearchProfile::PlentyChess
         );
     }
 

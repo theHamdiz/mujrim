@@ -157,6 +157,10 @@ vendor_url velvet \
   "https://github.com/mhonert/velvet-chess/releases/download/v8.1.1/velvet-v8.1.1-x86_64-avx2" \
   "velvet-v8.1.1-x86_64-avx2"
 
+vendor_url plentychess \
+  "https://github.com/Yoshie2000/PlentyChess/releases/download/8.0.0/PlentyChess-8.0.0-linux-avx2" \
+  "PlentyChess-8.0.0-linux-avx2"
+
 # ── Source builds when no Linux asset exists ─────────────────────────────
 
 log "Building Ethereal v13 (last free GitHub release)"
@@ -239,7 +243,7 @@ fi
 # ── UCI smoke ────────────────────────────────────────────────────────────
 
 log "UCI smoke"
-for id in stockfish akimbo reckless viridithas hobbes velvet ethereal obsidian integral; do
+for id in stockfish akimbo reckless viridithas hobbes velvet plentychess ethereal obsidian integral; do
   uci_smoke "${ENGINES}/${id}/bin/${ARCH}/${id}"
 done
 if [[ -f "${ENGINES}/lc0/bin/${ARCH}/weights.pb.gz" ]]; then

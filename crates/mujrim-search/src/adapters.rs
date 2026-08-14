@@ -135,6 +135,9 @@ impl EvalSearchAdapter for PlentyChessAdapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(PlentyChessSearchProfile.compose());
+        if let Ok(network) = eval::nnue::load_network_for_preset("plentychess") {
+            engine.set_nnue_network(network);
+        }
         engine.set_use_nnue(true);
     }
 }
@@ -223,6 +226,8 @@ mod tests {
             engine.search_stack.policies.move_ordering,
             MoveOrderingProfile::StockLike
         );
+        engine.set_contempt(48);
+        assert_eq!(engine.contempt(), 0);
     }
 
     #[cfg(feature = "reckless-nnue")]
@@ -239,6 +244,8 @@ mod tests {
             engine.search_stack.policies.move_ordering,
             MoveOrderingProfile::Reckless
         );
+        engine.set_contempt(48);
+        assert_eq!(engine.contempt(), 0);
     }
 
     #[test]
@@ -254,6 +261,8 @@ mod tests {
             engine.search_stack.policies.move_ordering,
             MoveOrderingProfile::StockLike
         );
+        engine.set_contempt(48);
+        assert_eq!(engine.contempt(), 0);
     }
 
     #[test]
@@ -266,6 +275,8 @@ mod tests {
             engine.search_stack.policies.move_ordering,
             MoveOrderingProfile::StockLike
         );
+        engine.set_contempt(48);
+        assert_eq!(engine.contempt(), 48);
     }
 
     #[test]
@@ -277,10 +288,37 @@ mod tests {
             viri.eval_mode(),
             EvalMode::Nnue(NnueSearchProfile::Viridithas)
         );
+        viri.set_contempt(48);
+        assert_eq!(viri.contempt(), 0);
 
         let mut obs = SearchEngine::new(1, 1);
         assert!(install_adapter(&mut obs, "obsidian"));
         assert_eq!(obs.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Obsidian));
+        obs.set_contempt(48);
+        assert_eq!(obs.contempt(), 0);
+    }
+
+    #[cfg(feature = "viridithas-nnue")]
+    #[test]
+    fn viridithas_adapter_binds_sandhi_eval_to_viri_search() {
+        if eval::nnue::discover_named_network("sandhi-s2-b200.nnue.zst").is_none()
+            && eval::nnue::discover_named_network("viri_default.nnue.zst").is_none()
+        {
+            return;
+        }
+        let mut engine = SearchEngine::new(1, 1);
+        assert!(install_adapter(&mut engine, "viridithas"));
+        assert_eq!(
+            engine.eval_mode(),
+            EvalMode::Nnue(NnueSearchProfile::Viridithas)
+        );
+        let info = engine.nnue_info();
+        assert!(
+            info.architecture.contains("sandhi"),
+            "viridithas adapter must bind sandhi, got {}",
+            info.architecture
+        );
+        assert_eq!(info.format.to_string(), "Viridithas");
     }
 
     #[test]
@@ -291,10 +329,24 @@ mod tests {
             plenty.eval_mode(),
             EvalMode::Nnue(NnueSearchProfile::PlentyChess)
         );
+        if eval::nnue::discover_named_network("plenty_default.bin").is_some()
+            || eval::nnue::discover_named_network("0179r.bin").is_some()
+        {
+            assert_eq!(plenty.nnue_info().format.to_string(), "PlentyChess");
+        }
+        plenty.set_contempt(48);
+        assert_eq!(plenty.contempt(), 0);
 
         let mut lc0 = SearchEngine::new(1, 1);
         assert!(install_adapter(&mut lc0, "lc0"));
         assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
+        assert!(lc0.eval_mode().is_lc0_nnue());
+        assert_eq!(
+            lc0.search_stack.policies.move_ordering,
+            MoveOrderingProfile::Reckless
+        );
+        lc0.set_contempt(48);
+        assert_eq!(lc0.contempt(), 0);
     }
 
     #[test]

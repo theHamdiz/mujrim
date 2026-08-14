@@ -7,8 +7,9 @@
 //! - `akimbo-nnue` feature: Load Akimbo-family networks (768→H×2→1)
 //! - `stockfish-nnue` feature: Load Stockfish .nnue files (HalfKAv2_hm)
 //! - `reckless-nnue` feature: Load the Reckless v60 threat-aware raw network
-//! - `viridithas-nnue` feature: Load Viridithas `.nnue.zst` piece-feature nets
+//! - `viridithas-nnue` feature: Load Viridithas `.nnue.zst` simple and velarised nets
 //! - `obsidian-nnue` feature: Load Obsidian layered `net89perm.bin` nets
+//! - `plentychess-nnue` feature: Load PlentyChess SLEB128 `0179r.bin` nets
 //!
 //! Modules:
 //! - `network`: Network struct, forward pass, feature indexing
@@ -48,6 +49,9 @@ pub mod viridithas_format;
 
 #[cfg(feature = "obsidian-nnue")]
 pub mod obsidian_format;
+
+#[cfg(feature = "plentychess-nnue")]
+pub mod plentychess_format;
 
 pub use accumulator::NNUEState;
 pub use adapter::{

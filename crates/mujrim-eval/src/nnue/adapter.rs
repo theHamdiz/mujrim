@@ -43,6 +43,7 @@ pub enum NetworkFormat {
     Reckless,
     Viridithas,
     Obsidian,
+    PlentyChess,
 }
 
 /// Search-stack family required by an evaluator architecture.
@@ -81,6 +82,7 @@ impl Display for NetworkFormat {
             Self::Reckless => f.write_str("Reckless"),
             Self::Viridithas => f.write_str("Viridithas"),
             Self::Obsidian => f.write_str("Obsidian"),
+            Self::PlentyChess => f.write_str("PlentyChess"),
         }
     }
 }
@@ -108,6 +110,8 @@ pub enum NnueNetworkParameters<'a> {
     Viridithas(&'a super::viridithas_format::ViridithasNetwork),
     #[cfg(feature = "obsidian-nnue")]
     Obsidian(&'a super::obsidian_format::ObsidianNetwork),
+    #[cfg(feature = "plentychess-nnue")]
+    PlentyChess(&'a super::plentychess_format::PlentyChessNetwork),
 }
 
 pub trait NnueNetworkSource {
@@ -149,6 +153,11 @@ pub enum ActiveNetwork {
     #[cfg(feature = "obsidian-nnue")]
     ExternalObsidian {
         network: Box<super::obsidian_format::ObsidianNetwork>,
+        info: NnueNetworkInfo,
+    },
+    #[cfg(feature = "plentychess-nnue")]
+    ExternalPlentyChess {
+        network: Box<super::plentychess_format::PlentyChessNetwork>,
         info: NnueNetworkInfo,
     },
 }
@@ -210,6 +219,10 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalViridithas { network, .. } => NnueNetworkParameters::Viridithas(network),
             #[cfg(feature = "obsidian-nnue")]
             Self::ExternalObsidian { network, .. } => NnueNetworkParameters::Obsidian(network),
+            #[cfg(feature = "plentychess-nnue")]
+            Self::ExternalPlentyChess { network, .. } => {
+                NnueNetworkParameters::PlentyChess(network)
+            }
         }
     }
 
@@ -229,6 +242,8 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalViridithas { info, .. } => info.clone(),
             #[cfg(feature = "obsidian-nnue")]
             Self::ExternalObsidian { info, .. } => info.clone(),
+            #[cfg(feature = "plentychess-nnue")]
+            Self::ExternalPlentyChess { info, .. } => info.clone(),
         }
     }
 
@@ -247,6 +262,8 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalViridithas { .. } => NnueSearchProfile::Viridithas,
             #[cfg(feature = "obsidian-nnue")]
             Self::ExternalObsidian { .. } => NnueSearchProfile::Obsidian,
+            #[cfg(feature = "plentychess-nnue")]
+            Self::ExternalPlentyChess { .. } => NnueSearchProfile::PlentyChess,
         }
     }
 }
@@ -313,6 +330,8 @@ pub fn enabled_network_formats() -> Vec<NetworkFormat> {
         NetworkFormat::Viridithas,
         #[cfg(feature = "obsidian-nnue")]
         NetworkFormat::Obsidian,
+        #[cfg(feature = "plentychess-nnue")]
+        NetworkFormat::PlentyChess,
     ]
 }
 
@@ -337,6 +356,11 @@ pub fn load_network(path: &Path) -> Result<ActiveNetwork, String> {
     #[cfg(feature = "viridithas-nnue")]
     if super::viridithas_format::looks_like_viridithas(path, &bytes) {
         return load_viridithas_network(path, &bytes);
+    }
+
+    #[cfg(feature = "plentychess-nnue")]
+    if super::plentychess_format::is_plentychess_path(path) {
+        return load_plentychess_network(path, &bytes);
     }
 
     #[cfg(feature = "obsidian-nnue")]
@@ -448,8 +472,9 @@ fn load_reckless_network(path: &Path, file_size: u64) -> Result<ActiveNetwork, S
 #[cfg(feature = "viridithas-nnue")]
 fn load_viridithas_network(path: &Path, bytes: &[u8]) -> Result<ActiveNetwork, String> {
     let network = super::viridithas_format::ViridithasNetwork::from_bytes(bytes)?;
-    let features = network.features_per_bucket();
     let hidden = network.hidden();
+    let scale = network.scale();
+    let architecture = network.architecture();
     types::init();
     let startpos = network.evaluate(&types::Board::new());
     if startpos.abs() > 2_500 {
@@ -466,12 +491,37 @@ fn load_viridithas_network(path: &Path, bytes: &[u8]) -> Result<ActiveNetwork, S
         info: NnueNetworkInfo {
             name,
             format: NetworkFormat::Viridithas,
-            architecture: format!("16×{features}→{hidden}×2→1 SCReLU (Viridithas piece features)"),
+            architecture,
             hidden_size: hidden,
             num_buckets: super::viridithas_format::KING_BUCKETS,
             qa: super::viridithas_format::QA,
             qb: 64,
-            scale: super::viridithas_format::SCALE,
+            scale,
+            file_size: bytes.len() as u64,
+        },
+    })
+}
+
+#[cfg(feature = "plentychess-nnue")]
+fn load_plentychess_network(path: &Path, bytes: &[u8]) -> Result<ActiveNetwork, String> {
+    let network = super::plentychess_format::PlentyChessNetwork::from_compressed_bytes(bytes)?;
+    let name = path.file_stem().map_or_else(
+        || "External PlentyChess network".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    Ok(ActiveNetwork::ExternalPlentyChess {
+        network: Box::new(network),
+        info: NnueNetworkInfo {
+            name,
+            format: NetworkFormat::PlentyChess,
+            architecture:
+                "768×12 + 4560 pawn-pair + 59808 threat → 1024 pairwise-CReLU → 16 → 32 → 1 ×8 (0179r)"
+                    .to_string(),
+            hidden_size: super::plentychess_format::L1,
+            num_buckets: super::plentychess_format::KING_BUCKETS,
+            qa: super::plentychess_format::NETWORK_QA,
+            qb: super::plentychess_format::NETWORK_QB,
+            scale: super::plentychess_format::NETWORK_SCALE,
             file_size: bytes.len() as u64,
         },
     })
@@ -604,8 +654,20 @@ pub fn load_network_for_preset(preset: &str) -> Result<ActiveNetwork, String> {
         return Ok(embedded);
     }
     let names: &[&str] = match preset {
-        "viridithas" => &["viri_default.nnue.zst", "velarised-2-b800.nnue.zst"],
+        "viridithas" => &[
+            "sandhi-s2-b200.nnue.zst",
+            "viri_default.nnue.zst",
+            "viri_velarised.nnue.zst",
+            "velarised-2-b800.nnue.zst",
+        ],
         "obsidian" => &["obs_default.bin", "net89perm.bin"],
+        "plentychess" | "plenty" => &["plenty_default.bin", "0179r.bin"],
+        "lc0" => {
+            return Err(
+                "Lc0 transformer nets (.pb.gz) are not an in-process NNUE; use the official lc0 binary"
+                    .to_string(),
+            );
+        }
         _ => {
             return Err(format!(
                 "preset '{preset}' has no embedded or on-disk network mapping"
@@ -805,6 +867,10 @@ mod tests {
             NnueNetworkParameters::Obsidian(_) => {
                 panic!("embedded network must use the Akimbo evaluator")
             }
+            #[cfg(feature = "plentychess-nnue")]
+            NnueNetworkParameters::PlentyChess(_) => {
+                panic!("embedded network must use the Akimbo evaluator")
+            }
         };
         #[cfg(not(any(feature = "reckless-nnue", feature = "stockfish-nnue")))]
         let NnueNetworkParameters::Akimbo(network) = active.parameters();
@@ -958,16 +1024,27 @@ mod tests {
     #[cfg(feature = "viridithas-nnue")]
     #[test]
     fn preset_loader_finds_downloaded_viridithas_file() {
-        let Some(path) = discover_named_network("viri_default.nnue.zst") else {
+        let Some(path) = discover_named_network("sandhi-s2-b200.nnue.zst")
+            .or_else(|| discover_named_network("viri_default.nnue.zst"))
+        else {
             return;
         };
-        match load_network(&path) {
-            Ok(net) => assert_eq!(net.search_profile(), NnueSearchProfile::Viridithas),
-            Err(error) => assert!(
-                error.contains("sane opening range")
-                    || error.contains("not a supported piece-feature layout"),
-                "{error}"
-            ),
+        let net =
+            load_network(&path).expect("sandhi / velarised / simple Viridithas net must load");
+        assert_eq!(net.search_profile(), NnueSearchProfile::Viridithas);
+        assert_eq!(net.info().format, NetworkFormat::Viridithas);
+        assert!(
+            net.info().architecture.contains("sandhi"),
+            "viri_default must load sandhi, got {}",
+            net.info().architecture
+        );
+        if let ActiveNetwork::ExternalViridithas { network, .. } = &net {
+            types::init();
+            let startpos = network.evaluate(&types::Board::new());
+            assert!(
+                startpos.abs() < 250,
+                "loaded Viridithas startpos should be a quiet opening score, got {startpos}"
+            );
         }
     }
 
@@ -979,6 +1056,35 @@ mod tests {
         }
         let net = load_network_for_preset("obsidian").expect("obs net");
         assert_eq!(net.search_profile(), NnueSearchProfile::Obsidian);
+    }
+
+    #[cfg(feature = "plentychess-nnue")]
+    #[test]
+    fn preset_loader_finds_downloaded_plentychess_net() {
+        let Some(path) = discover_named_network("plenty_default.bin")
+            .or_else(|| discover_named_network("0179r.bin"))
+        else {
+            return;
+        };
+        let net = load_network(&path).expect("0179r must decode as PlentyChess");
+        assert_eq!(net.search_profile(), NnueSearchProfile::PlentyChess);
+        assert_eq!(net.info().format, NetworkFormat::PlentyChess);
+        if let ActiveNetwork::ExternalPlentyChess { network, .. } = &net {
+            types::init();
+            let startpos = network.evaluate(&types::Board::new());
+            assert!(
+                startpos.abs() < 250,
+                "loaded PlentyChess startpos should be a quiet opening score, got {startpos}"
+            );
+        }
+    }
+
+    #[test]
+    fn lc0_preset_does_not_silently_load_an_nnue() {
+        let Err(error) = load_network_for_preset("lc0") else {
+            panic!("lc0 is not an in-process NNUE");
+        };
+        assert!(error.contains("official lc0"), "{error}");
     }
 
     #[cfg(feature = "reckless-nnue")]

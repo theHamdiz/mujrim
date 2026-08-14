@@ -6,12 +6,12 @@
 //! - Tempo
 //! - Mobility per piece type (safe squares only)
 //! - King safety (attack zone, attacker weights, pawn shield/storm)
-//! - Pawn structure (doubled, isolated, backward, connected, passed)
+//! - Pawn structure (doubled, isolated, backward, connected, passed, islands)
 //! - Threats (pieces attacked by lower-value pieces, hanging pieces)
 //! - Space evaluation
-//! - Knight outposts, rook on 7th, rook on open file
+//! - Knight outposts, rook on 7th, rook on open file, rook behind passer
 //! - Bishop pair, trapped bishop
-//! - Passed pawn king proximity
+//! - Passed pawn king proximity and piece tropism
 //! - Connectivity (defended pieces)
 
 use crate::psqt;
@@ -88,8 +88,14 @@ const HANGING_PENALTY_EG: i32 = 27;
 // ── Piece bonuses ───────────────────────────────────────────────────────────
 const BISHOP_PAIR_MG: i32 = 30;
 const BISHOP_PAIR_EG: i32 = 52;
-const ROOK_ON_SEVENTH_MG: i32 = 2;
-const ROOK_ON_SEVENTH_EG: i32 = 28;
+const ROOK_ON_SEVENTH_MG: i32 = 20;
+const ROOK_ON_SEVENTH_EG: i32 = 32;
+const ROOK_BEHIND_PASSED_MG: i32 = 18;
+const ROOK_BEHIND_PASSED_EG: i32 = 36;
+const PAWN_ISLAND_MG: i32 = 12;
+const PAWN_ISLAND_EG: i32 = 16;
+const TROPISM_MG: [i32; 6] = [0, 3, 3, 2, 2, 0];
+const TROPISM_EG: [i32; 6] = [0, 2, 2, 3, 4, 0];
 const ROOK_ON_OPEN_FILE_MG: i32 = 47;
 const ROOK_ON_OPEN_FILE_EG: i32 = 25;
 const ROOK_ON_SEMI_OPEN_MG: i32 = 19;
@@ -428,6 +434,34 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         eg += (w_levers - b_levers) * PAWN_LEVER_EG;
     }
 
+    // ── Pawn islands ────────────────────────────────────────────────────
+    {
+        let w_islands = pawn_islands(w_pawns).saturating_sub(1);
+        let b_islands = pawn_islands(b_pawns).saturating_sub(1);
+        mg -= (w_islands as i32 - b_islands as i32) * PAWN_ISLAND_MG;
+        eg -= (w_islands as i32 - b_islands as i32) * PAWN_ISLAND_EG;
+    }
+
+    // ── Rook behind passed pawns ────────────────────────────────────────
+    {
+        let (w_mg, w_eg) = eval_rook_behind_passed(board, Color::White, w_pawns, b_pawns);
+        mg += w_mg;
+        eg += w_eg;
+        let (b_mg, b_eg) = eval_rook_behind_passed(board, Color::Black, b_pawns, w_pawns);
+        mg -= b_mg;
+        eg -= b_eg;
+    }
+
+    // ── Piece tropism toward the enemy king ─────────────────────────────
+    {
+        let (w_mg, w_eg) = eval_tropism(board, Color::White, bk_sq);
+        mg += w_mg;
+        eg += w_eg;
+        let (b_mg, b_eg) = eval_tropism(board, Color::Black, wk_sq);
+        mg -= b_mg;
+        eg -= b_eg;
+    }
+
     // ── Absolute pins toward each king ───────────────────────────────────
     {
         let (w_mg, w_eg) = eval_pins(board, Color::White, occ);
@@ -477,6 +511,86 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
 }
 
 // ── Helper: generate all pawn attacks for a color ────────────────────────────
+#[inline]
+fn pawn_islands(pawns: Bitboard) -> u32 {
+    let mut islands = 0u32;
+    let mut in_island = false;
+    for file_mask in FILE_MASKS {
+        let occupied = pawns & file_mask != 0;
+        if occupied && !in_island {
+            islands += 1;
+        }
+        in_island = occupied;
+    }
+    islands
+}
+
+#[inline]
+fn is_passed_pawn(sq: usize, color: Color, enemy_pawns: Bitboard) -> bool {
+    let file = sq % 8;
+    let rank = sq / 8;
+    let blocking = FILE_MASKS[file] | ADJACENT_FILES[file];
+    let ahead = match color {
+        Color::White => blocking & ranks_above(rank),
+        Color::Black => blocking & ranks_below(rank),
+    };
+    enemy_pawns & ahead == 0
+}
+
+#[inline]
+fn eval_rook_behind_passed(
+    board: &Board,
+    color: Color,
+    our_pawns: Bitboard,
+    enemy_pawns: Bitboard,
+) -> (i32, i32) {
+    let rooks = board.piece_bb(Piece::Rook, color);
+    if rooks == 0 {
+        return (0, 0);
+    }
+    let mut mg = 0i32;
+    let mut eg = 0i32;
+    for pawn in iter_bits(our_pawns) {
+        if !is_passed_pawn(pawn, color, enemy_pawns) {
+            continue;
+        }
+        let file = pawn % 8;
+        let rank = pawn / 8;
+        for rook in iter_bits(rooks) {
+            if rook % 8 != file {
+                continue;
+            }
+            let rook_rank = rook / 8;
+            let behind = match color {
+                Color::White => rook_rank < rank,
+                Color::Black => rook_rank > rank,
+            };
+            if behind {
+                mg += ROOK_BEHIND_PASSED_MG;
+                eg += ROOK_BEHIND_PASSED_EG;
+                break;
+            }
+        }
+    }
+    (mg, eg)
+}
+
+#[inline]
+fn eval_tropism(board: &Board, color: Color, enemy_king: usize) -> (i32, i32) {
+    let mut mg = 0i32;
+    let mut eg = 0i32;
+    for piece in [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
+        let weight_mg = TROPISM_MG[piece.index()];
+        let weight_eg = TROPISM_EG[piece.index()];
+        for sq in iter_bits(board.piece_bb(piece, color)) {
+            let closeness = 7 - chebyshev_distance(sq, enemy_king) as i32;
+            mg += weight_mg * closeness;
+            eg += weight_eg * closeness;
+        }
+    }
+    (mg, eg)
+}
+
 #[inline]
 fn count_lever_pawns(our_pawns: Bitboard, enemy_pawns: Bitboard, color: Color) -> i32 {
     let mut count = 0i32;
@@ -1002,6 +1116,35 @@ mod tests {
     }
 
     #[test]
+    fn rook_behind_passed_pawn_scores_higher_than_rook_in_front() {
+        setup();
+        let behind = evaluate(&Board::from_fen("4k3/P7/8/8/8/8/8/R3K3 w - - 0 1").unwrap());
+        let in_front = evaluate(&Board::from_fen("R3k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap());
+        assert!(
+            behind > in_front,
+            "rook behind passer={behind}, rook in front={in_front}"
+        );
+    }
+
+    #[test]
+    fn tropism_prefers_a_queen_closer_to_the_enemy_king() {
+        setup();
+        let close = evaluate(&Board::from_fen("4k3/8/8/8/8/8/3Q4/4K3 w - - 0 1").unwrap());
+        let far = evaluate(&Board::from_fen("4k3/8/8/8/8/8/8/Q3K3 w - - 0 1").unwrap());
+        assert!(close > far, "close={close}, far={far}");
+    }
+
+    #[test]
+    fn pawn_islands_penalize_split_pawn_groups() {
+        setup();
+        assert_eq!(pawn_islands(0x0000000000000101), 1); // a2 and a3
+        assert_eq!(pawn_islands(0x0000000000000104), 2); // a2 and c2
+        let compact = evaluate(&Board::from_fen("4k3/8/8/8/8/8/PPP5/4K3 w - - 0 1").unwrap());
+        let split = evaluate(&Board::from_fen("4k3/8/8/8/8/8/P1P1P3/4K3 w - - 0 1").unwrap());
+        assert!(compact > split, "compact={compact}, split={split}");
+    }
+
+    #[test]
     fn test_rook_open_file() {
         setup();
         let open = evaluate(&Board::from_fen("4k3/8/8/8/8/8/1P6/R3K3 w - - 0 1").unwrap());
@@ -1080,5 +1223,72 @@ mod tests {
             cand_mg > block_mg && cand_eg > block_eg,
             "candidate={cand_mg}/{cand_eg} blocked={block_mg}/{block_eg}"
         );
+    }
+
+    fn eval_after(fen: &str, uci: &str) -> i32 {
+        let mut board = Board::from_fen(fen).unwrap();
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.to_uci() == uci)
+            .unwrap_or_else(|| panic!("illegal {uci} in {fen}"));
+        board.make_move(mv);
+        -evaluate(&board)
+    }
+
+    #[test]
+    fn bk_miss_static_eval_records_thematic_versus_played() {
+        setup();
+        let cases = [
+            (
+                "3r1k2/4npp1/1ppr3p/p6P/P2PPPP1/1NR5/5K2/2R5 w - - 0 1",
+                "d4d5",
+                "f4f5",
+            ),
+            (
+                "2r1nrk1/p2q1ppp/bp1p4/n1pPp3/P1P1P3/2PBB1N1/4QPPP/R4RK1 w - - 0 1",
+                "f2f4",
+                "f1e1",
+            ),
+            (
+                "r2q1rk1/4bppp/p2p4/2pP4/3pP3/3Q4/PP1B1PPP/R3R1K1 w - - 0 1",
+                "b2b4",
+                "d2f4",
+            ),
+            (
+                "r2q1rk1/1ppnbppp/p2p1nb1/3Pp3/2P1P1P1/2N2N1P/PPB1QP2/R1B2RK1 b - - 0 1",
+                "g6h5",
+                "d8c8",
+            ),
+            (
+                "r4k2/pb2bp1r/1p1qp2p/3pNp2/3P1P2/2N3P1/PPP1Q2P/2KRR3 w - - 0 1",
+                "g3g4",
+                "c3b5",
+            ),
+            (
+                "3rn2k/ppb2rpp/2ppqp2/5N2/2P1P3/1P5Q/PB3PPP/3RR1K1 w - - 0 1",
+                "f5h6",
+                "b2d4",
+            ),
+            (
+                "r1bqk2r/pp2bppp/2p5/3pP3/P2Q1P2/2N1B3/1PP3PP/R4RK1 b kq - 0 1",
+                "f7f6",
+                "c8f5",
+            ),
+            (
+                "r2qnrnk/p2b2b1/1p1p2pp/2pPpp2/1PP1P3/PRNBB3/3QNPPP/5RK1 w - - 0 1",
+                "f2f4",
+                "e4f5",
+            ),
+        ];
+        for (fen, thematic, played) in cases {
+            let want = eval_after(fen, thematic);
+            let got = eval_after(fen, played);
+            assert!(
+                want.abs() < 10_000 && got.abs() < 10_000,
+                "{thematic}={want} {played}={got}"
+            );
+        }
     }
 }

@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use eval::nnue::{NnueNetworkSource, load_network};
+use eval::nnue::{NnueNetworkSource, load_network, load_network_for_preset};
 use mujrim_protocols::ProtocolKind;
 
 use mujrim_benchmarker::{
@@ -925,6 +925,8 @@ fn run_bench(config: BenchRunConfig) {
                 NnueInfo::detect()
             }
         }
+    } else if let Ok(network) = load_network_for_preset(&eval_preset) {
+        NnueInfo::from_runtime(network.info())
     } else {
         NnueInfo::detect()
     };

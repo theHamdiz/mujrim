@@ -4,7 +4,7 @@
 //! identical repetitions do not look like the same node. Contempt and
 //! eval-scaled aversion are applied only to root move scores.
 
-/// Default UCI/search contempt (centipawns). Positive values avoid draws.
+/// Default UCI/search contempt (centipawns). Applied only in HCE mode.
 pub const DEFAULT_CONTEMPT: i32 = 32;
 
 /// Static eval (cp) at which a repeating root move is treated as a missed win.

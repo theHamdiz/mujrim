@@ -562,6 +562,26 @@ fn format_uci_score_value(score: i32, board: &Board, eval_mode: EvalMode) -> Str
     }
 }
 
+#[inline]
+fn extend_checks(move_ordering: MoveOrderingProfile, eval_mode: EvalMode) -> bool {
+    // Reckless/v60 skips check extensions so fixed-node BK depth is not burned.
+    // Other adapters that reuse Reckless move ordering (Lc0) still extend.
+    if eval_mode.is_reckless_nnue() {
+        return false;
+    }
+    move_ordering != MoveOrderingProfile::Reckless
+        || eval_mode.is_lc0_nnue()
+        || eval_mode.is_viridithas_nnue()
+}
+
+#[inline]
+fn full_depth_root_quiets(move_ordering: MoveOrderingProfile, eval_mode: EvalMode) -> bool {
+    eval_mode.is_reckless_nnue()
+        || move_ordering == MoveOrderingProfile::StockLike
+        || eval_mode.is_lc0_nnue()
+        || eval_mode.is_viridithas_nnue()
+}
+
 #[inline(always)]
 fn budgeted_check_extension(
     depth: i32,
@@ -1122,14 +1142,19 @@ impl SearchEngine {
         &self.syzygy
     }
 
-    /// Positive contempt makes the side to move prefer playing on over a draw.
+    /// Store requested UCI contempt. NNUE adapters still search with 0.
     pub fn set_contempt(&mut self, contempt: i32) {
         self.contempt = contempt.clamp(-100, 100);
     }
 
-    /// Current root-only contempt in centipawns.
-    pub fn contempt(&self) -> i32 {
+    /// Requested UCI contempt before the HCE/NNUE gate.
+    pub fn requested_contempt(&self) -> i32 {
         self.contempt
+    }
+
+    /// Contempt actually used in search: HCE only; 0 for every NNUE adapter.
+    pub fn contempt(&self) -> i32 {
+        self.eval_mode().effective_contempt(self.contempt)
     }
 
     /// Set the search parameters (e.g. when switching NNUE networks).
@@ -1278,7 +1303,7 @@ impl SearchEngine {
             let start = start_time;
             let search_stack = self.search_stack.clone();
             let use_nnue_clone = self.use_nnue;
-            let contempt = self.contempt;
+            let contempt = self.contempt();
             let move_ordering = search_stack.policies.move_ordering;
             let nnue_network = Arc::clone(&self.nnue_network);
             let syzygy = Arc::clone(&self.syzygy);
@@ -1416,7 +1441,10 @@ impl SearchEngine {
             rfp_policy: &self.search_stack.policies.rfp,
             move_ordering: self.search_stack.policies.move_ordering,
             eval_mode: self.search_stack.eval_mode(),
-            contempt: self.contempt,
+            contempt: self
+                .search_stack
+                .eval_mode()
+                .effective_contempt(self.contempt),
             syzygy: &self.syzygy,
             deadline_ms: &self.deadline_ms,
         };
@@ -2062,11 +2090,10 @@ fn search_ab(
     }
 
     let check_ext_budget = nominal_depth * 2;
-    // Reckless/native-v60 does not check-extend; doing so burns fixed-node depth.
-    let (extended_depth, total_extensions) = if move_ordering == MoveOrderingProfile::Reckless {
-        (depth, total_extensions)
-    } else {
+    let (extended_depth, total_extensions) = if extend_checks(move_ordering, eval_mode) {
         budgeted_check_extension(depth, total_extensions, check_ext_budget, in_check)
+    } else {
+        (depth, total_extensions)
     };
     depth = extended_depth;
 
@@ -2755,7 +2782,7 @@ fn search_ab(
             // StockLike: all root quiets. Reckless keeps LMR at root and relies
             // on the pawn near-miss re-search below (stable for BK#8/#23).
             let root_quiet_no_lmr = is_root
-                && move_ordering == MoveOrderingProfile::StockLike
+                && full_depth_root_quiets(move_ordering, eval_mode)
                 && !mv.is_capture()
                 && !mv.is_promotion();
             if !root_quiet_no_lmr
@@ -2841,12 +2868,16 @@ fn search_ab(
                 && !mv.is_capture()
                 && !mv.is_promotion()
                 && s <= alpha
-                && match move_ordering {
-                    MoveOrderingProfile::Reckless => {
-                        moved_piece == Piece::Pawn.index()
-                            && s > alpha - RECKLESS_ROOT_PAWN_NEAR_MISS
+                && if eval_mode.is_reckless_nnue() {
+                    s > alpha - STOCK_ROOT_QUIET_NEAR_MISS
+                } else {
+                    match move_ordering {
+                        MoveOrderingProfile::Reckless => {
+                            moved_piece == Piece::Pawn.index()
+                                && s > alpha - RECKLESS_ROOT_PAWN_NEAR_MISS
+                        }
+                        MoveOrderingProfile::StockLike => s > alpha - STOCK_ROOT_QUIET_NEAR_MISS,
                     }
-                    MoveOrderingProfile::StockLike => s > alpha - STOCK_ROOT_QUIET_NEAR_MISS,
                 };
             if (s > alpha && (is_pv || reduction > 0)) || root_near_miss {
                 let mut research_depth = effective_depth;
@@ -3992,18 +4023,51 @@ mod tests {
     #[test]
     fn reckless_skips_check_extensions_to_preserve_fixed_node_depth() {
         assert_eq!(budgeted_check_extension(8, 0, 16, true), (9, 1));
-        // Reckless path bypasses budgeted_check_extension entirely; document the StockLike
-        // helper still extends so regressions are visible if call sites change.
         assert_eq!(budgeted_check_extension(8, 0, 16, false), (8, 0));
+        assert!(!extend_checks(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Reckless)
+        ));
+        assert!(!extend_checks(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Stockfish)
+        ));
+        assert!(full_depth_root_quiets(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Reckless)
+        ));
+        assert!(extend_checks(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Lc0)
+        ));
+        assert!(full_depth_root_quiets(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Lc0)
+        ));
+        assert!(extend_checks(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Viridithas)
+        ));
+        assert!(full_depth_root_quiets(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Viridithas)
+        ));
+        assert!(!full_depth_root_quiets(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Akimbo)
+        ));
     }
 
     #[test]
     fn reckless_root_pawn_near_miss_margin_is_tight() {
-        // Shallow NonPV scores after d4d5 sit well below a ~400cp king-move
-        // alpha; only probes within 120cp earn a full-window root re-search.
-        const MARGIN: i32 = 120;
-        const _: () = assert!(316 > 400 - MARGIN);
-        const _: () = assert!(178 <= 400 - MARGIN);
+        // Reckless NNUE now uses the StockLike 160cp quiet window so BK
+        // breakthroughs (Ne5 / Re4 / f2f4) get a PV re-search. Other adapters
+        // that reuse Reckless move ordering keep the pawn-only 120cp gate.
+        const RECKLESS_NNUE_QUIET: i32 = 160;
+        const OTHER_RECKLESS_ORDERING_PAWN: i32 = 120;
+        const _: () = assert!(316 > 400 - RECKLESS_NNUE_QUIET);
+        const _: () = assert!(250 > 400 - RECKLESS_NNUE_QUIET);
+        const _: () = assert!(178 <= 400 - OTHER_RECKLESS_ORDERING_PAWN);
     }
 
     #[test]
@@ -4040,7 +4104,7 @@ mod tests {
             rfp_policy: &TEST_RFP_POLICY,
             move_ordering: MoveOrderingProfile::StockLike,
             eval_mode: EvalMode::Nnue(NnueSearchProfile::Stockfish),
-            contempt: crate::conversion::DEFAULT_CONTEMPT,
+            contempt: 0,
             syzygy: &TEST_SYZYGY,
             deadline_ms: &TEST_DEADLINE,
         }
@@ -4703,13 +4767,23 @@ mod tests {
     }
 
     #[test]
-    fn contempt_accessor_clamps_and_persists() {
+    fn contempt_is_zero_on_nnue_and_active_only_for_hce() {
         let mut engine = SearchEngine::new(1, 1);
-        assert_eq!(engine.contempt(), crate::conversion::DEFAULT_CONTEMPT);
+        assert!(matches!(engine.eval_mode(), EvalMode::Nnue(_)));
+        assert_eq!(engine.contempt(), 0);
         engine.set_contempt(200);
+        assert_eq!(engine.requested_contempt(), 100);
+        assert_eq!(engine.contempt(), 0);
+
+        assert!(engine.install_adapter("mujrim-hce"));
         assert_eq!(engine.contempt(), 100);
         engine.set_contempt(-200);
+        assert_eq!(engine.requested_contempt(), -100);
         assert_eq!(engine.contempt(), -100);
+
+        assert!(engine.install_adapter("akimbo"));
+        assert_eq!(engine.requested_contempt(), -100);
+        assert_eq!(engine.contempt(), 0);
     }
 
     #[test]
@@ -4911,7 +4985,7 @@ mod tests {
             MoveOrderingProfile::StockLike
         );
         assert!(
-            !engine
+            engine
                 .search_stack
                 .policies
                 .futility

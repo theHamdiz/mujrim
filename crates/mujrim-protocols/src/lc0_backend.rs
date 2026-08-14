@@ -120,16 +120,30 @@ fn with_exe(path: PathBuf) -> PathBuf {
 }
 
 fn weights_args(binary: &Path) -> Vec<String> {
-    let Some(dir) = binary.parent() else {
-        return Vec::new();
-    };
-    for name in ["weights.pb.gz", "192x15-2024.pb.gz", "lc0.pb.gz"] {
-        let weights = dir.join(name);
-        if weights.is_file() {
-            return vec![
-                "--weights".to_string(),
-                weights.to_string_lossy().into_owned(),
-            ];
+    let mut dirs = Vec::new();
+    if let Some(dir) = binary.parent() {
+        dirs.push(dir.to_path_buf());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join("nnue"));
+        dirs.push(cwd.join("dist").join("nnue"));
+    }
+    const NAMES: &[&str] = &[
+        "weights.pb.gz",
+        "lc0_default.pb.gz",
+        "lc0_t1_512.pb.gz",
+        "192x15-2024.pb.gz",
+        "lc0.pb.gz",
+    ];
+    for dir in dirs {
+        for name in NAMES {
+            let weights = dir.join(name);
+            if weights.is_file() {
+                return vec![
+                    "--weights".to_string(),
+                    weights.to_string_lossy().into_owned(),
+                ];
+            }
         }
     }
     Vec::new()
@@ -214,6 +228,27 @@ mod tests {
             parse_advertised_backends(help),
             vec!["eigen", "cuda", "onnx-dml", "dnnl"]
         );
+    }
+
+    #[test]
+    fn launch_picks_up_sibling_weights() {
+        let dir = std::env::temp_dir().join(format!("mujrim-lc0-weights-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let weights = dir.join("weights.pb.gz");
+        let binary = dir.join("lc0");
+        std::fs::write(&weights, b"net").unwrap();
+        std::fs::write(&binary, b"").unwrap();
+        let launch = plan_launch(&binary, Lc0DeviceKind::Cpu);
+        assert_eq!(
+            launch.extra_args,
+            vec![
+                "--weights".to_string(),
+                weights.to_string_lossy().into_owned()
+            ]
+        );
+        let _ = std::fs::remove_file(&weights);
+        let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

@@ -108,7 +108,10 @@ pub struct NnueNetwork {
 /// ak_default       Akimbo      ak_default.bin        net.bin
 /// threat_v60       Threat      threat_v60.nnue       v60-7f587dfb.nnue
 /// sf_current       Stockfish   sf_current.nnue       nn-ab28990d4ea3.nnue
-/// viri_default     Viridithas  viri_default.nnue.zst viridithas.nnue.zst
+/// viri_default     Viridithas  viri_default.nnue.zst sandhi-s2-b200.nnue.zst
+/// viri_velarised   Viridithas  viri_velarised.nnue.zst velarised-2-b800.nnue.zst
+/// plenty_default   PlentyChess plenty_default.bin    0179r.bin
+/// lc0_default      Lc0         lc0_default.pb.gz     t1-256x10-distilled-swa-2432500.pb.gz
 /// alex_default     Alexandria  alex_default.net      nn.net
 /// ```
 pub const NETWORKS: &[NnueNetwork] = &[
@@ -151,19 +154,29 @@ pub const NETWORKS: &[NnueNetwork] = &[
         elo: 3642,
     },
     // ── Viridithas ──────────────────────────────────────────────────
-    // NOTE: Viridithas distributes nets as .nnue.zst (zstd-compressed).
-    // The asset filename changes per release (e.g. velarised-2-b800),
-    // so the URL must be updated when a new net ships. The manifest
-    // will detect the change via url/upstream_name mismatch.
+    // Upstream latest is viridithas-networks v109 `sandhi`
+    // (`sandhi-s2-b200.nnue.zst`, 2026-06-26).
     NnueNetwork {
         id: "viri_default",
-        name: "Viridithas v104.1 (velarised-2)",
+        name: "Viridithas v109 sandhi",
         engine: "Viridithas",
-        architecture: "16×768 + threat features → H×2 (velarised-2; piece-feature layout when size matches)",
-        url: "https://github.com/cosmobobak/viridithas-networks/releases/download/v104.1/velarised-2-b800.nnue.zst",
+        architecture: "(704×16hm + (59808+4560)hm → 1024)×2 → (32 → 32×2 → 1)×8",
+        url: "https://github.com/cosmobobak/viridithas-networks/releases/download/v109/sandhi-s2-b200.nnue.zst",
         filename: "viri_default.nnue.zst",
+        upstream_name: "sandhi-s2-b200.nnue.zst",
+        approx_size: 52_442_657,
+        search_preset: "viridithas",
+        elo: 3550,
+    },
+    NnueNetwork {
+        id: "viri_velarised",
+        name: "Viridithas v104.1 velarised-2",
+        engine: "Viridithas",
+        architecture: "704×16hm → 2560 pairwise-CReLU → 16 HardSwish6 → 32 SwiGLU → 1 ×8 (velarised-2)",
+        url: "https://github.com/cosmobobak/viridithas-networks/releases/download/v104.1/velarised-2-b800.nnue.zst",
+        filename: "viri_velarised.nnue.zst",
         upstream_name: "velarised-2-b800.nnue.zst",
-        approx_size: 3_500_000,
+        approx_size: 29_564_785,
         search_preset: "viridithas",
         elo: 3350,
     },
@@ -178,6 +191,42 @@ pub const NETWORKS: &[NnueNetwork] = &[
         approx_size: 30_905_888,
         search_preset: "obsidian",
         elo: 3600,
+    },
+    NnueNetwork {
+        id: "plenty_default",
+        name: "PlentyChess 0179r",
+        engine: "PlentyChess",
+        architecture: "768×12 + 4560 pawn-pair + 59808 threat → 1024 → 16 → 32 → 1 ×8",
+        url: "https://github.com/Yoshie2000/PlentyNetworks/releases/download/0179r/0179r.bin",
+        filename: "plenty_default.bin",
+        upstream_name: "0179r.bin",
+        approx_size: 76_368_704,
+        search_preset: "plentychess",
+        elo: 3600,
+    },
+    NnueNetwork {
+        id: "lc0_default",
+        name: "Lc0 T1-256x10 distilled SWA",
+        engine: "Lc0",
+        architecture: "T1-256x10 transformer (official lc0 .pb.gz, not in-process NNUE)",
+        url: "https://storage.lczero.org/files/networks-contrib/t1-256x10-distilled-swa-2432500.pb.gz",
+        filename: "lc0_default.pb.gz",
+        upstream_name: "t1-256x10-distilled-swa-2432500.pb.gz",
+        approx_size: 37_000_000,
+        search_preset: "lc0",
+        elo: 3600,
+    },
+    NnueNetwork {
+        id: "lc0_t1_512",
+        name: "Lc0 T1-512x15x8h distilled SWA",
+        engine: "Lc0",
+        architecture: "T1-512x15x8h transformer (official lc0 .pb.gz, not in-process NNUE)",
+        url: "https://storage.lczero.org/files/networks-contrib/t1-512x15x8h-distilled-swa-3395000.pb.gz",
+        filename: "lc0_t1_512.pb.gz",
+        upstream_name: "t1-512x15x8h-distilled-swa-3395000.pb.gz",
+        approx_size: 149_758_071,
+        search_preset: "lc0",
+        elo: 3640,
     },
     // ── Alexandria ──────────────────────────────────────────────────
     // Nets are published at PGG106/Alexandria-networks/releases.
@@ -650,6 +699,9 @@ mod tests {
         assert!(find_by_id("ak_default").is_some());
         assert!(find_by_id("viri_default").is_some());
         assert!(find_by_id("obs_default").is_some());
+        assert!(find_by_id("plenty_default").is_some());
+        assert!(find_by_id("lc0_default").is_some());
+        assert!(find_by_id("lc0_t1_512").is_some());
         assert!(find_by_id("alex_default").is_some());
         assert!(find_by_id("nonexistent").is_none());
     }
@@ -658,11 +710,21 @@ mod tests {
     fn viridithas_and_obsidian_catalog_use_matching_search_presets() {
         let viri = find_by_id("viri_default").expect("viri_default");
         assert_eq!(viri.search_preset, "viridithas");
-        assert!(viri.architecture.contains("768"));
+        assert_eq!(viri.upstream_name, "sandhi-s2-b200.nnue.zst");
+        assert!(viri.architecture.contains("59808"));
+        assert!(viri.architecture.contains("4560"));
+        let velarised = find_by_id("viri_velarised").expect("viri_velarised");
+        assert_eq!(velarised.upstream_name, "velarised-2-b800.nnue.zst");
         let obs = find_by_id("obs_default").expect("obs_default");
         assert_eq!(obs.search_preset, "obsidian");
         assert_eq!(obs.upstream_name, "net89perm.bin");
         assert_eq!(obs.approx_size, 30_905_888);
+        let plenty = find_by_id("plenty_default").expect("plenty_default");
+        assert_eq!(plenty.search_preset, "plentychess");
+        assert_eq!(plenty.upstream_name, "0179r.bin");
+        let lc0 = find_by_id("lc0_default").expect("lc0_default");
+        assert_eq!(lc0.search_preset, "lc0");
+        assert!(lc0.filename.ends_with(".pb.gz"));
     }
 
     #[test]

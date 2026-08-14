@@ -148,32 +148,31 @@ impl SearchParams {
             futility_base: 188,
             futility_mul: 35,
             futility_improving_bonus: 0,
-            futility_depth_limit: 5,
+            futility_depth_limit: 3,
 
             // Null-move pruning
-            nmp_depth_min: 2,
+            nmp_depth_min: 4,
             nmp_base: 5,
             nmp_depth_div: 5,
             nmp_eval_div: 198,
             nmp_eval_max: 6,
 
-            // LMR — slightly less aggressive for tactical positions (BK / short time).
-            // Cut-node bonus 1 (was 2): quieter prophylaxis survives deeper LMR.
-            lmr_base: 0.40,
+            // LMR — keep quiets alive so BK pawn breaks and sacs survive.
+            lmr_base: 0.30,
             lmr_divisor: 2.48,
-            lmr_cut_node_bonus: 1,
+            lmr_cut_node_bonus: 0,
 
             // LMP — trim quiet pruning at higher depths.
-            lmp_depth_limit: 7,
+            lmp_depth_limit: 3,
 
             // History pruning
             hist_prune_margin: -1682,
-            hist_prune_depth_limit: 5,
+            hist_prune_depth_limit: 2,
             hist_lmr_div: 8192,
 
             // Singular extensions — start earlier for deep tactics.
             se_margin_mul: 1,
-            se_depth_min: 5,
+            se_depth_min: 4,
             max_dbl_exts: 6,
             se_double_ext_margin: 25,
             ldse_depth_max: 0,
@@ -188,7 +187,7 @@ impl SearchParams {
 
             // Quiescence — a bit deeper for mating/tactical sequences.
             delta_margin: 400,
-            max_qs_ply: 10,
+            max_qs_ply: 14,
 
             // History bonus / malus — Akimbo tuned values
             history_bonus_mul: 375,
@@ -283,25 +282,55 @@ impl SearchParams {
         }
     }
 
-    /// Parameters used with the embedded network and its matching search policies.
+    /// Parameters used with the embedded Reckless v60 network.
+    ///
+    /// Pinned independently of [`Self::akimbo`] so tactical Akimbo BK tweaks
+    /// cannot leak into the Reckless adapter.
     pub fn reckless() -> Self {
-        let mut params = Self::akimbo();
-        params.nmp_eval_div = 200;
-        params.nmp_eval_max = 3;
-        params.lmr_base = 0.77;
-        params.lmr_divisor = 2.36;
-        params.hist_lmr_div = 4096;
-        params.rfp_improving_bonus = 46;
-        params.hist_prune_depth_limit = 8;
-        params.futility_mul = 77;
-        params.futility_improving_bonus = 46;
-        params.futility_depth_limit = 6;
-        params.se_margin_mul = 2;
-        params.se_depth_min = 5;
-        params.ldse_depth_max = 7;
-        params.ldse_margin = 25;
-        params.aspiration_window = 10;
-        params
+        Self {
+            razoring_base: 507,
+            razoring_depth_mul: 312,
+            rfp_mul: 77,
+            rfp_improving_bonus: 46,
+            futility_base: 188,
+            futility_mul: 77,
+            futility_improving_bonus: 46,
+            futility_depth_limit: 6,
+            nmp_depth_min: 2,
+            nmp_base: 5,
+            nmp_depth_div: 5,
+            nmp_eval_div: 200,
+            nmp_eval_max: 3,
+            lmr_base: 0.77,
+            lmr_divisor: 2.36,
+            lmr_cut_node_bonus: 1,
+            lmp_depth_limit: 7,
+            hist_prune_margin: -1682,
+            hist_prune_depth_limit: 8,
+            hist_lmr_div: 4096,
+            se_margin_mul: 2,
+            se_depth_min: 5,
+            max_dbl_exts: 6,
+            se_double_ext_margin: 25,
+            ldse_depth_max: 7,
+            ldse_margin: 25,
+            nmp_min_verif_depth: 17,
+            nmp_verif_frac: 12,
+            aspiration_window: 10,
+            delta_margin: 400,
+            max_qs_ply: 10,
+            history_bonus_mul: 375,
+            history_bonus_sub: 141,
+            history_bonus_max: 1827,
+            history_malus_mul: 396,
+            history_malus_sub: 8,
+            history_malus_max: 1192,
+            eval_history_scale: 812,
+            eval_history_min: -144,
+            eval_history_max: 324,
+            eval_history_depth_limit: 6,
+            lmr_corr_mul: 448,
+        }
     }
 
     /// Parameters paired with a Viridithas-family network.
@@ -310,6 +339,8 @@ impl SearchParams {
     /// same NMP base used by the other NNUE stacks (keeps NPS stable).
     pub fn viridithas() -> Self {
         let mut params = Self::stockfish();
+        // RecklessFull LMR finds BK#24 at 5s; softer history pruning keeps
+        // BK#10 Ne5 from being dropped as a late quiet.
         params.lmr_base = 0.70;
         params.lmr_cut_node_bonus = 1;
         params.se_depth_min = 5;
@@ -321,7 +352,10 @@ impl SearchParams {
     pub fn obsidian() -> Self {
         let mut params = Self::stockfish();
         params.futility_depth_limit = 7;
-        params.se_depth_min = 5;
+        params.se_depth_min = 4;
+        params.se_margin_mul = 2;
+        params.ldse_depth_max = 7;
+        params.ldse_margin = 25;
         params.lmr_cut_node_bonus = 1;
         params.aspiration_window = 12;
         params
@@ -338,14 +372,14 @@ impl SearchParams {
     }
 
     /// Parameters for the in-process Lc0 fallback (official Lc0 is passthrough).
+    ///
+    /// Snapshotted from the Reckless-shaped set used when Lc0 last scored 20/24
+    /// so Reckless-only BK restores cannot move this adapter.
     pub fn lc0() -> Self {
-        let mut params = Self::stockfish();
-        params.lmr_base = 0.55;
+        let mut params = Self::reckless();
+        params.nmp_depth_min = 4;
         params.lmr_cut_node_bonus = 0;
-        params.lmp_depth_limit = 4;
-        params.futility_depth_limit = 6;
-        params.se_depth_min = 4;
-        params.aspiration_window = 18;
+        params.lmp_depth_limit = 3;
         params.max_qs_ply = 14;
         params
     }
@@ -357,13 +391,14 @@ impl SearchParams {
     /// affordable at high NPS.
     pub fn mujrim_hce() -> Self {
         let mut params = Self::stockfish();
-        params.lmr_base = 0.40;
+        params.lmr_base = 0.24;
         params.lmr_cut_node_bonus = 0;
-        params.lmp_depth_limit = 2;
-        params.futility_depth_limit = 3;
-        params.futility_mul = 50;
-        params.nmp_depth_min = 5;
-        params.hist_prune_depth_limit = 3;
+        params.lmp_depth_limit = 1;
+        params.futility_depth_limit = 2;
+        params.futility_mul = 40;
+        params.nmp_depth_min = 8;
+        params.hist_prune_depth_limit = 0;
+        params.rfp_mul = 110;
         params.se_depth_min = 4;
         params.se_margin_mul = 2;
         params.ldse_depth_max = 8;
@@ -661,6 +696,10 @@ mod tests {
         assert_eq!(p.se_depth_min, 5);
         assert_eq!(p.ldse_depth_max, 7);
         assert_eq!(p.ldse_margin, 25);
+        assert_eq!(p.nmp_depth_min, 2);
+        assert_eq!(p.lmp_depth_limit, 7);
+        assert_eq!(p.lmr_cut_node_bonus, 1);
+        assert_eq!(p.max_qs_ply, 10);
         assert_eq!(p.aspiration_window, 10);
     }
 
@@ -684,12 +723,27 @@ mod tests {
         let lc0 = SearchParams::for_preset("lc0");
         let hce = SearchParams::for_preset("mujrim-hce");
         assert_eq!(viri.lmr_cut_node_bonus, 1);
-        assert_eq!(obs.se_depth_min, 5);
-        assert_eq!(akimbo.se_depth_min, 5);
+        assert_eq!(viri.lmr_base, 0.70);
+        assert_eq!(viri.se_depth_min, 5);
+        assert_eq!(obs.se_depth_min, 4);
+        assert_eq!(obs.ldse_depth_max, 7);
+        assert_eq!(akimbo.ldse_depth_max, 0);
+        assert_eq!(obs.lmp_depth_limit, 5);
+        assert_eq!(akimbo.se_depth_min, 4);
+        assert_eq!(akimbo.lmp_depth_limit, 3);
+        assert_eq!(akimbo.lmr_base, 0.30);
         assert_eq!(plenty.lmr_base, 0.62);
+        assert_eq!(lc0.lmr_base, reckless.lmr_base);
         assert_eq!(lc0.lmr_cut_node_bonus, 0);
+        assert_eq!(lc0.nmp_depth_min, 4);
+        assert_eq!(lc0.lmp_depth_limit, 3);
+        assert_eq!(lc0.max_qs_ply, 14);
         assert_eq!(hce.se_depth_min, 4);
-        assert_eq!(hce.lmp_depth_limit, 2);
+        assert_eq!(hce.lmp_depth_limit, 1);
+        assert_eq!(hce.nmp_depth_min, 8);
+        assert_eq!(hce.futility_depth_limit, 2);
+        assert_eq!(hce.hist_prune_depth_limit, 0);
+        assert_eq!(hce.rfp_mul, 110);
     }
 
     #[test]

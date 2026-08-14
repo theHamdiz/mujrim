@@ -2070,18 +2070,23 @@ mod tests {
     fn contempt_is_wired_into_the_search_engine() {
         let mut handler = UciHandler::new();
         assert_eq!(handler.contempt, search::DEFAULT_CONTEMPT);
-        assert_eq!(
-            handler.engine.as_ref().unwrap().contempt(),
-            search::DEFAULT_CONTEMPT
-        );
+        assert_eq!(handler.engine.as_ref().unwrap().contempt(), 0);
 
         handler.handle_setoption(&["name", "Contempt", "value", "48"]);
         assert_eq!(handler.contempt, 48);
+        assert_eq!(handler.engine.as_ref().unwrap().requested_contempt(), 48);
+        assert_eq!(handler.engine.as_ref().unwrap().contempt(), 0);
+
+        handler.handle_setoption(&["name", "EvalPreset", "value", "mujrim-hce"]);
         assert_eq!(handler.engine.as_ref().unwrap().contempt(), 48);
 
         handler.handle_setoption(&["name", "Contempt", "value", "-200"]);
         assert_eq!(handler.contempt, -100);
         assert_eq!(handler.engine.as_ref().unwrap().contempt(), -100);
+
+        handler.handle_setoption(&["name", "EvalPreset", "value", "akimbo"]);
+        assert_eq!(handler.engine.as_ref().unwrap().requested_contempt(), -100);
+        assert_eq!(handler.engine.as_ref().unwrap().contempt(), 0);
     }
 
     #[test]

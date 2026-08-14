@@ -508,9 +508,14 @@ pub trait FutilityPolicy {
 pub struct StockLikeFutilityPolicy;
 
 impl FutilityPolicy for StockLikeFutilityPolicy {
+    fn requires_direct_check(&self) -> bool {
+        true
+    }
+
     fn decision(&self, context: &FutilityContext) -> Option<FutilityDecision> {
         (!context.is_pv
             && !context.in_check
+            && !context.gives_direct_check
             && context.depth <= context.stock_depth_limit
             && context.is_quiet
             && context.move_count > 1
@@ -1070,6 +1075,37 @@ mod tests {
             policy
                 .decision(&LmpContext {
                     move_count: 22,
+                    ..context
+                })
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stocklike_futility_does_not_prune_direct_checks() {
+        let policy = StockLikeFutilityPolicy;
+        let context = FutilityContext {
+            depth: 2,
+            eval: 0,
+            alpha: 400,
+            history: 0,
+            improving: false,
+            is_root: false,
+            is_pv: false,
+            in_check: false,
+            is_quiet: true,
+            move_count: 3,
+            best_score: 0,
+            gives_direct_check: false,
+            stock_depth_limit: 8,
+            stock_margin: 80,
+        };
+        assert!(policy.requires_direct_check());
+        assert!(policy.decision(&context).is_some());
+        assert!(
+            policy
+                .decision(&FutilityContext {
+                    gives_direct_check: true,
                     ..context
                 })
                 .is_none()

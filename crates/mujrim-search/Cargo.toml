@@ -9,7 +9,7 @@ license = "MIT"
 [features]
 # Format loaders are defaulted for tests/tools; embedded-networks stays off so
 # dependents do not silently grow by ~150 MB via feature unification.
-default = ["book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "viridithas-nnue", "obsidian-nnue"]
+default = ["book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "viridithas-nnue", "obsidian-nnue", "plentychess-nnue"]
 book = []
 nnue = ["eval/nnue"]
 simd = ["eval/simd"]
@@ -18,6 +18,7 @@ stockfish-nnue = ["eval/stockfish-nnue"]
 reckless-nnue = ["eval/reckless-nnue"]
 viridithas-nnue = ["eval/viridithas-nnue"]
 obsidian-nnue = ["eval/obsidian-nnue"]
+plentychess-nnue = ["eval/plentychess-nnue"]
 embedded-networks = ["eval/embedded-networks"]
 syzygy = []
 

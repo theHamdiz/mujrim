@@ -1510,6 +1510,140 @@ fn threat_feature_index(
     Some(feature)
 }
 
+pub(crate) fn visit_threat_features(
+    board: &Board,
+    perspective: usize,
+    mut visit: impl FnMut(usize),
+) {
+    let king_square = board.king_square(color(perspective)).index();
+    let occupied = board.all_occupancy();
+    let pawn_targets = pieces_of(board, Piece::Knight) | pieces_of(board, Piece::Rook);
+    let minor_slider_targets = pieces_of(board, Piece::Pawn)
+        | pieces_of(board, Piece::Knight)
+        | pieces_of(board, Piece::Bishop)
+        | pieces_of(board, Piece::Rook);
+    let queen_targets = minor_slider_targets | pieces_of(board, Piece::Queen);
+
+    for attacker_color in 0..2 {
+        let mut pawns = board.pieces[attacker_color][Piece::Pawn.index()];
+        while pawns != 0 {
+            let from = pawns.trailing_zeros() as usize;
+            pawns &= pawns - 1;
+            let mut targets = pawn_attacks(attacker_color, from) & pawn_targets;
+            while targets != 0 {
+                let to = targets.trailing_zeros() as usize;
+                targets &= targets - 1;
+                visit_one_threat(
+                    board,
+                    perspective,
+                    king_square,
+                    Piece::Pawn.index(),
+                    attacker_color,
+                    from,
+                    to,
+                    &mut visit,
+                );
+            }
+        }
+
+        for attacker_piece in [Piece::Knight, Piece::Bishop, Piece::Rook, Piece::Queen] {
+            let targets_mask = if matches!(attacker_piece, Piece::Knight | Piece::Queen) {
+                queen_targets
+            } else {
+                minor_slider_targets
+            };
+            let mut attackers = board.pieces[attacker_color][attacker_piece.index()];
+            while attackers != 0 {
+                let from = attackers.trailing_zeros() as usize;
+                attackers &= attackers - 1;
+                let mut targets =
+                    piece_attacks(attacker_piece.index(), attacker_color, from, occupied)
+                        & targets_mask;
+                while targets != 0 {
+                    let to = targets.trailing_zeros() as usize;
+                    targets &= targets - 1;
+                    visit_one_threat(
+                        board,
+                        perspective,
+                        king_square,
+                        attacker_piece.index(),
+                        attacker_color,
+                        from,
+                        to,
+                        &mut visit,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_one_threat(
+    board: &Board,
+    perspective: usize,
+    king_square: usize,
+    attacker_piece: usize,
+    attacker_color: usize,
+    from: usize,
+    to: usize,
+    visit: &mut impl FnMut(usize),
+) {
+    let Some((attacked_piece, attacked_color)) = board.piece_on(types::Square::from_index(to))
+    else {
+        return;
+    };
+    if let Some(feature) = threat_feature_index(
+        attacker_piece,
+        attacker_color,
+        from,
+        attacked_piece.index(),
+        attacked_color.index(),
+        to,
+        king_square,
+        perspective,
+    ) {
+        visit(feature);
+    }
+}
+
+pub(crate) fn visit_pawn_pair_features(
+    board: &Board,
+    perspective: usize,
+    mut visit: impl FnMut(usize),
+) {
+    let king_square = board.king_square(color(perspective)).index();
+    let pawns = [
+        board.pieces[0][Piece::Pawn.index()],
+        board.pieces[1][Piece::Pawn.index()],
+    ];
+    for first_color in 0..2 {
+        let mut first_pawns = pawns[first_color];
+        while first_pawns != 0 {
+            let first = first_pawns.trailing_zeros() as usize;
+            first_pawns &= first_pawns - 1;
+            for (second_color, &second_pawns) in pawns.iter().enumerate().skip(first_color) {
+                let mut partners = second_pawns & pawn_pair_mask(first);
+                if second_color == first_color {
+                    partners &= !((1_u64 << (first + 1)) - 1);
+                }
+                while partners != 0 {
+                    let second = partners.trailing_zeros() as usize;
+                    partners &= partners - 1;
+                    visit(pawn_pair_feature_index(
+                        first_color,
+                        first,
+                        second_color,
+                        second,
+                        king_square,
+                        perspective,
+                    ));
+                }
+            }
+        }
+    }
+}
+
 struct ParameterReader<'a> {
     bytes: &'a [u8],
     offset: usize,

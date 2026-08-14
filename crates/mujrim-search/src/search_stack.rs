@@ -31,11 +31,37 @@ impl EvalMode {
         matches!(self, Self::Nnue(NnueSearchProfile::Reckless))
     }
 
+    /// In-process Lc0 uses the embedded Reckless net; keep the same
+    /// check-extension / root-quiet gates as Reckless.
+    pub const fn is_lc0_nnue(self) -> bool {
+        matches!(self, Self::Nnue(NnueSearchProfile::Lc0))
+    }
+
+    pub const fn is_viridithas_nnue(self) -> bool {
+        matches!(self, Self::Nnue(NnueSearchProfile::Viridithas))
+    }
+
     #[inline]
     pub const fn nnue_profile(self) -> Option<NnueSearchProfile> {
         match self {
             Self::Nnue(profile) => Some(profile),
             Self::MujrimHce => None,
+        }
+    }
+
+    /// Contempt is classical-only. NNUE adapters always search with 0.
+    #[inline]
+    pub const fn allows_contempt(self) -> bool {
+        matches!(self, Self::MujrimHce)
+    }
+
+    /// Requested UCI contempt, or 0 when the active evaluator is NNUE.
+    #[inline]
+    pub fn effective_contempt(self, requested: i32) -> i32 {
+        if self.allows_contempt() {
+            requested.clamp(-100, 100)
+        } else {
+            0
         }
     }
 }
@@ -317,7 +343,7 @@ impl SearchStackProfile for ViridithasSearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::stock_like()
+        SearchPolicies::akimbo()
     }
 }
 
@@ -333,7 +359,7 @@ impl SearchStackProfile for ObsidianSearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::stock_like()
+        SearchPolicies::akimbo()
     }
 }
 
@@ -365,7 +391,10 @@ impl SearchStackProfile for Lc0SearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::stock_like()
+        // Official Lc0 is passthrough. The in-process adapter evaluates the
+        // embedded Reckless net, so Reckless reductions/ordering are the
+        // matching search half.
+        SearchPolicies::reckless()
     }
 }
 
@@ -420,6 +449,27 @@ mod tests {
     }
 
     #[test]
+    fn contempt_is_reserved_for_hce_and_zero_on_nnue() {
+        assert!(EvalMode::MujrimHce.allows_contempt());
+        assert_eq!(EvalMode::MujrimHce.effective_contempt(48), 48);
+        assert_eq!(EvalMode::MujrimHce.effective_contempt(200), 100);
+        for profile in [
+            NnueSearchProfile::Stockfish,
+            NnueSearchProfile::Reckless,
+            NnueSearchProfile::Akimbo,
+            NnueSearchProfile::Viridithas,
+            NnueSearchProfile::Obsidian,
+            NnueSearchProfile::PlentyChess,
+            NnueSearchProfile::Lc0,
+        ] {
+            let mode = EvalMode::Nnue(profile);
+            assert!(!mode.allows_contempt(), "{}", profile.as_str());
+            assert_eq!(mode.effective_contempt(48), 0, "{}", profile.as_str());
+            assert_eq!(mode.effective_contempt(-90), 0, "{}", profile.as_str());
+        }
+    }
+
+    #[test]
     fn viridithas_and_obsidian_stacks_keep_matching_profiles() {
         let viri = SearchStack::for_network(NnueSearchProfile::Viridithas);
         assert_eq!(
@@ -427,11 +477,16 @@ mod tests {
             EvalMode::Nnue(NnueSearchProfile::Viridithas)
         );
         assert_eq!(viri.params.lmr_cut_node_bonus, 1);
+        assert_eq!(viri.params.lmr_base, 0.70);
+        assert_eq!(viri.params.se_depth_min, 5);
         assert_eq!(viri.policies.move_ordering, MoveOrderingProfile::StockLike);
+        assert!(matches!(viri.policies.lmr, LmrDispatch::RecklessFull));
+        assert!(viri.eval_mode().is_viridithas_nnue());
 
         let obs = SearchStack::for_preset_name("obsidian");
         assert_eq!(obs.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Obsidian));
-        assert_eq!(obs.params.se_depth_min, 5);
+        assert_eq!(obs.params.se_depth_min, 4);
+        assert!(matches!(obs.policies.lmr, LmrDispatch::RecklessFull));
 
         let plenty = SearchStack::for_preset_name("plentychess");
         assert_eq!(
@@ -440,11 +495,19 @@ mod tests {
         );
         let lc0 = SearchStack::for_network(NnueSearchProfile::Lc0);
         assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
-        assert_eq!(lc0.params.lmr_cut_node_bonus, 0);
+        assert!(lc0.eval_mode().is_lc0_nnue());
+        assert!(!lc0.eval_mode().is_reckless_nnue());
+        assert_eq!(
+            lc0.params.lmr_cut_node_bonus,
+            SearchParams::lc0().lmr_cut_node_bonus
+        );
+        assert_eq!(lc0.params.lmp_depth_limit, 3);
+        assert_eq!(lc0.policies.move_ordering, MoveOrderingProfile::Reckless);
+        assert!(matches!(lc0.policies.lmr, LmrDispatch::RecklessFull));
     }
 
     #[test]
-    fn reckless_stack_cannot_mix_in_stocklike_policies() {
+    fn reckless_stack_keeps_reckless_reductions_and_ordering() {
         let stack = SearchStack::for_network(NnueSearchProfile::Reckless);
         assert_eq!(
             stack.eval_mode(),
