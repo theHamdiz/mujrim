@@ -92,8 +92,15 @@ impl StandingRow {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThinkingLine {
+    pub multipv: u32,
+    pub score_cp: i32,
+    pub pv: Vec<String>,
+}
+
 /// In-progress game board for the live arena.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveGameBoard {
     pub game_key: String,
     pub match_index: usize,
@@ -108,6 +115,9 @@ pub struct LiveGameBoard {
     pub nodes: u64,
     pub white_clock_ms: Option<u64>,
     pub black_clock_ms: Option<u64>,
+    pub clock_synced_ms: Option<u64>,
+    pub pv: Vec<String>,
+    pub multipv_lines: Vec<ThinkingLine>,
 }
 
 /// Replayable tournament game for the hub board viewer.
@@ -254,7 +264,44 @@ impl LiveTournamentSnapshot {
             if black_clock_ms.is_some() {
                 game.black_clock_ms = black_clock_ms;
             }
+            if white_clock_ms.is_some() || black_clock_ms.is_some() {
+                game.clock_synced_ms = Some(now_unix_ms());
+            }
             let _ = ply;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_thinking(
+        &mut self,
+        game_key: &str,
+        score_cp: i32,
+        depth: i32,
+        nodes: u64,
+        pv: Vec<String>,
+        multipv_lines: Vec<ThinkingLine>,
+        white_clock_ms: Option<u64>,
+        black_clock_ms: Option<u64>,
+    ) {
+        if let Some(game) = self
+            .live_games
+            .iter_mut()
+            .find(|game| game.game_key == game_key)
+        {
+            game.score_cp = score_cp;
+            game.depth = depth;
+            game.nodes = nodes;
+            game.pv = pv;
+            game.multipv_lines = multipv_lines;
+            if white_clock_ms.is_some() {
+                game.white_clock_ms = white_clock_ms;
+            }
+            if black_clock_ms.is_some() {
+                game.black_clock_ms = black_clock_ms;
+            }
+            if white_clock_ms.is_some() || black_clock_ms.is_some() {
+                game.clock_synced_ms = Some(now_unix_ms());
+            }
         }
     }
 
@@ -358,6 +405,36 @@ impl LiveTournamentHandle {
     }
 }
 
+pub fn standings_from_played(engine_names: &[String], games: &[PlayedGame]) -> Vec<StandingRow> {
+    use mujrim_study::rating::published_reference_elo;
+    use mujrim_study::tournament::{Entrant, Pairing, TournamentResult, standings};
+    let entrants: Vec<Entrant> = engine_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| Entrant {
+            id: index.to_string(),
+            name: name.clone(),
+            seed_elo: published_reference_elo(name),
+        })
+        .collect();
+    let results: Vec<TournamentResult> = games
+        .iter()
+        .filter_map(|game| {
+            let white = engine_names.iter().position(|name| name == &game.white)?;
+            let black = engine_names.iter().position(|name| name == &game.black)?;
+            Some(TournamentResult {
+                pairing: Pairing {
+                    round: game.round,
+                    white,
+                    black,
+                },
+                white_score: game.white_score,
+            })
+        })
+        .collect();
+    standing_rows(engine_names, &standings(&entrants, &results))
+}
+
 pub fn standing_rows(engine_names: &[String], standings: &[Standing]) -> Vec<StandingRow> {
     standings
         .iter()
@@ -390,6 +467,13 @@ pub fn result_label(white_score: f64) -> &'static str {
     } else {
         "½-½"
     }
+}
+
+pub fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 pub fn format_clock_ms(ms: Option<u64>) -> String {
@@ -505,6 +589,7 @@ mod tests {
             nodes: 0,
             white_clock_ms: Some(180_000),
             black_clock_ms: Some(180_000),
+            ..LiveGameBoard::default()
         });
         snap.apply_ply(
             "g1",
@@ -523,6 +608,65 @@ mod tests {
         assert!(snap.live_games.is_empty());
         assert_eq!(snap.played_games.len(), 1);
         assert_eq!(snap.played_games[0].white_score, 1.0);
+    }
+
+    #[test]
+    fn parallel_game_keys_do_not_clobber_each_other() {
+        let mut snap = LiveTournamentSnapshot::default();
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "g-a".into(),
+            white: "A".into(),
+            black: "B".into(),
+            ..LiveGameBoard::default()
+        });
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "g-b".into(),
+            white: "C".into(),
+            black: "D".into(),
+            ..LiveGameBoard::default()
+        });
+        snap.apply_ply(
+            "g-a",
+            1,
+            "e2e4".into(),
+            20,
+            6,
+            100,
+            vec!["e2e4".into()],
+            Some(1000),
+            None,
+        );
+        snap.apply_thinking(
+            "g-b",
+            -15,
+            7,
+            200,
+            vec!["d7d5".into()],
+            vec![ThinkingLine {
+                multipv: 1,
+                score_cp: -15,
+                pv: vec!["d7d5".into()],
+            }],
+            None,
+            Some(2000),
+        );
+        let a = snap
+            .live_games
+            .iter()
+            .find(|game| game.game_key == "g-a")
+            .expect("a");
+        let b = snap
+            .live_games
+            .iter()
+            .find(|game| game.game_key == "g-b")
+            .expect("b");
+        assert_eq!(a.last_uci, "e2e4");
+        assert_eq!(a.score_cp, 20);
+        assert!(b.last_uci.is_empty());
+        assert_eq!(b.score_cp, -15);
+        assert_eq!(b.pv, vec!["d7d5".to_owned()]);
+        assert_eq!(b.black_clock_ms, Some(2000));
+        assert_eq!(a.black_clock_ms, None);
     }
 
     #[test]

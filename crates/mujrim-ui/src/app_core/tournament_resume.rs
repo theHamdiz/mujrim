@@ -177,6 +177,7 @@ mod tests {
             nodes: 100,
             white_clock_ms: Some(180_000),
             black_clock_ms: Some(180_000),
+            ..LiveGameBoard::default()
         });
         let checkpoint = ActiveTournamentCheckpoint::from_live("t-1".into(), &setup, &snap);
         assert_eq!(checkpoint.white, "Alpha");

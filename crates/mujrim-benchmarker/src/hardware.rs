@@ -37,6 +37,11 @@ impl HardwareInfo {
         self.cpu_cores.saturating_sub(2).max(1)
     }
 
+    /// Simultaneous games that leave two cores for the UI and use two engine threads each.
+    pub fn safe_simultaneous_games(&self) -> usize {
+        safe_simultaneous_games(self.cpu_cores)
+    }
+
     /// Format as display lines for the benchmark header.
     pub fn display_lines(&self) -> Vec<String> {
         let simd_str = if self.simd_features.is_empty() {
@@ -57,6 +62,10 @@ impl HardwareInfo {
             format!("    NPU:        {}", self.npu),
         ]
     }
+}
+
+pub fn safe_simultaneous_games(cpu_cores: usize) -> usize {
+    (cpu_cores.saturating_sub(2) / 2).max(1)
 }
 
 /// Detect SIMD features usable by this process.
@@ -195,6 +204,10 @@ mod tests {
         assert_eq!(hw.bench_threads(), 2);
         hw.cpu_cores = 1;
         assert_eq!(hw.bench_threads(), 1);
+        assert_eq!(safe_simultaneous_games(16), 7);
+        assert_eq!(safe_simultaneous_games(8), 3);
+        assert_eq!(safe_simultaneous_games(4), 1);
+        assert_eq!(safe_simultaneous_games(2), 1);
     }
 
     #[test]

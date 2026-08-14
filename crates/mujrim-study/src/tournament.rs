@@ -273,6 +273,12 @@ pub fn standings(entrants: &[Entrant], results: &[TournamentResult]) -> Vec<Stan
             .then_with(|| right.wins.cmp(&left.wins))
             .then_with(|| left.entrant.cmp(&right.entrant))
     });
+    let mut ordered: Vec<Option<crate::rating::EloEstimate>> =
+        table.iter().map(|row| row.performance).collect();
+    crate::rating::apply_isotonic_ratings(&mut ordered);
+    for (row, estimate) in table.iter_mut().zip(ordered) {
+        row.performance = estimate;
+    }
     table
 }
 
@@ -451,5 +457,35 @@ mod tests {
         assert!((stockfish.elo - crate::rating::STOCKFISH_REFERENCE_ELO).abs() < 80.0);
         assert!(club.elo < 3_000.0);
         assert!(table[0].points > table[1].points);
+        assert!(stockfish.elo >= club.elo);
+    }
+
+    #[test]
+    fn standings_leader_elo_is_not_below_lower_rows() {
+        let entrants = vec![
+            Entrant {
+                id: "club".to_owned(),
+                name: "ClubEngine".to_owned(),
+                seed_elo: Some(2_000.0),
+            },
+            Entrant {
+                id: "sf".to_owned(),
+                name: "Stockfish 17".to_owned(),
+                seed_elo: Some(3_400.0),
+            },
+        ];
+        let results = vec![TournamentResult {
+            pairing: Pairing {
+                round: 1,
+                white: 0,
+                black: 1,
+            },
+            white_score: 1.0,
+        }];
+        let table = standings(&entrants, &results);
+        assert_eq!(table[0].entrant, 0);
+        let leader = table[0].performance.expect("leader").elo;
+        let second = table[1].performance.expect("second").elo;
+        assert!(leader >= second, "{leader} vs {second}");
     }
 }

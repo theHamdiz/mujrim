@@ -73,7 +73,10 @@ fn face(state: AppState, white: bool) -> ClockFace {
     let played = selected.and_then(|id| snap.game(id).cloned());
     let live = selected
         .is_none()
-        .then(|| layout::focused_live_game(&snap.live_games).cloned())
+        .then(|| {
+            layout::select_live_game(&snap.live_games, state.focused_live_key.get().as_deref())
+                .cloned()
+        })
         .flatten();
     let fallback = Some(
         state
@@ -88,8 +91,14 @@ fn face(state: AppState, white: bool) -> ClockFace {
         .game
         .get()
         .is_none_or(|game| game.board.side_to_move == Side::White);
-    let (white_face, black_face) =
-        layout::live_clock_faces(live.as_ref(), played.as_ref(), fallback, white_to_move);
+    let (white_face, black_face) = layout::live_clock_faces_at(
+        live.as_ref(),
+        played.as_ref(),
+        fallback,
+        white_to_move,
+        Some(state.clock_now_ms.get()),
+        snap.paused,
+    );
     if white { white_face } else { black_face }
 }
 
@@ -114,6 +123,7 @@ mod tests {
             nodes: 0,
             white_clock_ms: Some(4_100),
             black_clock_ms: Some(180_000),
+            ..LiveGameBoard::default()
         };
         let (white, black) = layout::live_clock_faces(Some(&live), None, None, true);
         assert_eq!(white.display, "0:04.1");

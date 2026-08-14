@@ -104,8 +104,34 @@ pub enum Screen {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionsTab {
-    Settings,
+    Display,
+    Motion,
+    Arrows,
+    Audio,
+    Analysis,
     Tools,
+}
+
+impl OptionsTab {
+    pub const ALL: [Self; 6] = [
+        Self::Display,
+        Self::Motion,
+        Self::Arrows,
+        Self::Audio,
+        Self::Analysis,
+        Self::Tools,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Display => "Display",
+            Self::Motion => "Motion",
+            Self::Arrows => "Arrows",
+            Self::Audio => "Audio",
+            Self::Analysis => "Analysis",
+            Self::Tools => "Tools",
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -138,6 +164,8 @@ pub struct AppSettings {
     pub last_move_arrow: bool,
     pub ponder_arrow: bool,
     pub show_threats: bool,
+    pub dock_height_px: f64,
+    pub eval_bar_engine: String,
 }
 
 impl Default for AppSettings {
@@ -170,7 +198,23 @@ impl Default for AppSettings {
             last_move_arrow: true,
             ponder_arrow: true,
             show_threats: true,
+            dock_height_px: super::layout::DOCK_OPEN_PX,
+            eval_bar_engine: EVAL_BAR_DEFAULT_ENGINE.to_owned(),
         }
+    }
+}
+
+pub const EVAL_BAR_DEFAULT_ENGINE: &str = "mujrim-v60";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalBarEngineChoice {
+    pub id: String,
+    pub label: String,
+}
+
+impl std::fmt::Display for EvalBarEngineChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
     }
 }
 
@@ -298,6 +342,11 @@ mod tests {
             (settings.sidebar_width_px - crate::app_core::layout::SIDEBAR_IDEAL_PX).abs()
                 < f64::EPSILON
         );
+        assert_eq!(settings.eval_bar_engine, EVAL_BAR_DEFAULT_ENGINE);
+        assert!(
+            (settings.dock_height_px - crate::app_core::layout::DOCK_OPEN_PX).abs() < f64::EPSILON
+        );
+        assert_eq!(OptionsTab::ALL.len(), 6);
     }
 
     #[test]

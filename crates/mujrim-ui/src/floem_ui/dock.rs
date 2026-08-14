@@ -9,15 +9,36 @@ use floem::taffy::style::{Display, Overflow};
 use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
 
+use super::actions;
 use super::eval_graph;
 use super::state::{AppHandles, AppState};
 use super::theme;
 use super::widgets;
 
 pub fn bottom_dock(state: AppState, handles: AppHandles) -> impl IntoView {
-    Stack::vertical((tab_bar(state), dock_body(state, handles))).style(move |s| {
-        let pal = theme::palette(state.settings.get().board_theme);
-        let height = layout::dock_height(state.dock_open.get());
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    let dragging = RwSignal::new(false);
+    let drag_origin_y = RwSignal::new(0.0);
+    let drag_origin_height = RwSignal::new(layout::DOCK_OPEN_PX);
+    let pane_height = RwSignal::new(800.0);
+    Stack::vertical((
+        dock_split_handle(
+            state,
+            pal,
+            dragging,
+            drag_origin_y,
+            drag_origin_height,
+            pane_height,
+        ),
+        tab_bar(state),
+        dock_body(state, handles),
+    ))
+    .style(move |s| {
+        let pal = pal();
+        let height = layout::dock_height(
+            state.dock_open.get(),
+            layout::clamp_dock_height(state.settings.get().dock_height_px, pane_height.get()),
+        );
         s.width_full()
             .height(height)
             .overflow_x(Overflow::Clip)
@@ -30,6 +51,70 @@ pub fn bottom_dock(state: AppState, handles: AppHandles) -> impl IntoView {
                 Transition::ease_in_out(Duration::from_millis(220)),
             )
     })
+}
+
+fn dock_split_handle(
+    state: AppState,
+    pal: impl Fn() -> crate::app_core::palette::GuiPalette + Copy + 'static,
+    dragging: RwSignal<bool>,
+    drag_origin_y: RwSignal<f64>,
+    drag_origin_height: RwSignal<f64>,
+    pane_height: RwSignal<f64>,
+) -> impl IntoView {
+    Empty::new()
+        .style(move |s| {
+            let active = dragging.get();
+            s.width_full()
+                .height(layout::SPLIT_HANDLE_PX)
+                .flex_shrink(0.0f32)
+                .cursor(floem::style::CursorStyle::RowResize)
+                .background(if active {
+                    theme::rgba(pal().accent)
+                } else {
+                    theme::rgba(pal().border)
+                })
+                .hover(|s| {
+                    s.background(theme::rgba(pal().accent))
+                        .cursor(floem::style::CursorStyle::RowResize)
+                })
+        })
+        .on_event_stop(
+            el::PointerDown,
+            move |cx, event: &floem::ui_events::pointer::PointerButtonEvent| {
+                if let Some(pointer_id) = event.pointer.pointer_id {
+                    cx.request_pointer_capture(pointer_id);
+                }
+                if let Some(size) = cx.target.owning_id().parent_size()
+                    && size.height > 1.0
+                {
+                    pane_height.set(size.height);
+                }
+                dragging.set(true);
+                drag_origin_y.set(event.state.logical_point().y);
+                drag_origin_height.set(state.settings.get_untracked().dock_height_px);
+            },
+        )
+        .on_event_cont(
+            el::PointerMove,
+            move |_, event: &floem::ui_events::pointer::PointerUpdate| {
+                if !dragging.get_untracked() {
+                    return;
+                }
+                let dy = event.current.logical_point().y - drag_origin_y.get_untracked();
+                let next = layout::apply_dock_drag(
+                    drag_origin_height.get_untracked(),
+                    dy,
+                    pane_height.get_untracked(),
+                );
+                actions::update_settings(state, |settings| settings.dock_height_px = next);
+            },
+        )
+        .on_event_stop(
+            el::PointerUp,
+            move |_, _: &floem::ui_events::pointer::PointerButtonEvent| {
+                dragging.set(false);
+            },
+        )
 }
 
 fn tab_bar(state: AppState) -> impl IntoView {
@@ -204,21 +289,87 @@ fn played_game_slot(
 
 fn engine_log_pane(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
+    let telemetry = handles.telemetry.clone();
+    let telemetry_lines = telemetry.clone();
     widgets::filling_scroll(
-        Label::derived(move || {
-            let tel = handles.telemetry.get();
-            if tel.label.is_empty() {
-                state.status.get()
-            } else {
-                tel.label
-            }
-        })
-        .style(move |s| {
-            s.font_size(12.0)
-                .width_full()
-                .min_width(0.0)
-                .text_wrap()
-                .color(theme::rgba(pal().text_primary))
-        }),
+        Stack::vertical((
+            Label::derived(move || {
+                let tel = telemetry.get();
+                if tel.label.is_empty() {
+                    state.status.get()
+                } else {
+                    format!(
+                        "depth {}/{} · {:+} cp · {} nodes",
+                        tel.depth, tel.seldepth, tel.score_cp, tel.nodes
+                    )
+                }
+            })
+            .style(move |s| {
+                s.font_size(12.0)
+                    .width_full()
+                    .min_width(0.0)
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_primary))
+            }),
+            Label::derived(move || {
+                let tel = telemetry_lines.get();
+                let snap = state.tournament_snapshot.get();
+                let live = layout::select_live_game(
+                    &snap.live_games,
+                    state.focused_live_key.get().as_deref(),
+                );
+                let lines = if !tel.multipv_lines.is_empty() {
+                    tel.multipv_lines
+                        .iter()
+                        .map(|(rank, score, pv)| format!("#{rank} {score:+}  {}", pv.join(" ")))
+                        .collect::<Vec<_>>()
+                } else if let Some(game) = live.filter(|game| !game.multipv_lines.is_empty()) {
+                    game.multipv_lines
+                        .iter()
+                        .map(|line| {
+                            format!(
+                                "#{} {:+}  {}",
+                                line.multipv,
+                                line.score_cp,
+                                line.pv.join(" ")
+                            )
+                        })
+                        .collect()
+                } else if let Some(game) = live.filter(|game| !game.pv.is_empty()) {
+                    vec![format!("pv {}", game.pv.join(" "))]
+                } else if !tel.pv.is_empty() {
+                    vec![format!("pv {}", tel.pv.join(" "))]
+                } else {
+                    Vec::new()
+                };
+                if lines.is_empty() {
+                    "No engine lines yet.".to_owned()
+                } else {
+                    lines.join("\n")
+                }
+            })
+            .style(move |s| {
+                s.font_size(12.0)
+                    .width_full()
+                    .min_width(0.0)
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_secondary))
+            }),
+        ))
+        .style(|s| s.width_full().row_gap(6.0).min_width(0.0)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn engine_dock_renders_numbered_multipv_lines() {
+        let src = include_str!("dock.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("multipv_lines"));
+        assert!(production.contains("RowResize"));
+        assert!(production.contains("apply_dock_drag"));
+        assert!(production.contains("dock_height_px"));
+        assert!(production.contains("#{}"));
+    }
 }

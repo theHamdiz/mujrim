@@ -15,10 +15,16 @@ pub const OVERLAY_MAX_WIDTH: f64 = 760.0;
 pub const OVERLAY_PAD: f64 = 24.0;
 pub const DOCK_TAB_BAR_PX: f64 = 36.0;
 pub const DOCK_OPEN_PX: f64 = 248.0;
+pub const DOCK_MIN_PX: f64 = 120.0;
+pub const DOCK_MAX_PX: f64 = 560.0;
 pub const LIST_SCROLL_PX: f64 = 260.0;
 pub const PICKER_SCROLL_PX: f64 = 220.0;
 pub const MODAL_LIST_SCROLL_PX: f64 = 280.0;
 pub const LOW_TIME_MS: u64 = 10_000;
+pub const STANDING_SLOTS: usize = 24;
+pub const LIVE_BOARD_SLOTS: usize = 16;
+pub const COORD_GUTTER_PX: f64 = 18.0;
+pub const EVAL_BAR_PX: f64 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoardGeom {
@@ -102,8 +108,24 @@ pub struct ClockFace {
     pub to_move: bool,
 }
 
-pub fn dock_height(open: bool) -> f64 {
-    if open { DOCK_OPEN_PX } else { DOCK_TAB_BAR_PX }
+pub fn dock_height(open: bool, height_px: f64) -> f64 {
+    if open {
+        height_px.max(DOCK_TAB_BAR_PX)
+    } else {
+        DOCK_TAB_BAR_PX
+    }
+}
+
+pub fn clamp_dock_height(height: f64, window_height: f64) -> f64 {
+    let max = DOCK_MAX_PX
+        .min((window_height - TITLE_BAR_PX - BOARD_MIN_PX).max(DOCK_MIN_PX))
+        .max(DOCK_MIN_PX);
+    height.clamp(DOCK_MIN_PX, max)
+}
+
+/// Dock sits at the bottom: dragging the split up (negative dy) grows it.
+pub fn apply_dock_drag(height: f64, delta_y: f64, window_height: f64) -> f64 {
+    clamp_dock_height(height - delta_y, window_height)
 }
 
 pub fn next_dock_state(current: DockTab, open: bool, clicked: DockTab) -> (DockTab, bool) {
@@ -116,6 +138,15 @@ pub fn next_dock_state(current: DockTab, open: bool, clicked: DockTab) -> (DockT
 
 pub fn focused_live_game(live: &[LiveGameBoard]) -> Option<&LiveGameBoard> {
     live.last()
+}
+
+pub fn select_live_game<'a>(
+    live: &'a [LiveGameBoard],
+    preferred: Option<&str>,
+) -> Option<&'a LiveGameBoard> {
+    preferred
+        .and_then(|key| live.iter().find(|game| game.game_key == key))
+        .or_else(|| focused_live_game(live))
 }
 
 pub fn clock_is_low(ms: Option<u64>) -> bool {
@@ -135,11 +166,47 @@ pub fn format_clock_live(ms: Option<u64>) -> String {
     }
 }
 
+pub fn clock_player_label(name: &str, white: bool) -> String {
+    let side = if white { "White" } else { "Black" };
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(side) {
+        side.to_owned()
+    } else {
+        format!("{trimmed} playing as {side}")
+    }
+}
+
+pub fn remaining_clock_ms(
+    stored: Option<u64>,
+    synced_ms: Option<u64>,
+    now_ms: u64,
+    active: bool,
+    paused: bool,
+) -> Option<u64> {
+    let stored = stored?;
+    if !active || paused {
+        return Some(stored);
+    }
+    let synced = synced_ms.unwrap_or(now_ms);
+    Some(stored.saturating_sub(now_ms.saturating_sub(synced)))
+}
+
 pub fn live_clock_faces(
     live: Option<&LiveGameBoard>,
     played: Option<&PlayedGame>,
     fallback_ms: Option<u64>,
     white_to_move: bool,
+) -> (ClockFace, ClockFace) {
+    live_clock_faces_at(live, played, fallback_ms, white_to_move, None, false)
+}
+
+pub fn live_clock_faces_at(
+    live: Option<&LiveGameBoard>,
+    played: Option<&PlayedGame>,
+    fallback_ms: Option<u64>,
+    white_to_move: bool,
+    now_ms: Option<u64>,
+    paused: bool,
 ) -> (ClockFace, ClockFace) {
     let white_name = live
         .map(|game| game.white.as_str())
@@ -149,22 +216,87 @@ pub fn live_clock_faces(
         .map(|game| game.black.as_str())
         .or_else(|| played.map(|game| game.black.as_str()))
         .unwrap_or("Black");
-    let white_ms = live.and_then(|game| game.white_clock_ms).or(fallback_ms);
-    let black_ms = live.and_then(|game| game.black_clock_ms).or(white_ms);
+    let white_stored = live.and_then(|game| game.white_clock_ms).or(fallback_ms);
+    let black_stored = live.and_then(|game| game.black_clock_ms).or(white_stored);
+    let synced = live.and_then(|game| game.clock_synced_ms);
+    let now = now_ms.unwrap_or(synced.unwrap_or(0));
+    let white_ms = remaining_clock_ms(white_stored, synced, now, white_to_move, paused);
+    let black_ms = remaining_clock_ms(black_stored, synced, now, !white_to_move, paused);
     (
         ClockFace {
-            name: white_name.to_owned(),
+            name: clock_player_label(white_name, true),
             display: format_clock_live(white_ms),
             low_time: clock_is_low(white_ms),
             to_move: white_to_move,
         },
         ClockFace {
-            name: black_name.to_owned(),
+            name: clock_player_label(black_name, false),
             display: format_clock_live(black_ms),
             low_time: clock_is_low(black_ms),
             to_move: !white_to_move,
         },
     )
+}
+
+pub fn eval_bar_fill(score_cp: i32) -> f32 {
+    let normalized = (score_cp as f32 / 400.0).tanh();
+    (0.5 + normalized * 0.5).clamp(0.02, 0.98)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoordLabel {
+    pub text: char,
+    pub x: f64,
+    pub y: f64,
+    pub outside: bool,
+    pub on_light: bool,
+}
+
+pub fn coord_labels(
+    origin_x: f64,
+    origin_y: f64,
+    side: f64,
+    flipped: bool,
+    outside: bool,
+) -> Vec<CoordLabel> {
+    let sq = side / 8.0;
+    let gutter = COORD_GUTTER_PX;
+    let mut labels = Vec::with_capacity(16);
+    for i in 0..8 {
+        let file = if flipped { 7 - i } else { i };
+        let rank = if flipped { i } else { 7 - i };
+        let file_x = if outside {
+            origin_x + i as f64 * sq + sq * 0.5 - 4.0
+        } else {
+            origin_x + i as f64 * sq + 4.0
+        };
+        let file_y = if outside {
+            origin_y + side + 2.0
+        } else {
+            origin_y + side - 16.0
+        };
+        let rank_x = if outside {
+            (origin_x - gutter + 4.0).max(0.0)
+        } else {
+            origin_x + 4.0
+        };
+        let rank_y = origin_y + i as f64 * sq + if outside { sq * 0.5 - 6.0 } else { 4.0 };
+        labels.push(CoordLabel {
+            text: (b'a' + file as u8) as char,
+            x: file_x,
+            y: file_y,
+            outside,
+            on_light: (7 + i) % 2 == 0,
+        });
+        labels.push(CoordLabel {
+            text: (b'1' + rank as u8) as char,
+            x: rank_x,
+            y: rank_y,
+            outside,
+            on_light: i % 2 == 0,
+        });
+    }
+    labels
 }
 
 pub fn extend_histogram(scores: &mut Vec<Option<i32>>, ply_count: usize, score_cp: i32) {
@@ -199,6 +331,9 @@ mod tests {
             nodes: 1000,
             white_clock_ms: white_ms,
             black_clock_ms: black_ms,
+            clock_synced_ms: None,
+            pv: Vec::new(),
+            multipv_lines: Vec::new(),
         }
     }
 
@@ -264,8 +399,15 @@ mod tests {
             assert!(PICKER_SCROLL_PX > 120.0);
             assert!(MODAL_LIST_SCROLL_PX >= LIST_SCROLL_PX);
         }
-        assert_eq!(dock_height(false), DOCK_TAB_BAR_PX);
-        assert_eq!(dock_height(true), DOCK_OPEN_PX);
+        assert_eq!(dock_height(false, DOCK_OPEN_PX), DOCK_TAB_BAR_PX);
+        assert_eq!(dock_height(true, DOCK_OPEN_PX), DOCK_OPEN_PX);
+        assert_eq!(dock_height(true, 400.0), 400.0);
+        let grown = apply_dock_drag(DOCK_OPEN_PX, -80.0, 900.0);
+        assert!(grown > DOCK_OPEN_PX);
+        let shrunk = apply_dock_drag(DOCK_OPEN_PX, 80.0, 900.0);
+        assert!(shrunk < DOCK_OPEN_PX);
+        assert!(clamp_dock_height(20.0, 900.0) >= DOCK_MIN_PX);
+        assert!(clamp_dock_height(900.0, 400.0) <= DOCK_MAX_PX);
     }
 
     #[test]
@@ -289,6 +431,18 @@ mod tests {
         let live = vec![board("g0", None, None), board("g1", Some(1), Some(2))];
         let focused = focused_live_game(&live).expect("board");
         assert_eq!(focused.game_key, "g1");
+        assert_eq!(
+            select_live_game(&live, Some("g0"))
+                .expect("preferred")
+                .game_key,
+            "g0"
+        );
+        assert_eq!(
+            select_live_game(&live, Some("missing"))
+                .expect("fallback")
+                .game_key,
+            "g1"
+        );
     }
 
     #[test]
@@ -304,13 +458,62 @@ mod tests {
     fn live_clock_faces_label_players_and_active_side() {
         let live = board("g1", Some(61_000), Some(8_000));
         let (white, black) = live_clock_faces(Some(&live), None, Some(180_000), false);
-        assert_eq!(white.name, "Alpha");
+        assert_eq!(white.name, "Alpha playing as White");
         assert_eq!(white.display, "1:01");
         assert!(!white.to_move);
-        assert_eq!(black.name, "Beta");
+        assert_eq!(black.name, "Beta playing as Black");
         assert_eq!(black.display, "0:08.0");
         assert!(black.low_time);
         assert!(black.to_move);
+        assert_eq!(clock_player_label("", true), "White");
+        assert_eq!(clock_player_label("White", true), "White");
+    }
+
+    #[test]
+    fn remaining_clock_ticks_only_the_active_side() {
+        assert_eq!(
+            remaining_clock_ms(Some(10_000), Some(1_000), 1_400, true, false),
+            Some(9_600)
+        );
+        assert_eq!(
+            remaining_clock_ms(Some(10_000), Some(1_000), 1_400, false, false),
+            Some(10_000)
+        );
+        assert_eq!(
+            remaining_clock_ms(Some(10_000), Some(1_000), 1_400, true, true),
+            Some(10_000)
+        );
+        let mut live = board("g1", Some(8_000), Some(60_000));
+        live.clock_synced_ms = Some(5_000);
+        let (white, black) = live_clock_faces_at(Some(&live), None, None, true, Some(5_900), false);
+        assert_eq!(white.display, "0:07.1");
+        assert_eq!(black.display, "1:00");
+    }
+
+    #[test]
+    fn eval_bar_fill_is_white_from_the_bottom() {
+        assert!((eval_bar_fill(0) - 0.5).abs() < 0.02);
+        assert!(eval_bar_fill(100) > eval_bar_fill(0));
+        assert!(eval_bar_fill(-100) < eval_bar_fill(0));
+        assert!(eval_bar_fill(10_000) > 0.9);
+        assert!(eval_bar_fill(-10_000) < 0.1);
+    }
+
+    #[test]
+    fn outside_coords_sit_in_the_gutter() {
+        let inside = coord_labels(20.0, 20.0, 160.0, false, false);
+        let outside = coord_labels(20.0, 20.0, 160.0, false, true);
+        assert_eq!(inside.len(), 16);
+        assert_eq!(outside.len(), 16);
+        let file_a = outside.iter().find(|label| label.text == 'a').expect("a");
+        assert!(file_a.y > 20.0 + 160.0);
+        let rank_8 = outside.iter().find(|label| label.text == '8').expect("8");
+        assert!(rank_8.x < 20.0);
+        let flipped = coord_labels(20.0, 20.0, 160.0, true, true);
+        assert_eq!(
+            flipped.iter().find(|label| label.x > 20.0).map(|l| l.text),
+            Some('h')
+        );
     }
 
     #[test]

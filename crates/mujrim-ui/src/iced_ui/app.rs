@@ -707,6 +707,7 @@ impl Default for App {
             active_puzzle: None,
             opening_explorer: OpeningExplorer::default(),
             opening_indexed_games: 0,
+            bgm_on: settings.bgm_on,
             settings,
             show_options: false,
             options_tab: OptionsTab::Settings,
@@ -734,7 +735,6 @@ impl Default for App {
             animation: None,
             window_width: 1280.0,
             window_height: 850.0,
-            bgm_on: settings.bgm_on,
             coin_flip: CoinFlipState::Idle,
             recorder: recording::RecordingEngine::new(),
             window_id: None,
@@ -1583,8 +1583,11 @@ impl App {
                 let roster =
                     tournament_engine_roster(&self.bundled_engines, &self.external_engine_catalog);
                 if self.tournament_setup.selected_engine_paths.is_empty() {
-                    self.tournament_setup.selected_engine_paths =
-                        crate::app_core::logic::default_tournament_engine_paths(&roster);
+                    self.tournament_setup.selected_engine_paths = roster
+                        .iter()
+                        .take(crate::app_core::tournament_setup::GUI_TOURNAMENT_DEFAULT_ENGINES)
+                        .map(|engine| engine.path.clone())
+                        .collect();
                 }
                 self.tournament_setup.sanitize_for_gui();
                 if let Err(error) = self.tournament_setup.validate() {
@@ -6580,10 +6583,40 @@ fn run_quick_tournament_body(
                             nodes: 0,
                             white_clock_ms: Some(initial_clock_ms),
                             black_clock_ms: Some(initial_clock_ms),
+                            clock_synced_ms: Some(tournament_live::now_unix_ms()),
+                            ..tournament_live::LiveGameBoard::default()
                         });
                         guard.current_round = round;
                         guard.current_white = white;
                         guard.current_black = black;
+                    }
+                    TournamentEvent::Thinking {
+                        game_key,
+                        score_cp,
+                        depth,
+                        nodes,
+                        pv,
+                        multipv_lines,
+                        white_clock_ms,
+                        black_clock_ms,
+                    } => {
+                        guard.apply_thinking(
+                            &game_key,
+                            score_cp,
+                            depth,
+                            nodes,
+                            pv,
+                            multipv_lines
+                                .into_iter()
+                                .map(|line| tournament_live::ThinkingLine {
+                                    multipv: line.multipv,
+                                    score_cp: line.score,
+                                    pv: line.pv,
+                                })
+                                .collect(),
+                            white_clock_ms,
+                            black_clock_ms,
+                        );
                     }
                     TournamentEvent::PlyPlayed {
                         game_key,
@@ -6614,6 +6647,10 @@ fn run_quick_tournament_body(
                         moves,
                     } => {
                         guard.finish_live_game(&game_key, white_score, moves);
+                        guard.standings = tournament_live::standings_from_played(
+                            &guard.engine_names,
+                            &guard.played_games,
+                        );
                     }
                     TournamentEvent::MatchFinished {
                         index,
@@ -6695,6 +6732,7 @@ fn run_quick_tournament_body(
                 path.join("tournaments")
                     .join(tournament_directory_name(format))
             }),
+            completed_pairings: setup.completed_pairings.clone(),
         },
         cancel,
         Some(progress),

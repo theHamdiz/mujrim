@@ -302,5 +302,7 @@ mod tests {
         assert!(production.contains("exec_after"));
         assert!(production.contains("handles.ui_scope"));
         assert!(!production.contains("Scope::current()"));
+        assert!(production.contains("apply_search_info"));
+        assert!(production.contains("query_best_move_streaming"));
     }
 }

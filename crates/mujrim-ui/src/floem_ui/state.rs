@@ -91,6 +91,11 @@ pub struct AppState {
     pub persisted_tournament_games: RwSignal<usize>,
     pub resume_prompt:
         RwSignal<Option<crate::app_core::tournament_resume::ActiveTournamentCheckpoint>>,
+    pub clock_now_ms: RwSignal<u64>,
+    pub eval_bar_cp: RwSignal<i32>,
+    pub eval_bar_fen: RwSignal<String>,
+    pub eval_bar_gen: RwSignal<u64>,
+    pub focused_live_key: RwSignal<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -143,7 +148,7 @@ impl AppState {
             engine_cfg: RwSignal::new(EngineConfig::default()),
             settings: RwSignal::new(settings.clone()),
             show_options: RwSignal::new(false),
-            options_tab: RwSignal::new(OptionsTab::Settings),
+            options_tab: RwSignal::new(OptionsTab::Display),
             show_tournament_setup: RwSignal::new(false),
             move_log: RwSignal::new(Vec::new()),
             move_annotations: RwSignal::new(Vec::new()),
@@ -192,6 +197,11 @@ impl AppState {
             current_tournament_id: RwSignal::new(None),
             persisted_tournament_games: RwSignal::new(0),
             resume_prompt: RwSignal::new(None),
+            clock_now_ms: RwSignal::new(0),
+            eval_bar_cp: RwSignal::new(0),
+            eval_bar_fen: RwSignal::new(String::new()),
+            eval_bar_gen: RwSignal::new(0),
+            focused_live_key: RwSignal::new(None),
         };
         let study_path = crate::app_core::logic::study_database_path();
         let study = StudyDatabase::open(&study_path).ok();

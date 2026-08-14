@@ -29,7 +29,11 @@ pub fn options_modal(state: AppState, handles: AppHandles) -> impl IntoView {
             Stack::horizontal((
                 widgets::curious_title("Options", 28.0),
                 Stack::horizontal((
-                    tab_btn(state, OptionsTab::Settings, "Display"),
+                    tab_btn(state, OptionsTab::Display, "Display"),
+                    tab_btn(state, OptionsTab::Motion, "Motion"),
+                    tab_btn(state, OptionsTab::Arrows, "Arrows"),
+                    tab_btn(state, OptionsTab::Audio, "Audio"),
+                    tab_btn(state, OptionsTab::Analysis, "Analysis"),
                     tab_btn(state, OptionsTab::Tools, "Tools"),
                     widgets::ghost_button(state, "Close", move || {
                         state.show_options.set(false);
@@ -46,12 +50,13 @@ pub fn options_modal(state: AppState, handles: AppHandles) -> impl IntoView {
                     .row_gap(8.0)
                     .flex_wrap(FlexWrap::Wrap)
             }),
-            dyn_view(move || {
-                if state.options_tab.get() == OptionsTab::Tools {
-                    tools_tab(state, handles.clone()).into_any()
-                } else {
-                    settings_tab(state, handles.clone()).into_any()
-                }
+            dyn_view(move || match state.options_tab.get() {
+                OptionsTab::Display => display_tab(state).into_any(),
+                OptionsTab::Motion => motion_tab(state).into_any(),
+                OptionsTab::Arrows => arrows_tab(state).into_any(),
+                OptionsTab::Audio => audio_tab(state, handles.clone()).into_any(),
+                OptionsTab::Analysis => analysis_tab(state, handles.clone()).into_any(),
+                OptionsTab::Tools => tools_tab(state, handles.clone()).into_any(),
             }),
         ))
         .style(|s| s.width_full().row_gap(14.0).min_width(0.0)),
@@ -84,284 +89,320 @@ fn tab_btn(state: AppState, tab: OptionsTab, label: &'static str) -> impl IntoVi
         })
 }
 
-fn settings_tab(state: AppState, handles: AppHandles) -> impl IntoView {
+fn display_tab(state: AppState) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
-        Stack::vertical((
-            widgets::section_label("Display", pal),
-            widgets::picker_row(
-                state,
-                "Theme",
-                move || state.settings.get().board_theme,
-                BoardTheme::ALL,
-                move |theme| {
-                    actions::update_settings(state, |settings| settings.board_theme = theme);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Pieces",
-                move || state.settings.get().piece_set,
-                PieceSet::ALL,
-                move |set| {
-                    actions::update_settings(state, |settings| settings.piece_set = set);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Coordinates",
-                move || state.settings.get().show_coords,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.show_coords = value);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Coord position",
-                move || state.settings.get().coord_position,
-                CoordPosition::ALL,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.coord_position = value);
-                },
-            ),
-        ))
-        .style(|s| s.row_gap(10.0).width_full()),
-        Stack::vertical((
-            widgets::section_label("Audio", pal),
-            widgets::toggle_row(state, "Background music", move || state.bgm_on.get(), {
-                let handles = handles.clone();
-                move |value| {
-                    state.bgm_on.set(value);
-                    actions::update_settings(state, |settings| settings.bgm_on = value);
-                    if let Some(sound) = handles.sound.borrow_mut().as_mut() {
-                        if value {
-                            sound.play_bgm(crate::app_core::audio::BgmTrack::Menu);
-                        } else {
-                            sound.stop_bgm();
-                        }
-                    }
-                }
-            }),
-            widgets::toggle_row(state, "SFX", move || state.settings.get().sfx_on, {
-                let handles = handles.clone();
-                move |value| {
-                    actions::update_settings(state, |settings| settings.sfx_on = value);
-                    if let Some(sound) = handles.sound.borrow_mut().as_mut()
-                        && !value
-                        && !state.bgm_on.get_untracked()
-                    {
+        widgets::section_label("Display", pal),
+        widgets::picker_row(
+            state,
+            "Theme",
+            move || state.settings.get().board_theme,
+            BoardTheme::ALL,
+            move |theme| {
+                actions::update_settings(state, |settings| settings.board_theme = theme);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Pieces",
+            move || state.settings.get().piece_set,
+            PieceSet::ALL,
+            move |set| {
+                actions::update_settings(state, |settings| settings.piece_set = set);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Coordinates",
+            move || state.settings.get().show_coords,
+            move |value| {
+                actions::update_settings(state, |settings| settings.show_coords = value);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Coord position",
+            move || state.settings.get().coord_position,
+            CoordPosition::ALL,
+            move |value| {
+                actions::update_settings(state, |settings| settings.coord_position = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Auto-flip Black",
+            move || state.settings.get().auto_flip_black,
+            move |value| {
+                actions::update_settings(state, |settings| settings.auto_flip_black = value);
+            },
+        ),
+    ))
+    .style(|s| s.row_gap(10.0).width_full().min_width(0.0))
+}
+
+fn audio_tab(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        widgets::section_label("Audio", pal),
+        widgets::toggle_row(state, "Background music", move || state.bgm_on.get(), {
+            let handles = handles.clone();
+            move |value| {
+                state.bgm_on.set(value);
+                actions::update_settings(state, |settings| settings.bgm_on = value);
+                if let Some(sound) = handles.sound.borrow_mut().as_mut() {
+                    if value {
+                        sound.play_bgm(crate::app_core::audio::BgmTrack::Menu);
+                    } else {
                         sound.stop_bgm();
                     }
                 }
-            }),
-            widgets::stepper_row(
-                state,
-                "BGM volume",
-                "%",
-                move || state.settings.get().bgm_volume,
+            }
+        }),
+        widgets::toggle_row(state, "SFX", move || state.settings.get().sfx_on, {
+            let handles = handles.clone();
+            move |value| {
+                actions::update_settings(state, |settings| settings.sfx_on = value);
+                if let Some(sound) = handles.sound.borrow_mut().as_mut()
+                    && !value
+                    && !state.bgm_on.get_untracked()
                 {
-                    let handles = handles.clone();
-                    move |value| {
-                        actions::update_settings(state, |settings| settings.bgm_volume = value);
-                        if let Some(sound) = handles.sound.borrow_mut().as_mut() {
-                            sound.set_volume(value as f32 / 100.0);
-                        }
+                    sound.stop_bgm();
+                }
+            }
+        }),
+        widgets::stepper_row(
+            state,
+            "BGM volume",
+            "%",
+            move || state.settings.get().bgm_volume,
+            {
+                let handles = handles.clone();
+                move |value| {
+                    actions::update_settings(state, |settings| settings.bgm_volume = value);
+                    if let Some(sound) = handles.sound.borrow_mut().as_mut() {
+                        sound.set_volume(value as f32 / 100.0);
                     }
-                },
-                0,
-                100,
-            ),
-            widgets::picker_row(
-                state,
-                "Mood",
-                move || state.settings.get().game_mood,
-                GameMood::ALL,
-                {
-                    let handles = handles.clone();
-                    move |mood| {
-                        actions::update_settings(state, |settings| settings.game_mood = mood);
-                        if let Some(sound) = handles.sound.borrow_mut().as_mut() {
-                            sound.set_mood(mood);
-                        }
+                }
+            },
+            0,
+            100,
+        ),
+        widgets::picker_row(
+            state,
+            "Mood",
+            move || state.settings.get().game_mood,
+            GameMood::ALL,
+            {
+                let handles = handles.clone();
+                move |mood| {
+                    actions::update_settings(state, |settings| settings.game_mood = mood);
+                    if let Some(sound) = handles.sound.borrow_mut().as_mut() {
+                        sound.set_mood(mood);
                     }
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Board SFX",
-                move || state.settings.get().sound_theme,
-                SoundTheme::ALL,
-                {
-                    let handles = handles.clone();
-                    move |theme| {
-                        actions::update_settings(state, |settings| settings.sound_theme = theme);
-                        if let Some(sound) = handles.sound.borrow_mut().as_mut() {
-                            sound.set_sound_theme(theme);
-                        }
+                }
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Board SFX",
+            move || state.settings.get().sound_theme,
+            SoundTheme::ALL,
+            {
+                let handles = handles.clone();
+                move |theme| {
+                    actions::update_settings(state, |settings| settings.sound_theme = theme);
+                    if let Some(sound) = handles.sound.borrow_mut().as_mut() {
+                        sound.set_sound_theme(theme);
                     }
-                },
-            ),
-        ))
-        .style(|s| s.row_gap(10.0).width_full()),
-        Stack::vertical((
-            widgets::section_label("Gameplay", pal),
-            widgets::toggle_row(
-                state,
-                "Legal dots",
-                move || state.settings.get().show_legal_moves,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.show_legal_moves = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Last move",
-                move || state.settings.get().show_last_move,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.show_last_move = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Threat highlights",
-                move || state.settings.get().show_threats,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.show_threats = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Premoves",
-                move || state.settings.get().premoves_enabled,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.premoves_enabled = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Multi-premoves",
-                move || state.settings.get().multi_premoves,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.multi_premoves = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Auto-flip Black",
-                move || state.settings.get().auto_flip_black,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.auto_flip_black = value);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Capture FX",
-                move || state.settings.get().capture_anim_style,
-                CaptureAnimStyle::ALL,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.capture_anim_style = value);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Piece motion",
-                move || state.settings.get().piece_anim_style,
-                crate::app_core::settings::PieceAnimStyle::ALL,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.piece_anim_style = value);
-                },
-            ),
-        ))
-        .style(|s| s.row_gap(10.0).width_full()),
-        Stack::vertical((
-            widgets::section_label("Arrows", pal),
-            widgets::toggle_row(
-                state,
-                "Draw arrows",
-                move || state.settings.get().draw_arrows,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.draw_arrows = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Last-move arrow",
-                move || state.settings.get().last_move_arrow,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.last_move_arrow = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "Ponder arrow",
-                move || state.settings.get().ponder_arrow,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.ponder_arrow = value);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Shape",
-                move || state.settings.get().arrow_shape,
-                ArrowShape::ALL,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.arrow_shape = value);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Color",
-                move || state.settings.get().arrow_color,
-                ArrowColor::ALL,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.arrow_color = value);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Size",
-                move || state.settings.get().arrow_size,
-                ArrowSize::ALL,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.arrow_size = value);
-                },
-            ),
-        ))
-        .style(|s| s.row_gap(10.0).width_full()),
-        Stack::vertical((
-            widgets::section_label("Motion", pal),
-            widgets::toggle_row(
-                state,
-                "Piece slide",
-                move || state.settings.get().piece_slide,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.piece_slide = value);
-                },
-            ),
-            widgets::toggle_row(
-                state,
-                "System motion",
-                move || state.settings.get().system_motion,
-                move |value| {
-                    actions::update_settings(state, |settings| settings.system_motion = value);
-                },
-            ),
-            widgets::picker_row(
-                state,
-                "Anim speed",
-                move || AnimPace::from_setting(state.settings.get().anim_speed),
-                AnimPace::ALL,
-                move |pace| {
-                    actions::update_settings(state, |settings| {
-                        settings.anim_speed = pace.to_setting()
-                    });
-                },
-            ),
-        ))
-        .style(|s| s.row_gap(10.0).width_full()),
+                }
+            },
+        ),
+    ))
+    .style(|s| s.row_gap(10.0).width_full().min_width(0.0))
+}
+
+fn analysis_tab(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        widgets::section_label("Analysis", pal),
+        widgets::toggle_row(
+            state,
+            "Legal dots",
+            move || state.settings.get().show_legal_moves,
+            move |value| {
+                actions::update_settings(state, |settings| settings.show_legal_moves = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Last move",
+            move || state.settings.get().show_last_move,
+            move |value| {
+                actions::update_settings(state, |settings| settings.show_last_move = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Threat highlights",
+            move || state.settings.get().show_threats,
+            move |value| {
+                actions::update_settings(state, |settings| settings.show_threats = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Premoves",
+            move || state.settings.get().premoves_enabled,
+            move |value| {
+                actions::update_settings(state, |settings| settings.premoves_enabled = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Multi-premoves",
+            move || state.settings.get().multi_premoves,
+            move |value| {
+                actions::update_settings(state, |settings| settings.multi_premoves = value);
+            },
+        ),
+        eval_bar_engine_picker(state, handles),
         engine_rows(state),
     ))
     .style(|s| s.row_gap(10.0).width_full().min_width(0.0))
+}
+
+fn arrows_tab(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        widgets::section_label("Arrows", pal),
+        widgets::toggle_row(
+            state,
+            "Draw arrows",
+            move || state.settings.get().draw_arrows,
+            move |value| {
+                actions::update_settings(state, |settings| settings.draw_arrows = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Last-move arrow",
+            move || state.settings.get().last_move_arrow,
+            move |value| {
+                actions::update_settings(state, |settings| settings.last_move_arrow = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Ponder arrow",
+            move || state.settings.get().ponder_arrow,
+            move |value| {
+                actions::update_settings(state, |settings| settings.ponder_arrow = value);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Shape",
+            move || state.settings.get().arrow_shape,
+            ArrowShape::ALL,
+            move |value| {
+                actions::update_settings(state, |settings| settings.arrow_shape = value);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Color",
+            move || state.settings.get().arrow_color,
+            ArrowColor::ALL,
+            move |value| {
+                actions::update_settings(state, |settings| settings.arrow_color = value);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Size",
+            move || state.settings.get().arrow_size,
+            ArrowSize::ALL,
+            move |value| {
+                actions::update_settings(state, |settings| settings.arrow_size = value);
+            },
+        ),
+    ))
+    .style(|s| s.row_gap(10.0).width_full().min_width(0.0))
+}
+
+fn motion_tab(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        widgets::section_label("Motion", pal),
+        widgets::toggle_row(
+            state,
+            "Piece slide",
+            move || state.settings.get().piece_slide,
+            move |value| {
+                actions::update_settings(state, |settings| settings.piece_slide = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "System motion",
+            move || state.settings.get().system_motion,
+            move |value| {
+                actions::update_settings(state, |settings| settings.system_motion = value);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Anim speed",
+            move || AnimPace::from_setting(state.settings.get().anim_speed),
+            AnimPace::ALL,
+            move |pace| {
+                actions::update_settings(state, |settings| settings.anim_speed = pace.to_setting());
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Capture FX",
+            move || state.settings.get().capture_anim_style,
+            CaptureAnimStyle::ALL,
+            move |value| {
+                actions::update_settings(state, |settings| settings.capture_anim_style = value);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Piece motion",
+            move || state.settings.get().piece_anim_style,
+            crate::app_core::settings::PieceAnimStyle::ALL,
+            move |value| {
+                actions::update_settings(state, |settings| settings.piece_anim_style = value);
+            },
+        ),
+    ))
+    .style(|s| s.row_gap(10.0).width_full().min_width(0.0))
+}
+
+fn eval_bar_engine_picker(state: AppState, handles: AppHandles) -> impl IntoView {
+    dyn_view(move || {
+        let items = crate::app_core::logic::eval_bar_engine_choices(
+            &handles.bundled,
+            &handles.catalog.borrow(),
+        )
+        .into_iter()
+        .map(|choice| choice.id)
+        .collect::<Vec<_>>();
+        widgets::picker_row(
+            state,
+            "Eval-bar engine",
+            move || state.settings.get().eval_bar_engine,
+            items,
+            move |id| {
+                actions::update_settings(state, |settings| {
+                    settings.eval_bar_engine = id;
+                });
+            },
+        )
+        .into_any()
+    })
 }
 
 fn engine_rows(state: AppState) -> impl IntoView {
@@ -571,9 +612,29 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
                     1,
                     1,
                 ),
-                Label::new(
-                    "One board at a time. Engine crashes and missing binaries forfeit that game.",
-                )
+                widgets::stepper_row(
+                    state,
+                    "Simultaneous games",
+                    "",
+                    move || state.tournament_setup.get().concurrency as i32,
+                    move |value| {
+                        state.tournament_setup.update(|setup| {
+                            setup.concurrency = value.max(1) as u32;
+                            setup.sanitize_for_gui();
+                        });
+                    },
+                    1,
+                    crate::app_core::tournament_setup::detected_safe_games() as i32,
+                ),
+                Label::derived(move || {
+                    let cores = std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1);
+                    let safe = crate::app_core::tournament_setup::detected_safe_games();
+                    format!(
+                        "{cores} CPU cores detected · up to {safe} simultaneous games (2 threads/game, 2 cores reserved for UI). Engine crashes and missing binaries forfeit that game."
+                    )
+                })
                 .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
             ))
             .style(|s| s.width_full().row_gap(10.0).min_width(0.0)),
@@ -700,6 +761,13 @@ mod tests {
             "Ponder arrow",
             "BGM volume",
             "Threat highlights",
+            "Eval-bar engine",
+            "Simultaneous games",
+            "OptionsTab::Display",
+            "OptionsTab::Motion",
+            "OptionsTab::Arrows",
+            "OptionsTab::Audio",
+            "OptionsTab::Analysis",
             "capped_scroll",
             "MODAL_LIST_SCROLL_PX",
         ] {

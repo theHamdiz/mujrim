@@ -198,6 +198,7 @@ pub struct TelemetrySnapshot {
     pub best_move: String,
     pub ponder_move: Option<String>,
     pub label: String,
+    pub multipv_lines: Vec<(u32, i32, Vec<String>)>,
 }
 
 impl TelemetrySnapshot {
@@ -216,6 +217,11 @@ impl TelemetrySnapshot {
             best_move: info.best_move.clone(),
             ponder_move: info.ponder_move.clone(),
             label: String::new(),
+            multipv_lines: info
+                .multipv_lines
+                .iter()
+                .map(|line| (line.multipv, line.score, line.pv.clone()))
+                .collect(),
         };
         snap.label = snap.format_label(prefix);
         snap

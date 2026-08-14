@@ -67,6 +67,16 @@ pub enum GameProgressEvent {
         white_clock_ms: Option<u64>,
         black_clock_ms: Option<u64>,
     },
+    Thinking {
+        game_key: String,
+        score_cp: i32,
+        depth: i32,
+        nodes: u64,
+        pv: Vec<String>,
+        multipv_lines: Vec<mujrim_protocols::MultiPvLine>,
+        white_clock_ms: Option<u64>,
+        black_clock_ms: Option<u64>,
+    },
     Finished {
         game_key: String,
         white_score: f64,
@@ -1335,6 +1345,27 @@ fn engine_color(candidate_white: bool, candidate_engine: bool) -> Color {
     }
 }
 
+fn remaining_think_clocks(
+    white_clock: Option<Duration>,
+    black_clock: Option<Duration>,
+    side: Color,
+    elapsed: Duration,
+) -> (Option<u64>, Option<u64>) {
+    let tick = |clock: Option<Duration>, active: bool| {
+        clock.map(|time| {
+            if active {
+                time.saturating_sub(elapsed).as_millis() as u64
+            } else {
+                time.as_millis() as u64
+            }
+        })
+    };
+    (
+        tick(white_clock, side == Color::White),
+        tick(black_clock, side == Color::Black),
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchControl {
     Run,
@@ -1503,9 +1534,25 @@ fn play_game(
             }),
         };
         let search_started = Instant::now();
-        let info = match session.search_interruptible(&request, || {
-            match_search_control(config) != SearchControl::Run
-        }) {
+        let info = match session.search_interruptible_with_info(
+            &request,
+            || match_search_control(config) != SearchControl::Run,
+            |info| {
+                let elapsed = search_started.elapsed();
+                let (think_white, think_black) =
+                    remaining_think_clocks(white_clock, black_clock, side, elapsed);
+                emit(GameProgressEvent::Thinking {
+                    game_key: game_key.to_owned(),
+                    score_cp: info.score,
+                    depth: info.depth,
+                    nodes: info.nodes,
+                    pv: info.pv.clone(),
+                    multipv_lines: info.multipv_lines.clone(),
+                    white_clock_ms: think_white,
+                    black_clock_ms: think_black,
+                });
+            },
+        ) {
             Ok(info) => info,
             Err(message) => {
                 return emit_done(with_moves(
@@ -1960,6 +2007,15 @@ mod tests {
 
     #[test]
     fn engine_colors_and_forfeit_recycling_follow_the_pair_assignment() {
+        let (white, black) = remaining_think_clocks(
+            Some(Duration::from_millis(10_000)),
+            Some(Duration::from_millis(8_000)),
+            Color::White,
+            Duration::from_millis(400),
+        );
+        assert_eq!(white, Some(9_600));
+        assert_eq!(black, Some(8_000));
+
         assert_eq!(engine_color(true, true), Color::White);
         assert_eq!(engine_color(true, false), Color::Black);
         assert_eq!(engine_color(false, true), Color::Black);

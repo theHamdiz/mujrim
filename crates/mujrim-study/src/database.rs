@@ -284,32 +284,7 @@ impl StudyDatabase {
         &self,
         tournament: &crate::tournament_store::StoredTournament,
     ) -> Vec<crate::tournament_store::StoredTournamentGame> {
-        if !tournament.games.is_empty() {
-            return tournament.games.clone();
-        }
-        self.search(&GameQuery {
-            event: Some(tournament.name.clone()),
-            ..GameQuery::default()
-        })
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, summary)| {
-            let game = self.load_game(&summary.id).ok()?;
-            Some(crate::tournament_store::StoredTournamentGame {
-                game_index: index,
-                round: game.metadata.round.parse().unwrap_or(0),
-                white: game.metadata.white,
-                black: game.metadata.black,
-                white_score: match game.result.as_str() {
-                    "1-0" => 1.0,
-                    "0-1" => 0.0,
-                    _ => 0.5,
-                },
-                initial_fen: game.initial_fen,
-                moves: game.moves,
-            })
-        })
-        .collect()
+        tournament.games.clone()
     }
 
     pub fn save_line(&mut self, line: &crate::opening::SavedLine) -> Result<(), String> {
@@ -858,6 +833,98 @@ mod tests {
         );
         database.upsert_move_note(fen, "   ").unwrap();
         assert_eq!(database.load_move_note(fen).unwrap(), None);
+        drop(database);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn recover_tournament_games_never_pulls_library_by_event_name() {
+        let root = temporary_database();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        let pgn = "[Event \"Mujrim Tournament\"]\n[White \"Stockfish\"]\n[Black \"Stockfish\"]\n\n1. e4 e5 1-0\n";
+        database.import_pgn_text(pgn).unwrap();
+        let empty = crate::tournament_store::StoredTournament {
+            id: "t-1".into(),
+            name: "Mujrim Tournament".into(),
+            format: crate::tournament::TournamentFormat::RoundRobin,
+            created_at: 1,
+            status: "running".into(),
+            entrants: Vec::new(),
+            results: Vec::new(),
+            games: Vec::new(),
+        };
+        assert!(database.recover_tournament_games(&empty).is_empty());
+        let owned = crate::tournament_store::StoredTournament {
+            games: vec![crate::tournament_store::StoredTournamentGame {
+                game_index: 0,
+                round: 1,
+                white: "Alpha".into(),
+                black: "Beta".into(),
+                white_score: 1.0,
+                initial_fen: crate::opening::START_FEN.into(),
+                moves: vec!["e2e4".into()],
+            }],
+            ..empty
+        };
+        assert_eq!(database.recover_tournament_games(&owned).len(), 1);
+        drop(database);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn tournaments_with_the_same_event_name_stay_disjoint() {
+        let root = temporary_database();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        let game_a = crate::tournament_store::StoredTournamentGame {
+            game_index: 0,
+            round: 1,
+            white: "Alpha".into(),
+            black: "Beta".into(),
+            white_score: 1.0,
+            initial_fen: crate::opening::START_FEN.into(),
+            moves: vec!["e2e4".into()],
+        };
+        let game_b = crate::tournament_store::StoredTournamentGame {
+            game_index: 0,
+            round: 1,
+            white: "Stockfish".into(),
+            black: "Stockfish".into(),
+            white_score: 0.5,
+            initial_fen: crate::opening::START_FEN.into(),
+            moves: vec!["d2d4".into()],
+        };
+        let first = crate::tournament_store::StoredTournament {
+            id: "t-a".into(),
+            name: "Mujrim Tournament".into(),
+            format: crate::tournament::TournamentFormat::RoundRobin,
+            created_at: 1,
+            status: "finished".into(),
+            entrants: Vec::new(),
+            results: Vec::new(),
+            games: vec![game_a],
+        };
+        let second = crate::tournament_store::StoredTournament {
+            id: "t-b".into(),
+            name: "Mujrim Tournament".into(),
+            format: crate::tournament::TournamentFormat::RoundRobin,
+            created_at: 2,
+            status: "finished".into(),
+            entrants: Vec::new(),
+            results: Vec::new(),
+            games: vec![game_b],
+        };
+        database.save_tournament(&first).unwrap();
+        database.save_tournament(&second).unwrap();
+        let loaded_a = database.load_tournament("t-a").unwrap().expect("a");
+        let loaded_b = database.load_tournament("t-b").unwrap().expect("b");
+        assert_eq!(
+            database.recover_tournament_games(&loaded_a)[0].white,
+            "Alpha"
+        );
+        assert_eq!(
+            database.recover_tournament_games(&loaded_b)[0].white,
+            "Stockfish"
+        );
         drop(database);
         fs::remove_dir_all(&root).unwrap();
     }

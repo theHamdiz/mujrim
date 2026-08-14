@@ -71,7 +71,7 @@ fn paint_board(
     let settings = state.settings.get();
     let mut geom = layout::board_geom(size.width, size.height);
     if settings.coord_position == CoordPosition::Outside && settings.show_coords {
-        let pad = 18.0;
+        let pad = layout::COORD_GUTTER_PX;
         geom.origin_x += pad;
         geom.origin_y += pad;
         geom.side = (geom.side - pad * 2.0).max(layout::BOARD_MIN_PX);
@@ -436,58 +436,53 @@ fn draw_piece(cx: &mut floem::context::PaintCx<'_>, svg: &str, x: f64, y: f64, s
 }
 
 fn coord_layer(state: AppState) -> impl IntoView {
-    let files = (0..8).map(move |i| {
-        Label::derived(move || {
-            let settings = state.settings.get();
-            if !settings.show_coords {
-                return String::new();
-            }
-            let Some(game) = state.game.get() else {
-                return String::new();
-            };
-            let file = if game.flipped { 7 - i } else { i };
-            ((b'a' + file as u8) as char).to_string()
+    (0..16)
+        .map(move |index| {
+            Label::derived(move || {
+                let settings = state.settings.get();
+                if !settings.show_coords {
+                    return String::new();
+                }
+                let Some(game) = state.game.get() else {
+                    return String::new();
+                };
+                let geom = state.board_geom.get();
+                layout::coord_labels(
+                    geom.origin_x,
+                    geom.origin_y,
+                    geom.side,
+                    game.flipped,
+                    settings.coord_position == CoordPosition::Outside,
+                )
+                .get(index)
+                .map(|label| label.text.to_string())
+                .unwrap_or_default()
+            })
+            .style(move |s| {
+                let settings = state.settings.get();
+                let geom = state.board_geom.get();
+                let pal = theme::palette(settings.board_theme);
+                let flipped = state.game.get().is_some_and(|game| game.flipped);
+                let outside = settings.coord_position == CoordPosition::Outside;
+                let labels =
+                    layout::coord_labels(geom.origin_x, geom.origin_y, geom.side, flipped, outside);
+                let Some(label) = labels.get(index) else {
+                    return s.display(floem::taffy::style::Display::None);
+                };
+                let color = if outside {
+                    theme::rgba(pal.text_primary)
+                } else {
+                    theme::rgba(settings.board_theme.colors().coord_color(label.on_light))
+                };
+                s.absolute()
+                    .inset_left(label.x)
+                    .inset_top(label.y)
+                    .font_size(11.0)
+                    .font_bold()
+                    .color(color)
+                    .pointer_events_none()
+            })
         })
-        .style(move |s| {
-            let geom = state.board_geom.get();
-            let sq = geom.square();
-            let pal = theme::palette(state.settings.get().board_theme);
-            s.absolute()
-                .inset_left(geom.origin_x + i as f64 * sq + 4.0)
-                .inset_top(geom.origin_y + geom.side - 16.0)
-                .font_size(11.0)
-                .font_bold()
-                .color(theme::rgba(pal.text_primary))
-                .pointer_events_none()
-        })
-    });
-    let ranks = (0..8).map(move |i| {
-        Label::derived(move || {
-            let settings = state.settings.get();
-            if !settings.show_coords {
-                return String::new();
-            }
-            let Some(game) = state.game.get() else {
-                return String::new();
-            };
-            let rank = if game.flipped { i } else { 7 - i };
-            (rank + 1).to_string()
-        })
-        .style(move |s| {
-            let geom = state.board_geom.get();
-            let sq = geom.square();
-            let pal = theme::palette(state.settings.get().board_theme);
-            s.absolute()
-                .inset_left(geom.origin_x + 4.0)
-                .inset_top(geom.origin_y + i as f64 * sq + 4.0)
-                .font_size(11.0)
-                .font_bold()
-                .color(theme::rgba(pal.text_primary))
-                .pointer_events_none()
-        })
-    });
-    files
-        .chain(ranks)
         .collect::<Vec<_>>()
         .into_view()
         .style(|s| s.size_full().absolute().pointer_events_none())
@@ -711,6 +706,8 @@ mod tests {
             "capture_marks",
             "last_move_arrow",
             "arrow_start",
+            "coord_labels",
+            "COORD_GUTTER_PX",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

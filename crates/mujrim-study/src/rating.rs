@@ -167,6 +167,49 @@ pub fn estimate_field_ratings(
         .collect()
 }
 
+/// Force displayed ratings to be non-increasing with standings order so a
+/// table leader cannot show a lower Elo than engines ranked below it.
+pub fn apply_isotonic_ratings(ratings: &mut [Option<EloEstimate>]) {
+    let mut values: Vec<(usize, f64)> = ratings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, estimate)| estimate.as_ref().map(|value| (index, value.elo)))
+        .collect();
+    if values.len() < 2 {
+        return;
+    }
+    let mut start = 0;
+    while start < values.len() {
+        let mut end = start + 1;
+        let mut sum = values[start].1;
+        while end < values.len() && values[end].1 > sum / (end - start) as f64 {
+            sum += values[end].1;
+            end += 1;
+        }
+        let mean = sum / (end - start) as f64;
+        for slot in &mut values[start..end] {
+            slot.1 = mean;
+        }
+        start = end;
+    }
+    for i in 1..values.len() {
+        if values[i].1 > values[i - 1].1 {
+            values[i].1 = values[i - 1].1;
+        }
+    }
+    for (index, elo) in values {
+        if let Some(estimate) = ratings.get_mut(index).and_then(|slot| slot.as_mut()) {
+            estimate.elo = elo;
+            if estimate.lower_95 > elo {
+                estimate.lower_95 = elo;
+            }
+            if estimate.upper_95 < elo {
+                estimate.upper_95 = elo;
+            }
+        }
+    }
+}
+
 fn samples_for(
     index: usize,
     ratings: &[f64],
@@ -174,7 +217,13 @@ fn samples_for(
     prior: RatingPrior,
 ) -> Vec<RatedResult> {
     let mut samples = Vec::new();
-    let virtual_draws = prior.virtual_draws.max(0.0).round() as usize;
+    let played = games
+        .iter()
+        .filter(|(white, black, _)| *white == index || *black == index)
+        .count() as f64;
+    let virtual_draws = (prior.virtual_draws / (1.0 + played * 0.35))
+        .max(0.0)
+        .round() as usize;
     for _ in 0..virtual_draws {
         samples.push(RatedResult {
             opponent_elo: prior.elo,
@@ -393,5 +442,27 @@ mod tests {
         let contender = ratings[1].unwrap().elo;
         assert!(contender > 3_200.0, "{contender}");
         assert!(contender < 4_000.0, "{contender}");
+    }
+
+    #[test]
+    fn isotonic_keeps_the_leader_at_or_above_lower_rows() {
+        let mut ratings = vec![
+            Some(EloEstimate {
+                elo: 2_000.0,
+                lower_95: 1_800.0,
+                upper_95: 2_200.0,
+                games: 2,
+            }),
+            Some(EloEstimate {
+                elo: 3_400.0,
+                lower_95: 3_200.0,
+                upper_95: 3_600.0,
+                games: 2,
+            }),
+        ];
+        apply_isotonic_ratings(&mut ratings);
+        let leader = ratings[0].unwrap().elo;
+        let second = ratings[1].unwrap().elo;
+        assert!(leader >= second, "{leader} vs {second}");
     }
 }

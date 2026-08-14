@@ -127,6 +127,7 @@ fn mark_colors(color: MarkColor, opacity: f32) -> (Color, Color) {
 }
 
 /// Returns true if the move between `from` and `to` is a knight jump.
+#[allow(dead_code)]
 pub fn is_knight_move(from_file: i32, from_rank: i32, to_file: i32, to_rank: i32) -> bool {
     let df = (from_file - to_file).abs();
     let dr = (from_rank - to_rank).abs();
@@ -250,10 +251,6 @@ fn draw_board_arrow(
     flipped: bool,
     appearance: ArrowAppearance,
 ) {
-    let from_file = arrow.from.file() as i32;
-    let from_rank = arrow.from.rank() as i32;
-    let to_file = arrow.to.file() as i32;
-    let to_rank = arrow.to.rank() as i32;
     let p_from = sq_center(arrow.from.file(), arrow.from.rank(), sq_size, flipped);
     let p_to = sq_center(arrow.to.file(), arrow.to.rank(), sq_size, flipped);
     let color = if arrow.role == ArrowRole::User {
@@ -262,6 +259,7 @@ fn draw_board_arrow(
         arrow.color
     };
     let (fill, outline) = mark_colors(color, arrow.resolved_opacity());
+    let scale = appearance.size.scale();
     let appearance_core = crate::app_core::arrows::ArrowAppearance {
         shape: match appearance.shape {
             ArrowShape::Smart => crate::app_core::arrows::ArrowShape::Smart,
@@ -385,7 +383,7 @@ fn draw_straight_arrow(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn draw_knight_arrow(
     frame: &mut Frame,
     from_square: types::Square,
@@ -475,6 +473,7 @@ fn draw_knight_arrow(
     );
 }
 
+#[allow(dead_code)]
 fn draw_leg_segment(
     frame: &mut Frame,
     from: Point,

@@ -1,7 +1,8 @@
 //! CuteChess-inspired tournament setup state (Mujrim theme).
 
+use mujrim_benchmarker::hardware::safe_simultaneous_games;
 use mujrim_benchmarker::strength::{MatchClock, MatchConfig};
-use mujrim_study::tournament::TournamentFormat;
+use mujrim_study::tournament::{Pairing, TournamentFormat};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,8 +14,9 @@ pub struct TournamentSetup {
     pub format: TournamentFormat,
     pub swiss_rounds: u32,
     pub games_per_encounter: u32,
-    /// Always 1 — one full board like Engine vs Engine / CuteChess.
+    /// Simultaneous games; clamped to host-safe cores.
     pub concurrency: u32,
+    pub completed_pairings: Vec<Pairing>,
     /// Reserved for paired color-swap UI (always on in runner today).
     #[allow(dead_code)]
     pub swap_sides: bool,
@@ -32,6 +34,13 @@ pub const GUI_TOURNAMENT_MAX_HASH_MB: u32 = 64;
 pub const GUI_TOURNAMENT_MAX_THREADS: u32 = 1;
 pub const GUI_TOURNAMENT_ENGINE_MEMORY_MB: u32 = 256;
 pub const GUI_TOURNAMENT_MATCH_MEMORY_MB: u32 = 512;
+
+pub fn detected_safe_games() -> u32 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    safe_simultaneous_games(cores) as u32
+}
 pub const GUI_TOURNAMENT_DEFAULT_ENGINES: usize = 2;
 
 /// Real-time Fischer clocks with a secondary control after move 40.
@@ -93,6 +102,7 @@ impl Default for TournamentSetup {
             max_plies: 400,
             selected_engine_paths: Vec::new(),
             pgn_output: String::new(),
+            completed_pairings: Vec::new(),
         }
     }
 }
@@ -102,8 +112,8 @@ impl TournamentSetup {
         if self.selected_engine_paths.len() < 2 {
             return Err("Select at least two host-native engines.".to_owned());
         }
-        if self.concurrency != 1 {
-            return Err("Tournament games run one at a time on a full board.".to_owned());
+        if self.concurrency == 0 {
+            return Err("Concurrency must be at least 1.".to_owned());
         }
         if self.games_per_encounter == 0 {
             return Err("Games per encounter must be at least 1.".to_owned());
@@ -112,7 +122,8 @@ impl TournamentSetup {
     }
 
     pub fn sanitize_for_gui(&mut self) {
-        self.concurrency = 1;
+        let max_games = detected_safe_games();
+        self.concurrency = self.concurrency.clamp(1, max_games);
         self.hash_mb = self.hash_mb.clamp(16, GUI_TOURNAMENT_MAX_HASH_MB);
         self.engine_threads = 1;
         self.games_per_encounter = self.games_per_encounter.clamp(1, 4);
@@ -130,11 +141,12 @@ impl TournamentSetup {
         );
         MatchConfig {
             pairs: setup.games_per_encounter as usize,
-            concurrency: 1,
+            concurrency: setup.concurrency.max(1) as usize,
             hash_mb,
             engine_threads: 1,
             max_engine_memory_mb: GUI_TOURNAMENT_ENGINE_MEMORY_MB as usize,
-            max_match_memory_mb: GUI_TOURNAMENT_MATCH_MEMORY_MB as usize,
+            max_match_memory_mb: GUI_TOURNAMENT_MATCH_MEMORY_MB as usize
+                * setup.concurrency.max(1) as usize,
             session_pairs: 1,
             max_plies: setup.max_plies as usize,
             early_stop: false,
@@ -156,13 +168,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_requires_two_engines_and_single_board() {
+    fn validate_requires_two_engines() {
         let mut setup = TournamentSetup::default();
         assert!(setup.validate().is_err());
         setup.selected_engine_paths = vec![PathBuf::from("a.exe"), PathBuf::from("b.exe")];
         assert!(setup.validate().is_ok());
-        setup.concurrency = 2;
+        setup.concurrency = 0;
         assert!(setup.validate().is_err());
+        setup.concurrency = 2;
+        assert!(setup.validate().is_ok());
     }
 
     #[test]
@@ -230,10 +244,28 @@ mod tests {
             ..TournamentSetup::default()
         };
         setup.sanitize_for_gui();
-        assert_eq!(setup.concurrency, 1);
+        assert!(setup.concurrency >= 1);
+        assert!(setup.concurrency <= detected_safe_games());
         assert_eq!(setup.engine_threads, 1);
         assert_eq!(setup.hash_mb, GUI_TOURNAMENT_MAX_HASH_MB);
         assert_eq!(setup.games_per_encounter, 4);
         assert_eq!(setup.max_plies, 400);
+    }
+
+    #[test]
+    fn match_config_scales_memory_with_concurrency() {
+        let setup = TournamentSetup {
+            selected_engine_paths: vec![PathBuf::from("a"), PathBuf::from("b")],
+            concurrency: detected_safe_games().clamp(1, 2),
+            ..TournamentSetup::default()
+        };
+        let config = setup.to_match_config();
+        assert_eq!(
+            config.max_match_memory_mb,
+            GUI_TOURNAMENT_MATCH_MEMORY_MB as usize * config.concurrency
+        );
+        assert_eq!(config.engine_threads, 1);
+        assert!(config.concurrency >= 1);
+        assert!(config.concurrency <= detected_safe_games() as usize);
     }
 }

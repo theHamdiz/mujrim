@@ -1148,6 +1148,11 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     state.analysis_scores.set(Vec::new());
     state.move_annotations.set(Vec::new());
     state.review_ply.set(None);
+    let resume_id = state
+        .resume_prompt
+        .get_untracked()
+        .map(|checkpoint| checkpoint.id)
+        .filter(|id| !id.is_empty());
     state.resume_prompt.set(None);
     state.dock_tab.set(DockTab::Results);
     state.dock_open.set(true);
@@ -1155,10 +1160,25 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    state
-        .current_tournament_id
-        .set(Some(format!("t-{started}")));
+    let tournament_id = resume_id.clone().unwrap_or_else(|| format!("t-{started}"));
+    state.current_tournament_id.set(Some(tournament_id.clone()));
     state.persisted_tournament_games.set(0);
+    state.focused_live_key.set(None);
+    state.eval_bar_fen.set(String::new());
+    let resumed = resume_id.as_ref().and_then(|id| {
+        handles
+            .study
+            .borrow()
+            .as_ref()
+            .and_then(|database| database.load_tournament(id).ok().flatten())
+    });
+    if let Some(stored) = resumed.as_ref() {
+        setup.completed_pairings = stored.results.iter().map(|result| result.pairing).collect();
+        state.tournament_setup.set(setup.clone());
+    } else {
+        setup.completed_pairings.clear();
+        state.tournament_setup.set(setup.clone());
+    }
     let handle = crate::app_core::tournament_live::LiveTournamentHandle::new(setup.format);
     let white_name = selected[0].name.clone();
     let black_name = selected[1].name.clone();
@@ -1173,6 +1193,17 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
             black_name.clone(),
             clock_ms,
         ));
+        if let Some(stored) = resumed.as_ref() {
+            guard.played_games = logic::stored_to_played(&stored.games);
+            guard.game_results = stored.results.clone();
+            guard.standings = crate::app_core::tournament_live::standings_from_played(
+                &guard.engine_names,
+                &guard.played_games,
+            );
+            state
+                .persisted_tournament_games
+                .set(guard.played_games.len());
+        }
         guard.status_line = format!("Starting {white_name} vs {black_name}…");
     }
     if let Ok(game) = logic::replay_study_game(mujrim_study::opening::START_FEN, &[]) {
@@ -1184,7 +1215,7 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     }
     state.tournament_snapshot.set(handle.clone_snapshot());
     crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
-        format!("t-{started}"),
+        tournament_id,
         &setup,
         &handle.clone_snapshot(),
     )
@@ -1193,8 +1224,9 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     state.show_tournament_setup.set(false);
     state.screen.set(Screen::Tournaments);
     state.tournament_status.set(format!(
-        "Starting {} engines · 1 board · {white_name} vs {black_name}.",
-        selected.len()
+        "Starting {} engines · {} boards · {white_name} vs {black_name}.",
+        selected.len(),
+        setup.concurrency
     ));
     let snapshot = handle.clone();
     let persist_handles = handles.clone();
@@ -1257,7 +1289,7 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
             state.tournament_snapshot.set(guard.clone());
             state.tournament_status.set(guard.status_line.clone());
             if match_controller::should_sync_tournament_board(state.screen.get_untracked()) {
-                sync_tournament_board(state, &guard);
+                sync_tournament_board(state, &handles, &guard);
             }
             persist_tournament_progress(state, &handles, &guard);
             if running {
@@ -1285,6 +1317,7 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
 
 fn sync_tournament_board(
     state: AppState,
+    handles: &AppHandles,
     snap: &crate::app_core::tournament_live::LiveTournamentSnapshot,
 ) {
     if let Some(id) = state.selected_tournament_game_id.get_untracked()
@@ -1296,15 +1329,26 @@ fn sync_tournament_board(
         state.initial_fen.set(played.initial_fen);
         return;
     }
-    if let Some(live) = layout::focused_live_game(&snap.live_games).cloned() {
-        if (state.move_log.get_untracked() != live.moves
-            || state.initial_fen.get_untracked() != live.initial_fen)
+    if let Some(live) = layout::select_live_game(
+        &snap.live_games,
+        state.focused_live_key.get_untracked().as_deref(),
+    )
+    .cloned()
+    {
+        let previous = state.move_log.get_untracked();
+        let fen_changed = state.initial_fen.get_untracked() != live.initial_fen;
+        if let Some(uci) = logic::next_incremental_uci(&previous, &live.moves)
+            && !fen_changed
+        {
+            apply_live_tournament_uci(state, handles, &uci);
+        } else if (previous != live.moves || fen_changed)
             && let Ok(game) = logic::replay_study_game(&live.initial_fen, &live.moves)
         {
             state.game.set(Some(game));
             state.move_log.set(live.moves.clone());
             state.initial_fen.set(live.initial_fen.clone());
         }
+        apply_live_thinking_overlays(state, handles, &live);
         let mut scores = state.analysis_scores.get_untracked();
         layout::extend_histogram(&mut scores, live.moves.len(), live.score_cp);
         state.analysis_scores.set(scores);
@@ -1318,6 +1362,75 @@ fn sync_tournament_board(
         state.move_log.set(played.moves);
         state.initial_fen.set(played.initial_fen);
     }
+}
+
+fn apply_live_tournament_uci(state: AppState, handles: &AppHandles, uci: &str) {
+    let Some((mv, captured, gives_check)) = state.game.with_untracked(|game| {
+        let gs = game.as_ref()?;
+        let mut board = gs.board.clone();
+        let mv = board
+            .generate_legal_moves()
+            .into_iter()
+            .copied()
+            .find(|candidate| candidate.to_uci() == uci)?;
+        let captured = gs.board.piece_on(mv.to).is_some() || mv.is_capture();
+        board.make_move(mv);
+        let gives_check = board.is_in_check(board.side_to_move);
+        Some((mv, captured, gives_check))
+    }) else {
+        return;
+    };
+    play_move_sfx(state, handles, mv, captured, gives_check);
+    apply_engine_move(state, mv, None, captured);
+}
+
+fn apply_live_thinking_overlays(
+    state: AppState,
+    handles: &AppHandles,
+    live: &crate::app_core::tournament_live::LiveGameBoard,
+) {
+    let settings = state.settings.get_untracked();
+    let fen = state
+        .game
+        .get_untracked()
+        .map(|game| game.board.to_fen())
+        .unwrap_or_else(|| live.initial_fen.clone());
+    let pv = live
+        .multipv_lines
+        .first()
+        .map(|line| line.pv.clone())
+        .filter(|pv| !pv.is_empty())
+        .unwrap_or_else(|| live.pv.clone());
+    let analysis = mujrim_study::board_marks::arrows_from_uci_pv(
+        &fen,
+        &pv,
+        mujrim_study::board_marks::MarkColor::Green,
+        mujrim_study::board_marks::ArrowRole::EngineBest,
+        4,
+        Some("PV"),
+    )
+    .unwrap_or_default();
+    state.game.update(|game| {
+        let Some(game) = game.as_mut() else {
+            return;
+        };
+        game.refresh_move_overlays(settings.last_move_arrow, None, &analysis);
+    });
+    handles
+        .telemetry
+        .set(crate::app_core::engine::TelemetrySnapshot {
+            depth: live.depth,
+            score_cp: live.score_cp,
+            nodes: live.nodes,
+            pv: live.pv.clone(),
+            multipv_lines: live
+                .multipv_lines
+                .iter()
+                .map(|line| (line.multipv, line.score_cp, line.pv.clone()))
+                .collect(),
+            label: format!("{} vs {}", live.white, live.black),
+            ..crate::app_core::engine::TelemetrySnapshot::default()
+        });
 }
 
 pub fn pause_tournament(state: AppState, handles: &AppHandles) {
@@ -1718,6 +1831,134 @@ pub fn download_nnue(state: AppState, handles: &AppHandles) {
     });
 }
 
+pub fn apply_play_thinking_overlays(state: AppState, handles: &AppHandles) {
+    if state.screen.get_untracked() == Screen::Tournaments || !state.searching.get_untracked() {
+        return;
+    }
+    let tel = handles.telemetry.get();
+    if tel.pv.is_empty() {
+        return;
+    }
+    let settings = state.settings.get_untracked();
+    let fen = state
+        .game
+        .get_untracked()
+        .map(|game| game.board.to_fen())
+        .unwrap_or_else(|| state.initial_fen.get_untracked());
+    let analysis = mujrim_study::board_marks::arrows_from_uci_pv(
+        &fen,
+        &tel.pv,
+        mujrim_study::board_marks::MarkColor::Green,
+        mujrim_study::board_marks::ArrowRole::EngineBest,
+        4,
+        Some("PV"),
+    )
+    .unwrap_or_default();
+    state.game.update(|game| {
+        let Some(game) = game.as_mut() else {
+            return;
+        };
+        game.refresh_move_overlays(settings.last_move_arrow, None, &analysis);
+    });
+}
+
+pub fn refresh_eval_bar(state: AppState, handles: &AppHandles) {
+    let fen = current_eval_fen(state);
+    if fen.is_empty() || fen == state.eval_bar_fen.get_untracked() {
+        return;
+    }
+    state.eval_bar_fen.set(fen.clone());
+    let eval_generation = state.eval_bar_gen.get_untracked().saturating_add(1);
+    state.eval_bar_gen.set(eval_generation);
+    let engine_id = state.settings.get_untracked().eval_bar_engine;
+    let path = logic::resolve_eval_bar_engine_path(
+        &engine_id,
+        &handles.bundled,
+        &handles.catalog.borrow(),
+    );
+    let on_done = create_ext_action(handles.ui_scope, move |score: i32| {
+        if state.eval_bar_gen.get_untracked() == eval_generation {
+            state.eval_bar_cp.set(score);
+        }
+    });
+    std::thread::Builder::new()
+        .name("mujrim-eval-bar".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            types::init();
+            on_done(search_eval_bar_cp(&fen, path.as_deref()));
+        })
+        .ok();
+}
+
+fn current_eval_fen(state: AppState) -> String {
+    if state.screen.get_untracked() == Screen::Tournaments {
+        let snap = state.tournament_snapshot.get_untracked();
+        if let Some(live) = layout::select_live_game(
+            &snap.live_games,
+            state.focused_live_key.get_untracked().as_deref(),
+        ) && let Ok(game) = logic::replay_study_game(&live.initial_fen, &live.moves)
+        {
+            return game.board.to_fen();
+        }
+    }
+    state
+        .game
+        .get_untracked()
+        .map(|game| game.board.to_fen())
+        .unwrap_or_else(|| state.initial_fen.get_untracked())
+}
+
+fn search_eval_bar_cp(fen: &str, path: Option<&Path>) -> i32 {
+    if let Some(path) = path {
+        let search = crate::app_core::uci_process::ExternalSearchConfig {
+            ponder: false,
+            use_nnue: true,
+            own_book: false,
+            eval_file: None,
+        };
+        if let Some(path) = path.to_str()
+            && let Ok(result) = uci_process::query_best_move(
+                path,
+                ExternalEngineProtocol::Uci,
+                fen,
+                12,
+                Duration::from_millis(250),
+                16,
+                1,
+                &search,
+            )
+        {
+            return result.score;
+        }
+    }
+    if let Ok(mut board) = types::Board::from_fen(fen)
+        && let Ok((_, info)) = crate::app_core::engine::builtin_engine_search(
+            &mut board,
+            16,
+            1,
+            true,
+            None,
+            Duration::from_millis(200),
+            10,
+        )
+    {
+        return parse_score_cp(&info).unwrap_or(0);
+    }
+    0
+}
+
+fn parse_score_cp(label: &str) -> Option<i32> {
+    label
+        .split("score ")
+        .nth(1)?
+        .split(" cp")
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 pub fn update_settings(state: AppState, patch: impl FnOnce(&mut AppSettings)) {
     state.settings.update(patch);
     state.persist_settings();
@@ -1879,6 +2120,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_score_cp_reads_uci_style_labels() {
+        assert_eq!(
+            parse_score_cp("depth 12/14 | score 34 cp | 100 nodes"),
+            Some(34)
+        );
+        assert_eq!(parse_score_cp("no score here"), None);
+    }
+
+    #[test]
     fn tournament_and_game_stop_actions_are_wired() {
         let src = include_str!("actions.rs");
         let production = src.split("#[cfg(test)]").next().expect("source");
@@ -1900,6 +2150,12 @@ mod tests {
             "request_abort_game",
             "stop_builtin_search",
             "cancel_all_pondering",
+            "apply_live_tournament_uci",
+            "begin_slide",
+            "refresh_eval_bar",
+            "apply_play_thinking_overlays",
+            "arrows_from_uci_pv",
+            "next_incremental_uci",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

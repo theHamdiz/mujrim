@@ -29,6 +29,7 @@ pub struct TournamentConfig {
     pub checkpoint_directory: Option<PathBuf>,
     pub format: TournamentFormat,
     pub swiss_rounds: Option<usize>,
+    pub completed_pairings: Vec<Pairing>,
 }
 
 impl Default for TournamentConfig {
@@ -45,6 +46,7 @@ impl Default for TournamentConfig {
             checkpoint_directory: None,
             format: TournamentFormat::RoundRobin,
             swiss_rounds: None,
+            completed_pairings: Vec::new(),
         }
     }
 }
@@ -134,6 +136,16 @@ pub enum TournamentEvent {
         depth: i32,
         nodes: u64,
         moves: Vec<String>,
+        white_clock_ms: Option<u64>,
+        black_clock_ms: Option<u64>,
+    },
+    Thinking {
+        game_key: String,
+        score_cp: i32,
+        depth: i32,
+        nodes: u64,
+        pv: Vec<String>,
+        multipv_lines: Vec<mujrim_protocols::MultiPvLine>,
         white_clock_ms: Option<u64>,
         black_clock_ms: Option<u64>,
     },
@@ -417,8 +429,33 @@ fn execute_plan(
             callback(event);
         }
     };
-    let total = plan.len().max(matches.len().saturating_add(plan.len()));
-    for &pairing in plan {
+    let remaining: Vec<Pairing> = plan
+        .iter()
+        .copied()
+        .filter(|pairing| !config.completed_pairings.contains(pairing))
+        .collect();
+    let total = plan
+        .len()
+        .max(matches.len().saturating_add(remaining.len()));
+    let workers = config
+        .match_config
+        .concurrency
+        .max(1)
+        .min(remaining.len().max(1));
+    if workers > 1 {
+        return execute_plan_parallel(
+            engines,
+            config,
+            &remaining,
+            matches,
+            game_results,
+            cancel,
+            on_event,
+            total,
+            workers,
+        );
+    }
+    for &pairing in &remaining {
         if cancel.load(Ordering::Acquire) {
             return PlanOutcome {
                 cancelled: true,
@@ -487,6 +524,25 @@ fn execute_plan(
                     depth,
                     nodes,
                     moves,
+                    white_clock_ms,
+                    black_clock_ms,
+                }),
+                GameProgressEvent::Thinking {
+                    game_key,
+                    score_cp,
+                    depth,
+                    nodes,
+                    pv,
+                    multipv_lines,
+                    white_clock_ms,
+                    black_clock_ms,
+                } => callback(TournamentEvent::Thinking {
+                    game_key,
+                    score_cp,
+                    depth,
+                    nodes,
+                    pv,
+                    multipv_lines,
                     white_clock_ms,
                     black_clock_ms,
                 }),
@@ -564,6 +620,236 @@ fn execute_plan(
     }
     PlanOutcome {
         cancelled: false,
+        error: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_plan_parallel(
+    engines: &[TournamentEngine],
+    config: &TournamentConfig,
+    remaining: &[Pairing],
+    matches: &mut Vec<MatchSummary>,
+    game_results: &mut Vec<TournamentResult>,
+    cancel: &AtomicBool,
+    on_event: &Option<TournamentProgress>,
+    total: usize,
+    workers: usize,
+) -> PlanOutcome {
+    use std::sync::mpsc;
+    let (job_tx, job_rx) = mpsc::channel();
+    for (offset, pairing) in remaining.iter().copied().enumerate() {
+        let _ = job_tx.send((matches.len() + offset + 1, pairing));
+    }
+    drop(job_tx);
+    let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
+    let matches_lock = Arc::new(std::sync::Mutex::new(std::mem::take(matches)));
+    let results_lock = Arc::new(std::sync::Mutex::new(std::mem::take(game_results)));
+    let engines = engines.to_vec();
+    let config = config.clone();
+    let cancel = config
+        .match_config
+        .stop_flag
+        .clone()
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(cancel.load(Ordering::Acquire))));
+    let on_event = on_event.clone();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let job_rx = Arc::clone(&job_rx);
+            let matches_lock = Arc::clone(&matches_lock);
+            let results_lock = Arc::clone(&results_lock);
+            let engines = engines.clone();
+            let config = config.clone();
+            let cancel = Arc::clone(&cancel);
+            let on_event = on_event.clone();
+            scope.spawn(move || {
+                loop {
+                    if cancel.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Ok(guard) = job_rx.lock() else {
+                        break;
+                    };
+                    let Ok((index, pairing)) = guard.recv() else {
+                        break;
+                    };
+                    drop(guard);
+                    let emit = |event: TournamentEvent| {
+                        if let Some(callback) = on_event.as_ref() {
+                            callback(event);
+                        }
+                    };
+                    let candidate = engines[pairing.white].engine.clone();
+                    let reference = engines[pairing.black].engine.clone();
+                    emit(TournamentEvent::MatchStarted {
+                        index,
+                        total: total.max(index),
+                        round: pairing.round,
+                        white: candidate.name.clone(),
+                        black: reference.name.clone(),
+                    });
+                    let mut match_config = config.match_config.clone();
+                    match_config.opening_offset = match_config.opening_offset.saturating_add(
+                        (index.saturating_sub(1)).saturating_mul(match_config.pairs),
+                    );
+                    match_config.reference_elo = engines[pairing.black].established_elo;
+                    if let Some(flag) = config.match_config.stop_flag.as_ref() {
+                        match_config.stop_flag = Some(Arc::clone(flag));
+                    }
+                    match_config.checkpoint_path =
+                        config.checkpoint_directory.as_ref().map(|directory| {
+                            directory.join(format!(
+                                "{:02}-{}-vs-{}.jsonl",
+                                index,
+                                safe_name(&candidate.name),
+                                safe_name(&reference.name)
+                            ))
+                        });
+                    let match_index = index;
+                    let round = pairing.round;
+                    if let Some(callback) = on_event.clone() {
+                        match_config.game_progress = Some(Arc::new(move |event| match event {
+                            GameProgressEvent::Started {
+                                game_key,
+                                white,
+                                black,
+                                initial_fen,
+                            } => callback(TournamentEvent::GameStarted {
+                                game_key,
+                                match_index,
+                                round,
+                                white,
+                                black,
+                                initial_fen,
+                            }),
+                            GameProgressEvent::Ply {
+                                game_key,
+                                ply,
+                                uci,
+                                score_cp,
+                                depth,
+                                nodes,
+                                moves,
+                                white_clock_ms,
+                                black_clock_ms,
+                            } => callback(TournamentEvent::PlyPlayed {
+                                game_key,
+                                ply,
+                                uci,
+                                score_cp,
+                                depth,
+                                nodes,
+                                moves,
+                                white_clock_ms,
+                                black_clock_ms,
+                            }),
+                            GameProgressEvent::Thinking {
+                                game_key,
+                                score_cp,
+                                depth,
+                                nodes,
+                                pv,
+                                multipv_lines,
+                                white_clock_ms,
+                                black_clock_ms,
+                            } => callback(TournamentEvent::Thinking {
+                                game_key,
+                                score_cp,
+                                depth,
+                                nodes,
+                                pv,
+                                multipv_lines,
+                                white_clock_ms,
+                                black_clock_ms,
+                            }),
+                            GameProgressEvent::Finished {
+                                game_key,
+                                white_score,
+                                moves,
+                            } => callback(TournamentEvent::GameFinished {
+                                game_key,
+                                white_score,
+                                moves,
+                            }),
+                        }));
+                    }
+                    let summary = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || {
+                            run_match(
+                                candidate.clone(),
+                                reference.clone(),
+                                None,
+                                match_config.clone(),
+                            )
+                        },
+                    )) {
+                        Ok(summary) => ensure_scored_match(summary, &candidate, &reference),
+                        Err(_) => forfeit_match_summary(
+                            &candidate,
+                            &reference,
+                            &match_config,
+                            FailedEngine::Candidate,
+                            "match panicked; awarded forfeit loss to white/candidate and continued",
+                        ),
+                    };
+                    let white_points =
+                        summary.scores.wins as f64 + summary.scores.draws as f64 * 0.5;
+                    let games = summary.scores.games() as f64;
+                    let black_points = games - white_points;
+                    let match_note = summary.error.as_ref().map(|error| {
+                        format!(
+                            "{} vs {}: {error} (forfeit recorded; tournament continues)",
+                            summary.candidate, summary.reference
+                        )
+                    });
+                    let games = games_from_match(&summary, index, pairing.round);
+                    let mut results_guard = results_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    append_game_results(pairing, &summary, &mut results_guard);
+                    let current_standings = {
+                        let entrants = engines
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, engine)| Entrant {
+                                id: idx.to_string(),
+                                name: engine.engine.name.clone(),
+                                seed_elo: engine.established_elo,
+                            })
+                            .collect::<Vec<_>>();
+                        standings(&entrants, &results_guard)
+                    };
+                    let snapshot_results = results_guard.clone();
+                    drop(results_guard);
+                    emit(TournamentEvent::MatchFinished {
+                        index,
+                        total: total.max(index),
+                        round: pairing.round,
+                        white: summary.candidate.clone(),
+                        black: summary.reference.clone(),
+                        white_points,
+                        black_points,
+                        error: match_note,
+                        standings: current_standings,
+                        game_results: snapshot_results,
+                        games,
+                    });
+                    matches_lock
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(summary);
+                }
+            });
+        }
+    });
+    *matches = match Arc::try_unwrap(matches_lock) {
+        Ok(mutex) => mutex.into_inner().unwrap_or_else(|e| e.into_inner()),
+        Err(arc) => arc.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+    };
+    *game_results = match Arc::try_unwrap(results_lock) {
+        Ok(mutex) => mutex.into_inner().unwrap_or_else(|e| e.into_inner()),
+        Err(arc) => arc.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+    };
+    PlanOutcome {
+        cancelled: cancel.load(Ordering::Acquire),
         error: None,
     }
 }
@@ -705,6 +991,7 @@ mod tests {
                     checkpoint_directory: None,
                     format: TournamentFormat::RoundRobin,
                     swiss_rounds: None,
+                    completed_pairings: Vec::new(),
                 },
             )
         }))

@@ -172,6 +172,14 @@ pub fn save_current_line(
     Ok(line)
 }
 
+pub fn next_incremental_uci(previous: &[String], next: &[String]) -> Option<String> {
+    if next.len() == previous.len() + 1 && next.starts_with(previous) {
+        next.last().cloned()
+    } else {
+        None
+    }
+}
+
 pub fn replay_study_game(initial_fen: &str, moves: &[String]) -> Result<GameState, String> {
     types::init();
     let mut state = GameState::new(types::Board::from_fen(initial_fen)?);
@@ -623,6 +631,39 @@ pub fn tournament_engine_roster(
     roster
 }
 
+pub fn eval_bar_engine_choices(
+    bundled: &[DiscoveredEngine],
+    catalog: &[EngineMetadata],
+) -> Vec<crate::app_core::settings::EvalBarEngineChoice> {
+    use crate::app_core::settings::{EVAL_BAR_DEFAULT_ENGINE, EvalBarEngineChoice};
+    let mut choices = vec![EvalBarEngineChoice {
+        id: EVAL_BAR_DEFAULT_ENGINE.to_owned(),
+        label: "Mujrim v60".to_owned(),
+    }];
+    for engine in tournament_engine_roster(bundled, catalog) {
+        let id = engine_identity_key(&engine.path);
+        if choices.iter().any(|choice| choice.id == id) {
+            continue;
+        }
+        choices.push(EvalBarEngineChoice {
+            id,
+            label: engine.name,
+        });
+    }
+    choices
+}
+
+pub fn resolve_eval_bar_engine_path(
+    id: &str,
+    bundled: &[DiscoveredEngine],
+    catalog: &[EngineMetadata],
+) -> Option<PathBuf> {
+    tournament_engine_roster(bundled, catalog)
+        .into_iter()
+        .find(|engine| engine_identity_key(&engine.path) == id)
+        .map(|engine| engine.path)
+}
+
 pub fn engine_player_from_roster(
     roster: &[QuickTournamentEngine],
     index: usize,
@@ -814,6 +855,8 @@ fn run_quick_tournament_body(
                             nodes: 0,
                             white_clock_ms: Some(initial_clock_ms),
                             black_clock_ms: Some(initial_clock_ms),
+                            clock_synced_ms: Some(tournament_live::now_unix_ms()),
+                            ..tournament_live::LiveGameBoard::default()
                         });
                         guard.current_round = round;
                         guard.current_white = white;
@@ -842,12 +885,44 @@ fn run_quick_tournament_body(
                             black_clock_ms,
                         );
                     }
+                    TournamentEvent::Thinking {
+                        game_key,
+                        score_cp,
+                        depth,
+                        nodes,
+                        pv,
+                        multipv_lines,
+                        white_clock_ms,
+                        black_clock_ms,
+                    } => {
+                        guard.apply_thinking(
+                            &game_key,
+                            score_cp,
+                            depth,
+                            nodes,
+                            pv,
+                            multipv_lines
+                                .into_iter()
+                                .map(|line| tournament_live::ThinkingLine {
+                                    multipv: line.multipv,
+                                    score_cp: line.score,
+                                    pv: line.pv,
+                                })
+                                .collect(),
+                            white_clock_ms,
+                            black_clock_ms,
+                        );
+                    }
                     TournamentEvent::GameFinished {
                         game_key,
                         white_score,
                         moves,
                     } => {
                         guard.finish_live_game(&game_key, white_score, moves);
+                        guard.standings = tournament_live::standings_from_played(
+                            &guard.engine_names,
+                            &guard.played_games,
+                        );
                     }
                     TournamentEvent::MatchFinished {
                         index,
@@ -929,6 +1004,7 @@ fn run_quick_tournament_body(
                 path.join("tournaments")
                     .join(tournament_directory_name(format))
             }),
+            completed_pairings: setup.completed_pairings.clone(),
         },
         cancel,
         Some(progress),
@@ -1272,6 +1348,8 @@ pub fn optimistic_live_board(
         nodes: 0,
         white_clock_ms: Some(initial_clock_ms),
         black_clock_ms: Some(initial_clock_ms),
+        clock_synced_ms: Some(tournament_live::now_unix_ms()),
+        ..tournament_live::LiveGameBoard::default()
     }
 }
 
@@ -1375,15 +1453,6 @@ pub fn persist_live_tournament(
     snap: &tournament_live::LiveTournamentSnapshot,
 ) -> Result<(), String> {
     let stored = snapshot_to_stored(id, name, format, created_at, snap);
-    for game in &stored.games {
-        let record = stored_game_record(name, "Local", game);
-        let pgn = String::from_utf8(game_export::encode_games(
-            std::slice::from_ref(&record),
-            GameExportFormat::Pgn,
-        )?)
-        .unwrap_or_default();
-        let _ = database.import_pgn_text(&pgn);
-    }
     database.save_tournament(&stored)
 }
 
@@ -1403,6 +1472,22 @@ mod tests {
     use crate::app_core::engine::{GameMode, PlayerConfig, QuickTournamentEngine};
     use mujrim_study::annotation::MoveAnnotation;
     use mujrim_study::database::{GameMetadata, GameSummary};
+
+    #[test]
+    fn next_incremental_uci_accepts_a_single_new_ply() {
+        assert_eq!(
+            next_incremental_uci(&["e2e4".into()], &["e2e4".into(), "e7e5".into()]),
+            Some("e7e5".into())
+        );
+        assert_eq!(
+            next_incremental_uci(&["e2e4".into()], &["d2d4".into()]),
+            None
+        );
+        assert_eq!(
+            next_incremental_uci(&[], &["e2e4".into()]),
+            Some("e2e4".into())
+        );
+    }
 
     #[test]
     fn pgn_builder_numbers_moves_and_preserves_result() {
@@ -1790,5 +1875,14 @@ mod tests {
             annotation_tint(Some(MoveAnnotation::Blunder)),
             Some((224, 40, 40))
         );
+    }
+
+    #[test]
+    fn eval_bar_engine_defaults_to_v60_and_resolves_by_identity() {
+        use crate::app_core::settings::EVAL_BAR_DEFAULT_ENGINE;
+        let choices = eval_bar_engine_choices(&[], &[]);
+        assert_eq!(choices[0].id, EVAL_BAR_DEFAULT_ENGINE);
+        assert_eq!(choices[0].label, "Mujrim v60");
+        assert!(resolve_eval_bar_engine_path(EVAL_BAR_DEFAULT_ENGINE, &[], &[]).is_none());
     }
 }

@@ -4,7 +4,7 @@ use super::tournament_live::{LiveGameBoard, PlayedGame};
 
 /// Cap concurrent live boards shown in the arena grid.
 pub fn visible_live_boards(live: &[LiveGameBoard], concurrency: usize) -> Vec<LiveGameBoard> {
-    let limit = concurrency.clamp(1, 4);
+    let limit = concurrency.clamp(1, 16);
     live.iter().rev().take(limit).cloned().rev().collect()
 }
 
@@ -37,6 +37,7 @@ mod tests {
                 nodes: 0,
                 white_clock_ms: None,
                 black_clock_ms: None,
+                ..LiveGameBoard::default()
             })
             .collect::<Vec<_>>();
         let visible = visible_live_boards(&boards, 2);

@@ -6,6 +6,7 @@ mod chrome;
 mod clock;
 mod dock;
 mod engine;
+mod eval_bar;
 mod eval_graph;
 mod icons;
 mod modals;
@@ -65,6 +66,8 @@ fn load_window_icon() -> Option<floem::window::Icon> {
 fn app_view(window_id: WindowId) -> impl IntoView {
     let (state, handles) = AppState::boot();
     tick_hub(state);
+    tick_clocks(state, handles.clone());
+    tick_eval_bar(state, handles.clone());
     let content = screens::root_content(state, handles.clone());
     let shell = chrome::shell(window_id, state, handles.clone(), content);
     let options = modals::options_modal(state, handles.clone())
@@ -88,6 +91,23 @@ fn overlay_host_style(style: floem::style::Style, open: bool) -> floem::style::S
     } else {
         style.display(Display::None)
     }
+}
+
+fn tick_clocks(state: AppState, handles: state::AppHandles) {
+    floem::action::exec_after(std::time::Duration::from_millis(100), move |_| {
+        state
+            .clock_now_ms
+            .set(crate::app_core::tournament_live::now_unix_ms());
+        actions::apply_play_thinking_overlays(state, &handles);
+        tick_clocks(state, handles);
+    });
+}
+
+fn tick_eval_bar(state: AppState, handles: state::AppHandles) {
+    floem::action::exec_after(std::time::Duration::from_millis(400), move |_| {
+        actions::refresh_eval_bar(state, &handles);
+        tick_eval_bar(state, handles);
+    });
 }
 
 fn tick_hub(state: AppState) {

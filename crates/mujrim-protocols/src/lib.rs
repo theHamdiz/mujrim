@@ -865,6 +865,22 @@ pub enum SearchStep {
     Done(SearchInfo),
 }
 
+enum SearchPoll {
+    Pending,
+    Done(SearchInfo),
+}
+
+fn forward_search_step(step: SearchStep, on_info: &mut impl FnMut(&SearchInfo)) -> SearchPoll {
+    match step {
+        SearchStep::Pending => SearchPoll::Pending,
+        SearchStep::Info(info) => {
+            on_info(&info);
+            SearchPoll::Pending
+        }
+        SearchStep::Done(info) => SearchPoll::Done(info),
+    }
+}
+
 pub struct EngineSession {
     io: EngineIo,
     driver: Box<dyn ProtocolDriver + Send>,
@@ -1044,6 +1060,15 @@ impl EngineSession {
         req: &SearchRequest,
         interrupt: impl Fn() -> bool,
     ) -> Result<SearchInfo, String> {
+        self.search_interruptible_with_info(req, interrupt, |_| {})
+    }
+
+    pub fn search_interruptible_with_info(
+        &mut self,
+        req: &SearchRequest,
+        interrupt: impl Fn() -> bool,
+        mut on_info: impl FnMut(&SearchInfo),
+    ) -> Result<SearchInfo, String> {
         if !self.supports_stop() {
             return self.search(req);
         }
@@ -1052,10 +1077,9 @@ impl EngineSession {
             if interrupt() {
                 return self.stop_search();
             }
-            match self.poll_search_step()? {
-                SearchStep::Pending => std::thread::sleep(Duration::from_millis(8)),
-                SearchStep::Info(_) => {}
-                SearchStep::Done(info) => return Ok(info),
+            match forward_search_step(self.poll_search_step()?, &mut on_info) {
+                SearchPoll::Pending => std::thread::sleep(Duration::from_millis(8)),
+                SearchPoll::Done(info) => return Ok(info),
             }
         }
     }
@@ -1531,6 +1555,32 @@ mod tests {
             other => panic!("expected done, got {other:?}"),
         }
         assert!(matches!(SearchStep::Pending, SearchStep::Pending));
+    }
+
+    #[test]
+    fn search_info_steps_are_forwarded_to_the_callback() {
+        let info = SearchInfo {
+            depth: 11,
+            score: 42,
+            pv: vec!["e2e4".into()],
+            ..SearchInfo::default()
+        };
+        let mut seen = Vec::new();
+        assert!(matches!(
+            forward_search_step(SearchStep::Pending, &mut |_| {}),
+            SearchPoll::Pending
+        ));
+        assert!(matches!(
+            forward_search_step(SearchStep::Info(info.clone()), &mut |snapshot| {
+                seen.push((snapshot.depth, snapshot.score, snapshot.pv.clone()));
+            }),
+            SearchPoll::Pending
+        ));
+        assert_eq!(seen, vec![(11, 42, vec!["e2e4".to_owned()])]);
+        match forward_search_step(SearchStep::Done(info), &mut |_| {}) {
+            SearchPoll::Done(done) => assert_eq!(done.depth, 11),
+            SearchPoll::Pending => panic!("done step must finish the search"),
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ use floem::taffy::style::Overflow;
 
 use crate::app_core::layout;
 use crate::app_core::palette::GuiPalette;
-use crate::app_core::tournament_live::{PodiumTier, StandingRow};
+use crate::app_core::tournament_live::PodiumTier;
 
 use super::icons;
 use super::state::{AppHandles, AppState};
@@ -546,65 +546,76 @@ pub fn explanation_card(state: AppState, body: impl Fn() -> String + 'static) ->
 
 pub fn standing_rows_list(state: AppState, empty: &'static str) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    dyn_view(move || {
-        let snap = state.tournament_snapshot.get();
-        if snap.standings.is_empty() {
-            return Label::new(empty)
-                .style(move |s| {
-                    s.font_size(theme::TYPE_CAPTION)
-                        .min_width(0.0)
-                        .width_full()
-                        .text_wrap()
-                        .color(theme::rgba(pal().text_secondary))
-                })
-                .into_any();
-        }
+    let rows = (0..layout::STANDING_SLOTS)
+        .map(|index| standing_row_slot(state, index))
+        .collect::<Vec<_>>();
+    Stack::vertical((
+        Label::derived(move || {
+            if state.tournament_snapshot.get().standings.is_empty() {
+                empty.to_owned()
+            } else {
+                String::new()
+            }
+        })
+        .style(move |s| {
+            let empty_list = state.tournament_snapshot.get().standings.is_empty();
+            let s = s
+                .font_size(theme::TYPE_CAPTION)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(pal().text_secondary));
+            if empty_list {
+                s
+            } else {
+                s.display(floem::taffy::style::Display::None)
+            }
+        }),
         capped_scroll(
-            snap.standings
-                .into_iter()
-                .map(|row| standing_row(state, row))
-                .collect::<Vec<_>>()
-                .into_view()
+            rows.into_view()
                 .style(|s| s.width_full().row_gap(6.0).flex_col().min_width(0.0)),
             layout::LIST_SCROLL_PX,
-        )
-        .into_any()
-    })
+        ),
+    ))
+    .style(|s| s.width_full().row_gap(2.0).min_width(0.0).min_height(0.0))
 }
 
-fn standing_row(state: AppState, row: StandingRow) -> impl IntoView {
+fn standing_row_slot(state: AppState, index: usize) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    let podium = row.podium();
-    let (tr, tg, tb) = podium.map(PodiumTier::rgb).unwrap_or((160, 160, 168));
-    let name = row.name.clone();
-    let stats = match row.performance {
-        Some(elo) => format!(
-            "{elo:.0} Elo · {:.1}  ({}-{}-{})",
-            row.points, row.wins, row.draws, row.losses
-        ),
-        None => format!(
-            "{:.1}  ({}-{}-{})",
-            row.points, row.wins, row.draws, row.losses
-        ),
+    let row = move || {
+        state
+            .tournament_snapshot
+            .get()
+            .standings
+            .get(index)
+            .cloned()
     };
-    let rank = row.rank;
     Stack::vertical((
         Stack::horizontal((
             svg(icons::TROPHY).style(move |s| {
+                let Some(row) = row() else {
+                    return s.display(floem::taffy::style::Display::None);
+                };
+                let (tr, tg, tb) = row.podium().map(PodiumTier::rgb).unwrap_or((160, 160, 168));
                 let s = s.size(16, 16).color(Color::from_rgb8(tr, tg, tb));
-                if podium.is_none() {
+                if row.podium().is_none() {
                     s.display(floem::taffy::style::Display::None)
                 } else {
                     s
                 }
             }),
-            Label::new(format!("{rank}")).style(move |s| {
-                s.font_size(12.0)
-                    .font_bold()
-                    .width(22.0)
-                    .color(Color::from_rgb8(tr, tg, tb))
-            }),
-            Label::new(name).style(move |s| {
+            Label::derived(move || row().map(|row| row.rank.to_string()).unwrap_or_default())
+                .style(move |s| {
+                    let (tr, tg, tb) = row()
+                        .and_then(|row| row.podium())
+                        .map(PodiumTier::rgb)
+                        .unwrap_or((160, 160, 168));
+                    s.font_size(12.0)
+                        .font_bold()
+                        .width(22.0)
+                        .color(Color::from_rgb8(tr, tg, tb))
+                }),
+            Label::derived(move || row().map(|row| row.name).unwrap_or_default()).style(move |s| {
                 s.flex_grow(1.0f32)
                     .min_width(0.0)
                     .font_size(theme::TYPE_BODY)
@@ -614,7 +625,22 @@ fn standing_row(state: AppState, row: StandingRow) -> impl IntoView {
             }),
         ))
         .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0)),
-        Label::new(stats).style(move |s| {
+        Label::derived(move || {
+            let Some(row) = row() else {
+                return String::new();
+            };
+            match row.performance {
+                Some(elo) => format!(
+                    "{elo:.0} Elo · {:.1}  ({}-{}-{})",
+                    row.points, row.wins, row.draws, row.losses
+                ),
+                None => format!(
+                    "{:.1}  ({}-{}-{})",
+                    row.points, row.wins, row.draws, row.losses
+                ),
+            }
+        })
+        .style(move |s| {
             s.font_size(theme::TYPE_CAPTION)
                 .min_width(0.0)
                 .width_full()
@@ -623,6 +649,9 @@ fn standing_row(state: AppState, row: StandingRow) -> impl IntoView {
         }),
     ))
     .style(move |s| {
+        let Some(row) = row() else {
+            return s.display(floem::taffy::style::Display::None);
+        };
         let s = s
             .width_full()
             .row_gap(2.0)
@@ -630,7 +659,8 @@ fn standing_row(state: AppState, row: StandingRow) -> impl IntoView {
             .padding_vert(8.0)
             .border_radius(10.0)
             .min_width(0.0);
-        if podium.is_some() {
+        if let Some(podium) = row.podium() {
+            let (tr, tg, tb) = podium.rgb();
             s.background(Color::from_rgba8(tr, tg, tb, 28))
         } else {
             s
@@ -707,13 +737,21 @@ mod tests {
                 .contains("capped_scroll"),
             "engine and theme pickers must scroll when the roster is long"
         );
+        let standings = production
+            .split("pub fn standing_rows_list")
+            .nth(1)
+            .expect("standing_rows_list");
         assert!(
-            production
-                .split("pub fn standing_rows_list")
-                .nth(1)
-                .expect("standing_rows_list")
-                .contains("capped_scroll"),
+            standings.contains("capped_scroll"),
             "standings must scroll instead of overflowing the pane"
+        );
+        assert!(
+            !standings.contains("dyn_view"),
+            "rebuilding standings inside dyn_view resets the scroll offset"
+        );
+        assert!(
+            standings.contains("STANDING_SLOTS"),
+            "standings must keep a mounted slot list"
         );
     }
 }
