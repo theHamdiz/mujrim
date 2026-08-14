@@ -17,10 +17,16 @@ pub fn run_uci(backend: &str) {
         println!("uciok");
         return;
     }
-    let mut handler = if backend == "mujrim-hce" {
-        UciHandler::with_adapter("mujrim-hce")
-    } else {
-        UciHandler::new()
+    let mut handler = match backend {
+        "mujrim-hce" | "hce" => UciHandler::with_adapter("mujrim-hce"),
+        "viridithas" | "viri" | "mujrim-viri" => UciHandler::with_adapter("viridithas"),
+        "obsidian" | "obs" | "mujrim-obs" => UciHandler::with_adapter("obsidian"),
+        "plentychess" | "plenty" | "mujrim-plenty" => UciHandler::with_adapter("plentychess"),
+        "lc0" | "mujrim-lc0" => UciHandler::with_adapter("lc0"),
+        "stockfish" | "v10" | "elite" | "mujrim-elite" => UciHandler::with_adapter("stockfish"),
+        "reckless" | "v60" | "mujrim-v60" => UciHandler::with_adapter("reckless"),
+        "akimbo" | "ak" | "mujrim-ak" => UciHandler::with_adapter("akimbo"),
+        _ => UciHandler::new(),
     };
     handler.run();
 }

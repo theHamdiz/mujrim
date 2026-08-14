@@ -37,6 +37,8 @@ impl NnueInfo {
         let profile = match info.format {
             eval::nnue::NetworkFormat::Stockfish => eval::nnue::NnueSearchProfile::Stockfish,
             eval::nnue::NetworkFormat::Reckless => eval::nnue::NnueSearchProfile::Reckless,
+            eval::nnue::NetworkFormat::Viridithas => eval::nnue::NnueSearchProfile::Viridithas,
+            eval::nnue::NetworkFormat::Obsidian => eval::nnue::NnueSearchProfile::Obsidian,
             eval::nnue::NetworkFormat::Embedded | eval::nnue::NetworkFormat::Akimbo => {
                 eval::nnue::NnueSearchProfile::Akimbo
             }

@@ -11,6 +11,9 @@ build:
 release:
     cargo run --release -p mujrim-tooling -- release native
 
+# Native release plus product copies into dist/ and dist/engines/mujrim/bin/<os-arch>/.
+dist: release
+
 # Release build for macOS (aarch64 + x86_64)
 release-darwin:
     cargo run --release -p mujrim-tooling -- release darwin

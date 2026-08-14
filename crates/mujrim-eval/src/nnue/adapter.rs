@@ -41,6 +41,8 @@ pub enum NetworkFormat {
     Akimbo,
     Stockfish,
     Reckless,
+    Viridithas,
+    Obsidian,
 }
 
 /// Search-stack family required by an evaluator architecture.
@@ -49,6 +51,10 @@ pub enum NnueSearchProfile {
     Akimbo,
     Stockfish,
     Reckless,
+    Viridithas,
+    Obsidian,
+    PlentyChess,
+    Lc0,
 }
 
 impl NnueSearchProfile {
@@ -58,6 +64,10 @@ impl NnueSearchProfile {
             Self::Akimbo => "akimbo",
             Self::Stockfish => "stockfish",
             Self::Reckless => "reckless",
+            Self::Viridithas => "viridithas",
+            Self::Obsidian => "obsidian",
+            Self::PlentyChess => "plentychess",
+            Self::Lc0 => "lc0",
         }
     }
 }
@@ -69,6 +79,8 @@ impl Display for NetworkFormat {
             Self::Akimbo => f.write_str("Akimbo"),
             Self::Stockfish => f.write_str("Stockfish"),
             Self::Reckless => f.write_str("Reckless"),
+            Self::Viridithas => f.write_str("Viridithas"),
+            Self::Obsidian => f.write_str("Obsidian"),
         }
     }
 }
@@ -92,6 +104,10 @@ pub enum NnueNetworkParameters<'a> {
     Stockfish(&'a StockfishNetwork),
     #[cfg(feature = "reckless-nnue")]
     Reckless(&'a RecklessNetwork),
+    #[cfg(feature = "viridithas-nnue")]
+    Viridithas(&'a super::viridithas_format::ViridithasNetwork),
+    #[cfg(feature = "obsidian-nnue")]
+    Obsidian(&'a super::obsidian_format::ObsidianNetwork),
 }
 
 pub trait NnueNetworkSource {
@@ -123,6 +139,16 @@ pub enum ActiveNetwork {
     #[cfg(feature = "reckless-nnue")]
     ExternalReckless {
         network: Box<RecklessNetwork>,
+        info: NnueNetworkInfo,
+    },
+    #[cfg(feature = "viridithas-nnue")]
+    ExternalViridithas {
+        network: Box<super::viridithas_format::ViridithasNetwork>,
+        info: NnueNetworkInfo,
+    },
+    #[cfg(feature = "obsidian-nnue")]
+    ExternalObsidian {
+        network: Box<super::obsidian_format::ObsidianNetwork>,
         info: NnueNetworkInfo,
     },
 }
@@ -157,6 +183,7 @@ pub fn embedded_network_for_preset(preset: &str) -> Option<ActiveNetwork> {
         "stockfish" => Some(ActiveNetwork::EmbeddedStockfish),
         #[cfg(feature = "reckless-nnue")]
         "reckless" => Some(ActiveNetwork::EmbeddedReckless),
+        "viridithas" | "obsidian" | "plentychess" | "lc0" => None,
         _ => None,
     }
 }
@@ -179,6 +206,10 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalStockfish { network, .. } => NnueNetworkParameters::Stockfish(network),
             #[cfg(feature = "reckless-nnue")]
             Self::ExternalReckless { network, .. } => NnueNetworkParameters::Reckless(network),
+            #[cfg(feature = "viridithas-nnue")]
+            Self::ExternalViridithas { network, .. } => NnueNetworkParameters::Viridithas(network),
+            #[cfg(feature = "obsidian-nnue")]
+            Self::ExternalObsidian { network, .. } => NnueNetworkParameters::Obsidian(network),
         }
     }
 
@@ -194,6 +225,10 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalStockfish { info, .. } => info.clone(),
             #[cfg(feature = "reckless-nnue")]
             Self::ExternalReckless { info, .. } => info.clone(),
+            #[cfg(feature = "viridithas-nnue")]
+            Self::ExternalViridithas { info, .. } => info.clone(),
+            #[cfg(feature = "obsidian-nnue")]
+            Self::ExternalObsidian { info, .. } => info.clone(),
         }
     }
 
@@ -208,6 +243,10 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::EmbeddedReckless => NnueSearchProfile::Reckless,
             #[cfg(feature = "reckless-nnue")]
             Self::ExternalReckless { .. } => NnueSearchProfile::Reckless,
+            #[cfg(feature = "viridithas-nnue")]
+            Self::ExternalViridithas { .. } => NnueSearchProfile::Viridithas,
+            #[cfg(feature = "obsidian-nnue")]
+            Self::ExternalObsidian { .. } => NnueSearchProfile::Obsidian,
         }
     }
 }
@@ -270,6 +309,10 @@ pub fn enabled_network_formats() -> Vec<NetworkFormat> {
         NetworkFormat::Reckless,
         #[cfg(feature = "akimbo-nnue")]
         NetworkFormat::Akimbo,
+        #[cfg(feature = "viridithas-nnue")]
+        NetworkFormat::Viridithas,
+        #[cfg(feature = "obsidian-nnue")]
+        NetworkFormat::Obsidian,
     ]
 }
 
@@ -286,6 +329,21 @@ pub fn load_network(path: &Path) -> Result<ActiveNetwork, String> {
     #[cfg(feature = "reckless-nnue")]
     if file_size == RECKLESS_FILE_SIZE {
         return load_reckless_network(path, file_size);
+    }
+
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read NNUE file '{}': {error}", path.display()))?;
+
+    #[cfg(feature = "viridithas-nnue")]
+    if super::viridithas_format::looks_like_viridithas(path, &bytes) {
+        return load_viridithas_network(path, &bytes);
+    }
+
+    #[cfg(feature = "obsidian-nnue")]
+    if super::obsidian_format::is_obsidian_path(path)
+        || bytes.len() as u64 == super::obsidian_format::FILE_SIZE
+    {
+        return load_obsidian_network(path, &bytes);
     }
 
     let extension = path
@@ -387,6 +445,61 @@ fn load_reckless_network(path: &Path, file_size: u64) -> Result<ActiveNetwork, S
     })
 }
 
+#[cfg(feature = "viridithas-nnue")]
+fn load_viridithas_network(path: &Path, bytes: &[u8]) -> Result<ActiveNetwork, String> {
+    let network = super::viridithas_format::ViridithasNetwork::from_bytes(bytes)?;
+    let features = network.features_per_bucket();
+    let hidden = network.hidden();
+    types::init();
+    let startpos = network.evaluate(&types::Board::new());
+    if startpos.abs() > 2_500 {
+        return Err(format!(
+            "Viridithas net startpos eval {startpos} is outside a sane opening range; keeping the search profile and the implemented fallback net"
+        ));
+    }
+    let name = path.file_stem().map_or_else(
+        || "External Viridithas network".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    Ok(ActiveNetwork::ExternalViridithas {
+        network: Box::new(network),
+        info: NnueNetworkInfo {
+            name,
+            format: NetworkFormat::Viridithas,
+            architecture: format!("16×{features}→{hidden}×2→1 SCReLU (Viridithas piece features)"),
+            hidden_size: hidden,
+            num_buckets: super::viridithas_format::KING_BUCKETS,
+            qa: super::viridithas_format::QA,
+            qb: 64,
+            scale: super::viridithas_format::SCALE,
+            file_size: bytes.len() as u64,
+        },
+    })
+}
+
+#[cfg(feature = "obsidian-nnue")]
+fn load_obsidian_network(path: &Path, bytes: &[u8]) -> Result<ActiveNetwork, String> {
+    let network = super::obsidian_format::ObsidianNetwork::from_bytes(bytes)?;
+    let name = path.file_stem().map_or_else(
+        || "External Obsidian network".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    Ok(ActiveNetwork::ExternalObsidian {
+        network: Box::new(network),
+        info: NnueNetworkInfo {
+            name,
+            format: NetworkFormat::Obsidian,
+            architecture: "768→1536→16→32→1 (13 king buckets, 8 output buckets)".to_string(),
+            hidden_size: super::obsidian_format::L1,
+            num_buckets: super::obsidian_format::KING_BUCKETS,
+            qa: super::obsidian_format::NETWORK_QA,
+            qb: super::obsidian_format::NETWORK_QB,
+            scale: super::obsidian_format::NETWORK_SCALE,
+            file_size: bytes.len() as u64,
+        },
+    })
+}
+
 #[cfg(not(feature = "akimbo-nnue"))]
 fn load_native_network(path: &Path) -> Result<ActiveNetwork, String> {
     Err(format!(
@@ -396,10 +509,22 @@ fn load_native_network(path: &Path) -> Result<ActiveNetwork, String> {
 }
 
 pub fn auto_detect_network(dir: &Path) -> (Option<ActiveNetwork>, String) {
-    let paths = match candidate_paths(dir) {
-        Ok(paths) => paths,
-        Err(message) => return (None, message),
-    };
+    auto_detect_networks(&[dir.to_path_buf()])
+}
+
+/// Scan `nnue/` plus `dist/nnue` (and other search roots) for a compatible net.
+pub fn auto_detect_from_search_roots() -> (Option<ActiveNetwork>, String) {
+    auto_detect_networks(&nnue_search_directories())
+}
+
+fn auto_detect_networks(dirs: &[PathBuf]) -> (Option<ActiveNetwork>, String) {
+    let mut paths = Vec::new();
+    for dir in dirs {
+        match candidate_paths(dir) {
+            Ok(found) => paths.extend(found),
+            Err(message) => return (None, message),
+        }
+    }
     let mut paths = paths
         .into_iter()
         .map(|path| (network_priority(&path), path))
@@ -417,19 +542,85 @@ pub fn auto_detect_network(dir: &Path) -> (Option<ActiveNetwork>, String) {
         }
     }
 
+    let scanned = dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     let message = if failures.is_empty() {
-        format!(
-            "No compatible NNUE files found in '{}'; using embedded network",
-            dir.display()
-        )
+        format!("No compatible NNUE files found in [{scanned}]; using embedded network")
     } else {
         format!(
-            "No compatible NNUE files in '{}'; using embedded network ({})",
-            dir.display(),
+            "No compatible NNUE files in [{scanned}]; using embedded network ({})",
             failures.join("; ")
         )
     };
     (None, message)
+}
+
+/// Directories searched for on-disk nets: `MUJRIM_NNUE`, `nnue/`, `dist/nnue`.
+pub fn nnue_search_directories() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(explicit) = std::env::var_os("MUJRIM_NNUE") {
+        let explicit = PathBuf::from(explicit);
+        if explicit.is_dir() {
+            dirs.push(explicit);
+        } else if let Some(parent) = explicit.parent() {
+            dirs.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        for ancestor in executable
+            .parent()
+            .into_iter()
+            .flat_map(|path| path.ancestors())
+            .take(7)
+        {
+            dirs.push(ancestor.join("nnue"));
+            dirs.push(ancestor.join("dist").join("nnue"));
+        }
+    }
+    if let Ok(current) = std::env::current_dir() {
+        dirs.push(current.join("nnue"));
+        dirs.push(current.join("dist").join("nnue"));
+    }
+    dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
+    dirs.sort();
+    dirs.dedup();
+    dirs.retain(|dir| dir.is_dir());
+    dirs
+}
+
+pub fn discover_named_network(filename: &str) -> Option<PathBuf> {
+    nnue_search_directories()
+        .into_iter()
+        .map(|dir| dir.join(filename))
+        .find(|path| path.is_file())
+}
+
+/// Load the embedded net for a preset, or the matching file from `nnue/` / `dist/nnue`.
+pub fn load_network_for_preset(preset: &str) -> Result<ActiveNetwork, String> {
+    if let Some(embedded) = embedded_network_for_preset(preset) {
+        return Ok(embedded);
+    }
+    let names: &[&str] = match preset {
+        "viridithas" => &["viri_default.nnue.zst", "velarised-2-b800.nnue.zst"],
+        "obsidian" => &["obs_default.bin", "net89perm.bin"],
+        _ => {
+            return Err(format!(
+                "preset '{preset}' has no embedded or on-disk network mapping"
+            ));
+        }
+    };
+    for name in names {
+        if let Some(path) = discover_named_network(name) {
+            return load_network(&path);
+        }
+    }
+    Err(format!(
+        "no {preset} network found in nnue/ or dist/nnue (looked for {})",
+        names.join(", ")
+    ))
 }
 
 fn candidate_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -446,7 +637,7 @@ fn candidate_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
                 .is_some_and(|extension| {
                     matches!(
                         extension.to_ascii_lowercase().as_str(),
-                        "bin" | "net" | "nnue"
+                        "bin" | "net" | "nnue" | "zst"
                     )
                 })
         })
@@ -577,6 +768,7 @@ fn network_priority(path: &Path) -> u8 {
         return 4;
     }
     match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("zst") => 3,
         Some(extension) if extension.eq_ignore_ascii_case("nnue") => 3,
         Some(extension) if extension.eq_ignore_ascii_case("bin") => 2,
         Some(extension) if extension.eq_ignore_ascii_case("net") => 1,
@@ -603,6 +795,14 @@ mod tests {
             }
             #[cfg(feature = "stockfish-nnue")]
             NnueNetworkParameters::Stockfish(_) => {
+                panic!("embedded network must use the Akimbo evaluator")
+            }
+            #[cfg(feature = "viridithas-nnue")]
+            NnueNetworkParameters::Viridithas(_) => {
+                panic!("embedded network must use the Akimbo evaluator")
+            }
+            #[cfg(feature = "obsidian-nnue")]
+            NnueNetworkParameters::Obsidian(_) => {
                 panic!("embedded network must use the Akimbo evaluator")
             }
         };
@@ -707,6 +907,78 @@ mod tests {
             .join("resources")
             .join(super::super::stockfish_format::NETWORK_FILENAME);
         assert_eq!(network_priority(&path), 4);
+    }
+
+    #[cfg(feature = "viridithas-nnue")]
+    #[test]
+    fn load_network_parses_a_viridithas_piece_feature_file() {
+        let path = std::env::temp_dir().join("viri_default.bin");
+        let bytes = vec![0u8; super::super::viridithas_format::simple_size(256)];
+        std::fs::write(&path, bytes).unwrap();
+        let active = load_network(&path).expect("viridithas layout");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(active.info().format, NetworkFormat::Viridithas);
+        assert_eq!(active.search_profile(), NnueSearchProfile::Viridithas);
+    }
+
+    #[cfg(feature = "obsidian-nnue")]
+    #[test]
+    fn load_network_identifies_obsidian_by_filename() {
+        let path = std::env::temp_dir().join("obs_default.bin");
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        let error = load_network(&path).err().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(error.contains("Obsidian"), "{error}");
+    }
+
+    #[test]
+    fn auto_detect_accepts_zst_and_bin_extensions() {
+        let zst = Path::new("viri_default.nnue.zst");
+        let bin = Path::new("obs_default.bin");
+        assert_eq!(zst.extension().and_then(|ext| ext.to_str()), Some("zst"));
+        assert!(matches!(
+            bin.extension().and_then(|ext| ext.to_str()),
+            Some("bin")
+        ));
+        assert!(network_priority(zst) >= 3);
+    }
+
+    #[test]
+    fn search_roots_include_dist_nnue_when_present() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let dist = cwd.join("dist").join("nnue");
+        if dist.is_dir() {
+            assert!(
+                nnue_search_directories().iter().any(|dir| dir == &dist),
+                "dist/nnue must be a discovery root"
+            );
+        }
+    }
+
+    #[cfg(feature = "viridithas-nnue")]
+    #[test]
+    fn preset_loader_finds_downloaded_viridithas_file() {
+        let Some(path) = discover_named_network("viri_default.nnue.zst") else {
+            return;
+        };
+        match load_network(&path) {
+            Ok(net) => assert_eq!(net.search_profile(), NnueSearchProfile::Viridithas),
+            Err(error) => assert!(
+                error.contains("sane opening range")
+                    || error.contains("not a supported piece-feature layout"),
+                "{error}"
+            ),
+        }
+    }
+
+    #[cfg(feature = "obsidian-nnue")]
+    #[test]
+    fn preset_loader_finds_downloaded_obsidian_net() {
+        if discover_named_network("obs_default.bin").is_none() {
+            return;
+        }
+        let net = load_network_for_preset("obsidian").expect("obs net");
+        assert_eq!(net.search_profile(), NnueSearchProfile::Obsidian);
     }
 
     #[cfg(feature = "reckless-nnue")]

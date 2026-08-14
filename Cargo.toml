@@ -31,7 +31,7 @@ members = [
 ]
 
 [features]
-default = ["trainer", "gpu", "xboard", "book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue"]
+default = ["trainer", "gpu", "xboard", "book", "nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "viridithas-nnue", "obsidian-nnue", "syzygy"]
 mimalloc = ["dep:mimalloc"]
 trainer = ["dep:trainer"]
 gpu = ["dep:gpu"]
@@ -42,6 +42,9 @@ simd = ["eval/simd", "search/simd"]
 akimbo-nnue = ["eval/akimbo-nnue", "search/akimbo-nnue"]
 stockfish-nnue = ["eval/stockfish-nnue", "comms/stockfish-nnue", "search/stockfish-nnue"]
 reckless-nnue = ["eval/reckless-nnue", "comms/reckless-nnue", "search/reckless-nnue"]
+viridithas-nnue = ["eval/viridithas-nnue", "comms/viridithas-nnue", "search/viridithas-nnue"]
+obsidian-nnue = ["eval/obsidian-nnue", "comms/obsidian-nnue", "search/obsidian-nnue"]
+syzygy = ["search/syzygy", "comms/syzygy"]
 embedded-networks = ["eval/embedded-networks", "search/embedded-networks"]
 
 [dependencies]

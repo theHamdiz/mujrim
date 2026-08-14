@@ -101,6 +101,10 @@ impl NNUEState {
             NnueNetworkParameters::Reckless(_) => None,
             #[cfg(feature = "stockfish-nnue")]
             NnueNetworkParameters::Stockfish(_) => None,
+            #[cfg(feature = "viridithas-nnue")]
+            NnueNetworkParameters::Viridithas(_) => None,
+            #[cfg(feature = "obsidian-nnue")]
+            NnueNetworkParameters::Obsidian(_) => None,
         };
         #[cfg(feature = "reckless-nnue")]
         let reckless = matches!(parameters, NnueNetworkParameters::Reckless(_))
@@ -256,11 +260,24 @@ impl NNUEState {
             }
             ActiveNetwork::Embedded => {}
             ActiveNetwork::ExternalAkimbo { .. } => {}
+            #[cfg(feature = "viridithas-nnue")]
+            ActiveNetwork::ExternalViridithas { network, .. } => {
+                return network.evaluate(board);
+            }
+            #[cfg(feature = "obsidian-nnue")]
+            ActiveNetwork::ExternalObsidian { network, .. } => {
+                return network.evaluate(board);
+            }
         }
 
         let net = match self.source.parameters() {
             NnueNetworkParameters::Akimbo(net) => net,
-            #[cfg(any(feature = "stockfish-nnue", feature = "reckless-nnue"))]
+            #[cfg(any(
+                feature = "stockfish-nnue",
+                feature = "reckless-nnue",
+                feature = "viridithas-nnue",
+                feature = "obsidian-nnue"
+            ))]
             _ => unreachable!("non-Akimbo backends are handled above"),
         };
         let w_king = board.king_square(Color::White).index();
@@ -469,11 +486,20 @@ impl NNUEState {
                 return;
             }
             ActiveNetwork::Embedded | ActiveNetwork::ExternalAkimbo { .. } => {}
+            #[cfg(feature = "viridithas-nnue")]
+            ActiveNetwork::ExternalViridithas { .. } => return,
+            #[cfg(feature = "obsidian-nnue")]
+            ActiveNetwork::ExternalObsidian { .. } => return,
         }
 
         let net = match self.source.parameters() {
             NnueNetworkParameters::Akimbo(net) => net,
-            #[cfg(any(feature = "stockfish-nnue", feature = "reckless-nnue"))]
+            #[cfg(any(
+                feature = "stockfish-nnue",
+                feature = "reckless-nnue",
+                feature = "viridithas-nnue",
+                feature = "obsidian-nnue"
+            ))]
             _ => unreachable!("non-Akimbo backends are handled above"),
         };
         let w_king = board.king_square(Color::White).index();

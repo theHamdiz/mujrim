@@ -53,6 +53,12 @@ pub struct Board {
     pub side_to_move: Color,
     /// Castling rights encoded as 4 bits.
     pub castling_rights: u8,
+    /// When set, castling is encoded as king-takes-rook (UCI Chess960).
+    chess960: bool,
+    /// King start files used to revoke Chess960 castling rights `[white, black]`.
+    castling_king_file: [u8; 2],
+    /// Rook start files `[white KS, white QS, black KS, black QS]`.
+    castling_rook_file: [u8; 4],
     /// En passant target square (the square behind the double-pushed pawn).
     pub en_passant: Option<Square>,
     /// Halfmove clock (for 50-move rule).
@@ -140,6 +146,9 @@ impl Board {
             piece_at: [EMPTY_PIECE_ID; 64],
             side_to_move: Color::White,
             castling_rights: 0,
+            chess960: false,
+            castling_king_file: [4, 4],
+            castling_rook_file: [7, 0, 7, 0],
             en_passant: None,
             halfmove_clock: 0,
             fullmove_number: 1,
@@ -266,6 +275,102 @@ impl Board {
         Square::from_index(get_lsb(king_bb))
     }
 
+    #[inline(always)]
+    pub const fn is_chess960(&self) -> bool {
+        self.chess960
+    }
+
+    #[inline(always)]
+    pub fn set_chess960(&mut self, enabled: bool) {
+        self.chess960 = enabled;
+        if enabled {
+            self.refresh_castling_origins();
+        }
+    }
+
+    #[inline(always)]
+    pub fn castling_king_landing(color: Color, kingside: bool) -> Square {
+        match (color, kingside) {
+            (Color::White, true) => Square::G1,
+            (Color::White, false) => Square::C1,
+            (Color::Black, true) => Square::G8,
+            (Color::Black, false) => Square::C8,
+        }
+    }
+
+    #[inline(always)]
+    pub fn castling_rook_landing(color: Color, kingside: bool) -> Square {
+        match (color, kingside) {
+            (Color::White, true) => Square::F1,
+            (Color::White, false) => Square::D1,
+            (Color::Black, true) => Square::F8,
+            (Color::Black, false) => Square::D8,
+        }
+    }
+
+    #[inline(always)]
+    pub fn castling_rook_from(&self, color: Color, kingside: bool) -> Square {
+        let file = self.castling_rook_file[Self::rook_file_index(color, kingside)];
+        let rank = if color == Color::White { 0 } else { 7 };
+        Square::from_file_rank(file, rank)
+    }
+
+    #[inline(always)]
+    pub fn castle_uci_to(&self, color: Color, kingside: bool) -> Square {
+        if self.chess960 {
+            self.castling_rook_from(color, kingside)
+        } else {
+            Self::castling_king_landing(color, kingside)
+        }
+    }
+
+    #[inline(always)]
+    const fn rook_file_index(color: Color, kingside: bool) -> usize {
+        match (color, kingside) {
+            (Color::White, true) => 0,
+            (Color::White, false) => 1,
+            (Color::Black, true) => 2,
+            (Color::Black, false) => 3,
+        }
+    }
+
+    fn refresh_castling_origins(&mut self) {
+        for color in [Color::White, Color::Black] {
+            if self.piece_bb(Piece::King, color) != 0 {
+                self.castling_king_file[color.index()] = self.king_square(color).file();
+            }
+        }
+        if !self.chess960 {
+            self.castling_rook_file = [7, 0, 7, 0];
+            return;
+        }
+        for color in [Color::White, Color::Black] {
+            let king_file = self.castling_king_file[color.index()];
+            let rank = if color == Color::White { 0 } else { 7 };
+            let mut rooks = self.piece_bb(Piece::Rook, color);
+            let mut queenside = None;
+            let mut kingside = None;
+            while rooks != 0 {
+                let sq = Square::from_index(rooks.trailing_zeros() as usize);
+                rooks &= rooks - 1;
+                if sq.rank() != rank {
+                    continue;
+                }
+                if sq.file() > king_file {
+                    kingside = Some(kingside.map_or(sq.file(), |file: u8| file.max(sq.file())));
+                } else if sq.file() < king_file {
+                    queenside = Some(queenside.map_or(sq.file(), |file: u8| file.min(sq.file())));
+                }
+            }
+            if let Some(file) = kingside {
+                self.castling_rook_file[Self::rook_file_index(color, true)] = file;
+            }
+            if let Some(file) = queenside {
+                self.castling_rook_file[Self::rook_file_index(color, false)] = file;
+            }
+        }
+    }
+
     /// Returns the count of a specific piece type for a given color.
     #[inline(always)]
     pub fn piece_count(&self, piece: Piece, color: Color) -> u32 {
@@ -331,14 +436,15 @@ impl Board {
             hash ^= z.piece_keys[us.index()][piece.index()][to.index()];
         }
 
-        let rook_move = match (us, mv.flag) {
-            (Color::White, MoveFlag::KingCastle) => Some((Square::H1, Square::F1)),
-            (Color::Black, MoveFlag::KingCastle) => Some((Square::H8, Square::F8)),
-            (Color::White, MoveFlag::QueenCastle) => Some((Square::A1, Square::D1)),
-            (Color::Black, MoveFlag::QueenCastle) => Some((Square::A8, Square::D8)),
-            _ => None,
-        };
-        if let Some((rook_from, rook_to)) = rook_move {
+        if mv.is_castling() {
+            let kingside = mv.flag == MoveFlag::KingCastle;
+            let king_to = Self::castling_king_landing(us, kingside);
+            if king_to != to {
+                hash ^= z.piece_keys[us.index()][piece.index()][to.index()];
+                hash ^= z.piece_keys[us.index()][piece.index()][king_to.index()];
+            }
+            let rook_from = self.castling_rook_from(us, kingside);
+            let rook_to = Self::castling_rook_landing(us, kingside);
             hash ^= z.piece_keys[us.index()][Piece::Rook.index()][rook_from.index()];
             hash ^= z.piece_keys[us.index()][Piece::Rook.index()][rook_to.index()];
         }
@@ -350,9 +456,7 @@ impl Board {
         }
 
         let old_castling = self.castling_rights;
-        let new_castling = old_castling
-            & CASTLING_RIGHTS_UPDATE[from.index()]
-            & CASTLING_RIGHTS_UPDATE[to.index()];
+        let new_castling = self.castling_rights_after(from, to);
         if old_castling != new_castling {
             hash ^= z.castling_keys[old_castling as usize];
             hash ^= z.castling_keys[new_castling as usize];
@@ -429,9 +533,9 @@ impl Board {
             last.captured_piece = captured;
         }
 
-        // Non-captures relocate normally. Promotions mutate the pawn after the
-        // base move, matching the observer state transitions used by NNUE.
-        if captured.is_none() {
+        // Non-captures relocate normally. Castling moves the king to c/g even
+        // when UCI Chess960 encodes the move as king-takes-rook.
+        if captured.is_none() && !mv.is_castling() {
             self.relocate_piece(piece, us, from, to);
             observer.on_piece_move(self, piece, us, from, to);
         }
@@ -452,25 +556,19 @@ impl Board {
             observer.on_piece_mutate(self, piece, us, promotion, us, to);
         }
 
-        // Handle castling rook movement
-        match mv.flag {
-            MoveFlag::KingCastle => {
-                let (rook_from, rook_to) = match us {
-                    Color::White => (Square::H1, Square::F1),
-                    Color::Black => (Square::H8, Square::F8),
-                };
+        if mv.is_castling() {
+            let kingside = mv.flag == MoveFlag::KingCastle;
+            let king_to = Self::castling_king_landing(us, kingside);
+            let rook_from = self.castling_rook_from(us, kingside);
+            let rook_to = Self::castling_rook_landing(us, kingside);
+            if from != king_to {
+                self.relocate_piece(piece, us, from, king_to);
+                observer.on_piece_move(self, piece, us, from, king_to);
+            }
+            if rook_from != rook_to {
                 self.relocate_piece(Piece::Rook, us, rook_from, rook_to);
                 observer.on_piece_move(self, Piece::Rook, us, rook_from, rook_to);
             }
-            MoveFlag::QueenCastle => {
-                let (rook_from, rook_to) = match us {
-                    Color::White => (Square::A1, Square::D1),
-                    Color::Black => (Square::A8, Square::D8),
-                };
-                self.relocate_piece(Piece::Rook, us, rook_from, rook_to);
-                observer.on_piece_move(self, Piece::Rook, us, rook_from, rook_to);
-            }
-            _ => {}
         }
 
         // Set en passant square for double pawn push (the square between from and to)
@@ -483,8 +581,7 @@ impl Board {
 
         // Update castling rights
         let old_castling = self.castling_rights;
-        self.castling_rights &= CASTLING_RIGHTS_UPDATE[from.index()];
-        self.castling_rights &= CASTLING_RIGHTS_UPDATE[to.index()];
+        self.castling_rights = self.castling_rights_after(from, to);
         if old_castling != self.castling_rights {
             self.hash ^= z.castling_keys[old_castling as usize];
             self.hash ^= z.castling_keys[self.castling_rights as usize];
@@ -524,52 +621,46 @@ impl Board {
         let from = mv.from;
         let to = mv.to;
 
-        // Determine the piece that was placed (after promotion, it might differ)
-        let placed_piece = mv.promotion.unwrap_or_else(|| {
-            self.piece_of_color_on(to, us)
-                .expect("unmake_move: no piece on target square")
-        });
-
-        // Restore the moving piece. Promotions reverse their material change;
-        // ordinary moves only relocate the existing piece.
-        if mv.is_promotion() {
-            self.remove_piece(placed_piece, us, to);
-            self.put_piece(Piece::Pawn, us, from);
+        if mv.is_castling() {
+            let kingside = mv.flag == MoveFlag::KingCastle;
+            let king_to = Self::castling_king_landing(us, kingside);
+            let rook_from = self.castling_rook_from(us, kingside);
+            let rook_to = Self::castling_rook_landing(us, kingside);
+            if rook_from != rook_to {
+                self.relocate_piece(Piece::Rook, us, rook_to, rook_from);
+            }
+            if from != king_to {
+                self.relocate_piece(Piece::King, us, king_to, from);
+            }
         } else {
-            self.relocate_piece(placed_piece, us, to, from);
-        }
+            // Determine the piece that was placed (after promotion, it might differ)
+            let placed_piece = mv.promotion.unwrap_or_else(|| {
+                self.piece_of_color_on(to, us)
+                    .expect("unmake_move: no piece on target square")
+            });
 
-        // Restore captured piece
-        match mv.flag {
-            MoveFlag::Capture | MoveFlag::PromotionCapture => {
-                if let Some(cap_piece) = undo.captured_piece {
-                    self.put_piece(cap_piece, them, to);
+            // Restore the moving piece. Promotions reverse their material change;
+            // ordinary moves only relocate the existing piece.
+            if mv.is_promotion() {
+                self.remove_piece(placed_piece, us, to);
+                self.put_piece(Piece::Pawn, us, from);
+            } else {
+                self.relocate_piece(placed_piece, us, to, from);
+            }
+
+            // Restore captured piece
+            match mv.flag {
+                MoveFlag::Capture | MoveFlag::PromotionCapture => {
+                    if let Some(cap_piece) = undo.captured_piece {
+                        self.put_piece(cap_piece, them, to);
+                    }
                 }
+                MoveFlag::EnPassant => {
+                    let cap_sq = Square::from_file_rank(to.file(), from.rank());
+                    self.put_piece(Piece::Pawn, them, cap_sq);
+                }
+                _ => {}
             }
-            MoveFlag::EnPassant => {
-                let cap_sq = Square::from_file_rank(to.file(), from.rank());
-                self.put_piece(Piece::Pawn, them, cap_sq);
-            }
-            _ => {}
-        }
-
-        // Undo castling rook movement
-        match mv.flag {
-            MoveFlag::KingCastle => {
-                let (rook_from, rook_to) = match us {
-                    Color::White => (Square::H1, Square::F1),
-                    Color::Black => (Square::H8, Square::F8),
-                };
-                self.relocate_piece(Piece::Rook, us, rook_to, rook_from);
-            }
-            MoveFlag::QueenCastle => {
-                let (rook_from, rook_to) = match us {
-                    Color::White => (Square::A1, Square::D1),
-                    Color::Black => (Square::A8, Square::D8),
-                };
-                self.relocate_piece(Piece::Rook, us, rook_to, rook_from);
-            }
-            _ => {}
         }
 
         // Restore state
@@ -666,14 +757,54 @@ impl Board {
             _ => return Err(format!("invalid active color: '{}'", parts[1])),
         };
 
-        // 3. Castling availability
+        // 3. Castling availability (KQkq or Shredder-FEN file letters)
+        if board.piece_bb(Piece::King, Color::White) != 0 {
+            board.castling_king_file[0] = board.king_square(Color::White).file();
+        }
+        if board.piece_bb(Piece::King, Color::Black) != 0 {
+            board.castling_king_file[1] = board.king_square(Color::Black).file();
+        }
         board.castling_rights = 0;
         for ch in parts[2].chars() {
             match ch {
-                'K' => board.castling_rights |= WHITE_KING_CASTLE,
-                'Q' => board.castling_rights |= WHITE_QUEEN_CASTLE,
-                'k' => board.castling_rights |= BLACK_KING_CASTLE,
-                'q' => board.castling_rights |= BLACK_QUEEN_CASTLE,
+                'K' => {
+                    board.castling_rights |= WHITE_KING_CASTLE;
+                    board.castling_rook_file[0] = 7;
+                }
+                'Q' => {
+                    board.castling_rights |= WHITE_QUEEN_CASTLE;
+                    board.castling_rook_file[1] = 0;
+                }
+                'k' => {
+                    board.castling_rights |= BLACK_KING_CASTLE;
+                    board.castling_rook_file[2] = 7;
+                }
+                'q' => {
+                    board.castling_rights |= BLACK_QUEEN_CASTLE;
+                    board.castling_rook_file[3] = 0;
+                }
+                'A'..='H' => {
+                    board.chess960 = true;
+                    let file = ch as u8 - b'A';
+                    if file > board.castling_king_file[0] {
+                        board.castling_rights |= WHITE_KING_CASTLE;
+                        board.castling_rook_file[0] = file;
+                    } else {
+                        board.castling_rights |= WHITE_QUEEN_CASTLE;
+                        board.castling_rook_file[1] = file;
+                    }
+                }
+                'a'..='h' => {
+                    board.chess960 = true;
+                    let file = ch as u8 - b'a';
+                    if file > board.castling_king_file[1] {
+                        board.castling_rights |= BLACK_KING_CASTLE;
+                        board.castling_rook_file[2] = file;
+                    } else {
+                        board.castling_rights |= BLACK_QUEEN_CASTLE;
+                        board.castling_rook_file[3] = file;
+                    }
+                }
                 '-' => {}
                 _ => return Err(format!("invalid castling char: '{ch}'")),
             }
@@ -744,22 +875,7 @@ impl Board {
 
         // 3. Castling
         fen.push(' ');
-        if self.castling_rights == 0 {
-            fen.push('-');
-        } else {
-            if self.castling_rights & WHITE_KING_CASTLE != 0 {
-                fen.push('K');
-            }
-            if self.castling_rights & WHITE_QUEEN_CASTLE != 0 {
-                fen.push('Q');
-            }
-            if self.castling_rights & BLACK_KING_CASTLE != 0 {
-                fen.push('k');
-            }
-            if self.castling_rights & BLACK_QUEEN_CASTLE != 0 {
-                fen.push('q');
-            }
-        }
+        self.write_castling_fen(&mut fen);
 
         // 4. En passant
         fen.push(' ');
@@ -966,6 +1082,77 @@ impl Board {
 
 // ── Castling rights update table ────────────────────────────────────────────
 // When a piece moves from or to a square, AND the castling rights with this value.
+impl Board {
+    #[inline(always)]
+    fn castling_rights_after(&self, from: Square, to: Square) -> u8 {
+        if !self.chess960 {
+            return self.castling_rights
+                & CASTLING_RIGHTS_UPDATE[from.index()]
+                & CASTLING_RIGHTS_UPDATE[to.index()];
+        }
+        let mut rights = self.castling_rights;
+        let white_king = Square::from_file_rank(self.castling_king_file[0], 0);
+        let black_king = Square::from_file_rank(self.castling_king_file[1], 7);
+        if from == white_king || to == white_king {
+            rights &= !(WHITE_KING_CASTLE | WHITE_QUEEN_CASTLE);
+        }
+        if from == black_king || to == black_king {
+            rights &= !(BLACK_KING_CASTLE | BLACK_QUEEN_CASTLE);
+        }
+        let wk = self.castling_rook_from(Color::White, true);
+        let wq = self.castling_rook_from(Color::White, false);
+        let bk = self.castling_rook_from(Color::Black, true);
+        let bq = self.castling_rook_from(Color::Black, false);
+        if from == wk || to == wk {
+            rights &= !WHITE_KING_CASTLE;
+        }
+        if from == wq || to == wq {
+            rights &= !WHITE_QUEEN_CASTLE;
+        }
+        if from == bk || to == bk {
+            rights &= !BLACK_KING_CASTLE;
+        }
+        if from == bq || to == bq {
+            rights &= !BLACK_QUEEN_CASTLE;
+        }
+        rights
+    }
+
+    fn write_castling_fen(&self, fen: &mut String) {
+        if self.castling_rights == 0 {
+            fen.push('-');
+            return;
+        }
+        if self.chess960 {
+            if self.castling_rights & WHITE_KING_CASTLE != 0 {
+                fen.push((b'A' + self.castling_rook_file[0]) as char);
+            }
+            if self.castling_rights & WHITE_QUEEN_CASTLE != 0 {
+                fen.push((b'A' + self.castling_rook_file[1]) as char);
+            }
+            if self.castling_rights & BLACK_KING_CASTLE != 0 {
+                fen.push((b'a' + self.castling_rook_file[2]) as char);
+            }
+            if self.castling_rights & BLACK_QUEEN_CASTLE != 0 {
+                fen.push((b'a' + self.castling_rook_file[3]) as char);
+            }
+            return;
+        }
+        if self.castling_rights & WHITE_KING_CASTLE != 0 {
+            fen.push('K');
+        }
+        if self.castling_rights & WHITE_QUEEN_CASTLE != 0 {
+            fen.push('Q');
+        }
+        if self.castling_rights & BLACK_KING_CASTLE != 0 {
+            fen.push('k');
+        }
+        if self.castling_rights & BLACK_QUEEN_CASTLE != 0 {
+            fen.push('q');
+        }
+    }
+}
+
 const CASTLING_RIGHTS_UPDATE: [u8; 64] = {
     let mut table = [ALL_CASTLING; 64];
     // White king or rooks move → lose white castling
@@ -1649,5 +1836,78 @@ mod tests {
             Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
                 .unwrap();
         let _ = format!("{board2}");
+    }
+
+    #[test]
+    fn chess960_cleared_back_rank_encodes_king_takes_rook() {
+        setup();
+        let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+        board.set_chess960(true);
+        let moves = board.generate_legal_moves();
+        assert!(
+            moves
+                .iter()
+                .any(|mv| mv.to_uci() == "e1h1" && mv.flag == MoveFlag::KingCastle)
+        );
+        assert!(
+            moves
+                .iter()
+                .any(|mv| mv.to_uci() == "e1a1" && mv.flag == MoveFlag::QueenCastle)
+        );
+        assert!(!moves.iter().any(|mv| mv.to_uci() == "e1g1"));
+        assert!(!moves.iter().any(|mv| mv.to_uci() == "e1c1"));
+    }
+
+    #[test]
+    fn chess960_castle_make_unmake_restores_startpos() {
+        setup();
+        let mut board = Board::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
+        board.set_chess960(true);
+        let hash = board.hash;
+        let fen = board.to_fen();
+        let castle = *board
+            .generate_legal_moves()
+            .iter()
+            .find(|mv| mv.to_uci() == "e1h1")
+            .expect("FRC kingside");
+        board.make_move(castle);
+        assert_eq!(
+            board.piece_on(Square::G1),
+            Some((Piece::King, Color::White))
+        );
+        assert_eq!(
+            board.piece_on(Square::F1),
+            Some((Piece::Rook, Color::White))
+        );
+        assert_eq!(board.piece_on(Square::E1), None);
+        assert_eq!(board.piece_on(Square::H1), None);
+        board.unmake_move(castle);
+        assert_eq!(board.hash, hash);
+        assert_eq!(board.to_fen(), fen);
+    }
+
+    #[test]
+    fn shredder_fen_parses_rook_files() {
+        setup();
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/4KR2 w F - 0 1").unwrap();
+        assert!(board.is_chess960());
+        let mut playable = board;
+        let moves = playable.generate_legal_moves();
+        assert!(
+            moves
+                .iter()
+                .any(|mv| mv.to_uci() == "e1f1" && mv.flag == MoveFlag::KingCastle)
+        );
+    }
+
+    #[test]
+    fn standard_startpos_fen_unchanged_without_chess960() {
+        setup();
+        let board = Board::new();
+        assert!(!board.is_chess960());
+        assert_eq!(
+            board.to_fen(),
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
     }
 }

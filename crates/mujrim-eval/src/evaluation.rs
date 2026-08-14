@@ -17,7 +17,7 @@
 use crate::psqt;
 use types::bitboard::{Bitboard, count_bits, iter_bits};
 use types::board::attack_tables::*;
-use types::{Board, Color, Piece};
+use types::{Board, Color, Piece, Square};
 
 // ── Game phase ──────────────────────────────────────────────────────────────
 const PHASE_VALUES: [i32; 6] = [0, 1, 1, 2, 4, 0];
@@ -70,6 +70,12 @@ const CONNECTED_BONUS_EG: [i32; 8] = [0, 7, 8, 12, 29, 48, 86, 0];
 
 const PASSED_BONUS_MG: [i32; 8] = [0, 5, 10, 20, 40, 70, 120, 0];
 const PASSED_BONUS_EG: [i32; 8] = [0, 10, 20, 40, 70, 120, 200, 0];
+const CANDIDATE_PASSED_MG: [i32; 8] = [0, 2, 4, 8, 16, 28, 0, 0];
+const CANDIDATE_PASSED_EG: [i32; 8] = [0, 4, 8, 16, 32, 48, 0, 0];
+const PAWN_LEVER_MG: i32 = 14;
+const PAWN_LEVER_EG: i32 = 10;
+const PIN_PENALTY_MG: [i32; 6] = [8, 22, 22, 16, 12, 0];
+const PIN_PENALTY_EG: [i32; 6] = [4, 14, 14, 18, 16, 0];
 
 // ── Threats ─────────────────────────────────────────────────────────────────
 const THREAT_BY_PAWN_MG: [i32; 6] = [0, 80, 80, 120, 200, 0]; // P attacks [P,N,B,R,Q,K]
@@ -414,6 +420,24 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         eg -= b_eg;
     }
 
+    // ── Pawn levers (our pawns that attack at least one enemy pawn) ──────
+    {
+        let w_levers = count_lever_pawns(w_pawns, b_pawns, Color::White);
+        let b_levers = count_lever_pawns(b_pawns, w_pawns, Color::Black);
+        mg += (w_levers - b_levers) * PAWN_LEVER_MG;
+        eg += (w_levers - b_levers) * PAWN_LEVER_EG;
+    }
+
+    // ── Absolute pins toward each king ───────────────────────────────────
+    {
+        let (w_mg, w_eg) = eval_pins(board, Color::White, occ);
+        mg -= w_mg;
+        eg -= w_eg;
+        let (b_mg, b_eg) = eval_pins(board, Color::Black, occ);
+        mg += b_mg;
+        eg += b_eg;
+    }
+
     // ── Space ───────────────────────────────────────────────────────────
     if phase > 12 {
         // Only in middlegame with many pieces
@@ -453,6 +477,17 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
 }
 
 // ── Helper: generate all pawn attacks for a color ────────────────────────────
+#[inline]
+fn count_lever_pawns(our_pawns: Bitboard, enemy_pawns: Bitboard, color: Color) -> i32 {
+    let mut count = 0i32;
+    for sq in iter_bits(our_pawns) {
+        if pawn_attacks(color.index(), sq) & enemy_pawns != 0 {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[inline(always)]
 fn pawn_attacks_bb(pawns: Bitboard, color: Color) -> Bitboard {
     match color {
@@ -618,6 +653,23 @@ fn eval_pawn_structure(
         if (enemy_pawns & ahead_mask) == 0 && rel_rank < 8 {
             mg += PASSED_BONUS_MG[rel_rank.min(7)];
             eg += PASSED_BONUS_EG[rel_rank.min(7)];
+        } else if rel_rank < 8 {
+            let same_file_ahead = FILE_MASKS[file]
+                & match color {
+                    Color::White => ranks_above(rank),
+                    Color::Black => ranks_below(rank),
+                };
+            if enemy_pawns & same_file_ahead == 0 {
+                let adj_ahead = ahead_mask & ADJACENT_FILES[file];
+                if count_bits(enemy_pawns & adj_ahead) <= 1 {
+                    mg += CANDIDATE_PASSED_MG[rel_rank.min(7)];
+                    eg += CANDIDATE_PASSED_EG[rel_rank.min(7)];
+                }
+            }
+        }
+
+        if (enemy_pawns & ahead_mask) == 0 && rel_rank < 8 {
+            // King proximity / support for fully passed pawns (existing terms).
 
             // King proximity bonus for passed pawns (endgame)
             let pawn_dist_to_enemy_king = chebyshev_distance(sq_idx, enemy_king_sq);
@@ -809,6 +861,43 @@ fn eval_threats(
     (mg, eg)
 }
 
+#[inline]
+fn eval_pins(board: &Board, color: Color, occ: Bitboard) -> (i32, i32) {
+    let king = board.king_square(color).index();
+    let us = board.color_occupancy(color);
+    let them = color.opponent();
+    let enemy_diag = board.piece_bb(Piece::Bishop, them) | board.piece_bb(Piece::Queen, them);
+    let enemy_orth = board.piece_bb(Piece::Rook, them) | board.piece_bb(Piece::Queen, them);
+    let mut mg = 0i32;
+    let mut eg = 0i32;
+
+    let diag_hits = bishop_attacks(king, occ) & us;
+    for sq in iter_bits(diag_hits) {
+        let without = occ ^ (1u64 << sq);
+        let beyond = bishop_attacks(king, without) & !bishop_attacks(king, occ);
+        if beyond & enemy_diag != 0
+            && let Some((piece, _)) = board.piece_on(Square::from_index(sq))
+        {
+            mg += PIN_PENALTY_MG[piece.index()];
+            eg += PIN_PENALTY_EG[piece.index()];
+        }
+    }
+
+    let orth_hits = rook_attacks(king, occ) & us;
+    for sq in iter_bits(orth_hits) {
+        let without = occ ^ (1u64 << sq);
+        let beyond = rook_attacks(king, without) & !rook_attacks(king, occ);
+        if beyond & enemy_orth != 0
+            && let Some((piece, _)) = board.piece_on(Square::from_index(sq))
+        {
+            mg += PIN_PENALTY_MG[piece.index()];
+            eg += PIN_PENALTY_EG[piece.index()];
+        }
+    }
+
+    (mg, eg)
+}
+
 // ── Space ───────────────────────────────────────────────────────────────────
 #[inline]
 fn eval_space(
@@ -957,5 +1046,39 @@ mod tests {
         // With tempo, each side-to-move score should be non-negative on startpos.
         assert!(white >= 0, "white-to-move startpos={white}");
         assert!(black >= 0, "black-to-move startpos={black}");
+    }
+
+    #[test]
+    fn pawn_lever_counts_our_pawns_that_attack_enemy_pawns() {
+        setup();
+        let two_white = (1u64 << 26) | (1u64 << 28); // c4 and e4
+        let one_black = 1u64 << 35; // d5
+        assert_eq!(count_lever_pawns(two_white, one_black, Color::White), 2);
+        assert_eq!(count_lever_pawns(one_black, two_white, Color::Black), 1);
+    }
+
+    #[test]
+    fn absolute_pin_penalizes_the_pinned_side() {
+        setup();
+        let pinned = evaluate(&Board::from_fen("4k3/8/8/8/7b/8/5N2/4K3 w - - 0 1").unwrap());
+        let free = evaluate(&Board::from_fen("4k3/8/8/8/8/8/5N2/4K3 w - - 0 1").unwrap());
+        assert!(
+            pinned < free,
+            "pinned knight should score worse: pinned={pinned}, free={free}"
+        );
+    }
+
+    #[test]
+    fn candidate_passer_outscores_a_same_file_block() {
+        setup();
+        let our = 1u64 << 28; // e4
+        let candidate_enemy = 1u64 << 53; // f7: adjacent file, does not attack e5
+        let blocked_enemy = 1u64 << 52; // e7
+        let (cand_mg, cand_eg) = eval_pawn_structure(our, candidate_enemy, Color::White, 4, 60);
+        let (block_mg, block_eg) = eval_pawn_structure(our, blocked_enemy, Color::White, 4, 60);
+        assert!(
+            cand_mg > block_mg && cand_eg > block_eg,
+            "candidate={cand_mg}/{cand_eg} blocked={block_mg}/{block_eg}"
+        );
     }
 }

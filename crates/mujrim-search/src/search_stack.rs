@@ -131,6 +131,19 @@ impl SearchPolicies {
         }
     }
 
+    /// Akimbo keeps StockLike move ordering (BK-stable) but uses the same
+    /// late-move reduction curve as Reckless so quiet conversions are searched.
+    fn akimbo() -> Self {
+        Self {
+            lmr: LmrDispatch::RecklessFull,
+            lmp: LmpDispatch::StockLike,
+            futility: FutilityDispatch::StockLike,
+            bad_noisy_futility: BadNoisyFutilityDispatch::Disabled,
+            rfp: RfpDispatch::StockLike,
+            move_ordering: MoveOrderingProfile::StockLike,
+        }
+    }
+
     fn reckless() -> Self {
         Self {
             lmr: LmrDispatch::RecklessFull,
@@ -185,6 +198,10 @@ impl SearchStack {
             NnueSearchProfile::Akimbo => AkimboSearchProfile.compose(),
             NnueSearchProfile::Stockfish => StockfishSearchProfile.compose(),
             NnueSearchProfile::Reckless => RecklessSearchProfile.compose(),
+            NnueSearchProfile::Viridithas => ViridithasSearchProfile.compose(),
+            NnueSearchProfile::Obsidian => ObsidianSearchProfile.compose(),
+            NnueSearchProfile::PlentyChess => PlentyChessSearchProfile.compose(),
+            NnueSearchProfile::Lc0 => Lc0SearchProfile.compose(),
         }
     }
 
@@ -195,6 +212,10 @@ impl SearchStack {
         match name {
             "stockfish" => StockfishSearchProfile.compose(),
             "reckless" => RecklessSearchProfile.compose(),
+            "viridithas" => ViridithasSearchProfile.compose(),
+            "obsidian" => ObsidianSearchProfile.compose(),
+            "plentychess" | "plenty" => PlentyChessSearchProfile.compose(),
+            "lc0" => Lc0SearchProfile.compose(),
             "mujrim-hce" | "hce" => MujrimHceSearchProfile.compose(),
             "reckless-full-lmr" => {
                 let mut stack = AkimboSearchProfile.compose();
@@ -248,7 +269,7 @@ impl SearchStackProfile for AkimboSearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::stock_like()
+        SearchPolicies::akimbo()
     }
 }
 
@@ -284,7 +305,75 @@ impl SearchStackProfile for RecklessSearchProfile {
     }
 }
 
-/// Classical (HCE) evaluator with a StockLike search skeleton.
+pub struct ViridithasSearchProfile;
+
+impl SearchStackProfile for ViridithasSearchProfile {
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::Viridithas)
+    }
+
+    fn parameters(&self) -> SearchParams {
+        SearchParams::for_preset_with_repo_tuning("viridithas")
+    }
+
+    fn policies(&self) -> SearchPolicies {
+        SearchPolicies::stock_like()
+    }
+}
+
+pub struct ObsidianSearchProfile;
+
+impl SearchStackProfile for ObsidianSearchProfile {
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::Obsidian)
+    }
+
+    fn parameters(&self) -> SearchParams {
+        SearchParams::for_preset_with_repo_tuning("obsidian")
+    }
+
+    fn policies(&self) -> SearchPolicies {
+        SearchPolicies::stock_like()
+    }
+}
+
+pub struct PlentyChessSearchProfile;
+
+impl SearchStackProfile for PlentyChessSearchProfile {
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::PlentyChess)
+    }
+
+    fn parameters(&self) -> SearchParams {
+        SearchParams::for_preset_with_repo_tuning("plentychess")
+    }
+
+    fn policies(&self) -> SearchPolicies {
+        SearchPolicies::stock_like()
+    }
+}
+
+pub struct Lc0SearchProfile;
+
+impl SearchStackProfile for Lc0SearchProfile {
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::Lc0)
+    }
+
+    fn parameters(&self) -> SearchParams {
+        SearchParams::for_preset_with_repo_tuning("lc0")
+    }
+
+    fn policies(&self) -> SearchPolicies {
+        SearchPolicies::stock_like()
+    }
+}
+
+/// Classical (HCE) evaluator with StockLike policies.
+///
+/// StockLike keeps full-depth root quiets (no LMR) and budgeted check
+/// extensions — both are required for pawn breaks and sacrifices. Reckless
+/// policies bury those moves under root LMR.
 pub struct MujrimHceSearchProfile;
 
 impl SearchStackProfile for MujrimHceSearchProfile {
@@ -331,6 +420,30 @@ mod tests {
     }
 
     #[test]
+    fn viridithas_and_obsidian_stacks_keep_matching_profiles() {
+        let viri = SearchStack::for_network(NnueSearchProfile::Viridithas);
+        assert_eq!(
+            viri.eval_mode(),
+            EvalMode::Nnue(NnueSearchProfile::Viridithas)
+        );
+        assert_eq!(viri.params.lmr_cut_node_bonus, 1);
+        assert_eq!(viri.policies.move_ordering, MoveOrderingProfile::StockLike);
+
+        let obs = SearchStack::for_preset_name("obsidian");
+        assert_eq!(obs.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Obsidian));
+        assert_eq!(obs.params.se_depth_min, 5);
+
+        let plenty = SearchStack::for_preset_name("plentychess");
+        assert_eq!(
+            plenty.eval_mode(),
+            EvalMode::Nnue(NnueSearchProfile::PlentyChess)
+        );
+        let lc0 = SearchStack::for_network(NnueSearchProfile::Lc0);
+        assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
+        assert_eq!(lc0.params.lmr_cut_node_bonus, 0);
+    }
+
+    #[test]
     fn reckless_stack_cannot_mix_in_stocklike_policies() {
         let stack = SearchStack::for_network(NnueSearchProfile::Reckless);
         assert_eq!(
@@ -367,7 +480,7 @@ mod tests {
         assert_eq!(stack.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Akimbo));
         assert_eq!(stack.params.nmp_base, akimbo_nmp);
         assert!(matches!(stack.policies.lmp, LmpDispatch::Reckless));
-        assert!(matches!(stack.policies.lmr, LmrDispatch::StockLike));
+        assert!(matches!(stack.policies.lmr, LmrDispatch::RecklessFull));
         assert_eq!(stack.policies.move_ordering, MoveOrderingProfile::StockLike);
     }
 }

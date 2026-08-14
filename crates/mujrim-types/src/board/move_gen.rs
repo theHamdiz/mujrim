@@ -84,13 +84,15 @@ impl Board {
     #[inline(always)]
     fn castling_is_legal_after_move(&self, mv: Move, us: Color) -> bool {
         let them = us.opponent();
-        let (rook_from, rook_to, transit) = match (us, mv.flag) {
-            (Color::White, MoveFlag::KingCastle) => (Square::H1, Square::F1, Square::F1),
-            (Color::White, MoveFlag::QueenCastle) => (Square::A1, Square::D1, Square::D1),
-            (Color::Black, MoveFlag::KingCastle) => (Square::H8, Square::F8, Square::F8),
-            (Color::Black, MoveFlag::QueenCastle) => (Square::A8, Square::D8, Square::D8),
+        let kingside = match mv.flag {
+            MoveFlag::KingCastle => true,
+            MoveFlag::QueenCastle => false,
             _ => return false,
         };
+        let king_to = Board::castling_king_landing(us, kingside);
+        let rook_from = self.castling_rook_from(us, kingside);
+        let rook_to = Board::castling_rook_landing(us, kingside);
+        let transit = rook_to;
         if self.is_square_attacked_after(mv.from, them, self.all_occupancy(), 0) {
             return false;
         }
@@ -100,8 +102,8 @@ impl Board {
             return false;
         }
         let final_occupancy =
-            (without_king & !rook_from.bitboard()) | rook_to.bitboard() | mv.to.bitboard();
-        !self.is_square_attacked_after(mv.to, them, final_occupancy, 0)
+            (without_king & !rook_from.bitboard()) | rook_to.bitboard() | king_to.bitboard();
+        !self.is_square_attacked_after(king_to, them, final_occupancy, 0)
     }
 
     /// Generates all legal moves for the current side to move.
@@ -513,6 +515,21 @@ impl Board {
     // ── Castling ────────────────────────────────────────────────────────────
 
     fn gen_castling_moves(&self, color: Color, moves: &mut MoveList) {
+        if self.castling_rights == 0 {
+            return;
+        }
+        if self.is_chess960() {
+            if self.can_castle(color, true) {
+                let from = self.king_square(color);
+                moves.push(Move::king_castle(from, self.castle_uci_to(color, true)));
+            }
+            if self.can_castle(color, false) {
+                let from = self.king_square(color);
+                moves.push(Move::queen_castle(from, self.castle_uci_to(color, false)));
+            }
+            return;
+        }
+
         let occ = self.all_occupancy();
         let enemy = color.opponent();
 
@@ -566,6 +583,42 @@ impl Board {
                 }
             }
         }
+    }
+
+    fn can_castle(&self, color: Color, kingside: bool) -> bool {
+        let right = match (color, kingside) {
+            (Color::White, true) => WHITE_KING_CASTLE,
+            (Color::White, false) => WHITE_QUEEN_CASTLE,
+            (Color::Black, true) => BLACK_KING_CASTLE,
+            (Color::Black, false) => BLACK_QUEEN_CASTLE,
+        };
+        if self.castling_rights & right == 0 {
+            return false;
+        }
+        let king = self.king_square(color);
+        let rook = self.castling_rook_from(color, kingside);
+        if self.piece_on(rook) != Some((Piece::Rook, color)) {
+            return false;
+        }
+        let king_to = Board::castling_king_landing(color, kingside);
+        let rook_to = Board::castling_rook_landing(color, kingside);
+        let occ = self.all_occupancy() & !king.bitboard() & !rook.bitboard();
+        if rank_between(king, rook) & occ != 0 {
+            return false;
+        }
+        if rank_between(king, king_to) & occ != 0 {
+            return false;
+        }
+        if rank_between(rook, rook_to) & occ != 0 {
+            return false;
+        }
+        let enemy = color.opponent();
+        for sq in inclusive_rank_walk(king, king_to) {
+            if self.is_square_attacked(sq, enemy) {
+                return false;
+            }
+        }
+        true
     }
 
     // ── Capture-only generation (for quiescence search) ────────────────────
@@ -684,6 +737,39 @@ impl Board {
         }
         nodes
     }
+}
+
+#[inline(always)]
+fn rank_between(from: Square, to: Square) -> u64 {
+    if from.rank() != to.rank() {
+        return 0;
+    }
+    let (lo, hi) = if from.file() < to.file() {
+        (from.file(), to.file())
+    } else {
+        (to.file(), from.file())
+    };
+    let mut bb = 0u64;
+    let rank = from.rank();
+    let mut file = lo + 1;
+    while file < hi {
+        bb |= Square::from_file_rank(file, rank).bitboard();
+        file += 1;
+    }
+    bb
+}
+
+#[inline(always)]
+fn inclusive_rank_walk(from: Square, to: Square) -> impl Iterator<Item = Square> {
+    let rank = from.rank();
+    let start = from.file();
+    let end = to.file();
+    let step: i8 = if end >= start { 1 } else { -1 };
+    let count = start.abs_diff(end) as usize + 1;
+    (0..count).map(move |i| {
+        let file = (start as i8 + step * i as i8) as u8;
+        Square::from_file_rank(file, rank)
+    })
 }
 
 #[cfg(test)]

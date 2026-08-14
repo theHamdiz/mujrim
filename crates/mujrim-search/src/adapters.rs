@@ -6,7 +6,10 @@
 use eval::nnue::{ActiveNetwork, NnueSearchProfile};
 
 use crate::engine::SearchEngine;
-use crate::search_stack::{MujrimHceSearchProfile, SearchStack, SearchStackProfile};
+use crate::search_stack::{
+    Lc0SearchProfile, MujrimHceSearchProfile, ObsidianSearchProfile, PlentyChessSearchProfile,
+    SearchStack, SearchStackProfile, ViridithasSearchProfile,
+};
 
 /// Binds one evaluator to its compatible search composition.
 pub trait EvalSearchAdapter: Send + Sync {
@@ -20,6 +23,10 @@ pub struct StockfishAdapter;
 #[cfg(feature = "reckless-nnue")]
 pub struct RecklessAdapter;
 pub struct AkimboAdapter;
+pub struct ViridithasAdapter;
+pub struct ObsidianAdapter;
+pub struct PlentyChessAdapter;
+pub struct Lc0Adapter;
 pub struct MujrimHceAdapter;
 
 #[cfg(feature = "stockfish-nnue")]
@@ -81,6 +88,72 @@ impl EvalSearchAdapter for AkimboAdapter {
     }
 }
 
+impl EvalSearchAdapter for ViridithasAdapter {
+    fn id(&self) -> &'static str {
+        "viridithas"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Viridithas"
+    }
+
+    fn install(&self, engine: &mut SearchEngine) {
+        engine.set_search_stack(ViridithasSearchProfile.compose());
+        if let Ok(network) = eval::nnue::load_network_for_preset("viridithas") {
+            engine.set_nnue_network(network);
+        }
+        engine.set_use_nnue(true);
+    }
+}
+
+impl EvalSearchAdapter for ObsidianAdapter {
+    fn id(&self) -> &'static str {
+        "obsidian"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Obsidian"
+    }
+
+    fn install(&self, engine: &mut SearchEngine) {
+        match eval::nnue::load_network_for_preset("obsidian") {
+            Ok(network) => engine.set_nnue_network(network),
+            Err(_) => engine.set_search_stack(ObsidianSearchProfile.compose()),
+        }
+        engine.set_use_nnue(true);
+    }
+}
+
+impl EvalSearchAdapter for PlentyChessAdapter {
+    fn id(&self) -> &'static str {
+        "plentychess"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "PlentyChess"
+    }
+
+    fn install(&self, engine: &mut SearchEngine) {
+        engine.set_search_stack(PlentyChessSearchProfile.compose());
+        engine.set_use_nnue(true);
+    }
+}
+
+impl EvalSearchAdapter for Lc0Adapter {
+    fn id(&self) -> &'static str {
+        "lc0"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Lc0"
+    }
+
+    fn install(&self, engine: &mut SearchEngine) {
+        engine.set_search_stack(Lc0SearchProfile.compose());
+        engine.set_use_nnue(true);
+    }
+}
+
 impl EvalSearchAdapter for MujrimHceAdapter {
     fn id(&self) -> &'static str {
         "mujrim-hce"
@@ -106,6 +179,10 @@ pub fn adapter_for_id(id: &str) -> Option<&'static dyn EvalSearchAdapter> {
         #[cfg(feature = "reckless-nnue")]
         "reckless" => Some(&RecklessAdapter),
         "akimbo" => Some(&AkimboAdapter),
+        "viridithas" => Some(&ViridithasAdapter),
+        "obsidian" => Some(&ObsidianAdapter),
+        "plentychess" | "plenty" => Some(&PlentyChessAdapter),
+        "lc0" => Some(&Lc0Adapter),
         "mujrim-hce" | "hce" => Some(&MujrimHceAdapter),
         _ => None,
     }
@@ -192,12 +269,45 @@ mod tests {
     }
 
     #[test]
+    fn viridithas_and_obsidian_adapters_install_matching_stacks() {
+        let mut viri = SearchEngine::new(1, 1);
+        assert!(install_adapter(&mut viri, "viridithas"));
+        assert!(viri.use_nnue());
+        assert_eq!(
+            viri.eval_mode(),
+            EvalMode::Nnue(NnueSearchProfile::Viridithas)
+        );
+
+        let mut obs = SearchEngine::new(1, 1);
+        assert!(install_adapter(&mut obs, "obsidian"));
+        assert_eq!(obs.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Obsidian));
+    }
+
+    #[test]
+    fn plentychess_and_lc0_adapters_install_matching_stacks() {
+        let mut plenty = SearchEngine::new(1, 1);
+        assert!(install_adapter(&mut plenty, "plentychess"));
+        assert_eq!(
+            plenty.eval_mode(),
+            EvalMode::Nnue(NnueSearchProfile::PlentyChess)
+        );
+
+        let mut lc0 = SearchEngine::new(1, 1);
+        assert!(install_adapter(&mut lc0, "lc0"));
+        assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
+    }
+
+    #[test]
     fn adapter_ids_are_stable() {
         #[cfg(feature = "stockfish-nnue")]
         assert_eq!(StockfishAdapter.id(), "stockfish");
         #[cfg(feature = "reckless-nnue")]
         assert_eq!(RecklessAdapter.id(), "reckless");
         assert_eq!(AkimboAdapter.id(), "akimbo");
+        assert_eq!(ViridithasAdapter.id(), "viridithas");
+        assert_eq!(ObsidianAdapter.id(), "obsidian");
+        assert_eq!(PlentyChessAdapter.id(), "plentychess");
+        assert_eq!(Lc0Adapter.id(), "lc0");
         assert_eq!(MujrimHceAdapter.id(), "mujrim-hce");
         assert_eq!(MujrimHceAdapter.display_name(), "Mujrim HCE");
         assert!(adapter_for_id("native").is_none());

@@ -70,14 +70,16 @@ fn configure_engine_eval(
                 path.display()
             ),
         }
-    } else if matches!(eval_preset, "stockfish" | "reckless" | "akimbo") {
+    } else if matches!(
+        eval_preset,
+        "stockfish" | "reckless" | "akimbo" | "viridithas" | "obsidian" | "plentychess" | "lc0"
+    ) {
         let _ = search::install_adapter(engine, eval_preset);
         return;
     } else if let Some(network) = eval::nnue::embedded_network_for_preset(eval_preset) {
         engine.set_nnue_network(network);
     } else {
-        let nnue_dir = std::path::Path::new("nnue");
-        let (auto_net, msg) = eval::nnue::auto_detect_network(nnue_dir);
+        let (auto_net, msg) = eval::nnue::auto_detect_from_search_roots();
         if let Some(net) = auto_net {
             if !quiet {
                 eprintln!("{msg}");
@@ -208,6 +210,22 @@ mod tests {
         assert_eq!(c.threads, 1);
         assert_eq!(c.depth, 20);
         assert_eq!(c.time_per_position.as_secs(), 90);
+    }
+
+    #[test]
+    fn viridithas_and_obsidian_presets_install_matching_search_stacks() {
+        let mut viri = SearchEngine::new(4, 1);
+        configure_engine_eval(&mut viri, "viridithas", None, true);
+        assert_eq!(
+            viri.network_profile(),
+            Some(eval::nnue::NnueSearchProfile::Viridithas)
+        );
+        let mut obs = SearchEngine::new(4, 1);
+        configure_engine_eval(&mut obs, "obsidian", None, true);
+        assert_eq!(
+            obs.network_profile(),
+            Some(eval::nnue::NnueSearchProfile::Obsidian)
+        );
     }
 
     #[test]

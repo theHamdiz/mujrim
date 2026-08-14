@@ -1,6 +1,7 @@
 pub mod adapters;
 #[cfg(feature = "book")]
 pub mod book;
+pub mod conversion;
 pub mod engine;
 pub mod hce_bench;
 pub mod move_picker;
@@ -8,6 +9,7 @@ pub mod policy;
 pub mod search_params;
 pub mod search_stack;
 pub mod see;
+pub mod syzygy;
 pub mod tt;
 
 #[cfg(feature = "reckless-nnue")]
@@ -15,8 +17,10 @@ pub use adapters::RecklessAdapter;
 #[cfg(feature = "stockfish-nnue")]
 pub use adapters::StockfishAdapter;
 pub use adapters::{
-    AkimboAdapter, EvalSearchAdapter, MujrimHceAdapter, adapter_for_id, install_adapter,
+    AkimboAdapter, EvalSearchAdapter, Lc0Adapter, MujrimHceAdapter, ObsidianAdapter,
+    PlentyChessAdapter, ViridithasAdapter, adapter_for_id, install_adapter,
 };
+pub use conversion::{DEFAULT_CONTEMPT, WIN_CONVERSION_CP};
 pub use engine::SearchEngine;
 pub use hce_bench::{
     CI_HCE_NODE_BUDGET, HceNpsReport, RELEASE_HCE_NPS_TARGET, measure_hce_eval_nodes,
@@ -24,6 +28,7 @@ pub use hce_bench::{
 };
 pub use search_params::SearchParams;
 pub use search_stack::{EvalMode, SearchExperiment, SearchStack, SearchStackProfile};
+pub use syzygy::{DEFAULT_PROBE_DEPTH, DEFAULT_PROBE_LIMIT, SyzygyTables};
 
 #[cfg(test)]
 mod feature_contract_tests {

@@ -16,9 +16,10 @@ use crate::policy::{
 use crate::search_params::SearchParams;
 use crate::search_stack::{EvalMode, SearchExperiment, SearchStack};
 use crate::see;
+use crate::syzygy::SyzygyTables;
 use crate::tt::{NodeType, TTData, TranspositionTable};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use types::board::attack_tables::{
     bishop_attacks, king_attacks, knight_attacks, pawn_attacks, queen_attacks, rook_attacks,
@@ -650,11 +651,10 @@ fn root_score_stat(depth: i32, average_score: i32) -> u32 {
     (depth << 16) | score as u32
 }
 
-/// Small deterministic draw variation prevents repeated positions from all
-/// having the same value, which otherwise encourages threefold blindness.
+/// Interior draw jitter. Contempt is applied only at the root.
 #[inline(always)]
 const fn draw_score(nodes: u64) -> i32 {
-    -1 + (nodes & 2) as i32
+    crate::conversion::interior_draw_score(nodes)
 }
 
 #[inline(always)]
@@ -691,6 +691,10 @@ pub struct SearchResult {
     pub elapsed: Duration,
     /// Principal variation line.
     pub pv: Vec<Move>,
+    /// TT occupancy in per-mille, for UCI `hashfull`.
+    pub hashfull: u16,
+    /// Successful Syzygy WDL probes during this search.
+    pub tbhits: u64,
 }
 
 /// Configuration for a search.
@@ -803,6 +807,10 @@ struct ThreadState {
     reverse_qsearch: bool,
     /// Root score bias used by the Reckless evaluation adapter.
     optimism: [i32; 2],
+    /// Successful Syzygy WDL probes in this search.
+    tbhits: u64,
+    /// Root moves skipped for MultiPV follow-up lines. Read only at the root.
+    root_exclude: Vec<Move>,
 }
 
 impl ThreadState {
@@ -845,6 +853,8 @@ impl ThreadState {
             reductions: [0; MAX_PLY],
             reverse_qsearch: false,
             optimism: [0; 2],
+            tbhits: 0,
+            root_exclude: Vec::new(),
         }
     }
 
@@ -901,6 +911,14 @@ impl ThreadState {
         self.reductions.fill(0);
         self.reverse_qsearch = false;
         self.optimism = [0; 2];
+        self.tbhits = 0;
+    }
+
+    #[inline(always)]
+    fn is_root_excluded(&self, mv: Move) -> bool {
+        self.root_exclude.iter().any(|&excluded| {
+            excluded.from == mv.from && excluded.to == mv.to && excluded.promotion == mv.promotion
+        })
     }
 
     fn clear(&mut self) {
@@ -1029,6 +1047,11 @@ pub struct SearchEngine {
     root_selection_policy: Arc<dyn RootSelectionPolicy + Send + Sync>,
     state: ThreadState,
     previous_best_score: i32,
+    contempt: i32,
+    syzygy: Arc<SyzygyTables>,
+    /// Wall-clock deadline in milliseconds from search start; 0 disables it.
+    /// Used to convert an infinite ponder search into a timed one on ponderhit.
+    deadline_ms: Arc<AtomicU64>,
 }
 
 impl Default for SearchEngine {
@@ -1057,7 +1080,56 @@ impl SearchEngine {
             root_selection_policy: Arc::new(MainThreadPreferredRootSelection),
             state,
             previous_best_score: 0,
+            contempt: crate::conversion::DEFAULT_CONTEMPT,
+            syzygy: Arc::new(SyzygyTables::empty()),
+            deadline_ms: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub fn set_syzygy_path(&mut self, path: &str) {
+        let probe_limit = self.syzygy.probe_limit();
+        let probe_depth = self.syzygy.probe_depth();
+        let mut tables = SyzygyTables::from_path(path);
+        tables.set_probe_limit(probe_limit);
+        tables.set_probe_depth(probe_depth);
+        self.syzygy = Arc::new(tables);
+    }
+
+    pub fn set_syzygy_probe_limit(&mut self, limit: u32) {
+        let mut tables = (*self.syzygy).clone();
+        tables.set_probe_limit(limit);
+        self.syzygy = Arc::new(tables);
+    }
+
+    pub fn set_syzygy_probe_depth(&mut self, depth: i32) {
+        let mut tables = (*self.syzygy).clone();
+        tables.set_probe_depth(depth);
+        self.syzygy = Arc::new(tables);
+    }
+
+    /// Clone the ponder/soft deadline so a UCI thread can arm it mid-search.
+    pub fn deadline_token(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.deadline_ms)
+    }
+
+    /// Exclude these root moves (MultiPV follow-up lines). Empty = none.
+    pub fn set_root_exclusions(&mut self, moves: &[Move]) {
+        self.state.root_exclude.clear();
+        self.state.root_exclude.extend_from_slice(moves);
+    }
+
+    pub fn syzygy(&self) -> &SyzygyTables {
+        &self.syzygy
+    }
+
+    /// Positive contempt makes the side to move prefer playing on over a draw.
+    pub fn set_contempt(&mut self, contempt: i32) {
+        self.contempt = contempt.clamp(-100, 100);
+    }
+
+    /// Current root-only contempt in centipawns.
+    pub fn contempt(&self) -> i32 {
+        self.contempt
     }
 
     /// Set the search parameters (e.g. when switching NNUE networks).
@@ -1179,6 +1251,7 @@ impl SearchEngine {
     /// Performs search with Lazy SMP.
     pub fn search(&mut self, board: &mut Board, limits: SearchLimits) -> SearchResult {
         self.stopped.store(false, Ordering::SeqCst);
+        self.deadline_ms.store(0, Ordering::Relaxed);
         self.tt.new_generation();
 
         let start_time = Instant::now();
@@ -1205,8 +1278,12 @@ impl SearchEngine {
             let start = start_time;
             let search_stack = self.search_stack.clone();
             let use_nnue_clone = self.use_nnue;
+            let contempt = self.contempt;
             let move_ordering = search_stack.policies.move_ordering;
             let nnue_network = Arc::clone(&self.nnue_network);
+            let syzygy = Arc::clone(&self.syzygy);
+            let deadline_ms = Arc::clone(&self.deadline_ms);
+            let root_exclude = self.state.root_exclude.clone();
             let shared_best_stat = Arc::clone(&shared_best_stat);
 
             handles.push(
@@ -1214,6 +1291,7 @@ impl SearchEngine {
                     .stack_size(16 * 1024 * 1024)
                     .spawn(move || {
                         let mut state = ThreadState::new(nnue_network);
+                        state.root_exclude = root_exclude;
                         let mut best_score = -INF;
                         let mut average_score = initial_root_score;
                         let mut best_move = NULL_MOVE;
@@ -1234,6 +1312,9 @@ impl SearchEngine {
                             rfp_policy: &search_stack.policies.rfp,
                             move_ordering,
                             eval_mode: search_stack.eval_mode(),
+                            contempt,
+                            syzygy: &syzygy,
+                            deadline_ms: &deadline_ms,
                         };
 
                         for depth in 1..=max_depth {
@@ -1243,9 +1324,7 @@ impl SearchEngine {
                             if stopped.load(Ordering::Relaxed) {
                                 break;
                             }
-                            if let Some(tl) = time_limit
-                                && start.elapsed() >= tl
-                            {
+                            if search_time_exceeded(start, time_limit, &deadline_ms) {
                                 break;
                             }
                             if let Some(nl) = node_limit
@@ -1337,10 +1416,16 @@ impl SearchEngine {
             rfp_policy: &self.search_stack.policies.rfp,
             move_ordering: self.search_stack.policies.move_ordering,
             eval_mode: self.search_stack.eval_mode(),
+            contempt: self.contempt,
+            syzygy: &self.syzygy,
+            deadline_ms: &self.deadline_ms,
         };
 
         for depth in 1..=limits.max_depth {
             if self.stopped.load(Ordering::Relaxed) {
+                break;
+            }
+            if search_time_exceeded(start_time, limits.time_limit, &self.deadline_ms) {
                 break;
             }
             if let Some(nl) = limits.node_limit
@@ -1491,10 +1576,11 @@ impl SearchEngine {
 
                 let _ = writeln!(
                     out,
-                    "info depth {depth} seldepth {} score {score_str} nodes {} nps {nps} time {elapsed_ms} hashfull {} tbhits 0 currmove {} currmovenumber 1 pv {pv_str}",
+                    "info depth {depth} seldepth {} score {score_str} nodes {} nps {nps} time {elapsed_ms} hashfull {} tbhits {} currmove {} currmovenumber 1 pv {pv_str}",
                     state.seldepth,
                     state.nodes,
                     self.tt.hashfull_per_mille(),
+                    state.tbhits,
                     best_move.to_uci(),
                 );
                 let _ = out.flush();
@@ -1538,6 +1624,10 @@ impl SearchEngine {
                         soft_mul *= 0.85;
                     }
                 }
+
+                // When clearly ahead, spend more clock converting instead of
+                // stopping on a stable shuffle that is about to three-fold.
+                soft_mul *= crate::conversion::winning_time_multiplier(best_score);
 
                 // Fail-low emergency: if best move changed this iteration, extend time
                 if depth >= 6
@@ -1608,6 +1698,8 @@ impl SearchEngine {
             nodes: total_nodes,
             elapsed: start_time.elapsed(),
             pv: best_pv,
+            hashfull: self.tt.hashfull_per_mille(),
+            tbhits: state.tbhits,
         }
     }
 
@@ -1805,6 +1897,20 @@ fn singular_multicut_score(
         .then(|| (singular_score * 5_973 + beta * 4_027) / 10_000)
 }
 
+#[inline(always)]
+fn search_time_exceeded(
+    start_time: Instant,
+    time_limit: Option<Duration>,
+    deadline_ms: &AtomicU64,
+) -> bool {
+    let elapsed = start_time.elapsed();
+    if time_limit.is_some_and(|limit| elapsed >= limit) {
+        return true;
+    }
+    let deadline = deadline_ms.load(Ordering::Relaxed);
+    deadline != 0 && elapsed.as_millis() as u64 >= deadline
+}
+
 /// Immutable resources shared by every node in one search invocation.
 #[derive(Copy, Clone)]
 struct SearchContext<'a> {
@@ -1823,6 +1929,9 @@ struct SearchContext<'a> {
     rfp_policy: &'a RfpDispatch,
     move_ordering: MoveOrderingProfile,
     eval_mode: EvalMode,
+    contempt: i32,
+    syzygy: &'a SyzygyTables,
+    deadline_ms: &'a AtomicU64,
 }
 
 /// Per-node alpha-beta inputs. Keeping these together makes recursive calls
@@ -1877,6 +1986,9 @@ fn search_ab(
         rfp_policy,
         move_ordering,
         eval_mode,
+        contempt,
+        syzygy,
+        deadline_ms,
     } = *context;
     let SearchNode {
         mut depth,
@@ -1901,9 +2013,7 @@ fn search_ab(
             stopped.store(true, Ordering::Relaxed);
             return 0;
         }
-        if let Some(tl) = time_limit
-            && start_time.elapsed() >= tl
-        {
+        if search_time_exceeded(start_time, time_limit, deadline_ms) {
             stopped.store(true, Ordering::Relaxed);
             return 0;
         }
@@ -1924,6 +2034,21 @@ fn search_ab(
     // not inside the tree where it poisons minimax scoring.
     if !is_root && board.is_search_draw(ply_usize) {
         return draw_score(state.nodes);
+    }
+    if !is_root
+        && excluded_move.is_none()
+        && depth >= syzygy.probe_depth()
+        && let Some(tb) = syzygy.probe_wdl(board)
+    {
+        state.tbhits += 1;
+        let score = if tb > 0 {
+            tb - ply
+        } else if tb < 0 {
+            tb + ply
+        } else {
+            0
+        };
+        return score;
     }
     let in_check = board.in_check();
 
@@ -2404,6 +2529,7 @@ fn search_ab(
         // Skip the excluded move (for singular extension verification)
         if excluded_move
             .is_some_and(|em| em.from == mv.from && em.to == mv.to && em.promotion == mv.promotion)
+            || (is_root && state.is_root_excluded(mv))
         {
             continue;
         }
@@ -2587,6 +2713,7 @@ fn search_ab(
         // Prefetch the child TT slot before make; hash_after matches post-make key.
         tt.prefetch(board.tt_hash_after(mv));
         make_search_move(board, state, mv);
+        let repeats = is_root && (board.has_repetition() || board.is_draw());
 
         let gives_check = board.in_check();
 
@@ -2767,6 +2894,12 @@ fn search_ab(
         if stopped.load(Ordering::Relaxed) {
             return 0;
         }
+
+        let score = if is_root {
+            crate::conversion::apply_root_conversion(score, repeats, static_eval, contempt)
+        } else {
+            score
+        };
 
         if score > best_score {
             best_score = score;
@@ -3100,9 +3233,7 @@ fn quiescence(
             stopped.store(true, Ordering::Relaxed);
             return 0;
         }
-        if let Some(tl) = time_limit
-            && start_time.elapsed() >= tl
-        {
+        if search_time_exceeded(start_time, time_limit, context.deadline_ms) {
             stopped.store(true, Ordering::Relaxed);
             return 0;
         }
@@ -3884,6 +4015,9 @@ mod tests {
         const _: () = assert!(200 <= 400 - MARGIN);
     }
 
+    static TEST_SYZYGY: SyzygyTables = SyzygyTables::empty();
+    static TEST_DEADLINE: AtomicU64 = AtomicU64::new(0);
+
     fn test_context<'a>(
         tt: &'a TranspositionTable,
         stopped: &'a AtomicBool,
@@ -3906,6 +4040,9 @@ mod tests {
             rfp_policy: &TEST_RFP_POLICY,
             move_ordering: MoveOrderingProfile::StockLike,
             eval_mode: EvalMode::Nnue(NnueSearchProfile::Stockfish),
+            contempt: crate::conversion::DEFAULT_CONTEMPT,
+            syzygy: &TEST_SYZYGY,
+            deadline_ms: &TEST_DEADLINE,
         }
     }
 
@@ -4531,6 +4668,71 @@ mod tests {
         assert_eq!(draw_score(2), 1);
         assert_eq!(draw_score(3), 1);
         assert_eq!(draw_score(4), -1);
+    }
+
+    fn play_uci(board: &mut Board, moves: &[&str]) {
+        for uci in moves {
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .copied()
+                .find(|candidate| candidate.to_uci() == *uci)
+                .unwrap_or_else(|| panic!("illegal test move {uci}"));
+            board.make_move(mv);
+        }
+    }
+
+    #[test]
+    fn winning_side_does_not_choose_a_repeating_knight_shuffle() {
+        setup();
+        // White is a queen up. A knight tour has already occurred once, so
+        // g1f3 would repeat the start of the cycle.
+        let mut board =
+            Board::from_fen("4k3/8/8/8/8/8/8/Q3K1N1 w - - 0 1").expect("winning queen ending");
+        play_uci(&mut board, &["g1f3", "e8d8", "f3g1", "d8e8"]);
+        assert!(board.has_repetition());
+        assert!(!board.has_threefold_repetition());
+
+        let mut engine = SearchEngine::new(4, 1);
+        let _ = engine.install_adapter("mujrim-hce");
+        engine.set_contempt(48);
+        let result = engine.search_nodes(&mut board, 4_000, 8);
+        assert_ne!(result.best_move.to_uci(), "g1f3");
+        let legal = board.generate_legal_moves();
+        assert!(legal.iter().any(|mv| *mv == result.best_move));
+    }
+
+    #[test]
+    fn contempt_accessor_clamps_and_persists() {
+        let mut engine = SearchEngine::new(1, 1);
+        assert_eq!(engine.contempt(), crate::conversion::DEFAULT_CONTEMPT);
+        engine.set_contempt(200);
+        assert_eq!(engine.contempt(), 100);
+        engine.set_contempt(-200);
+        assert_eq!(engine.contempt(), -100);
+    }
+
+    #[test]
+    fn root_exclusions_force_a_different_best_move() {
+        setup();
+        let mut board = Board::new();
+        let mut engine = SearchEngine::new(4, 1);
+        let first = engine.search_nodes(&mut board, 1_500, 4);
+        assert_ne!(first.best_move, NULL_MOVE);
+        engine.set_root_exclusions(std::slice::from_ref(&first.best_move));
+        let second = engine.search_nodes(&mut board, 1_500, 4);
+        engine.set_root_exclusions(&[]);
+        assert_ne!(second.best_move, NULL_MOVE);
+        assert_ne!(second.best_move, first.best_move);
+    }
+
+    #[test]
+    fn deadline_token_can_be_armed_from_another_handle() {
+        let engine = SearchEngine::new(1, 1);
+        let token = engine.deadline_token();
+        assert_eq!(token.load(Ordering::Relaxed), 0);
+        token.store(1, Ordering::Relaxed);
+        assert_eq!(engine.deadline_token().load(Ordering::Relaxed), 1);
     }
 
     #[test]

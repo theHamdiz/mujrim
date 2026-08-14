@@ -7,6 +7,8 @@
 //! - `akimbo-nnue` feature: Load Akimbo-family networks (768→H×2→1)
 //! - `stockfish-nnue` feature: Load Stockfish .nnue files (HalfKAv2_hm)
 //! - `reckless-nnue` feature: Load the Reckless v60 threat-aware raw network
+//! - `viridithas-nnue` feature: Load Viridithas `.nnue.zst` piece-feature nets
+//! - `obsidian-nnue` feature: Load Obsidian layered `net89perm.bin` nets
 //!
 //! Modules:
 //! - `network`: Network struct, forward pass, feature indexing
@@ -41,10 +43,17 @@ pub mod reckless_format;
 #[cfg(feature = "reckless-nnue")]
 mod reckless_simd;
 
+#[cfg(feature = "viridithas-nnue")]
+pub mod viridithas_format;
+
+#[cfg(feature = "obsidian-nnue")]
+pub mod obsidian_format;
+
 pub use accumulator::NNUEState;
 pub use adapter::{
     ActiveNetwork, NetworkFormat, NnueNetworkInfo, NnueNetworkParameters, NnueNetworkSource,
-    NnueSearchProfile, auto_detect_network, default_embedded_network, embedded_network_for_preset,
-    enabled_network_formats, load_network,
+    NnueSearchProfile, auto_detect_from_search_roots, auto_detect_network,
+    default_embedded_network, discover_named_network, embedded_network_for_preset,
+    enabled_network_formats, load_network, load_network_for_preset, nnue_search_directories,
 };
 pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, forward_with_network, net};

@@ -229,7 +229,7 @@ function Assert-EngineSize([string]$Path, [long]$MinBytes, [long]$MaxBytes, [str
 
 function Build-Variants([string]$Triple) {
     Write-Host "==> Building Mujrim product engines for $Triple"
-    Write-Host "  product set: mujrim-elite, mujrim-external, mujrim-v60, mujrim-ak"
+    Write-Host "  product set: mujrim-elite, mujrim-external, mujrim-v60, mujrim-ak, mujrim-viri, mujrim-obs, mujrim-plenty, mujrim-lc0"
     Write-Host "  note: never add embedded-networks on top of default features (that embeds every net)"
     $release = Join-Path $TargetDir "$Triple\release"
     Ensure-Dir $release
@@ -250,7 +250,7 @@ function Build-Variants([string]$Triple) {
 
     # mujrim-external: NO embedded networks — discovers/loads NNUE at runtime.
     cargo build --release --target $Triple -p mujrim --no-default-features `
-        --features "xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue"
+        --features "xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue,viridithas-nnue,obsidian-nnue"
     if ($LASTEXITCODE -ne 0) { throw "mujrim-external build failed for $Triple" }
     Snapshot-ReleaseExe $release "mujrim-external.exe"
     # Must stay far below an embedded Stockfish payload.
@@ -267,6 +267,24 @@ function Build-Variants([string]$Triple) {
     if ($LASTEXITCODE -ne 0) { throw "mujrim-ak build failed for $Triple" }
     Snapshot-ReleaseExe $release "mujrim-ak.exe"
     Assert-EngineSize (Join-Path $release "mujrim-ak.exe") 1MB 40MB "mujrim-ak"
+
+    # mujrim-viri / mujrim-obs: format loaders + matching search, no embedded net.
+    cargo build --release --target $Triple -p mujrim --no-default-features `
+        --features "xboard,book,nnue,simd,viridithas-nnue"
+    if ($LASTEXITCODE -ne 0) { throw "mujrim-viri build failed for $Triple" }
+    Snapshot-ReleaseExe $release "mujrim-viri.exe"
+    Assert-EngineSize (Join-Path $release "mujrim-viri.exe") 1MB 40MB "mujrim-viri"
+
+    cargo build --release --target $Triple -p mujrim --no-default-features `
+        --features "xboard,book,nnue,simd,obsidian-nnue"
+    if ($LASTEXITCODE -ne 0) { throw "mujrim-obs build failed for $Triple" }
+    Snapshot-ReleaseExe $release "mujrim-obs.exe"
+    Assert-EngineSize (Join-Path $release "mujrim-obs.exe") 1MB 40MB "mujrim-obs"
+
+    Snapshot-ReleaseExe $release "mujrim-plenty.exe"
+    Assert-EngineSize (Join-Path $release "mujrim-plenty.exe") 1MB 40MB "mujrim-plenty"
+    Snapshot-ReleaseExe $release "mujrim-lc0.exe"
+    Assert-EngineSize (Join-Path $release "mujrim-lc0.exe") 1MB 40MB "mujrim-lc0"
 
     # Top-level mujrim.exe matches external (no embedded net).
     Copy-Item -Force (Join-Path $release "mujrim-external.exe") (Join-Path $release "mujrim.exe")
@@ -322,7 +340,11 @@ function Package-Arch(
         "mujrim-elite.exe",
         "mujrim-external.exe",
         "mujrim-v60.exe",
-        "mujrim-ak.exe"
+        "mujrim-ak.exe",
+        "mujrim-viri.exe",
+        "mujrim-obs.exe",
+        "mujrim-plenty.exe",
+        "mujrim-lc0.exe"
     )
     foreach ($name in $mujrimVariants) {
         $src = Join-Path $release $name

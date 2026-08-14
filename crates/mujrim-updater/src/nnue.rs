@@ -159,13 +159,25 @@ pub const NETWORKS: &[NnueNetwork] = &[
         id: "viri_default",
         name: "Viridithas v104.1 (velarised-2)",
         engine: "Viridithas",
-        architecture: "768→768×2→1 SCReLU",
+        architecture: "16×768 + threat features → H×2 (velarised-2; piece-feature layout when size matches)",
         url: "https://github.com/cosmobobak/viridithas-networks/releases/download/v104.1/velarised-2-b800.nnue.zst",
         filename: "viri_default.nnue.zst",
         upstream_name: "velarised-2-b800.nnue.zst",
         approx_size: 3_500_000,
-        search_preset: "akimbo",
+        search_preset: "viridithas",
         elo: 3350,
+    },
+    NnueNetwork {
+        id: "obs_default",
+        name: "Obsidian net89perm",
+        engine: "Obsidian",
+        architecture: "768→1536→16→32→1 (13 king buckets, 8 output buckets)",
+        url: "https://github.com/gab8192/Obsidian-nets/releases/download/nets/net89perm.bin",
+        filename: "obs_default.bin",
+        upstream_name: "net89perm.bin",
+        approx_size: 30_905_888,
+        search_preset: "obsidian",
+        elo: 3600,
     },
     // ── Alexandria ──────────────────────────────────────────────────
     // Nets are published at PGG106/Alexandria-networks/releases.
@@ -182,8 +194,6 @@ pub const NETWORKS: &[NnueNetwork] = &[
         elo: 3380,
     },
     // NOTE: Ethereal is excluded — its NNUE networks are commercial/paid.
-    // NOTE: Obsidian, Midnight, Stormphrax, Smallbrain embed nets at compile
-    //       time and don't publish standalone downloadable network files.
 ];
 
 // ═══════════════════════════════════════════════════════════════════
@@ -639,8 +649,20 @@ mod tests {
         assert!(find_by_id("sf_current").is_some());
         assert!(find_by_id("ak_default").is_some());
         assert!(find_by_id("viri_default").is_some());
+        assert!(find_by_id("obs_default").is_some());
         assert!(find_by_id("alex_default").is_some());
         assert!(find_by_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn viridithas_and_obsidian_catalog_use_matching_search_presets() {
+        let viri = find_by_id("viri_default").expect("viri_default");
+        assert_eq!(viri.search_preset, "viridithas");
+        assert!(viri.architecture.contains("768"));
+        let obs = find_by_id("obs_default").expect("obs_default");
+        assert_eq!(obs.search_preset, "obsidian");
+        assert_eq!(obs.upstream_name, "net89perm.bin");
+        assert_eq!(obs.approx_size, 30_905_888);
     }
 
     #[test]
@@ -674,6 +696,7 @@ mod tests {
         assert!(engines.contains(&"Akimbo"));
         assert!(engines.contains(&"Stockfish"));
         assert!(engines.contains(&"Viridithas"));
+        assert!(engines.contains(&"Obsidian"));
         assert!(engines.contains(&"Alexandria"));
     }
 

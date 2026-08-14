@@ -34,7 +34,16 @@ const EXTERNAL_BACKENDS: &[&str] = &[
     "integral",
     "velvet",
 ];
-const MUJRIM_ADAPTERS: &[&str] = &["mujrim-elite", "mujrim-external", "mujrim-v60", "mujrim-ak"];
+const MUJRIM_ADAPTERS: &[&str] = &[
+    "mujrim-elite",
+    "mujrim-external",
+    "mujrim-v60",
+    "mujrim-ak",
+    "mujrim-viri",
+    "mujrim-obs",
+    "mujrim-plenty",
+    "mujrim-lc0",
+];
 const V60_PASSTHROUGH_MARKER: &str = "MUJRIM_V60_PASSTHROUGH_ACTIVE";
 
 #[derive(Clone, Copy)]
@@ -81,6 +90,10 @@ fn resolve_backend_engine_id(backend: &str) -> Option<&'static str> {
         "v60" => Some("mujrim-v60"),
         "v10" | "elite" => Some("mujrim-elite"),
         "akimbo" | "ak" => Some("mujrim-ak"),
+        "viridithas" | "viri" | "mujrim-viri" => Some("viridithas"),
+        "obsidian" | "obs" | "mujrim-obs" => Some("obsidian"),
+        "plentychess" | "plenty" | "mujrim-plenty" => Some("plentychess"),
+        "lc0" | "mujrim-lc0" => Some("lc0"),
         "external" => Some("mujrim-external"),
         other => EXTERNAL_BACKENDS
             .iter()
@@ -93,6 +106,7 @@ fn passthrough_engine_id(
     backend: &str,
     uci_mode: bool,
     v60_passthrough_active: bool,
+    explicit_path: bool,
 ) -> Option<&'static str> {
     if !uci_mode
         || matches!(backend, "universal" | "mujrim-hce")
@@ -100,7 +114,35 @@ fn passthrough_engine_id(
     {
         return None;
     }
+    if matches!(
+        backend,
+        "viridithas"
+            | "viri"
+            | "mujrim-viri"
+            | "obsidian"
+            | "obs"
+            | "mujrim-obs"
+            | "plentychess"
+            | "plenty"
+            | "mujrim-plenty"
+    ) && !explicit_path
+    {
+        return None;
+    }
     resolve_backend_engine_id(backend)
+}
+
+fn product_adapter_from_exe_stem(stem: &str) -> Option<&'static str> {
+    match stem {
+        "mujrim-viri" | "mujrim-viridithas" => Some("viridithas"),
+        "mujrim-obs" | "mujrim-obsidian" => Some("obsidian"),
+        "mujrim-plenty" | "mujrim-plentychess" => Some("plentychess"),
+        "mujrim-lc0" | "mujrim-leela" => Some("lc0"),
+        "mujrim-elite" | "mujrim-embedded" => Some("stockfish"),
+        "mujrim-ak" | "mujrim-akimbo" => Some("akimbo"),
+        "mujrim-v60" | "mujrim-v60-embedded" => Some("reckless"),
+        _ => None,
+    }
 }
 
 fn fallback_engine_id(backend: &str, explicit_path: bool) -> Option<&'static str> {
@@ -145,13 +187,26 @@ fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Res
     } else {
         &[]
     };
+    let (engine, extra_args) = if engine_id == "lc0" {
+        let device = mujrim_protocols::detect_device_kind();
+        let launch = mujrim_protocols::plan_launch(&engine, device);
+        let extra_args = launch.argv();
+        (launch.binary, extra_args)
+    } else {
+        (engine, Vec::new())
+    };
     let status = if is_mujrim_adapter(engine_id) {
         let memory_limit = match engine_id {
             "mujrim-elite" | "mujrim-v10" => Some(1536 * 1024 * 1024),
             "mujrim-v60" => Some(1024 * 1024 * 1024),
             _ => Some(512 * 1024 * 1024),
         };
-        mujrim_protocols::run_passthrough_with_environment(&engine, &[], environment, memory_limit)?
+        mujrim_protocols::run_passthrough_with_environment(
+            &engine,
+            &extra_args,
+            environment,
+            memory_limit,
+        )?
     } else {
         let profile = search_stack_profile(
             EXTERNAL_BACKENDS
@@ -171,7 +226,7 @@ fn run_external_backend(engine_id: &str, explicit_path: Option<&PathBuf>) -> Res
         };
         mujrim_protocols::run_uci_search_stack_adapter(
             &engine,
-            &[],
+            &extra_args,
             environment,
             Some(profile.memory_limit_bytes),
             &adapter,
@@ -202,9 +257,11 @@ fn main() {
                     "stockfish",
                     "plentychess",
                     "obsidian",
+                    "viridithas",
                     "reckless",
                     "akimbo",
                     "ethereal",
+                    "lc0",
                 ])
                 .default_value("universal")
                 .global(true)
@@ -299,19 +356,41 @@ fn main() {
 
     let uci_mode =
         matches.subcommand().is_none() || matches!(matches.subcommand(), Some(("uci", _)));
-    let backend = matches
+    let requested_backend = matches
         .get_one::<String>("backend")
         .map_or("universal", String::as_str);
+    let inferred = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.file_stem()
+                .and_then(|stem| stem.to_str().map(str::to_owned))
+        })
+        .and_then(|stem| product_adapter_from_exe_stem(&stem));
+    let backend = if requested_backend == "universal" {
+        inferred.unwrap_or("universal")
+    } else {
+        requested_backend
+    };
     let passthrough_active = std::env::var_os(V60_PASSTHROUGH_MARKER).is_some();
     let uci_smoke = std::env::var_os("MUJRIM_UCI_SMOKE").is_some();
+    let explicit_path = matches.get_one::<PathBuf>("engine-path");
     if !uci_smoke
-        && let Some(engine_id) = passthrough_engine_id(backend, uci_mode, passthrough_active)
+        && let Some(engine_id) = passthrough_engine_id(
+            requested_backend,
+            uci_mode,
+            passthrough_active,
+            explicit_path.is_some(),
+        )
+        .or_else(|| (uci_mode && backend == "lc0" && explicit_path.is_none()).then_some("lc0"))
     {
-        match run_external_backend(engine_id, matches.get_one::<PathBuf>("engine-path")) {
+        match run_external_backend(engine_id, explicit_path) {
             Ok(()) => return,
             Err(error) => {
-                if let Some(fallback) =
-                    fallback_engine_id(backend, matches.get_one::<PathBuf>("engine-path").is_some())
+                if engine_id == "lc0" && explicit_path.is_none() {
+                    eprintln!(
+                        "info string official lc0 unavailable; using in-process Lc0 adapter: {error}"
+                    );
+                } else if let Some(fallback) = fallback_engine_id(backend, explicit_path.is_some())
                 {
                     eprintln!(
                         "info string {backend} backend unavailable; trying {fallback}: {error}"
@@ -377,7 +456,7 @@ fn main() {
 mod tests {
     use super::{
         EXTERNAL_BACKENDS, MUJRIM_ADAPTERS, fallback_engine_id, is_mujrim_adapter,
-        passthrough_engine_id, search_stack_profile,
+        passthrough_engine_id, product_adapter_from_exe_stem, search_stack_profile,
     };
 
     #[test]
@@ -387,7 +466,15 @@ mod tests {
             assert!(
                 matches!(
                     engine.0,
-                    "mujrim-elite" | "mujrim-external" | "mujrim-v60" | "mujrim-ak" | "akimbo"
+                    "mujrim-elite"
+                        | "mujrim-external"
+                        | "mujrim-v60"
+                        | "mujrim-ak"
+                        | "mujrim-viri"
+                        | "mujrim-obs"
+                        | "mujrim-plenty"
+                        | "mujrim-lc0"
+                        | "akimbo"
                 ) || EXTERNAL_BACKENDS.contains(&engine.0)
             );
         }
@@ -396,41 +483,85 @@ mod tests {
     #[test]
     fn uci_backends_prefer_mujrim_adapter_aliases() {
         assert_eq!(
-            passthrough_engine_id("v60", true, false),
+            passthrough_engine_id("v60", true, false, false),
             Some("mujrim-v60")
         );
         assert_eq!(
-            passthrough_engine_id("v10", true, false),
+            passthrough_engine_id("v10", true, false, false),
             Some("mujrim-elite")
         );
         assert_eq!(
-            passthrough_engine_id("akimbo", true, false),
+            passthrough_engine_id("akimbo", true, false, false),
             Some("mujrim-ak")
         );
         assert_eq!(
-            passthrough_engine_id("stockfish", true, false),
+            passthrough_engine_id("stockfish", true, false, false),
             Some("stockfish")
         );
         assert_eq!(
-            passthrough_engine_id("reckless", true, false),
+            passthrough_engine_id("reckless", true, false, false),
             Some("reckless")
         );
-        assert_eq!(passthrough_engine_id("universal", true, false), None);
-        assert_eq!(passthrough_engine_id("mujrim-hce", true, false), None);
-        assert_eq!(passthrough_engine_id("v60", true, true), None);
+        assert_eq!(passthrough_engine_id("universal", true, false, false), None);
+        assert_eq!(
+            passthrough_engine_id("mujrim-hce", true, false, false),
+            None
+        );
+        assert_eq!(passthrough_engine_id("v60", true, true, false), None);
+        assert_eq!(
+            passthrough_engine_id("viridithas", true, false, false),
+            None
+        );
+        assert_eq!(passthrough_engine_id("obsidian", true, false, false), None);
+        assert_eq!(
+            passthrough_engine_id("plentychess", true, false, false),
+            None
+        );
+        assert_eq!(
+            passthrough_engine_id("plentychess", true, false, true),
+            Some("plentychess")
+        );
+        assert_eq!(
+            passthrough_engine_id("lc0", true, false, false),
+            Some("lc0")
+        );
+        assert_eq!(
+            passthrough_engine_id("viridithas", true, false, true),
+            Some("viridithas")
+        );
+        assert_eq!(
+            passthrough_engine_id("obsidian", true, false, true),
+            Some("obsidian")
+        );
+        assert_eq!(
+            product_adapter_from_exe_stem("mujrim-viri"),
+            Some("viridithas")
+        );
+        assert_eq!(
+            product_adapter_from_exe_stem("mujrim-obs"),
+            Some("obsidian")
+        );
+        assert_eq!(
+            product_adapter_from_exe_stem("mujrim-plenty"),
+            Some("plentychess")
+        );
+        assert_eq!(product_adapter_from_exe_stem("mujrim-lc0"), Some("lc0"));
         assert!(MUJRIM_ADAPTERS.iter().all(|id| is_mujrim_adapter(id)));
     }
 
     #[test]
     fn native_backend_alias_is_removed() {
-        assert_eq!(passthrough_engine_id("native", true, false), None);
+        assert_eq!(passthrough_engine_id("native", true, false, false), None);
         assert_eq!(fallback_engine_id("native", false), None);
     }
 
     #[test]
     fn non_uci_commands_keep_the_in_process_implementation() {
-        assert_eq!(passthrough_engine_id("v60", false, false), None);
-        assert_eq!(passthrough_engine_id("stockfish", false, false), None);
+        assert_eq!(passthrough_engine_id("v60", false, false, false), None);
+        assert_eq!(
+            passthrough_engine_id("stockfish", false, false, false),
+            None
+        );
     }
 
     #[test]
@@ -444,7 +575,7 @@ mod tests {
 
     #[test]
     fn default_uci_backend_is_in_process_universal() {
-        assert_eq!(passthrough_engine_id("universal", true, false), None);
+        assert_eq!(passthrough_engine_id("universal", true, false, false), None);
     }
 
     #[test]

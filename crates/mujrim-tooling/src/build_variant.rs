@@ -17,6 +17,12 @@ pub enum BuildVariant {
     V60,
     #[value(alias = "native-v60-embedded", alias = "v60-embedded")]
     V60Embedded,
+    Viridithas,
+    Obsidian,
+    #[value(alias = "plentychess", alias = "plenty")]
+    PlentyChess,
+    #[value(alias = "leela")]
+    Lc0,
     Benchmark,
     Embedded,
     Minimal,
@@ -33,7 +39,7 @@ impl ToolAction for BuildVariantAction {
         match self.variant {
             BuildVariant::List => {
                 println!(
-                    "build variants: full, akimbo, stockfish, reckless, v60, v60-embedded, benchmark, embedded, minimal"
+                    "build variants: full, akimbo, stockfish, reckless, v60, v60-embedded, viridithas, obsidian, plentychess, lc0, benchmark, embedded, minimal"
                 );
                 Ok(())
             }
@@ -92,6 +98,33 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "--features",
             "syzygy,embedded-network",
         ],
+        BuildVariant::Viridithas => vec![
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,viridithas-nnue",
+        ],
+        BuildVariant::Obsidian => vec![
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,obsidian-nnue",
+        ],
+        BuildVariant::PlentyChess | BuildVariant::Lc0 => vec![
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,reckless-nnue",
+        ],
         BuildVariant::Benchmark => vec![
             "build",
             "--release",
@@ -128,6 +161,10 @@ fn variant_dist_mapping(variant: &BuildVariant) -> Option<(&'static str, &'stati
         BuildVariant::V60 | BuildVariant::V60Embedded => Some(("mujrim-v60", "mujrim-v60")),
         BuildVariant::Stockfish | BuildVariant::Embedded => Some(("mujrim", "mujrim-elite")),
         BuildVariant::Akimbo => Some(("mujrim", "mujrim-ak")),
+        BuildVariant::Viridithas => Some(("mujrim", "mujrim-viri")),
+        BuildVariant::Obsidian => Some(("mujrim", "mujrim-obs")),
+        BuildVariant::PlentyChess => Some(("mujrim", "mujrim-plenty")),
+        BuildVariant::Lc0 => Some(("mujrim", "mujrim-lc0")),
         _ => None,
     }
 }
@@ -208,6 +245,10 @@ mod tests {
             BuildVariant::V60Embedded,
             BuildVariant::Benchmark,
             BuildVariant::Embedded,
+            BuildVariant::Viridithas,
+            BuildVariant::Obsidian,
+            BuildVariant::PlentyChess,
+            BuildVariant::Lc0,
         ] {
             assert!(
                 !variant_args(&variant)
@@ -295,6 +336,22 @@ mod tests {
         assert_eq!(
             variant_dist_mapping(&BuildVariant::Akimbo),
             Some(("mujrim", "mujrim-ak"))
+        );
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::Viridithas),
+            Some(("mujrim", "mujrim-viri"))
+        );
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::Obsidian),
+            Some(("mujrim", "mujrim-obs"))
+        );
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::PlentyChess),
+            Some(("mujrim", "mujrim-plenty"))
+        );
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::Lc0),
+            Some(("mujrim", "mujrim-lc0"))
         );
         assert_eq!(adapter_binary_stem("mujrim-v10", "x86_64"), "mujrim-elite");
         assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");

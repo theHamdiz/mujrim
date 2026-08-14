@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 
 pub mod binary_arch;
 pub mod catalog;
+pub mod lc0_backend;
 
 pub use binary_arch::{BinaryArch, detect_binary_arch, is_host_native_binary};
+pub use lc0_backend::{Lc0DeviceKind, Lc0Launch, detect_device_kind, plan_launch};
 
 /// Run a protocol engine directly on the caller's standard streams while
 /// retaining the same kill-on-close and memory protections as managed sessions.

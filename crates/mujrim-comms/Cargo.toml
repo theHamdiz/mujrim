@@ -7,12 +7,15 @@ description = "UCI and XBoard protocol handlers for the Mujrim engine"
 license = "MIT"
 
 [features]
-default = ["xboard", "book", "nnue", "reckless-nnue", "stockfish-nnue"]
+default = ["xboard", "book", "nnue", "reckless-nnue", "stockfish-nnue", "viridithas-nnue", "obsidian-nnue", "syzygy"]
 xboard = []
 book = ["search/book"]
 nnue = ["search/nnue"]
-reckless-nnue = ["eval/reckless-nnue"]
-stockfish-nnue = ["eval/stockfish-nnue"]
+reckless-nnue = ["eval/reckless-nnue", "search/reckless-nnue"]
+stockfish-nnue = ["eval/stockfish-nnue", "search/stockfish-nnue"]
+viridithas-nnue = ["eval/viridithas-nnue", "search/viridithas-nnue"]
+obsidian-nnue = ["eval/obsidian-nnue", "search/obsidian-nnue"]
+syzygy = ["search/syzygy"]
 
 [dependencies]
 types = { package = "mujrim-types", path = "../mujrim-types" }

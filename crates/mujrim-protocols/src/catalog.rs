@@ -7,11 +7,19 @@ use std::path::{Path, PathBuf};
 /// - `mujrim-external` — loads/discovers NNUE at runtime
 /// - `mujrim-v60` — Reckless NNUE embedded
 /// - `mujrim-ak` — Akimbo NNUE embedded
+/// - `mujrim-viri` — Viridithas search + runtime net
+/// - `mujrim-obs` — Obsidian search + runtime net
+/// - `mujrim-plenty` — PlentyChess search profile
+/// - `mujrim-lc0` — official Lc0 passthrough with GPU/CPU selection
 pub const BUNDLED_ENGINES: &[(&str, &str)] = &[
     ("mujrim-elite", "Mujrim Elite"),
     ("mujrim-external", "Mujrim External"),
     ("mujrim-v60", "Mujrim v60"),
     ("mujrim-ak", "Mujrim Akimbo"),
+    ("mujrim-viri", "Mujrim Viridithas"),
+    ("mujrim-obs", "Mujrim Obsidian"),
+    ("mujrim-plenty", "Mujrim PlentyChess"),
+    ("mujrim-lc0", "Mujrim Lc0"),
     ("stockfish", "Stockfish"),
     ("plentychess", "PlentyChess"),
     ("obsidian", "Obsidian"),
@@ -34,6 +42,10 @@ const ENGINE_ID_ALIASES: &[(&str, &str)] = &[
     ("mujrim-embedded", "mujrim-elite"),
     ("mujrim-v10", "mujrim-elite"),
     ("mujrim-akimbo", "mujrim-ak"),
+    ("mujrim-viridithas", "mujrim-viri"),
+    ("mujrim-obsidian", "mujrim-obs"),
+    ("mujrim-plentychess", "mujrim-plenty"),
+    ("mujrim-leela", "mujrim-lc0"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +122,13 @@ pub fn canonical_engine_id(engine_id: &str) -> &str {
 pub fn is_arch_suffixed_adapter(engine_id: &str) -> bool {
     matches!(
         canonical_engine_id(engine_id),
-        "mujrim-v60" | "mujrim-ak" | "mujrim-elite"
+        "mujrim-v60"
+            | "mujrim-ak"
+            | "mujrim-elite"
+            | "mujrim-viri"
+            | "mujrim-obs"
+            | "mujrim-plenty"
+            | "mujrim-lc0"
     )
 }
 
@@ -190,7 +208,8 @@ fn packaged_executable_filename(engine_id: &str, _target_directory: &str) -> Str
 
 fn package_directory(engine_id: &str) -> &str {
     match canonical_engine_id(engine_id) {
-        "mujrim-elite" | "mujrim-external" | "mujrim-v60" | "mujrim-ak" => "mujrim",
+        "mujrim-elite" | "mujrim-external" | "mujrim-v60" | "mujrim-ak" | "mujrim-viri"
+        | "mujrim-obs" | "mujrim-plenty" | "mujrim-lc0" => "mujrim",
         other => other,
     }
 }
@@ -522,9 +541,20 @@ mod tests {
         assert_eq!(BUNDLED_ENGINES[1], ("mujrim-external", "Mujrim External"));
         assert_eq!(BUNDLED_ENGINES[2], ("mujrim-v60", "Mujrim v60"));
         assert_eq!(BUNDLED_ENGINES[3], ("mujrim-ak", "Mujrim Akimbo"));
+        assert_eq!(BUNDLED_ENGINES[4], ("mujrim-viri", "Mujrim Viridithas"));
+        assert_eq!(BUNDLED_ENGINES[5], ("mujrim-obs", "Mujrim Obsidian"));
 
         let target = RuntimePlatform::current().directory_name();
-        for product in ["mujrim-elite", "mujrim-external", "mujrim-v60", "mujrim-ak"] {
+        for product in [
+            "mujrim-elite",
+            "mujrim-external",
+            "mujrim-v60",
+            "mujrim-ak",
+            "mujrim-viri",
+            "mujrim-obs",
+            "mujrim-plenty",
+            "mujrim-lc0",
+        ] {
             let candidates = engine_candidates(
                 product,
                 Path::new("C:/Mujrim/mujrim-ui.exe"),
@@ -645,7 +675,24 @@ mod tests {
             "mujrim-v60"
         );
         assert_eq!(adapter_binary_stem("mujrim-akimbo", "aarch64"), "mujrim-ak");
+        assert_eq!(
+            adapter_binary_stem("mujrim-viridithas", "x86_64"),
+            "mujrim-viri"
+        );
+        assert_eq!(
+            adapter_binary_stem("mujrim-obsidian", "aarch64"),
+            "mujrim-obs"
+        );
         assert_eq!(adapter_binary_stem("mujrim", "x86_64"), "mujrim-elite");
+        assert_eq!(package_directory("mujrim-viri"), "mujrim");
+        assert_eq!(package_directory("mujrim-obs"), "mujrim");
+        assert_eq!(
+            adapter_binary_stem("mujrim-plentychess", "x86_64"),
+            "mujrim-plenty"
+        );
+        assert_eq!(adapter_binary_stem("mujrim-leela", "aarch64"), "mujrim-lc0");
+        assert_eq!(package_directory("mujrim-plenty"), "mujrim");
+        assert_eq!(package_directory("mujrim-lc0"), "mujrim");
     }
 
     #[test]
@@ -754,6 +801,10 @@ mod tests {
         assert!(ids.contains(&"mujrim-external"));
         assert!(ids.contains(&"mujrim-v60"));
         assert!(ids.contains(&"mujrim-ak"));
+        assert!(ids.contains(&"mujrim-viri"));
+        assert!(ids.contains(&"mujrim-obs"));
+        assert!(ids.contains(&"mujrim-plenty"));
+        assert!(ids.contains(&"mujrim-lc0"));
         assert!(ids.contains(&"lc0"));
         assert!(ids.contains(&"viridithas"));
         assert!(ids.contains(&"hobbes"));

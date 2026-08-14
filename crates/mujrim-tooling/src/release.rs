@@ -13,6 +13,21 @@ const BINS: &[&str] = &[
     "mujrim-updater",
 ];
 
+/// Dedicated product engines copied into `dist/` and `dist/engines/mujrim/bin/<os-arch>/`.
+const PRODUCT_ENGINE_STEMS: &[&str] = &[
+    "mujrim-ak",
+    "mujrim-elite",
+    "mujrim-external",
+    "mujrim-lc0",
+    "mujrim-obs",
+    "mujrim-plenty",
+    "mujrim-v60",
+    "mujrim-viri",
+];
+
+const EXTERNAL_ENGINE_FEATURES: &str =
+    "xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue,viridithas-nnue,obsidian-nnue";
+
 /// Binaries that require host GPU/windowing libraries and cannot be
 /// cross-compiled for non-host Linux (Floem/wgpu).
 const HOST_ONLY_BINS: &[&str] = &["mujrim-ui"];
@@ -180,7 +195,7 @@ fn build_native() -> Result<(), String> {
     )?;
     snapshot_engine("mujrim-v60", "mujrim-v60-external")?;
     let arch = host_packaging_arch();
-    // Product set: elite / external / v60 / ak
+    // Product set: elite / external / v60 / ak / viri / obs
     // Never enable embedded-networks on top of default features — that embeds every net.
     run(
         "cargo",
@@ -191,7 +206,7 @@ fn build_native() -> Result<(), String> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue",
+            EXTERNAL_ENGINE_FEATURES,
         ],
         &environment,
     )?;
@@ -239,6 +254,36 @@ fn build_native() -> Result<(), String> {
     )?;
     snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
     snapshot_engine("mujrim-v60", "mujrim-v60-embedded")?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,viridithas-nnue",
+        ],
+        &environment,
+    )?;
+    snapshot_engine("mujrim", "mujrim-viri")?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,obsidian-nnue",
+        ],
+        &environment,
+    )?;
+    snapshot_engine("mujrim", "mujrim-obs")?;
+    snapshot_engine("mujrim", "mujrim-plenty")?;
+    snapshot_engine("mujrim", "mujrim-lc0")?;
     // Leave mujrim.exe as the lean external (no embedded net).
     snapshot_engine("mujrim-external", "mujrim")?;
     run(
@@ -263,7 +308,52 @@ fn build_native() -> Result<(), String> {
         ],
         &environment,
     )?;
-    println!("✅ Release binaries built in target/release/");
+    publish_native_dist()?;
+    println!("✅ Release binaries built in target/release/ and copied to dist/");
+    Ok(())
+}
+
+fn publish_native_dist() -> Result<(), String> {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let release = Path::new("target/release");
+    let dist = Path::new("dist");
+    fs::create_dir_all(dist).map_err(|error| format!("failed to create dist/: {error}"))?;
+
+    let extras = [
+        "mujrim",
+        "mujrim-benchmarker",
+        "mujrim-tooling",
+        "mujrim-ui",
+        "mujrim-updater",
+    ];
+    for stem in PRODUCT_ENGINE_STEMS.iter().chain(extras.iter()) {
+        let source = release.join(format!("{stem}{suffix}"));
+        if source.is_file() {
+            fs::copy(&source, dist.join(format!("{stem}{suffix}"))).map_err(|error| {
+                format!("failed to copy {} into dist/: {error}", source.display())
+            })?;
+        }
+    }
+
+    let packaged = dist
+        .join("engines")
+        .join("mujrim")
+        .join("bin")
+        .join(mujrim_protocols::catalog::RuntimePlatform::current().directory_name());
+    fs::create_dir_all(&packaged)
+        .map_err(|error| format!("failed to create {}: {error}", packaged.display()))?;
+    for stem in PRODUCT_ENGINE_STEMS {
+        let source = release.join(format!("{stem}{suffix}"));
+        if source.is_file() {
+            fs::copy(&source, packaged.join(format!("{stem}{suffix}"))).map_err(|error| {
+                format!(
+                    "failed to copy {} into {}: {error}",
+                    source.display(),
+                    packaged.display()
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -829,7 +919,15 @@ mod tests {
     fn adapter_snapshot_stems_are_product_ids() {
         use mujrim_protocols::catalog::arch_token_from_rustc_target;
         let arch = arch_token_from_rustc_target("x86_64-pc-windows-msvc");
-        for adapter in ["mujrim-v60", "mujrim-elite", "mujrim-ak"] {
+        for adapter in [
+            "mujrim-v60",
+            "mujrim-elite",
+            "mujrim-ak",
+            "mujrim-viri",
+            "mujrim-obs",
+            "mujrim-plenty",
+            "mujrim-lc0",
+        ] {
             let stem = adapter_binary_stem(adapter, &arch);
             assert!(!stem.contains("native"), "{stem}");
             assert_eq!(stem, adapter);
@@ -854,11 +952,35 @@ mod tests {
             "mujrim-embedded",
             "mujrim-v60-external",
             "mujrim-v60-embedded",
+            "mujrim-viri",
+            "mujrim-obs",
+            "mujrim-plenty",
+            "mujrim-lc0",
         ] {
             assert!(
                 native.contains(&format!("\"{stem}\"")),
                 "missing installer snapshot {stem}"
             );
         }
+    }
+
+    #[test]
+    fn product_engine_stems_cover_the_dist_set() {
+        assert_eq!(
+            PRODUCT_ENGINE_STEMS,
+            &[
+                "mujrim-ak",
+                "mujrim-elite",
+                "mujrim-external",
+                "mujrim-lc0",
+                "mujrim-obs",
+                "mujrim-plenty",
+                "mujrim-v60",
+                "mujrim-viri",
+            ]
+        );
+        assert!(EXTERNAL_ENGINE_FEATURES.contains("viridithas-nnue"));
+        assert!(EXTERNAL_ENGINE_FEATURES.contains("obsidian-nnue"));
+        assert!(!EXTERNAL_ENGINE_FEATURES.contains("embedded-networks"));
     }
 }

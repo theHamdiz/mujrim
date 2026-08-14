@@ -54,7 +54,7 @@ fi
 # Product adapters when already built beside the release dir.
 MUJRIM_BIN="${DIST}/engines/mujrim/bin/linux-x86_64"
 mkdir -p "${MUJRIM_BIN}"
-for name in mujrim-elite mujrim-external mujrim-v60 mujrim-ak; do
+for name in mujrim-elite mujrim-external mujrim-v60 mujrim-ak mujrim-viri mujrim-obs mujrim-plenty mujrim-lc0; do
   if [[ -x "${RELEASE}/${name}" ]]; then
     cp -f "${RELEASE}/${name}" "${MUJRIM_BIN}/${name}"
     chmod +x "${MUJRIM_BIN}/${name}"

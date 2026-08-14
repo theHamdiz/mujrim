@@ -159,7 +159,7 @@ impl SearchParams {
 
             // LMR — slightly less aggressive for tactical positions (BK / short time).
             // Cut-node bonus 1 (was 2): quieter prophylaxis survives deeper LMR.
-            lmr_base: 0.45,
+            lmr_base: 0.40,
             lmr_divisor: 2.48,
             lmr_cut_node_bonus: 1,
 
@@ -173,8 +173,8 @@ impl SearchParams {
 
             // Singular extensions — start earlier for deep tactics.
             se_margin_mul: 1,
-            se_depth_min: 6,
-            max_dbl_exts: 5,
+            se_depth_min: 5,
+            max_dbl_exts: 6,
             se_double_ext_margin: 25,
             ldse_depth_max: 0,
             ldse_margin: 0,
@@ -240,17 +240,17 @@ impl SearchParams {
             // LMR — SF: reductions[i] = 2809/128 * ln(i), but we keep the 2D table
             lmr_base: 0.77,
             lmr_divisor: 2.36,
-            lmr_cut_node_bonus: 2,
+            lmr_cut_node_bonus: 1,
 
-            lmp_depth_limit: 6,
+            lmp_depth_limit: 5,
 
             hist_prune_margin: -3826,
             hist_prune_depth_limit: 6,
             hist_lmr_div: 2917,
 
             se_margin_mul: 1,
-            se_depth_min: 6,
-            max_dbl_exts: 8,
+            se_depth_min: 5,
+            max_dbl_exts: 10,
             se_double_ext_margin: 22,
             ldse_depth_max: 0,
             ldse_margin: 0,
@@ -296,23 +296,80 @@ impl SearchParams {
         params.futility_mul = 77;
         params.futility_improving_bonus = 46;
         params.futility_depth_limit = 6;
-        params.se_margin_mul = 3;
-        params.se_depth_min = 6;
+        params.se_margin_mul = 2;
+        params.se_depth_min = 5;
         params.ldse_depth_max = 7;
         params.ldse_margin = 25;
         params.aspiration_window = 10;
         params
     }
 
+    /// Parameters paired with a Viridithas-family network.
+    ///
+    /// Slightly less LMR than Stockfish so converting lines survive, with the
+    /// same NMP base used by the other NNUE stacks (keeps NPS stable).
+    pub fn viridithas() -> Self {
+        let mut params = Self::stockfish();
+        params.lmr_base = 0.70;
+        params.lmr_cut_node_bonus = 1;
+        params.se_depth_min = 5;
+        params.aspiration_window = 12;
+        params
+    }
+
+    /// Parameters paired with an Obsidian-family layered network.
+    pub fn obsidian() -> Self {
+        let mut params = Self::stockfish();
+        params.futility_depth_limit = 7;
+        params.se_depth_min = 5;
+        params.lmr_cut_node_bonus = 1;
+        params.aspiration_window = 12;
+        params
+    }
+
+    /// Parameters paired with the PlentyChess in-process search profile.
+    pub fn plentychess() -> Self {
+        let mut params = Self::obsidian();
+        params.lmr_base = 0.62;
+        params.lmp_depth_limit = 5;
+        params.se_depth_min = 5;
+        params.aspiration_window = 12;
+        params
+    }
+
+    /// Parameters for the in-process Lc0 fallback (official Lc0 is passthrough).
+    pub fn lc0() -> Self {
+        let mut params = Self::stockfish();
+        params.lmr_base = 0.55;
+        params.lmr_cut_node_bonus = 0;
+        params.lmp_depth_limit = 4;
+        params.futility_depth_limit = 6;
+        params.se_depth_min = 4;
+        params.aspiration_window = 18;
+        params.max_qs_ply = 14;
+        params
+    }
+
     /// Parameters for classical Mujrim HCE (no NNUE).
     ///
-    /// StockLike-oriented pruning with a slightly wider aspiration window than
-    /// Reckless so shallow classical searches remain stable.
+    /// Stockfish-shaped search with less LMP/NMP/LMR so pawn breaks and
+    /// sacrifices survive. HCE leaves are cheap, so the extra nodes stay
+    /// affordable at high NPS.
     pub fn mujrim_hce() -> Self {
-        let mut params = Self::akimbo();
+        let mut params = Self::stockfish();
+        params.lmr_base = 0.40;
+        params.lmr_cut_node_bonus = 0;
+        params.lmp_depth_limit = 2;
+        params.futility_depth_limit = 3;
+        params.futility_mul = 50;
+        params.nmp_depth_min = 5;
+        params.hist_prune_depth_limit = 3;
+        params.se_depth_min = 4;
+        params.se_margin_mul = 2;
+        params.ldse_depth_max = 8;
+        params.ldse_margin = 20;
         params.aspiration_window = 16;
-        params.futility_depth_limit = 6;
-        params.nmp_depth_min = 3;
+        params.max_qs_ply = 16;
         params
     }
 
@@ -324,6 +381,10 @@ impl SearchParams {
         match preset_name {
             "stockfish" => Self::stockfish(),
             "reckless" => Self::reckless(),
+            "viridithas" => Self::viridithas(),
+            "obsidian" => Self::obsidian(),
+            "plentychess" | "plenty" => Self::plentychess(),
+            "lc0" => Self::lc0(),
             "mujrim-hce" | "hce" => Self::mujrim_hce(),
             _ => Self::akimbo(),
         }
@@ -337,7 +398,17 @@ impl SearchParams {
     #[must_use]
     pub fn for_preset_with_repo_tuning(preset_name: &str) -> Self {
         let base = Self::for_preset(preset_name);
-        if preset_name == "stockfish" || matches!(preset_name, "mujrim-hce" | "hce") {
+        if matches!(
+            preset_name,
+            "stockfish"
+                | "viridithas"
+                | "obsidian"
+                | "plentychess"
+                | "plenty"
+                | "lc0"
+                | "mujrim-hce"
+                | "hce"
+        ) {
             return base;
         }
         if let Some(path) = std::env::var_os("MUJRIM_TUNING_FILE") {
@@ -568,8 +639,8 @@ mod tests {
         assert_eq!(p.futility_depth_limit, 8);
         assert_eq!(p.hist_prune_margin, -3826);
         assert_eq!(p.nmp_depth_min, 3);
-        assert_eq!(p.lmp_depth_limit, 6);
-        assert_eq!(p.se_depth_min, 6);
+        assert_eq!(p.lmp_depth_limit, 5);
+        assert_eq!(p.se_depth_min, 5);
         assert_eq!(p.max_qs_ply, 16);
         assert_eq!(p.se_double_ext_margin, 22);
         assert_eq!(p.aspiration_window, 10);
@@ -586,8 +657,8 @@ mod tests {
         assert_eq!(p.hist_prune_depth_limit, 8);
         assert_eq!(p.futility_mul, 77);
         assert_eq!(p.futility_depth_limit, 6);
-        assert_eq!(p.se_margin_mul, 3);
-        assert_eq!(p.se_depth_min, 6);
+        assert_eq!(p.se_margin_mul, 2);
+        assert_eq!(p.se_depth_min, 5);
         assert_eq!(p.ldse_depth_max, 7);
         assert_eq!(p.ldse_margin, 25);
         assert_eq!(p.aspiration_window, 10);
@@ -606,6 +677,19 @@ mod tests {
         // Unknown preset falls back to akimbo
         let unknown = SearchParams::for_preset("unknown");
         assert_eq!(unknown.nmp_base, 5);
+
+        let viri = SearchParams::for_preset("viridithas");
+        let obs = SearchParams::for_preset("obsidian");
+        let plenty = SearchParams::for_preset("plentychess");
+        let lc0 = SearchParams::for_preset("lc0");
+        let hce = SearchParams::for_preset("mujrim-hce");
+        assert_eq!(viri.lmr_cut_node_bonus, 1);
+        assert_eq!(obs.se_depth_min, 5);
+        assert_eq!(akimbo.se_depth_min, 5);
+        assert_eq!(plenty.lmr_base, 0.62);
+        assert_eq!(lc0.lmr_cut_node_bonus, 0);
+        assert_eq!(hce.se_depth_min, 4);
+        assert_eq!(hce.lmp_depth_limit, 2);
     }
 
     #[test]
@@ -620,7 +704,7 @@ mod tests {
     fn test_lmr_table() {
         let p = SearchParams::akimbo();
         let table = p.build_lmr_table();
-        // LMR[10][10] = floor(0.45 + ln(10)² / 2.48)
+        // LMR[10][10] = floor(0.40 + ln(10)² / 2.48)
         assert_eq!(table[10][10], 2);
         assert_eq!(table[1][1], 0);
     }

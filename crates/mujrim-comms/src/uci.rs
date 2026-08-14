@@ -8,18 +8,23 @@
 //! - Advanced time management
 
 use crate::aesthetic::{AestheticConfig, MAX_AESTHETIC_DELTA_CP, RootCandidate, select_root_move};
-use eval::nnue::{ActiveNetwork, NnueNetworkSource, enabled_network_formats, load_network};
+use eval::nnue::{
+    ActiveNetwork, NnueNetworkSource, enabled_network_formats, load_network,
+    load_network_for_preset,
+};
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
 use search::engine::{SearchLimits, SearchResult};
-use search::{SearchEngine, SearchExperiment, install_adapter};
+use search::{
+    DEFAULT_PROBE_DEPTH, DEFAULT_PROBE_LIMIT, SearchEngine, SearchExperiment, install_adapter,
+};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use types::chess_move::NULL_MOVE;
 use types::{Board, Move};
 
@@ -88,10 +93,23 @@ struct RootCandidateSearch<'a> {
     cancel_token: &'a AtomicBool,
 }
 
+struct RankedPvSearch<'a> {
+    multi_pv: usize,
+    aesthetic: AestheticConfig,
+    depth: i32,
+    time_limit: Option<Duration>,
+    node_limit: Option<u64>,
+    cancel_token: &'a AtomicBool,
+    show_wdl: bool,
+}
+
 struct RunningSearch {
     handle: JoinHandle<(SearchEngine, Move, Option<Move>)>,
     stop_token: Arc<AtomicBool>,
     cancel_token: Arc<AtomicBool>,
+    deadline: Arc<AtomicU64>,
+    started: Instant,
+    ponder_alloc: Option<Duration>,
     emit_bestmove: bool,
     root_board: Board,
     fallback_move: Move,
@@ -125,6 +143,18 @@ pub struct UciHandler {
     aesthetic_delta_cp: i32,
     /// Contempt value (positive = avoid draws)
     contempt: i32,
+    /// When true, `bestmove` may include a predicted ponder reply.
+    ponder: bool,
+    /// Chess960 / FRC: castle moves are encoded as king-takes-rook.
+    chess960: bool,
+    /// Last SyzygyPath value (empty = disabled).
+    syzygy_path: String,
+    syzygy_probe_limit: u32,
+    syzygy_probe_depth: i32,
+    /// When true, `info` score lines include a `wdl` triple.
+    show_wdl: bool,
+    country: String,
+    engine_about: String,
     /// Active runtime NNUE source (embedded by default).
     eval_network: Arc<ActiveNetwork>,
     /// Eval preset: "auto", "akimbo", "stockfish", or "reckless".
@@ -200,15 +230,46 @@ fn sanitize_search_output(
     (selected, legal_ponder)
 }
 
-fn format_final_search_info(result: &SearchResult, score: &str) -> String {
+#[inline]
+fn wdl_from_score(score: i32) -> (i32, i32, i32) {
+    if score >= 30_000 {
+        return (1000, 0, 0);
+    }
+    if score <= -30_000 {
+        return (0, 0, 1000);
+    }
+    let x = f64::from(score.clamp(-4000, 4000)) / 110.0;
+    let win = (1000.0 / (1.0 + (-x).exp())).round() as i32;
+    let loss = (1000.0 / (1.0 + x.exp())).round() as i32;
+    let draw = (1000 - win - loss).max(0);
+    (win, draw, loss)
+}
+
+struct InfoLineOptions {
+    multipv: Option<usize>,
+    wdl: Option<(i32, i32, i32)>,
+}
+
+fn format_search_info_line(result: &SearchResult, score: &str, extras: InfoLineOptions) -> String {
     let elapsed_ms = result.elapsed.as_millis().max(1);
     let elapsed_ns = result.elapsed.as_nanos().max(1);
     let nps = (u128::from(result.nodes).saturating_mul(1_000_000_000) / elapsed_ns)
         .min(u128::from(u64::MAX)) as u64;
-    let mut line = format!(
-        "info depth {} seldepth {} score {score} nodes {} nps {nps} time {elapsed_ms}",
-        result.depth, result.seldepth, result.nodes
-    );
+    let mut line = String::from("info");
+    if let Some(multipv) = extras.multipv {
+        line.push_str(&format!(" multipv {multipv}"));
+    }
+    line.push_str(&format!(
+        " depth {} seldepth {} score {score}",
+        result.depth, result.seldepth
+    ));
+    if let Some((win, draw, loss)) = extras.wdl {
+        line.push_str(&format!(" wdl {win} {draw} {loss}"));
+    }
+    line.push_str(&format!(
+        " nodes {} nps {nps} time {elapsed_ms} hashfull {} tbhits {}",
+        result.nodes, result.hashfull, result.tbhits
+    ));
     if !result.pv.is_empty() {
         line.push_str(" pv");
         for mv in &result.pv {
@@ -253,7 +314,15 @@ impl UciHandler {
             multi_pv: 1,
             aesthetic_bias: false,
             aesthetic_delta_cp: MAX_AESTHETIC_DELTA_CP,
-            contempt: 24,
+            contempt: search::DEFAULT_CONTEMPT,
+            ponder: false,
+            chess960: false,
+            syzygy_path: String::new(),
+            syzygy_probe_limit: DEFAULT_PROBE_LIMIT,
+            syzygy_probe_depth: DEFAULT_PROBE_DEPTH,
+            show_wdl: false,
+            country: "Egypt".to_string(),
+            engine_about: "Mujrim Chess Engine, Cairo, Egypt".to_string(),
             eval_network,
             eval_preset: "auto".to_string(),
             search_experiment: SearchExperiment::None,
@@ -269,9 +338,15 @@ impl UciHandler {
                 handler.eval_preset = "mujrim-hce".to_string();
                 handler.use_nnue = false;
             }
-            "stockfish" | "reckless" | "akimbo" => {
+            "stockfish" | "reckless" | "akimbo" | "viridithas" | "obsidian" | "plentychess"
+            | "lc0" => {
                 handler.eval_preset = adapter_id.to_string();
                 handler.use_nnue = true;
+                if matches!(adapter_id, "viridithas" | "obsidian")
+                    && let Ok(network) = load_network_for_preset(adapter_id)
+                {
+                    handler.eval_network = Arc::new(network);
+                }
             }
             _ => return handler,
         }
@@ -330,12 +405,7 @@ impl UciHandler {
                 }
                 "go" => self.handle_go(&parts[1..], &mut running),
                 "stop" => self.abort_running_search(&mut running, true),
-                "ponderhit" => {
-                    if let Some(task) = running.as_mut() {
-                        task.emit_bestmove = true;
-                        task.stop_token.store(true, Ordering::Relaxed);
-                    }
-                }
+                "ponderhit" => self.handle_ponderhit(&mut running),
                 "register" => {
                     // UCI registration — engine is free, always respond with "registration ok"
                     uci_println("registration ok");
@@ -387,6 +457,24 @@ impl UciHandler {
         let _ = reader.join();
     }
 
+    fn handle_ponderhit(&self, running: &mut Option<RunningSearch>) {
+        let Some(task) = running.as_mut() else {
+            return;
+        };
+        task.emit_bestmove = true;
+        if task.handle.is_finished() {
+            return;
+        }
+        let alloc = task.ponder_alloc.unwrap_or(Duration::from_millis(1_000));
+        let deadline = task
+            .started
+            .elapsed()
+            .saturating_add(alloc)
+            .as_millis()
+            .max(1) as u64;
+        task.deadline.store(deadline, Ordering::Release);
+    }
+
     fn poll_running_search(&mut self, running: &mut Option<RunningSearch>) {
         let finished = running
             .as_ref()
@@ -398,7 +486,10 @@ impl UciHandler {
             let emit_bestmove = task.emit_bestmove;
             let (best_move, ponder_move) = self.finish_search_task(task);
             if emit_bestmove {
-                uci_println(&format_bestmove(best_move, ponder_move));
+                uci_println(&format_bestmove(
+                    best_move,
+                    if self.ponder { ponder_move } else { None },
+                ));
             }
         }
     }
@@ -411,7 +502,10 @@ impl UciHandler {
             let emit_bestmove = task.emit_bestmove;
             let (best_move, ponder_move) = self.finish_search_task(task);
             if emit_bestmove {
-                uci_println(&format_bestmove(best_move, ponder_move));
+                uci_println(&format_bestmove(
+                    best_move,
+                    if self.ponder { ponder_move } else { None },
+                ));
             }
         }
     }
@@ -438,6 +532,10 @@ impl UciHandler {
         engine.set_params_for_preset(self.active_preset_name());
         engine.set_search_experiment(self.search_experiment);
         engine.set_use_nnue(self.use_nnue);
+        engine.set_contempt(self.contempt);
+        engine.set_syzygy_path(&self.syzygy_path);
+        engine.set_syzygy_probe_limit(self.syzygy_probe_limit);
+        engine.set_syzygy_probe_depth(self.syzygy_probe_depth);
         engine
     }
 
@@ -458,6 +556,8 @@ impl UciHandler {
                 nodes: 0,
                 elapsed: Duration::ZERO,
                 pv: Vec::new(),
+                hashfull: 0,
+                tbhits: 0,
             };
         }
         if time_limit.is_none() && node_limit.is_none() {
@@ -551,6 +651,7 @@ impl UciHandler {
         node_limit: Option<u64>,
         restricted_moves: Vec<Move>,
         emit_bestmove: bool,
+        ponder_alloc: Option<Duration>,
     ) -> RunningSearch {
         let fallback_move = self
             .board
@@ -569,11 +670,15 @@ impl UciHandler {
         let cancel_token = Arc::new(AtomicBool::new(false));
         let cancel_clone = Arc::clone(&cancel_token);
         let multi_pv = self.multi_pv;
+        let show_wdl = self.show_wdl;
         let aesthetic = AestheticConfig {
             enabled: self.aesthetic_bias,
             max_delta_cp: self.aesthetic_delta_cp,
         };
         let worker_fallback = fallback_move;
+        let deadline = engine.deadline_token();
+        deadline.store(0, Ordering::Relaxed);
+        let started = Instant::now();
         let handle = thread::spawn(move || {
             let (best_move, ponder_move) = if cancel_clone.load(Ordering::SeqCst) {
                 (worker_fallback, None)
@@ -596,24 +701,20 @@ impl UciHandler {
                     None,
                 )
             } else if multi_pv > 1 {
-                let legal_moves = board.generate_legal_moves();
-                (
-                    Self::search_root_candidates_on(
-                        &mut engine,
-                        &mut board,
-                        RootCandidateSearch {
-                            candidates: legal_moves.as_slice(),
-                            multi_pv,
-                            aesthetic,
-                            depth,
-                            time_limit,
-                            node_limit,
-                            cancel_token: cancel_clone.as_ref(),
-                        },
-                    )
-                    .unwrap_or(worker_fallback),
-                    None,
+                Self::search_ranked_pvs_on(
+                    &mut engine,
+                    &mut board,
+                    RankedPvSearch {
+                        multi_pv,
+                        aesthetic,
+                        depth,
+                        time_limit,
+                        node_limit,
+                        cancel_token: cancel_clone.as_ref(),
+                        show_wdl,
+                    },
                 )
+                .unwrap_or((worker_fallback, None))
             } else {
                 let result = Self::search_with_limits_on(
                     &mut engine,
@@ -624,9 +725,15 @@ impl UciHandler {
                     cancel_clone.as_ref(),
                 );
                 let score = engine.format_uci_score(&board, result.score);
-                uci_println(&format_final_search_info(&result, &score));
+                let wdl = show_wdl.then_some(wdl_from_score(result.score));
+                uci_println(&format_search_info_line(
+                    &result,
+                    &score,
+                    InfoLineOptions { multipv: None, wdl },
+                ));
                 (result.best_move, result.pv.get(1).copied())
             };
+            engine.set_root_exclusions(&[]);
             (engine, best_move, ponder_move)
         });
 
@@ -634,10 +741,73 @@ impl UciHandler {
             handle,
             stop_token,
             cancel_token,
+            deadline,
+            started,
+            ponder_alloc,
             emit_bestmove,
             root_board,
             fallback_move,
         }
+    }
+
+    fn search_ranked_pvs_on(
+        engine: &mut SearchEngine,
+        board: &mut Board,
+        request: RankedPvSearch<'_>,
+    ) -> Option<(Move, Option<Move>)> {
+        let legal = board.generate_legal_moves();
+        if legal.is_empty() {
+            return None;
+        }
+        let want = request.multi_pv.clamp(1, legal.len());
+        let mut excluded = Vec::with_capacity(want);
+        let mut scored = Vec::with_capacity(want);
+        let mut lines: Vec<(Move, Option<Move>, i32)> = Vec::with_capacity(want);
+
+        for index in 0..want {
+            if request.cancel_token.load(Ordering::SeqCst) {
+                break;
+            }
+            engine.set_root_exclusions(&excluded);
+            let result = Self::search_with_limits_on(
+                engine,
+                board,
+                request.depth,
+                request.time_limit,
+                request.node_limit,
+                request.cancel_token,
+            );
+            engine.set_root_exclusions(&[]);
+            if result.best_move == NULL_MOVE {
+                break;
+            }
+            let score = engine.format_uci_score(board, result.score);
+            let wdl = request.show_wdl.then_some(wdl_from_score(result.score));
+            uci_println(&format_search_info_line(
+                &result,
+                &score,
+                InfoLineOptions {
+                    multipv: Some(index + 1),
+                    wdl,
+                },
+            ));
+            excluded.push(result.best_move);
+            scored.push(RootCandidate {
+                mv: result.best_move,
+                eval: result.score,
+            });
+            lines.push((result.best_move, result.pv.get(1).copied(), result.score));
+        }
+
+        if scored.is_empty() {
+            return None;
+        }
+        let selected = select_root_move(board, &scored, request.aesthetic)?;
+        let ponder = lines
+            .iter()
+            .find(|(mv, _, _)| *mv == selected)
+            .and_then(|(_, ponder, _)| *ponder);
+        Some((selected, ponder))
     }
 
     /// Responds to `uci` with identification and option list.
@@ -660,7 +830,7 @@ impl UciHandler {
             self.advertised_eval_file()
         ));
         uci_println(
-            "option name EvalPreset type combo default auto var auto var akimbo var stockfish var reckless var mujrim-hce",
+            "option name EvalPreset type combo default auto var auto var akimbo var stockfish var reckless var viridithas var obsidian var plentychess var lc0 var mujrim-hce",
         );
         uci_println(&format!(
             "option name SearchExperiment type combo default none{}",
@@ -669,20 +839,50 @@ impl UciHandler {
                 .map(|name| format!(" var {name}"))
                 .collect::<String>()
         ));
-        uci_println("option name Ponder type check default false");
+        uci_println(&format!(
+            "option name Ponder type check default {}",
+            if self.ponder { "true" } else { "false" }
+        ));
         uci_println("option name MultiPV type spin default 1 min 1 max 500");
+        uci_println("option name Clear Hash type button");
+        uci_println("option name UCI_ShowWDL type check default false");
         uci_println("option name AestheticBias type check default false");
         uci_println(&format!(
             "option name AestheticDeltaCP type spin default {MAX_AESTHETIC_DELTA_CP} min 0 max {MAX_AESTHETIC_DELTA_CP}"
         ));
-        uci_println("option name Contempt type spin default 24 min -100 max 100");
-        uci_println("option name SyzygyPath type string default <empty>");
+        uci_println(&format!(
+            "option name Contempt type spin default {} min -100 max 100",
+            search::DEFAULT_CONTEMPT
+        ));
+        uci_println(&format!(
+            "option name SyzygyPath type string default {}",
+            if self.syzygy_path.is_empty() {
+                "<empty>"
+            } else {
+                &self.syzygy_path
+            }
+        ));
+        uci_println(&format!(
+            "option name SyzygyProbeLimit type spin default {} min 0 max 7",
+            self.syzygy_probe_limit
+        ));
+        uci_println(&format!(
+            "option name SyzygyProbeDepth type spin default {} min 1 max 100",
+            self.syzygy_probe_depth
+        ));
         uci_println("option name UCI_AnalyseMode type check default false");
-        uci_println("option name UCI_Chess960 type check default false");
-        uci_println("option name Country type string default Egypt");
-        uci_println(
-            "option name UCI_EngineAbout type string default Mujrim Chess Engine, Cairo, Egypt",
-        );
+        uci_println(&format!(
+            "option name UCI_Chess960 type check default {}",
+            if self.chess960 { "true" } else { "false" }
+        ));
+        uci_println(&format!(
+            "option name Country type string default {}",
+            self.country
+        ));
+        uci_println(&format!(
+            "option name UCI_EngineAbout type string default {}",
+            self.engine_about
+        ));
         let enabled = enabled_network_formats();
         if !enabled.is_empty() {
             let names = enabled
@@ -701,6 +901,7 @@ impl UciHandler {
             engine.clear();
         }
         self.board = Board::new();
+        self.board.set_chess960(self.chess960);
     }
 
     /// Handles `setoption name <name> value <value>`.
@@ -771,7 +972,16 @@ impl UciHandler {
                 let preset = value.to_lowercase();
                 if matches!(
                     preset.as_str(),
-                    "auto" | "akimbo" | "stockfish" | "reckless" | "mujrim-hce" | "hce"
+                    "auto"
+                        | "akimbo"
+                        | "stockfish"
+                        | "reckless"
+                        | "viridithas"
+                        | "obsidian"
+                        | "plentychess"
+                        | "lc0"
+                        | "mujrim-hce"
+                        | "hce"
                 ) {
                     let preset = if preset == "hce" {
                         "mujrim-hce".to_string()
@@ -783,6 +993,17 @@ impl UciHandler {
                     {
                         eprintln!("info string EvalPreset error: {error}");
                         return;
+                    }
+                    if matches!(preset.as_str(), "viridithas" | "obsidian") {
+                        match load_network_for_preset(&preset) {
+                            Ok(network) => {
+                                self.eval_network = Arc::new(network);
+                                self.eval_file = Some(format!("disk:{preset}"));
+                            }
+                            Err(error) => {
+                                eprintln!("info string EvalPreset {preset}: {error}");
+                            }
+                        }
                     }
                     self.eval_preset = preset;
                     self.use_nnue = self.eval_preset != "mujrim-hce";
@@ -815,11 +1036,26 @@ impl UciHandler {
                     eprintln!("info string UCI_AnalyseMode set to {}", self.analyse_mode);
                 }
             }
-            // UCI standard options we accept but don't actively use
-            "ponder" | "uci_chess960" | "country" | "uci_engineabout" => {
-                if self.debug_mode {
-                    eprintln!("info string Option {name} acknowledged");
+            "ponder" => {
+                self.ponder = value.eq_ignore_ascii_case("true");
+                eprintln!("info string Ponder set to {}", self.ponder);
+            }
+            "uci_chess960" => {
+                self.chess960 = value.eq_ignore_ascii_case("true");
+                self.board.set_chess960(self.chess960);
+                eprintln!("info string UCI_Chess960 set to {}", self.chess960);
+            }
+            "country" => {
+                if !value.is_empty() {
+                    self.country = value.to_string();
                 }
+                eprintln!("info string Country set to {}", self.country);
+            }
+            "uci_engineabout" => {
+                if !value.is_empty() {
+                    self.engine_about = value.to_string();
+                }
+                eprintln!("info string UCI_EngineAbout set to {}", self.engine_about);
             }
             "multipv" => {
                 if let Ok(n) = value.parse::<usize>() {
@@ -849,15 +1085,78 @@ impl UciHandler {
             "contempt" => {
                 if let Ok(c) = value.parse::<i32>() {
                     self.contempt = c.clamp(-100, 100);
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.set_contempt(self.contempt);
+                    }
                     if self.debug_mode {
                         eprintln!("info string Contempt set to {}", self.contempt);
                     }
                 }
             }
+            "clear hash" | "clearhash" => {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.clear();
+                }
+                eprintln!("info string Hash cleared");
+            }
+            "uci_showwdl" => {
+                self.show_wdl = value.eq_ignore_ascii_case("true");
+                eprintln!("info string UCI_ShowWDL set to {}", self.show_wdl);
+            }
+            "syzygyprobelimit" => {
+                if let Ok(limit) = value.parse::<u32>() {
+                    self.syzygy_probe_limit = limit.min(7);
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.set_syzygy_probe_limit(self.syzygy_probe_limit);
+                    }
+                    eprintln!(
+                        "info string SyzygyProbeLimit set to {}",
+                        self.syzygy_probe_limit
+                    );
+                }
+            }
+            "syzygyprobedepth" => {
+                if let Ok(depth) = value.parse::<i32>() {
+                    self.syzygy_probe_depth = depth.clamp(1, 100);
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.set_syzygy_probe_depth(self.syzygy_probe_depth);
+                    }
+                    eprintln!(
+                        "info string SyzygyProbeDepth set to {}",
+                        self.syzygy_probe_depth
+                    );
+                }
+            }
             "syzygypath" => {
-                // Store the path for future Syzygy tablebase integration
-                if self.debug_mode {
-                    eprintln!("info string SyzygyPath set to {value} (not yet active)");
+                self.syzygy_path = if value == "<empty>" {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.set_syzygy_path(&self.syzygy_path);
+                    let tables = engine.syzygy();
+                    if tables.is_ready() {
+                        eprintln!(
+                            "info string SyzygyPath {} ({} files, up to {}-man, probing on)",
+                            tables.path(),
+                            tables.file_count(),
+                            tables.largest()
+                        );
+                    } else if self.syzygy_path.is_empty() {
+                        eprintln!("info string SyzygyPath cleared");
+                    } else {
+                        eprintln!(
+                            "info string SyzygyPath {} ({} table files found; probe {})",
+                            self.syzygy_path,
+                            tables.file_count(),
+                            if cfg!(feature = "syzygy") {
+                                "inactive"
+                            } else {
+                                "requires syzygy feature"
+                            }
+                        );
+                    }
                 }
             }
             _ => {
@@ -880,7 +1179,9 @@ impl UciHandler {
             } else {
                 args.len()
             };
-            (Board::new(), move_start_idx)
+            let mut board = Board::new();
+            board.set_chess960(self.chess960);
+            (board, move_start_idx)
         } else if args[0] == "fen" {
             let mut fen_parts = Vec::new();
             let mut i = 1;
@@ -890,7 +1191,12 @@ impl UciHandler {
             }
             let fen = fen_parts.join(" ");
             let board = match Board::from_fen(&fen) {
-                Ok(board) => board,
+                Ok(mut board) => {
+                    if self.chess960 && !board.is_chess960() {
+                        board.set_chess960(true);
+                    }
+                    board
+                }
                 Err(e) => {
                     eprintln!("info string Invalid FEN: {e}");
                     return;
@@ -946,7 +1252,7 @@ impl UciHandler {
             depth = depth.min(mate_depth.clamp(1, MAX_DEPTH));
         }
 
-        let time_limit = if go.infinite || go.ponder {
+        let clock_alloc = if go.infinite {
             None
         } else if let Some(mt) = go.movetime {
             let safe = mt.saturating_sub(self.move_overhead_ms);
@@ -960,6 +1266,7 @@ impl UciHandler {
                 go.movestogo,
             )
         };
+        let time_limit = if go.ponder { None } else { clock_alloc };
         #[cfg(feature = "book")]
         let mut node_limit = go.nodes;
         #[cfg(not(feature = "book"))]
@@ -997,8 +1304,14 @@ impl UciHandler {
             uci_println("bestmove 0000");
             return;
         }
-        let task =
-            self.start_search_task(depth, time_limit, node_limit, restricted_moves, !go.ponder);
+        let task = self.start_search_task(
+            depth,
+            time_limit,
+            node_limit,
+            restricted_moves,
+            !go.ponder,
+            go.ponder.then_some(clock_alloc).flatten(),
+        );
         *running = Some(task);
     }
 
@@ -1190,6 +1503,10 @@ impl UciHandler {
             "akimbo" => "akimbo",
             "stockfish" => "stockfish",
             "reckless" => "reckless",
+            "viridithas" => "viridithas",
+            "obsidian" => "obsidian",
+            "plentychess" => "plentychess",
+            "lc0" => "lc0",
             "mujrim-hce" | "hce" => "mujrim-hce",
             _ => self.eval_network.search_profile().as_str(),
         }
@@ -1211,13 +1528,25 @@ impl UciHandler {
         let apply = |engine: &mut SearchEngine| {
             if use_hce {
                 let _ = install_adapter(engine, "mujrim-hce");
-            } else if matches!(preset, "stockfish" | "reckless" | "akimbo") {
-                let _ = install_adapter(engine, preset);
             } else {
-                engine.set_nnue_network_source(network);
+                if matches!(preset, "stockfish" | "reckless" | "akimbo") {
+                    if !install_adapter(engine, preset) {
+                        engine.set_nnue_network_source(network);
+                    }
+                } else if matches!(preset, "viridithas" | "obsidian" | "plentychess" | "lc0") {
+                    engine.set_nnue_network_source(network);
+                    if engine.nnue_preset_hint() != preset {
+                        let _ = install_adapter(engine, preset);
+                    }
+                } else {
+                    engine.set_nnue_network_source(network);
+                }
                 engine.set_use_nnue(true);
             }
             engine.set_search_experiment(experiment);
+            engine.set_contempt(self.contempt);
+            engine.set_syzygy_probe_limit(self.syzygy_probe_limit);
+            engine.set_syzygy_probe_depth(self.syzygy_probe_depth);
         };
 
         if let Some(engine) = self.engine.as_mut() {
@@ -1686,6 +2015,32 @@ mod tests {
     }
 
     #[test]
+    fn with_adapter_installs_viridithas_and_obsidian_search_profiles() {
+        let viri = UciHandler::with_adapter("viridithas");
+        assert_eq!(viri.eval_preset, "viridithas");
+        assert_eq!(
+            viri.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Viridithas)
+        );
+        let obs = UciHandler::with_adapter("obsidian");
+        assert_eq!(obs.eval_preset, "obsidian");
+        assert_eq!(
+            obs.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Obsidian)
+        );
+        let plenty = UciHandler::with_adapter("plentychess");
+        assert_eq!(
+            plenty.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::PlentyChess)
+        );
+        let lc0 = UciHandler::with_adapter("lc0");
+        assert_eq!(
+            lc0.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Lc0)
+        );
+    }
+
+    #[test]
     fn with_adapter_starts_on_mujrim_hce() {
         let handler = UciHandler::with_adapter("mujrim-hce");
         assert_eq!(handler.eval_preset, "mujrim-hce");
@@ -1709,6 +2064,24 @@ mod tests {
 
         handler.handle_setoption(&["name", "AestheticDeltaCP", "value", "-4"]);
         assert_eq!(handler.aesthetic_delta_cp, 0);
+    }
+
+    #[test]
+    fn contempt_is_wired_into_the_search_engine() {
+        let mut handler = UciHandler::new();
+        assert_eq!(handler.contempt, search::DEFAULT_CONTEMPT);
+        assert_eq!(
+            handler.engine.as_ref().unwrap().contempt(),
+            search::DEFAULT_CONTEMPT
+        );
+
+        handler.handle_setoption(&["name", "Contempt", "value", "48"]);
+        assert_eq!(handler.contempt, 48);
+        assert_eq!(handler.engine.as_ref().unwrap().contempt(), 48);
+
+        handler.handle_setoption(&["name", "Contempt", "value", "-200"]);
+        assert_eq!(handler.contempt, -100);
+        assert_eq!(handler.engine.as_ref().unwrap().contempt(), -100);
     }
 
     #[test]
@@ -1784,7 +2157,7 @@ mod tests {
         let mut handler = UciHandler::new();
         handler.use_book = false;
         let tt = Arc::as_ptr(&handler.engine.as_ref().unwrap().tt);
-        let mut running = Some(handler.start_search_task(1, None, None, Vec::new(), false));
+        let mut running = Some(handler.start_search_task(1, None, None, Vec::new(), false, None));
 
         handler.abort_running_search(&mut running, false);
 
@@ -1802,6 +2175,9 @@ mod tests {
             handle,
             stop_token: Arc::new(AtomicBool::new(false)),
             cancel_token: Arc::new(AtomicBool::new(false)),
+            deadline: Arc::new(AtomicU64::new(0)),
+            started: Instant::now(),
+            ponder_alloc: None,
             emit_bestmove: true,
             root_board: handler.board.clone(),
             fallback_move,
@@ -1844,6 +2220,7 @@ mod tests {
             None,
             Vec::new(),
             false,
+            Some(Duration::from_millis(20)),
         ));
 
         for _ in 0..40 {
@@ -1858,9 +2235,8 @@ mod tests {
 
         handler.poll_running_search(&mut running);
         assert!(running.is_some());
-        let task = running.as_mut().unwrap();
-        task.emit_bestmove = true;
-        task.stop_token.store(true, Ordering::Relaxed);
+        handler.handle_ponderhit(&mut running);
+        assert!(running.as_ref().unwrap().emit_bestmove);
         handler.poll_running_search(&mut running);
         assert!(running.is_none());
     }
@@ -1890,10 +2266,30 @@ mod tests {
                 Move::quiet(types::Square::E2, types::Square::E4),
                 Move::quiet(types::Square::E7, types::Square::E5),
             ],
+            hashfull: 12,
+            tbhits: 3,
         };
         assert_eq!(
-            format_final_search_info(&result, "cp 31"),
-            "info depth 14 seldepth 23 score cp 31 nodes 250000 nps 500000 time 500 pv e2e4 e7e5"
+            format_search_info_line(
+                &result,
+                "cp 31",
+                InfoLineOptions {
+                    multipv: None,
+                    wdl: None,
+                },
+            ),
+            "info depth 14 seldepth 23 score cp 31 nodes 250000 nps 500000 time 500 hashfull 12 tbhits 3 pv e2e4 e7e5"
+        );
+        assert_eq!(
+            format_search_info_line(
+                &result,
+                "cp 31",
+                InfoLineOptions {
+                    multipv: Some(2),
+                    wdl: Some((400, 500, 100)),
+                },
+            ),
+            "info multipv 2 depth 14 seldepth 23 score cp 31 wdl 400 500 100 nodes 250000 nps 500000 time 500 hashfull 12 tbhits 3 pv e2e4 e7e5"
         );
     }
 
@@ -1901,7 +2297,7 @@ mod tests {
     fn test_abort_running_search_with_emit_flag_clears_task() {
         let mut handler = UciHandler::new();
         handler.use_book = false;
-        let mut running = Some(handler.start_search_task(32, None, None, Vec::new(), false));
+        let mut running = Some(handler.start_search_task(32, None, None, Vec::new(), false, None));
         handler.abort_running_search(&mut running, true);
         assert!(running.is_none());
     }
@@ -1910,5 +2306,153 @@ mod tests {
     fn test_normalize_command_accepts_utf8_bom() {
         assert_eq!(normalize_command("\u{feff}uci\r\n"), "uci");
         assert_eq!(normalize_command("  isready  "), "isready");
+    }
+
+    #[test]
+    fn evalpreset_accepts_viridithas_and_obsidian() {
+        let mut handler = UciHandler::new();
+        handler.handle_setoption(&["name", "EvalPreset", "value", "viridithas"]);
+        assert_eq!(handler.eval_preset, "viridithas");
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Viridithas)
+        );
+        handler.handle_setoption(&["name", "EvalPreset", "value", "obsidian"]);
+        assert_eq!(handler.eval_preset, "obsidian");
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Obsidian)
+        );
+        handler.handle_setoption(&["name", "EvalPreset", "value", "plentychess"]);
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::PlentyChess)
+        );
+        handler.handle_setoption(&["name", "EvalPreset", "value", "lc0"]);
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Lc0)
+        );
+    }
+
+    #[test]
+    fn ponder_and_identity_options_are_stored() {
+        let mut handler = UciHandler::new();
+        assert!(!handler.ponder);
+        handler.handle_setoption(&["name", "Ponder", "value", "true"]);
+        assert!(handler.ponder);
+        handler.handle_setoption(&["name", "Country", "value", "Cairo"]);
+        assert_eq!(handler.country, "Cairo");
+        handler.handle_setoption(&["name", "UCI_EngineAbout", "value", "Mujrim test"]);
+        assert_eq!(handler.engine_about, "Mujrim test");
+    }
+
+    #[test]
+    fn chess960_option_switches_castle_encoding() {
+        let mut handler = UciHandler::new();
+        handler.handle_setoption(&["name", "UCI_Chess960", "value", "true"]);
+        assert!(handler.chess960);
+        assert!(handler.board.is_chess960());
+        handler.handle_position(&["fen", "r3k2r/8/8/8/8/8/8/R3K2R", "w", "KQkq", "-", "0", "1"]);
+        let moves = handler.board.generate_legal_moves();
+        assert!(moves.iter().any(|mv| mv.to_uci() == "e1h1"));
+        assert!(!moves.iter().any(|mv| mv.to_uci() == "e1g1"));
+    }
+
+    #[test]
+    fn syzygy_path_is_wired_into_the_search_engine() {
+        let mut handler = UciHandler::new();
+        handler.handle_setoption(&["name", "SyzygyPath", "value", "/tmp/mujrim-missing-syzygy"]);
+        assert_eq!(handler.syzygy_path, "/tmp/mujrim-missing-syzygy");
+        assert_eq!(
+            handler.engine.as_ref().unwrap().syzygy().path(),
+            "/tmp/mujrim-missing-syzygy"
+        );
+        handler.handle_setoption(&["name", "SyzygyPath", "value", "<empty>"]);
+        assert!(handler.syzygy_path.is_empty());
+    }
+
+    #[test]
+    fn ponder_option_off_strips_predicted_reply() {
+        let mut handler = UciHandler::new();
+        handler.ponder = false;
+        let best = Move::quiet(types::Square::E2, types::Square::E4);
+        let ponder = Move::quiet(types::Square::E7, types::Square::E5);
+        assert_eq!(
+            format_bestmove(best, handler.ponder.then_some(ponder)),
+            "bestmove e2e4"
+        );
+        handler.ponder = true;
+        assert_eq!(
+            format_bestmove(best, handler.ponder.then_some(ponder)),
+            "bestmove e2e4 ponder e7e5"
+        );
+    }
+
+    #[test]
+    fn clear_hash_and_syzygy_probe_options_are_wired() {
+        let mut handler = UciHandler::new();
+        handler.handle_setoption(&["name", "Clear Hash"]);
+        handler.handle_setoption(&["name", "SyzygyProbeLimit", "value", "0"]);
+        assert_eq!(handler.syzygy_probe_limit, 0);
+        assert_eq!(handler.engine.as_ref().unwrap().syzygy().probe_limit(), 0);
+        handler.handle_setoption(&["name", "SyzygyProbeDepth", "value", "8"]);
+        assert_eq!(handler.syzygy_probe_depth, 8);
+        assert_eq!(handler.engine.as_ref().unwrap().syzygy().probe_depth(), 8);
+        handler.handle_setoption(&["name", "UCI_ShowWDL", "value", "true"]);
+        assert!(handler.show_wdl);
+    }
+
+    #[test]
+    fn ponderhit_arms_deadline_without_stopping() {
+        let mut handler = UciHandler::new();
+        handler.use_book = false;
+        let mut running = Some(handler.start_search_task(
+            64,
+            None,
+            None,
+            Vec::new(),
+            false,
+            Some(Duration::from_millis(50)),
+        ));
+        handler.handle_ponderhit(&mut running);
+        let task = running.as_ref().unwrap();
+        assert!(task.emit_bestmove);
+        assert!(!task.stop_token.load(Ordering::Relaxed));
+        assert!(task.deadline.load(Ordering::Relaxed) > 0);
+        handler.abort_running_search(&mut running, false);
+    }
+
+    #[test]
+    fn ranked_multipv_returns_distinct_first_moves() {
+        let mut handler = UciHandler::new();
+        handler.use_book = false;
+        let mut engine = handler.engine.take().unwrap();
+        let cancel = AtomicBool::new(false);
+        let (best, _) = UciHandler::search_ranked_pvs_on(
+            &mut engine,
+            &mut handler.board,
+            RankedPvSearch {
+                multi_pv: 3,
+                aesthetic: AestheticConfig::default(),
+                depth: 3,
+                time_limit: None,
+                node_limit: Some(4_000),
+                cancel_token: &cancel,
+                show_wdl: false,
+            },
+        )
+        .expect("multi-pv lines");
+        let legal = handler.board.generate_legal_moves();
+        assert!(legal.iter().any(|mv| *mv == best));
+    }
+
+    #[test]
+    fn wdl_maps_mates_and_balanced_scores() {
+        assert_eq!(wdl_from_score(32_000), (1000, 0, 0));
+        assert_eq!(wdl_from_score(-32_000), (0, 0, 1000));
+        let (win, draw, loss) = wdl_from_score(0);
+        assert_eq!(win + draw + loss, 1000);
+        assert!(win.abs_diff(loss) <= 2);
     }
 }
