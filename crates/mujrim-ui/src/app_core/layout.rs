@@ -25,6 +25,15 @@ pub const STANDING_SLOTS: usize = 24;
 pub const LIVE_BOARD_SLOTS: usize = 16;
 pub const COORD_GUTTER_PX: f64 = 18.0;
 pub const EVAL_BAR_PX: f64 = 18.0;
+pub const MOVE_CHIP_HEIGHT: f64 = 32.0;
+pub const MOVE_NUM_WIDTH: f64 = 28.0;
+pub const MOVE_CHIP_GAP: f64 = 6.0;
+
+/// White and black move chips share the leftover row width equally.
+pub fn move_chip_width(row_inner_width: f64) -> f64 {
+    let leftover = row_inner_width - MOVE_NUM_WIDTH - MOVE_CHIP_GAP * 2.0;
+    (leftover * 0.5).max(0.0)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoardGeom {
@@ -488,6 +497,14 @@ mod tests {
         let (white, black) = live_clock_faces_at(Some(&live), None, None, true, Some(5_900), false);
         assert_eq!(white.display, "0:07.1");
         assert_eq!(black.display, "1:00");
+    }
+
+    #[test]
+    fn move_chips_share_equal_width() {
+        let width = move_chip_width(360.0);
+        assert!((width - 160.0).abs() < f64::EPSILON);
+        assert_eq!(move_chip_width(360.0), move_chip_width(360.0));
+        assert_eq!(MOVE_CHIP_HEIGHT, 32.0);
     }
 
     #[test]

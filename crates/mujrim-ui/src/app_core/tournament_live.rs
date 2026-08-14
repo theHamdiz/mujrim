@@ -185,12 +185,71 @@ pub struct LiveTournamentSnapshot {
     pub show_results_panel: bool,
 }
 
+/// Each encounter plays `games_per_encounter` color-swapped pairs (two games each).
+pub const GAMES_PER_ENCOUNTER_PAIR: usize = 2;
+
+pub fn games_per_match(games_per_encounter: u32) -> usize {
+    (games_per_encounter.max(1) as usize).saturating_mul(GAMES_PER_ENCOUNTER_PAIR)
+}
+
 impl LiveTournamentSnapshot {
     pub fn progress_fraction(&self) -> f32 {
         if self.total_matches == 0 {
             return if self.finished { 1.0 } else { 0.0 };
         }
         (self.completed_matches as f32 / self.total_matches as f32).clamp(0.0, 1.0)
+    }
+
+    pub fn planned_games(&self, games_per_encounter: u32) -> usize {
+        self.total_matches
+            .saturating_mul(games_per_match(games_per_encounter))
+    }
+
+    pub fn remaining_matches(&self) -> usize {
+        self.total_matches.saturating_sub(self.completed_matches)
+    }
+
+    pub fn remaining_games(&self, games_per_encounter: u32) -> usize {
+        if self.finished && !self.cancelled {
+            return 0;
+        }
+        self.planned_games(games_per_encounter)
+            .saturating_sub(self.played_games.len())
+    }
+
+    pub fn game_progress_fraction(&self, games_per_encounter: u32) -> f32 {
+        let total = self.planned_games(games_per_encounter);
+        if total == 0 {
+            return self.progress_fraction();
+        }
+        (self.played_games.len() as f32 / total as f32).clamp(0.0, 1.0)
+    }
+
+    pub fn remaining_games_label(&self, games_per_encounter: u32) -> String {
+        let remaining = self.remaining_games(games_per_encounter);
+        let planned = self.planned_games(games_per_encounter);
+        if planned == 0 {
+            return "No games scheduled".to_owned();
+        }
+        match remaining {
+            0 => "0 games remaining".to_owned(),
+            1 => "1 game remaining".to_owned(),
+            n => format!("{n} games remaining"),
+        }
+    }
+
+    pub fn phase_label(&self) -> &'static str {
+        if self.cancelled {
+            "Stopped"
+        } else if self.finished {
+            "Finished"
+        } else if self.paused {
+            "Paused"
+        } else if self.running {
+            "Live"
+        } else {
+            "Ready"
+        }
     }
 
     pub fn current_match_label(&self) -> String {
@@ -500,8 +559,29 @@ mod tests {
             ..LiveTournamentSnapshot::default()
         };
         assert!((snap.progress_fraction() - 0.25).abs() < f32::EPSILON);
+        assert_eq!(games_per_match(1), 2);
+        assert_eq!(snap.planned_games(1), 8);
+        assert_eq!(snap.remaining_matches(), 3);
+        assert_eq!(snap.remaining_games(1), 8);
+        assert_eq!(snap.remaining_games_label(1), "8 games remaining");
+        snap.played_games = vec![PlayedGame {
+            id: 0,
+            match_index: 1,
+            round: 1,
+            white: "A".into(),
+            black: "B".into(),
+            white_score: 1.0,
+            initial_fen: String::new(),
+            moves: Vec::new(),
+        }];
+        assert!((snap.game_progress_fraction(1) - 0.125).abs() < f32::EPSILON);
+        assert_eq!(snap.remaining_games(1), 7);
         snap.completed_matches = 4;
         assert!((snap.progress_fraction() - 1.0).abs() < f32::EPSILON);
+        snap.finished = true;
+        assert_eq!(snap.remaining_games(1), 0);
+        assert_eq!(snap.remaining_games_label(1), "0 games remaining");
+        assert_eq!(snap.phase_label(), "Finished");
         assert_eq!(score_label(1.5, 0.5), "1.5–0.5");
         assert_eq!(result_label(1.0), "1-0");
         assert_eq!(result_label(0.5), "½-½");
@@ -544,6 +624,51 @@ mod tests {
         assert_eq!(PodiumTier::from_rank(3), Some(PodiumTier::Bronze));
         assert_eq!(PodiumTier::from_rank(4), None);
         assert_eq!(rows[0].podium(), Some(PodiumTier::Gold));
+        assert_eq!(LiveTournamentSnapshot::default().phase_label(), "Ready");
+        assert_eq!(
+            LiveTournamentSnapshot {
+                running: true,
+                ..LiveTournamentSnapshot::default()
+            }
+            .phase_label(),
+            "Live"
+        );
+        assert_eq!(
+            LiveTournamentSnapshot {
+                running: true,
+                paused: true,
+                ..LiveTournamentSnapshot::default()
+            }
+            .phase_label(),
+            "Paused"
+        );
+        assert_eq!(
+            LiveTournamentSnapshot {
+                cancelled: true,
+                finished: true,
+                ..LiveTournamentSnapshot::default()
+            }
+            .phase_label(),
+            "Stopped"
+        );
+        assert_eq!(
+            LiveTournamentSnapshot {
+                total_matches: 1,
+                played_games: vec![PlayedGame {
+                    id: 0,
+                    match_index: 1,
+                    round: 1,
+                    white: "A".into(),
+                    black: "B".into(),
+                    white_score: 0.5,
+                    initial_fen: String::new(),
+                    moves: Vec::new(),
+                }],
+                ..LiveTournamentSnapshot::default()
+            }
+            .remaining_games_label(1),
+            "1 game remaining"
+        );
     }
 
     #[test]

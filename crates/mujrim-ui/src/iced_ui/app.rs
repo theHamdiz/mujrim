@@ -11,7 +11,7 @@ use super::eval_graph;
 use super::noise;
 use super::pieces;
 use crate::app_core::{
-    analysis, audio, game, gif_export, motion, premove, recording, tournament_arena,
+    analysis, audio, game, gif_export, layout, logic, motion, premove, recording, tournament_arena,
     tournament_live, tournament_results, tournament_setup, uci_process,
 };
 
@@ -3916,55 +3916,7 @@ impl App {
         // Move history — wider two-column layout
         let pal = self.settings.board_theme.gui_palette();
 
-        let moves_content: Element<'_, Msg> = if self.move_log.is_empty() {
-            text("No moves yet.")
-                .size(13)
-                .color(pal.text_secondary)
-                .into()
-        } else {
-            let mut moves_col = column![].spacing(2).padding([4, 8]);
-            for (i, pair) in self.move_log.chunks(2).enumerate() {
-                let num_text = text(format!("{}.", i + 1))
-                    .size(12)
-                    .color(pal.text_secondary)
-                    .width(32);
-                let white_index = i * 2;
-                let white_label = annotated_move_label(
-                    &pair[0],
-                    self.move_annotations.get(white_index).copied().flatten(),
-                );
-                let white_move = move_history_button(
-                    white_label,
-                    white_index + 1,
-                    self.review_ply == Some(white_index + 1),
-                    pal,
-                );
-                let black_move = if let Some(b) = pair.get(1) {
-                    move_history_button(
-                        annotated_move_label(
-                            b,
-                            self.move_annotations
-                                .get(white_index + 1)
-                                .copied()
-                                .flatten(),
-                        ),
-                        white_index + 2,
-                        self.review_ply == Some(white_index + 2),
-                        pal,
-                    )
-                } else {
-                    container(text("...").size(13).color(pal.text_secondary))
-                        .width(88)
-                        .into()
-                };
-                moves_col = moves_col.push(
-                    row![num_text, white_move, black_move]
-                        .spacing(6)
-                        .align_y(Alignment::Center),
-                );
-            }
-            moves_col.into()
-        };
+        let moves_content: Element<'_, Msg> = self.move_list_column(pal);
 
         let moves_panel = container(scrollable(moves_content).height(Length::Fill))
             .padding(8)
@@ -4635,57 +4587,9 @@ impl App {
             self.engine_info.clone()
         };
 
-        let moves_content: Element<'_, Msg> = if self.move_log.is_empty() {
-            text("No moves yet.")
-                .size(13)
-                .color(palette.text_secondary)
-                .into()
-        } else {
-            let mut moves_col = column![].spacing(2).padding([4, 8]);
-            for (i, pair) in self.move_log.chunks(2).enumerate() {
-                let white_index = i * 2;
-                let white_move = move_history_button(
-                    annotated_move_label(
-                        &pair[0],
-                        self.move_annotations.get(white_index).copied().flatten(),
-                    ),
-                    white_index + 1,
-                    self.review_ply == Some(white_index + 1),
-                    palette,
-                );
-                let black_move = if let Some(black) = pair.get(1) {
-                    move_history_button(
-                        annotated_move_label(
-                            black,
-                            self.move_annotations
-                                .get(white_index + 1)
-                                .copied()
-                                .flatten(),
-                        ),
-                        white_index + 2,
-                        self.review_ply == Some(white_index + 2),
-                        palette,
-                    )
-                } else {
-                    container(text("…").size(13).color(palette.text_secondary))
-                        .width(88)
-                        .into()
-                };
-                moves_col = moves_col.push(
-                    row![
-                        text(format!("{}.", i + 1))
-                            .size(12)
-                            .color(palette.text_secondary)
-                            .width(32),
-                        white_move,
-                        black_move
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                );
-            }
-            scrollable(moves_col).height(Length::Fill).into()
-        };
+        let moves_content: Element<'_, Msg> = scrollable(self.move_list_column(palette))
+            .height(Length::Fill)
+            .into();
 
         let mut side = column![
             text(title).size(16).color(palette.text_primary),
@@ -4738,6 +4642,62 @@ impl App {
         .into()
     }
 
+    fn move_list_column(&self, pal: board_view::GuiPalette) -> Element<'_, Msg> {
+        if self.move_log.is_empty() {
+            return text("No moves yet.")
+                .size(13)
+                .color(pal.text_secondary)
+                .into();
+        }
+        let labels = logic::move_list_chip_labels(
+            &self.initial_fen,
+            &self.move_log,
+            &self.move_annotations,
+            &self.analysis_scores_cp,
+        );
+        let mut moves_col = column![].spacing(2).padding([4, 8]).width(Length::Fill);
+        for (i, pair) in self.move_log.chunks(2).enumerate() {
+            let white_index = i * 2;
+            let white_move = move_history_button(
+                labels.get(white_index).cloned().unwrap_or_default(),
+                white_index + 1,
+                self.review_ply == Some(white_index + 1),
+                self.move_annotations.get(white_index).copied().flatten(),
+                pal,
+            );
+            let black_move = if pair.len() > 1 {
+                move_history_button(
+                    labels.get(white_index + 1).cloned().unwrap_or_default(),
+                    white_index + 2,
+                    self.review_ply == Some(white_index + 2),
+                    self.move_annotations
+                        .get(white_index + 1)
+                        .copied()
+                        .flatten(),
+                    pal,
+                )
+            } else {
+                empty_move_chip(pal)
+            };
+            moves_col = moves_col.push(
+                row![
+                    text(format!("{}.", i + 1))
+                        .size(12)
+                        .color(pal.text_secondary)
+                        .width(layout::MOVE_NUM_WIDTH as f32)
+                        .height(layout::MOVE_CHIP_HEIGHT as f32),
+                    white_move,
+                    black_move
+                ]
+                .spacing(layout::MOVE_CHIP_GAP as f32)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .height(layout::MOVE_CHIP_HEIGHT as f32),
+            );
+        }
+        moves_col.into()
+    }
+
     fn view_tournament_hub(&self) -> Element<'_, Msg> {
         let palette = self.settings.board_theme.gui_palette();
         let live = &self.live_tournament_view;
@@ -4782,9 +4742,10 @@ impl App {
             .size(22)
             .color(palette.text_primary),
             text(format!(
-                "{} · {} · {}/{} ({:.0}%) · {}",
+                "{} · {} · {} · {}/{} ({:.0}%) · {}",
                 live.format_label,
                 self.tournament_setup.time_control.label(),
+                live.remaining_games_label(self.tournament_setup.games_per_encounter),
                 live.completed_matches,
                 live.total_matches.max(live.completed_matches),
                 live.progress_fraction() * 100.0,
@@ -6898,20 +6859,6 @@ const fn piece_value(piece: types::Piece) -> i32 {
     }
 }
 
-fn annotated_move_label(notation: &str, annotation: Option<MoveAnnotation>) -> String {
-    annotation.map_or_else(
-        || notation.to_owned(),
-        |annotation| {
-            let symbol = annotation.symbol();
-            if symbol.is_empty() {
-                notation.to_owned()
-            } else {
-                format!("{notation} {symbol}")
-            }
-        },
-    )
-}
-
 fn tournament_history_button<'a>(
     name: String,
     status: String,
@@ -6994,28 +6941,64 @@ fn move_history_button<'a>(
     label: String,
     ply: usize,
     selected: bool,
+    annotation: Option<MoveAnnotation>,
     pal: board_view::GuiPalette,
 ) -> Element<'a, Msg> {
-    button(container(text(label).size(13)).width(88))
-        .on_press(Msg::ViewPly(ply))
-        .padding([3, 4])
-        .style(move |_theme, status| {
-            let background = if selected {
-                Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.30)
-            } else if matches!(status, button::Status::Hovered) {
-                Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.16)
-            } else {
-                Color::TRANSPARENT
-            };
-            button::Style {
-                background: Some(iced::Background::Color(background)),
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                },
-                text_color: pal.text_primary,
+    let tint = logic::annotation_tint(annotation);
+    button(
+        container(text(label).size(13))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Msg::ViewPly(ply))
+    .padding([0, 8])
+    .width(Length::Fill)
+    .height(layout::MOVE_CHIP_HEIGHT as f32)
+    .style(move |_theme, status| {
+        let (background, text_color) = if selected {
+            (
+                Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.30),
+                pal.text_primary,
+            )
+        } else if let Some((r, g, b)) = tint {
+            (
+                Color::from_rgba8(r, g, b, 48.0 / 255.0),
+                Color::from_rgb8(r, g, b),
+            )
+        } else if matches!(status, button::Status::Hovered) {
+            (
+                Color::from_rgba(pal.accent.r, pal.accent.g, pal.accent.b, 0.16),
+                pal.text_primary,
+            )
+        } else {
+            (Color::TRANSPARENT, pal.text_primary)
+        };
+        button::Style {
+            background: Some(iced::Background::Color(background)),
+            border: iced::Border {
+                radius: 8.0.into(),
                 ..Default::default()
-            }
+            },
+            text_color,
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+fn empty_move_chip<'a>(pal: board_view::GuiPalette) -> Element<'a, Msg> {
+    container(text(String::new()).size(13))
+        .width(Length::Fill)
+        .height(layout::MOVE_CHIP_HEIGHT as f32)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(Color::TRANSPARENT)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            text_color: Some(pal.text_secondary),
+            ..Default::default()
         })
         .into()
 }
@@ -7197,12 +7180,13 @@ mod tests {
 
     use super::{
         EngineConfig, ExternalEngineProtocol, PlayerConfig, analyze_game_at_depth,
-        annotated_move_label, apply_opening_move, board_at_ply, bounded_hash_mb,
-        build_annotated_pgn, build_pgn, bundled_engine_choices, find_logged_move,
-        format_tournament_summary, game_summary_label, main_window_settings, normalize_logged_uci,
-        puzzle_line_matches, replay_study_game, review_annotation_badge, selected_bundled_engine,
-        starter_puzzles, tournament_directory_name,
+        apply_opening_move, board_at_ply, bounded_hash_mb, build_annotated_pgn, build_pgn,
+        bundled_engine_choices, find_logged_move, format_tournament_summary, game_summary_label,
+        main_window_settings, normalize_logged_uci, puzzle_line_matches, replay_study_game,
+        review_annotation_badge, selected_bundled_engine, starter_puzzles,
+        tournament_directory_name,
     };
+    use crate::app_core::logic;
     use mujrim_study::annotation::MoveAnnotation;
     use mujrim_study::database::{GameMetadata, GameSummary};
     use mujrim_study::tournament::TournamentFormat;
@@ -7379,8 +7363,17 @@ mod tests {
         let annotations = analyze_game_at_depth(&["e2e4".to_owned()], 1).unwrap();
         assert_eq!(annotations.len(), 1);
         assert_eq!(
-            annotated_move_label("e2e4", Some(MoveAnnotation::Brilliant)),
+            logic::annotated_move_label("e2e4", Some(MoveAnnotation::Brilliant)),
             "e2e4 !!"
+        );
+        assert_eq!(
+            logic::move_list_chip_labels(
+                mujrim_study::opening::START_FEN,
+                &["e2e4".to_owned()],
+                &[Some(MoveAnnotation::Brilliant)],
+                &[Some(32)],
+            ),
+            ["e4 !!  +0.32"]
         );
     }
 

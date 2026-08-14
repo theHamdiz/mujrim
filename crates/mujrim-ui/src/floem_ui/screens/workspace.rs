@@ -17,6 +17,7 @@ use super::super::dock;
 use super::super::engine;
 use super::super::eval_bar;
 use super::super::eval_graph;
+use super::super::icons;
 use super::super::state::{AppHandles, AppState};
 use super::super::theme;
 use super::super::widgets;
@@ -687,60 +688,9 @@ fn gambit_controls(state: AppState) -> impl IntoView {
 }
 
 fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
-    let telemetry = handles.telemetry.clone();
     Stack::vertical((
         resume_banner(state, handles.clone()),
-        Stack::vertical((
-            pane_title("Live"),
-            Label::derived(move || {
-                let snap = state.tournament_snapshot.get();
-                layout::select_live_game(&snap.live_games, state.focused_live_key.get().as_deref())
-                    .map(|game| format!("R{} · {} vs {}", game.round, game.white, game.black))
-                    .unwrap_or_else(|| {
-                        format!(
-                            "{} · {}/{}",
-                            snap.format_label, snap.completed_matches, snap.total_matches
-                        )
-                    })
-            })
-            .style(|s| {
-                s.font_size(13.0)
-                    .font_bold()
-                    .min_width(0.0)
-                    .width_full()
-                    .text_wrap()
-            }),
-            Label::derived(move || state.tournament_status.get()).style(move |s| {
-                s.font_size(11.0)
-                    .min_width(0.0)
-                    .width_full()
-                    .text_wrap()
-                    .color(theme::rgba(
-                        theme::palette(state.settings.get().board_theme).text_secondary,
-                    ))
-            }),
-            Label::derived(move || {
-                let snap = state.tournament_snapshot.get();
-                layout::select_live_game(&snap.live_games, state.focused_live_key.get().as_deref())
-                    .map(|game| {
-                        format!(
-                            "{}  d{}  {} nodes\n{}",
-                            tournament_arena::score_text(game.score_cp),
-                            game.depth,
-                            game.nodes,
-                            if game.last_uci.is_empty() {
-                                "—"
-                            } else {
-                                game.last_uci.as_str()
-                            }
-                        )
-                    })
-                    .unwrap_or_else(|| telemetry.get().label)
-            })
-            .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
-            tournament_controls(state, handles.clone()),
-        ))
-        .style(|s| s.row_gap(8.0).width_full()),
+        tournament_live_card(state, handles.clone()),
         Stack::vertical((
             pane_title("Moves"),
             move_list(state, handles.clone()),
@@ -776,6 +726,234 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
             .min_width(0.0)
             .height_full()
             .min_height(0.0)
+    })
+}
+
+fn tournament_live_card(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    let telemetry = handles.telemetry.clone();
+    widgets::card(
+        state,
+        Stack::vertical((
+            Stack::horizontal((
+                Label::derived(move || state.tournament_snapshot.get().phase_label().to_owned())
+                    .style(move |s| {
+                        let snap = state.tournament_snapshot.get();
+                        let pal = pal();
+                        let (bg, fg) = match snap.phase_label() {
+                            "Live" => (theme::rgba(pal.accent), theme::rgba(pal.text_primary)),
+                            "Paused" => {
+                                (theme::rgba(pal.accent_alt), theme::rgba(pal.text_primary))
+                            }
+                            "Finished" => (theme::rgba(pal.panel), theme::rgba(pal.accent_alt)),
+                            "Stopped" => (theme::rgba(pal.bg), theme::rgba(pal.text_secondary)),
+                            _ => (theme::rgba(pal.bg), theme::rgba(pal.text_secondary)),
+                        };
+                        s.padding_horiz(8.0)
+                            .padding_vert(3.0)
+                            .border_radius(999.0)
+                            .font_size(10.0)
+                            .font_bold()
+                            .background(bg)
+                            .color(fg)
+                    }),
+                Label::derived(move || {
+                    let snap = state.tournament_snapshot.get();
+                    if snap.format_label.is_empty() {
+                        "Tournament".to_owned()
+                    } else {
+                        snap.format_label
+                    }
+                })
+                .style(move |s| {
+                    s.flex_grow(1.0f32)
+                        .min_width(0.0)
+                        .font_size(theme::TYPE_CAPTION)
+                        .font_bold()
+                        .text_ellipsis()
+                        .color(theme::rgba(pal().text_secondary))
+                }),
+                Label::derived(move || {
+                    state.tournament_setup.get().time_control.label().to_owned()
+                })
+                .style(move |s| {
+                    s.font_size(10.0)
+                        .text_ellipsis()
+                        .color(theme::rgba(pal().text_secondary))
+                }),
+            ))
+            .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0)),
+            Label::derived(move || {
+                let snap = state.tournament_snapshot.get();
+                layout::select_live_game(&snap.live_games, state.focused_live_key.get().as_deref())
+                    .map(|game| format!("R{} · {} vs {}", game.round, game.white, game.black))
+                    .unwrap_or_else(|| snap.current_match_label())
+            })
+            .style(move |s| {
+                s.font_size(theme::TYPE_BODY)
+                    .font_bold()
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_primary))
+            }),
+            tournament_progress_bar(state),
+            Stack::horizontal((
+                svg(icons::TROPHY).style(move |s| s.size(14, 14).color(theme::rgba(pal().accent))),
+                Label::derived(move || {
+                    let snap = state.tournament_snapshot.get();
+                    let games = state.tournament_setup.get().games_per_encounter;
+                    snap.remaining_games_label(games)
+                })
+                .style(move |s| {
+                    s.flex_grow(1.0f32)
+                        .min_width(0.0)
+                        .font_size(theme::TYPE_BODY)
+                        .font_bold()
+                        .text_wrap()
+                        .color(theme::rgba(pal().accent_alt))
+                }),
+                Label::derived(move || {
+                    let snap = state.tournament_snapshot.get();
+                    let games = state.tournament_setup.get().games_per_encounter;
+                    let planned = snap.planned_games(games);
+                    if planned == 0 {
+                        return String::new();
+                    }
+                    format!("{} / {planned}", snap.played_games.len())
+                })
+                .style(move |s| {
+                    s.font_size(theme::TYPE_CAPTION)
+                        .color(theme::rgba(pal().text_secondary))
+                }),
+            ))
+            .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0)),
+            Stack::horizontal((
+                tournament_stat_chip(state, "Left", move || {
+                    let snap = state.tournament_snapshot.get();
+                    let games = state.tournament_setup.get().games_per_encounter;
+                    if snap.planned_games(games) == 0 {
+                        "—".to_owned()
+                    } else {
+                        snap.remaining_games(games).to_string()
+                    }
+                }),
+                tournament_stat_chip(state, "Played", move || {
+                    state
+                        .tournament_snapshot
+                        .get()
+                        .played_games
+                        .len()
+                        .to_string()
+                }),
+                tournament_stat_chip(state, "Live", move || {
+                    state.tournament_snapshot.get().live_games.len().to_string()
+                }),
+            ))
+            .style(|s| s.width_full().col_gap(6.0).min_width(0.0)),
+            Label::derived(move || {
+                let snap = state.tournament_snapshot.get();
+                layout::select_live_game(&snap.live_games, state.focused_live_key.get().as_deref())
+                    .map(|game| {
+                        format!(
+                            "{}  d{}  {} nodes · {}",
+                            tournament_arena::score_text(game.score_cp),
+                            game.depth,
+                            game.nodes,
+                            if game.last_uci.is_empty() {
+                                "—"
+                            } else {
+                                game.last_uci.as_str()
+                            }
+                        )
+                    })
+                    .unwrap_or_else(|| telemetry.get().label)
+            })
+            .style(move |s| {
+                s.font_size(theme::TYPE_CAPTION)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_secondary))
+            }),
+            Label::derived(move || state.tournament_status.get()).style(move |s| {
+                s.font_size(theme::TYPE_CAPTION)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_secondary))
+            }),
+            tournament_controls(state, handles),
+        ))
+        .style(|s| s.row_gap(10.0).width_full().min_width(0.0)),
+    )
+}
+
+fn tournament_progress_bar(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    let fraction = move || {
+        let snap = state.tournament_snapshot.get();
+        let games = state.tournament_setup.get().games_per_encounter;
+        snap.game_progress_fraction(games)
+    };
+    Stack::horizontal((
+        Empty::new().style(move |s| {
+            let done = fraction().clamp(0.0, 1.0);
+            let s = s
+                .height(6.0)
+                .flex_grow(done.max(0.001))
+                .border_radius(99.0)
+                .background(theme::rgba(pal().accent));
+            if done <= 0.0 {
+                s.display(Display::None)
+            } else {
+                s
+            }
+        }),
+        Empty::new().style(move |s| {
+            let rest = (1.0 - fraction().clamp(0.0, 1.0)).max(0.0);
+            s.height(6.0).flex_grow(rest.max(0.001))
+        }),
+    ))
+    .style(move |s| {
+        s.width_full()
+            .height(6.0)
+            .border_radius(99.0)
+            .background(theme::rgba(pal().bg))
+            .overflow_x(Overflow::Clip)
+            .overflow_y(Overflow::Clip)
+    })
+}
+
+fn tournament_stat_chip(
+    state: AppState,
+    label: &'static str,
+    value: impl Fn() -> String + 'static,
+) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        Label::derived(value).style(move |s| {
+            s.font_size(18.0)
+                .font_bold()
+                .min_width(0.0)
+                .width_full()
+                .color(theme::rgba(pal().text_primary))
+        }),
+        Label::new(label).style(move |s| {
+            s.font_size(10.0)
+                .min_width(0.0)
+                .width_full()
+                .color(theme::rgba(pal().text_secondary))
+        }),
+    ))
+    .style(move |s| {
+        s.flex_grow(1.0f32)
+            .min_width(0.0)
+            .padding_horiz(8.0)
+            .padding_vert(8.0)
+            .row_gap(2.0)
+            .border_radius(10.0)
+            .background(theme::rgba(pal().bg))
     })
 }
 
@@ -1042,15 +1220,22 @@ pub(super) fn move_list(state: AppState, handles: AppHandles) -> impl IntoView {
                     }
                 })
                 .style(move |s| {
-                    s.font_size(11.0).width(28.0).color(theme::rgba(
-                        theme::palette(state.settings.get().board_theme).text_secondary,
-                    ))
+                    s.font_size(11.0)
+                        .width(layout::MOVE_NUM_WIDTH)
+                        .height(layout::MOVE_CHIP_HEIGHT)
+                        .color(theme::rgba(
+                            theme::palette(state.settings.get().board_theme).text_secondary,
+                        ))
                 }),
                 ply_slot(state, handles.clone(), idx * 2),
                 ply_slot(state, handles.clone(), idx * 2 + 1),
             ))
             .style(move |s| {
-                let s = s.width_full().col_gap(6.0).items_center().min_width(0.0);
+                let s = s
+                    .width_full()
+                    .col_gap(layout::MOVE_CHIP_GAP)
+                    .items_stretch()
+                    .min_width(0.0);
                 if state.move_log.get().len() > idx * 2 {
                     s
                 } else {
@@ -1102,24 +1287,15 @@ fn ply_slot(state: AppState, handles: AppHandles, ply_index: usize) -> impl Into
         if ply_index >= moves.len() {
             return String::new();
         }
-        let san = logic::san_annotated_moves(
+        logic::move_list_chip_labels(
             &state.initial_fen.get(),
             &moves,
             &state.move_annotations.get(),
+            &state.analysis_scores.get(),
         )
         .get(ply_index)
         .cloned()
-        .unwrap_or_default();
-        match state
-            .analysis_scores
-            .get()
-            .get(ply_index)
-            .copied()
-            .flatten()
-        {
-            Some(score) => format!("{san}  {}", logic::eval_label(score)),
-            None => san,
-        }
+        .unwrap_or_default()
     }))
     .action(move || {
         if ply_index < state.move_log.get_untracked().len() {
@@ -1129,6 +1305,7 @@ fn ply_slot(state: AppState, handles: AppHandles, ply_index: usize) -> impl Into
     .style(move |s| {
         let pal = theme::palette(state.settings.get().board_theme);
         let len = state.move_log.get().len();
+        let occupied = ply_index < len;
         let current = state.review_ply.get().unwrap_or(len);
         let annotation = state
             .move_annotations
@@ -1143,18 +1320,24 @@ fn ply_slot(state: AppState, handles: AppHandles, ply_index: usize) -> impl Into
             .copied()
             .flatten();
         let tint = logic::annotation_tint(annotation).or_else(|| score.map(logic::eval_tint));
-        let (bg, fg) = if current == ply && ply_index < len {
+        let (bg, fg) = if !occupied {
+            (Color::TRANSPARENT, theme::rgba(pal.text_secondary))
+        } else if current == ply {
             (theme::rgba(pal.accent), theme::rgba(pal.text_primary))
         } else if let Some((r, g, b)) = tint {
             (Color::from_rgba8(r, g, b, 48), Color::from_rgb8(r, g, b))
         } else {
-            (Color::TRANSPARENT, theme::rgba(pal.text_primary))
+            (theme::rgba(pal.bg), theme::rgba(pal.text_primary))
         };
-        let s = s
-            .min_width(0.0)
+        s.min_width(0.0)
             .flex_grow(1.0f32)
+            .flex_basis(0.0)
+            .flex_shrink(1.0f32)
+            .height(layout::MOVE_CHIP_HEIGHT)
+            .min_height(layout::MOVE_CHIP_HEIGHT)
+            .max_height(layout::MOVE_CHIP_HEIGHT)
             .padding_horiz(8.0)
-            .padding_vert(6.0)
+            .items_center()
             .border_radius(8.0)
             .border(0.0)
             .font_size(12.0)
@@ -1162,12 +1345,13 @@ fn ply_slot(state: AppState, handles: AppHandles, ply_index: usize) -> impl Into
             .text_ellipsis()
             .background(bg)
             .color(fg)
-            .hover(|s| s.background(theme::rgba(pal.panel)));
-        if ply_index < len {
-            s
-        } else {
-            s.display(Display::None)
-        }
+            .hover(|s| {
+                if occupied {
+                    s.background(theme::rgba(pal.panel))
+                } else {
+                    s
+                }
+            })
     })
 }
 
@@ -1233,14 +1417,16 @@ mod tests {
         let production = src.split("#[cfg(test)]").next().expect("source");
         for needle in [
             "actions::view_ply",
-            "san_annotated_moves",
+            "move_list_chip_labels",
             "pub fn study",
             "pub fn learn",
             "ply_slot",
             "MOVE_LIST_PAIRS",
+            "MOVE_CHIP_HEIGHT",
+            "flex_basis(0.0)",
+            "items_stretch()",
             "board::board_view",
             "display(Display::None)",
-            "eval_label",
             "annotation_tint",
             "resume_banner",
             "Resume event",
@@ -1270,6 +1456,11 @@ mod tests {
             "eval_bar::eval_bar",
             "live_board_grid",
             "LIVE_BOARD_SLOTS",
+            "tournament_live_card",
+            "remaining_games_label",
+            "tournament_progress_bar",
+            "tournament_stat_chip",
+            "phase_label",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

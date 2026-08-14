@@ -1178,6 +1178,37 @@ pub fn annotated_move_label(notation: &str, annotation: Option<MoveAnnotation>) 
     )
 }
 
+pub fn ply_chip_label(
+    notation: &str,
+    annotation: Option<MoveAnnotation>,
+    score_cp: Option<i32>,
+) -> String {
+    let mut label = annotated_move_label(notation, annotation);
+    if let Some(score) = score_cp {
+        label.push_str("  ");
+        label.push_str(&eval_label(score));
+    }
+    label
+}
+
+pub fn move_list_chip_labels(
+    initial_fen: &str,
+    moves: &[String],
+    annotations: &[Option<MoveAnnotation>],
+    scores: &[Option<i32>],
+) -> Vec<String> {
+    san_annotated_moves(initial_fen, moves, annotations)
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, label)| match scores.get(index).copied().flatten() {
+                Some(score) => format!("{label}  {}", eval_label(score)),
+                None => label,
+            },
+        )
+        .collect()
+}
+
 pub fn puzzle_line_matches(played: &[String], solution: &[String]) -> bool {
     played.len() == solution.len()
         && played
@@ -1776,6 +1807,27 @@ mod tests {
             ],
         );
         assert_eq!(labels, ["e4", "e5", "Nf3 B"]);
+        assert_eq!(
+            ply_chip_label(
+                "Nf3",
+                Some(mujrim_study::annotation::MoveAnnotation::Book),
+                Some(32)
+            ),
+            "Nf3 B  +0.32"
+        );
+        assert_eq!(
+            move_list_chip_labels(
+                mujrim_study::opening::START_FEN,
+                &["e2e4".into(), "e7e5".into(), "g1f3".into()],
+                &[
+                    Some(mujrim_study::annotation::MoveAnnotation::Book),
+                    None,
+                    Some(mujrim_study::annotation::MoveAnnotation::Brilliant),
+                ],
+                &[Some(20), None, Some(45)],
+            ),
+            ["e4 B  +0.20", "e5", "Nf3 !!  +0.45"]
+        );
         let mut after_e4 = board.clone();
         let mv = find_logged_move(&mut after_e4, "e2e4").unwrap();
         after_e4.make_move(mv);
