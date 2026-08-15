@@ -66,4 +66,6 @@ pub use adapter::{
     embedded_network_for_preset, enabled_network_formats, load_network, load_network_for_preset,
     nnue_search_directories,
 };
+#[cfg(feature = "ateed-nnue")]
+pub use ateed_format::{AteedEval, AteedNetwork, wdl_variance};
 pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, forward_with_network, net};

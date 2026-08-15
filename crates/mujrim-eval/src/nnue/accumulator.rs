@@ -351,6 +351,21 @@ impl NNUEState {
             .evaluate(board, net)
     }
 
+    /// Score plus a non-negative uncertainty proxy. Only Ateed fills WDL variance;
+    /// other evaluators return `0`.
+    pub fn evaluate_with_uncertainty(&mut self, board: &Board) -> (i32, i32) {
+        #[cfg(feature = "ateed-nnue")]
+        if let ActiveNetwork::ExternalAteed { network, .. } = self.source.as_ref() {
+            let eval = self
+                .ateed
+                .as_mut()
+                .expect("Ateed source has matching accumulator state")
+                .evaluate_full(board, network);
+            return (eval.score, super::ateed_format::wdl_variance(eval.wdl));
+        }
+        (self.evaluate(board), 0)
+    }
+
     /// Fully recompute the accumulators from a board position.
     pub fn reinit_from(&mut self, board: &Board) {
         match self.source.as_ref() {
@@ -520,6 +535,25 @@ mod tests {
         let mut state = NNUEState::with_network(Arc::new(ActiveNetwork::EmbeddedReckless));
         let score = state.evaluate(&Board::new());
         assert!(score.abs() < 500);
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    #[test]
+    fn ateed_evaluate_with_uncertainty_reports_wdl_variance() {
+        types::init();
+        let path = std::env::temp_dir().join("mujrim-ateed-uncertainty.bin");
+        std::fs::write(
+            &path,
+            super::super::ateed_format::AteedNetwork::zero().to_bytes(),
+        )
+        .unwrap();
+        let source = Arc::new(super::super::adapter::load_network(&path).expect("zero Ateed net"));
+        let _ = std::fs::remove_file(&path);
+        let mut state = NNUEState::with_network(source);
+        let (score, variance) = state.evaluate_with_uncertainty(&Board::new());
+        assert_eq!(score, 0);
+        assert!(variance >= 0);
+        assert_eq!(state.evaluate(&Board::new()), score);
     }
 
     #[cfg(feature = "reckless-nnue")]

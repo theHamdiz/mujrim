@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -514,7 +514,8 @@ pub fn download_network(
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    download_file(&client, network.url, &dest_path)?;
+    let expected_size = (network.id == "ateed_default").then_some(network.approx_size);
+    crate::download::download_resumable(&client, network.url, &dest_path, expected_size)?;
 
     // Record in manifest
     let file_size = fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
@@ -646,38 +647,6 @@ pub fn list_network_files(dir: &Path) -> Vec<(String, u64)> {
 // Internal helpers
 // ═══════════════════════════════════════════════════════════════════
 
-fn download_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<(), String> {
-    let mut response = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("Request failed for {url}: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("HTTP {} for {url}", response.status()));
-    }
-
-    // Write to a temp file first, then rename (atomic-ish)
-    let temp_path = dest.with_extension("tmp");
-    let mut file = fs::File::create(&temp_path).map_err(|e| format!("Create file: {e}"))?;
-
-    let mut buffer = vec![0u8; 65_536].into_boxed_slice();
-    loop {
-        let n = response
-            .read(&mut buffer)
-            .map_err(|e| format!("Read: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buffer[..n])
-            .map_err(|e| format!("Write: {e}"))?;
-    }
-
-    // Rename temp to final destination
-    fs::rename(&temp_path, dest).map_err(|e| format!("Rename {}: {e}", dest.display()))?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +723,10 @@ mod tests {
         assert_eq!(ateed.search_preset, "ateed");
         assert_eq!(ateed.filename, "ateed_default.bin");
         assert_eq!(ateed.approx_size, 17_327_452);
+        assert_eq!(
+            crate::download::validate_size(ateed.approx_size, Some(17_327_452)).ok(),
+            Some(())
+        );
         let lc0 = find_by_id("lc0_bt4").expect("lc0_bt4");
         assert_eq!(lc0.search_preset, "lc0");
         assert_eq!(lc0.filename, "lc0_bt4.pb.gz");

@@ -11,5 +11,6 @@
 //! mujrim train bench --net net.bin
 //! ```
 
+pub mod ateed;
 pub mod config;
 pub mod datagen;

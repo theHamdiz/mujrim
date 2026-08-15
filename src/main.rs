@@ -340,6 +340,22 @@ fn main() {
                 ),
         )
         .subcommand(
+            Command::new("train")
+                .about("NNUE training pipeline")
+                .subcommand(
+                    Command::new("emit-ateed")
+                        .about("Write a well-formed zero Ateed MoE network")
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("PATH")
+                                .default_value("ateed_default.bin")
+                                .help("Destination path for the Ateed payload"),
+                        ),
+                ),
+        )
+        .subcommand(
             Command::new("bench")
                 .about("Run ELO estimation benchmark suite")
                 .arg(
@@ -442,6 +458,32 @@ fn main() {
             let depth: u32 = sub.get_one::<String>("depth").unwrap().parse().unwrap_or(5);
             let fen = sub.get_one::<String>("fen").map(|s| s.as_str());
             commands::run_perft(depth, fen);
+        }
+        Some(("train", sub)) => {
+            #[cfg(feature = "trainer")]
+            match sub.subcommand() {
+                Some(("emit-ateed", emit)) => {
+                    let output = emit
+                        .get_one::<String>("output")
+                        .map_or("ateed_default.bin", String::as_str);
+                    if let Err(error) =
+                        trainer::ateed::emit_zero_network(std::path::Path::new(output))
+                    {
+                        eprintln!("failed to emit Ateed network: {error}");
+                        std::process::exit(1);
+                    }
+                    println!("wrote Ateed zero network to {output}");
+                }
+                _ => {
+                    eprintln!("usage: mujrim train emit-ateed [--output ateed_default.bin]");
+                    std::process::exit(2);
+                }
+            }
+            #[cfg(not(feature = "trainer"))]
+            {
+                let _ = sub;
+                eprintln!("training support disabled (compile with --features trainer)");
+            }
         }
         Some(("bench", sub)) => {
             let depth: i32 = sub

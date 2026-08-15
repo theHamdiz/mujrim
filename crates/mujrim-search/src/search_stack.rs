@@ -41,6 +41,10 @@ impl EvalMode {
         matches!(self, Self::Nnue(NnueSearchProfile::Viridithas))
     }
 
+    pub const fn is_ateed_nnue(self) -> bool {
+        matches!(self, Self::Nnue(NnueSearchProfile::Ateed))
+    }
+
     #[inline]
     pub const fn nnue_profile(self) -> Option<NnueSearchProfile> {
         match self {
@@ -513,6 +517,8 @@ mod tests {
         );
         let ateed = SearchStack::for_preset_name("ateed");
         assert_eq!(ateed.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Ateed));
+        assert!(ateed.eval_mode().is_ateed_nnue());
+        assert!(!ateed.eval_mode().is_reckless_nnue());
         assert_eq!(
             ateed.params.aspiration_window,
             SearchParams::reckless().aspiration_window

@@ -609,6 +609,30 @@ fn hybrid_eval(board: &Board, nnue_state: &mut NNUEState, use_nnue: bool) -> i32
     }
 }
 
+fn hybrid_eval_with_uncertainty(
+    board: &Board,
+    nnue_state: &mut NNUEState,
+    use_nnue: bool,
+) -> (i32, i32) {
+    if use_nnue {
+        nnue_state.evaluate_with_uncertainty(board)
+    } else {
+        (eval::evaluate(board), 0)
+    }
+}
+
+/// Widen Ateed pruning when WDL variance is high. `variance` is already ×10_000.
+fn ateed_uncertainty_margin(eval_mode: EvalMode, variance: i32) -> i32 {
+    if !eval_mode.is_ateed_nnue() || variance <= 0 {
+        return 0;
+    }
+    (variance / 200).clamp(0, 64)
+}
+
+fn ateed_lmr_relief(eval_mode: EvalMode, variance: i32) -> i32 {
+    i32::from(eval_mode.is_ateed_nnue() && variance >= 1_500)
+}
+
 #[inline(always)]
 fn reckless_material(board: &Board) -> i32 {
     board.total_material()
@@ -794,6 +818,8 @@ struct ThreadState {
     countermoves: Box<[[Move; 64]; 64]>,
     /// Unbounded corrected eval at each ply (for improving/history learning).
     static_evals: [i32; MAX_PLY],
+    /// Ateed WDL variance at each ply; zero for other evaluators.
+    eval_variance: [i32; MAX_PLY],
     /// Whether the corresponding static eval is meaningful outside check.
     eval_valid: [bool; MAX_PLY],
     /// NNUE evaluation state.
@@ -855,6 +881,7 @@ impl ThreadState {
             cap_hist: CaptureHistory::default(),
             countermoves,
             static_evals: [0; MAX_PLY],
+            eval_variance: [0; MAX_PLY],
             eval_valid: [false; MAX_PLY],
             nnue_state: NNUEState::with_network(nnue_network),
             pv: boxed_zeroed(),
@@ -918,6 +945,7 @@ impl ThreadState {
         self.seldepth = 0;
         self.killers = [[NULL_MOVE; 2]; MAX_PLY];
         self.static_evals.fill(0);
+        self.eval_variance.fill(0);
         self.eval_valid = [false; MAX_PLY];
         self.pv_len.fill(0);
         self.prev_move.fill(NULL_MOVE);
@@ -2170,10 +2198,18 @@ fn search_ab(
     // Checked nodes do not use a static evaluation. Skipping it also avoids an
     // unnecessary NNUE forward pass on tactical check chains.
     let (raw_eval, corrected_eval, corr) = if in_check {
+        state.eval_variance[ply_usize] = 0;
         (None, 0, 0)
     } else {
-        let raw_eval =
-            tt_raw_eval.unwrap_or_else(|| hybrid_eval(board, &mut state.nnue_state, use_nnue));
+        let (raw_eval, variance) = if eval_mode.is_ateed_nnue() {
+            hybrid_eval_with_uncertainty(board, &mut state.nnue_state, use_nnue)
+        } else {
+            (
+                tt_raw_eval.unwrap_or_else(|| hybrid_eval(board, &mut state.nnue_state, use_nnue)),
+                0,
+            )
+        };
+        state.eval_variance[ply_usize] = variance;
         let corr = state.correction(board, move_ordering);
         let corrected =
             corrected_network_eval(board, raw_eval, corr, state.optimism[us.index()], eval_mode);
@@ -2264,7 +2300,8 @@ fn search_ab(
             correction_abs: corr.abs(),
             tt_was_pv,
             own_pieces_threatened: threats & board.occupancy[us.index()] != 0,
-            stock_margin: params.rfp_margin(depth, improving),
+            stock_margin: params.rfp_margin(depth, improving)
+                + ateed_uncertainty_margin(eval_mode, state.eval_variance[ply_usize]),
         };
         if let Some(score) = rfp_policy.cutoff_score(static_eval, beta, &rfp_context) {
             return score;
@@ -2687,7 +2724,8 @@ fn search_ab(
                 && futility_policy.requires_direct_check()
                 && gives_direct_check(board, mv),
             stock_depth_limit: params.futility_depth_limit,
-            stock_margin: params.futility_margin(depth, improving),
+            stock_margin: params.futility_margin(depth, improving)
+                + ateed_uncertainty_margin(eval_mode, state.eval_variance[ply_usize]),
         };
         if let Some(decision) = futility_policy.decision(&futility_context) {
             if let Some(score_floor) = decision.score_floor {
@@ -2821,7 +2859,8 @@ fn search_ab(
                     lmr_cut_node_bonus: params.lmr_cut_node_bonus,
                     child_cutoffs: state.cutoffs[(ply_usize + 1).min(MAX_PLY - 1)],
                 };
-                reduction = lmr_policy.adjust_reduction(base, &lmr_ctx);
+                reduction = lmr_policy.adjust_reduction(base, &lmr_ctx)
+                    - ateed_lmr_relief(eval_mode, state.eval_variance[ply_usize]);
                 reduction = if effective_depth <= 1 {
                     0
                 } else if move_ordering == MoveOrderingProfile::Reckless {
@@ -3741,6 +3780,37 @@ mod tests {
 
     fn setup() {
         types::init();
+    }
+
+    #[test]
+    fn ateed_uncertainty_widens_margins_and_relieves_lmr() {
+        let ateed = EvalMode::Nnue(NnueSearchProfile::Ateed);
+        let reckless = EvalMode::Nnue(NnueSearchProfile::Reckless);
+        assert_eq!(ateed_uncertainty_margin(reckless, 2_000), 0);
+        assert_eq!(ateed_uncertainty_margin(ateed, 0), 0);
+        assert_eq!(ateed_uncertainty_margin(ateed, 2_000), 10);
+        assert_eq!(ateed_uncertainty_margin(ateed, 20_000), 64);
+        assert_eq!(ateed_lmr_relief(reckless, 2_000), 0);
+        assert_eq!(ateed_lmr_relief(ateed, 1_499), 0);
+        assert_eq!(ateed_lmr_relief(ateed, 1_500), 1);
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    #[test]
+    fn ateed_search_smoke_uses_uncertainty_eval() {
+        setup();
+        let path = std::env::temp_dir().join("mujrim-ateed-search-smoke.bin");
+        std::fs::write(&path, eval::nnue::AteedNetwork::zero().to_bytes()).unwrap();
+        let network = eval::nnue::load_network(&path).expect("zero Ateed net");
+        let _ = std::fs::remove_file(&path);
+        let mut engine = SearchEngine::new(4, 1);
+        engine.set_nnue_network(network);
+        engine.set_use_nnue(true);
+        assert!(engine.eval_mode().is_ateed_nnue());
+        let mut board = Board::new();
+        let result = engine.search_nodes(&mut board, 400, 3);
+        assert!(result.nodes > 0);
+        assert_ne!(result.best_move, NULL_MOVE);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Plays games between the engine and itself using NNUE eval,
 //! recording each position with its score and game outcome.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -55,7 +55,7 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     println!("{info}");
     println!();
 
-    let file = File::create(&config.output_path)?;
+    let file = open_datagen_output(&config.output_path)?;
     let mut writer = BufWriter::new(file);
 
     for _game_idx in 0..config.num_games {
@@ -96,6 +96,11 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     println!("Output: {}", config.output_path);
 
     Ok(total)
+}
+
+/// Append-only dataset writer so interrupted datagen can resume.
+pub fn open_datagen_output(path: &str) -> io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
 }
 
 /// Play a single self-play game, recording positions.
@@ -252,5 +257,23 @@ mod tests {
         let result = play_one_game(&config, &stopped);
         // Should complete without panicking
         assert!(result.is_some() || true);
+    }
+
+    #[test]
+    fn datagen_output_appends_instead_of_truncating() {
+        let path = std::env::temp_dir().join("mujrim-datagen-resume.txt");
+        let _ = std::fs::remove_file(&path);
+        let path_str = path.to_string_lossy().into_owned();
+        {
+            let mut first = open_datagen_output(&path_str).unwrap();
+            first.write_all(b"a|0|0.5\n").unwrap();
+        }
+        {
+            let mut second = open_datagen_output(&path_str).unwrap();
+            second.write_all(b"b|1|1.0\n").unwrap();
+        }
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(contents, "a|0|0.5\nb|1|1.0\n");
     }
 }

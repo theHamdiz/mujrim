@@ -13,6 +13,7 @@ Updated: 2026-08-15
 ## Current State
 - Multi-adapter in-process engine: Stockfish / Reckless / Akimbo / Viridithas / Obsidian / PlentyChess / Ateed / Mujrim HCE each bind eval + matching search via `EvalSearchAdapter`.
 - Ateed is the Phase 2 MoE NNUE (`ATEED001`, disk `ateed_default.bin`, adapter id `ateed`, product binary `mujrim-ateed`). Default eval remains Reckless/`auto`.
+- Phase 3: Ateed WDL variance widens futility/RFP and relieves LMR; NNUE downloads resume via HTTP Range; `mujrim train emit-ateed` writes a zero net.
 - Product surfaces: `--backend universal` (selectable), `--backend mujrim-hce` (classical HCE), `--backend v60`/`v10`/`akimbo` (packaged adapters), `--backend ateed` (in-process MoE), external upstream passthrough.
 - Do not use “native” as an engine/backend product name (`RuntimeCompatibility::Native` is host-ISA packaging only).
 - A structured AI-agent tool surface is implemented in `mujrim-tooling`.

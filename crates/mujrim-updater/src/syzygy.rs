@@ -5,8 +5,7 @@
 //!
 //! Default download path: `./syzygy/` relative to the engine working directory.
 
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Base URL for Syzygy downloads (Lichess mirror).
@@ -221,61 +220,7 @@ pub fn disk_usage(dir: &Path) -> u64 {
 }
 
 fn download_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<(), String> {
-    let part = dest.with_extension(format!(
-        "{}.part",
-        dest.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("download")
-    ));
-    let resume_at = part.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    let mut request = client.get(url);
-    if resume_at > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={resume_at}-"));
-    }
-    let mut response = request.send().map_err(|e| format!("Request failed: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
-    }
-
-    let resumed = resume_at > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-    let starting_size = if resumed { resume_at } else { 0 };
-    let expected_size = response
-        .content_length()
-        .map(|remaining| starting_size + remaining);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(resumed)
-        .truncate(!resumed)
-        .open(&part)
-        .map_err(|e| format!("Create partial file: {e}"))?;
-
-    let mut buffer = vec![0u8; 65_536].into_boxed_slice();
-    loop {
-        let n = response
-            .read(&mut buffer)
-            .map_err(|e| format!("Read: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buffer[..n])
-            .map_err(|e| format!("Write: {e}"))?;
-    }
-
-    file.flush().map_err(|e| format!("Flush: {e}"))?;
-    drop(file);
-    let actual_size = part.metadata().map_err(|e| format!("Metadata: {e}"))?.len();
-    if let Some(expected_size) = expected_size
-        && actual_size != expected_size
-    {
-        return Err(format!(
-            "incomplete download: {actual_size} of {expected_size} bytes"
-        ));
-    }
-    fs::rename(&part, dest).map_err(|e| format!("Finalize file: {e}"))?;
-
-    Ok(())
+    crate::download::download_resumable(client, url, dest, None)
 }
 
 fn remote_files(

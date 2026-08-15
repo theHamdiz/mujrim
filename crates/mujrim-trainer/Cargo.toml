@@ -6,7 +6,7 @@ description = "NNUE training pipeline for Mujrim — self-play datagen and bulle
 
 [features]
 default = ["nnue"]
-nnue = ["eval/nnue"]
+nnue = ["eval/nnue", "eval/ateed-nnue"]
 
 [dependencies]
 types = { package = "mujrim-types", path = "../mujrim-types" }
