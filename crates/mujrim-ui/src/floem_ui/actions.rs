@@ -1186,6 +1186,8 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     state.focused_live_key.set(None);
     state.announced_played_games.set(0);
     state.announced_tournament_over.set(false);
+    state.show_tournament_results.set(false);
+    state.tournament_ui_fingerprint.set(0);
     state.eval_bar_fen.set(String::new());
     let resumed = resume_id.as_ref().and_then(|id| {
         handles
@@ -1252,18 +1254,25 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     ));
     let snapshot = handle.clone();
     let persist_handles = handles.clone();
-    let on_done = create_ext_action(handles.ui_scope, move |summary| {
-        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            state
-                .tournament_status
-                .set(logic::format_tournament_summary(&summary));
-            if let Ok(guard) = snapshot.snapshot.lock() {
-                state.tournament_snapshot.set(guard.clone());
-                persist_tournament_progress(state, &persist_handles, &guard);
-                announce_tournament_outcomes(state, &persist_handles, &guard);
-            }
-        }));
-    });
+    let on_done = create_ext_action(
+        handles.ui_scope,
+        move |summary: mujrim_benchmarker::strength::TournamentSummary| {
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                state.tournament_status.set(if summary.cancelled {
+                    "Tournament stopped.".to_owned()
+                } else if let Some(error) = summary.error.as_ref() {
+                    error.clone()
+                } else {
+                    "Tournament finished.".to_owned()
+                });
+                if let Ok(guard) = snapshot.snapshot.lock() {
+                    state.tournament_snapshot.set(guard.clone());
+                    persist_tournament_progress(state, &persist_handles, &guard);
+                    announce_tournament_outcomes(state, &persist_handles, &guard);
+                }
+            }));
+        },
+    );
     if std::thread::Builder::new()
         .name("mujrim-tournament-ui".to_owned())
         .stack_size(8 * 1024 * 1024)
@@ -1309,9 +1318,20 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
                 Err(poisoned) => poisoned.into_inner(),
             };
             let running = guard.running;
+            let fingerprint = crate::app_core::tournament_live::ui_fingerprint(&guard);
+            if fingerprint == state.tournament_ui_fingerprint.get_untracked() {
+                return running;
+            }
+            state.tournament_ui_fingerprint.set(fingerprint);
             state.tournament_snapshot.set(guard.clone());
             state.tournament_status.set(guard.status_line.clone());
-            if match_controller::should_sync_tournament_board(state.screen.get_untracked()) {
+            let arena = layout::is_arena_mode(
+                state.tournament_setup.get_untracked().concurrency,
+                &guard.live_games,
+            );
+            if !arena
+                && match_controller::should_sync_tournament_board(state.screen.get_untracked())
+            {
                 sync_tournament_board(state, &handles, &guard);
             }
             persist_tournament_progress(state, &handles, &guard);
@@ -1695,6 +1715,7 @@ fn announce_tournament_outcomes(
         if snap.finished {
             play_sfx_kind(state, handles, SfxKind::TournamentOver);
         }
+        state.show_tournament_results.set(true);
     }
 }
 
@@ -1948,6 +1969,13 @@ pub fn apply_play_thinking_overlays(state: AppState, handles: &AppHandles) {
 }
 
 pub fn refresh_eval_bar(state: AppState, handles: &AppHandles) {
+    if layout::tournament_arena_layout(
+        state.screen.get_untracked(),
+        state.tournament_setup.get_untracked().concurrency,
+        &state.tournament_snapshot.get_untracked().live_games,
+    ) {
+        return;
+    }
     let fen = current_eval_fen(state);
     if fen.is_empty() || fen == state.eval_bar_fen.get_untracked() {
         return;
@@ -2236,6 +2264,9 @@ mod tests {
             "SfxKind::TournamentOver",
             "delete_historical_tournament",
             "announce_tournament_outcomes",
+            "show_tournament_results",
+            "ui_fingerprint",
+            "Tournament finished.",
             "optimistic_live_board",
             "request_pause",
             "request_abort_game",

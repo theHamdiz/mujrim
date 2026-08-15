@@ -1692,17 +1692,11 @@ impl App {
                     self.live_tournament_view.finished = true;
                     self.persist_tournament_summary(&summary);
                     self.tournament_status = if summary.cancelled {
-                        format!(
-                            "Tournament cancelled. {}",
-                            format_tournament_summary(&summary)
-                        )
+                        "Tournament stopped.".to_owned()
                     } else if let Some(error) = &summary.error {
-                        format!("Tournament finished with notes: {error}")
+                        error.clone()
                     } else {
-                        format!(
-                            "Tournament complete. {}",
-                            format_tournament_summary(&summary)
-                        )
+                        "Tournament finished.".to_owned()
                     };
                     self.live_tournament_view.status_line = self.tournament_status.clone();
                     let names = summary
@@ -1710,14 +1704,14 @@ impl App {
                         .iter()
                         .map(|engine| engine.engine.name.clone())
                         .collect::<Vec<_>>();
-                    self.live_tournament_view.standings =
-                        tournament_live::standing_rows(&names, &summary.standings);
+                    self.live_tournament_view.engine_names = names;
                     self.live_tournament_view.game_results = summary.game_results.clone();
                     let games = mujrim_benchmarker::strength::games_from_summary(&summary);
                     if self.live_tournament_view.played_games.len() < games.len() {
                         self.live_tournament_view.played_games.clear();
                         self.live_tournament_view.append_games(games);
                     }
+                    self.live_tournament_view.refresh_standings();
                     self.refresh_tournament_history();
                 }));
                 if finished.is_err() {
@@ -6608,10 +6602,7 @@ fn run_quick_tournament_body(
                         moves,
                     } => {
                         guard.finish_live_game(&game_key, white_score, moves);
-                        guard.standings = tournament_live::standings_from_played(
-                            &guard.engine_names,
-                            &guard.played_games,
-                        );
+                        guard.refresh_standings();
                     }
                     TournamentEvent::MatchFinished {
                         index,
@@ -6622,7 +6613,7 @@ fn run_quick_tournament_body(
                         white_points,
                         black_points,
                         error,
-                        standings,
+                        standings: _,
                         game_results,
                         games,
                     } => {
@@ -6639,8 +6630,6 @@ fn run_quick_tournament_body(
                                 black_points,
                                 error: error.clone(),
                             });
-                        guard.standings =
-                            tournament_live::standing_rows(&guard.engine_names, &standings);
                         guard.game_results = game_results;
                         let already_live = guard
                             .played_games
@@ -6649,6 +6638,7 @@ fn run_quick_tournament_body(
                         if !already_live {
                             guard.append_games(games);
                         }
+                        guard.refresh_standings();
                         guard.current_white.clear();
                         guard.current_black.clear();
                         guard.status_line = if let Some(error) = error {
@@ -6662,15 +6652,14 @@ fn run_quick_tournament_body(
                         };
                     }
                     TournamentEvent::Cancelled {
-                        standings,
+                        standings: _,
                         game_results,
                     } => {
                         guard.cancelled = true;
                         guard.running = false;
                         guard.paused = false;
-                        guard.standings =
-                            tournament_live::standing_rows(&guard.engine_names, &standings);
                         guard.game_results = game_results;
+                        guard.refresh_standings();
                         guard.status_line =
                             "Tournament cancelled. Partial standings are available.".to_owned();
                     }
@@ -6708,14 +6697,14 @@ fn run_quick_tournament_body(
             .iter()
             .map(|engine| engine.engine.name.clone())
             .collect::<Vec<_>>();
-        guard.engine_names = names.clone();
-        guard.standings = tournament_live::standing_rows(&names, &summary.standings);
+        guard.engine_names = names;
         guard.game_results = summary.game_results.clone();
         let games = mujrim_benchmarker::strength::games_from_summary(&summary);
         if guard.played_games.len() < games.len() {
             guard.played_games.clear();
             guard.append_games(games);
         }
+        guard.refresh_standings();
     }
     summary
 }

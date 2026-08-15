@@ -74,7 +74,9 @@ fn app_view(window_id: WindowId) -> impl IntoView {
         .style(move |s| overlay_host_style(s, state.show_options.get()));
     let tournament = modals::tournament_setup_modal(state, handles)
         .style(move |s| overlay_host_style(s, state.show_tournament_setup.get()));
-    Stack::new((shell.style(|s| s.size_full()), options, tournament))
+    let results = modals::tournament_results_modal(state)
+        .style(move |s| overlay_host_style(s, state.show_tournament_results.get()));
+    Stack::new((shell.style(|s| s.size_full()), options, tournament, results))
         .style(|s| {
             s.size_full()
                 .min_width(0.0)
@@ -162,6 +164,10 @@ mod tests {
         assert!(
             production.contains("overlay_host_style"),
             "Options and tournament setup must share a window-sized overlay host"
+        );
+        assert!(
+            production.contains("show_tournament_results"),
+            "finished tournaments must mount the results overlay"
         );
         assert!(
             production.contains("Display::None"),

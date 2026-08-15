@@ -87,6 +87,17 @@ impl StandingRow {
         }
     }
 
+    pub fn score_line(&self) -> String {
+        format!(
+            "Elo {} · {:.1} pts  ({}-{}-{})",
+            self.elo_label(),
+            self.points,
+            self.wins,
+            self.draws,
+            self.losses
+        )
+    }
+
     pub const fn podium(&self) -> Option<PodiumTier> {
         PodiumTier::from_rank(self.rank)
     }
@@ -278,6 +289,10 @@ impl LiveTournamentSnapshot {
             let id = self.played_games.len();
             self.played_games.push(PlayedGame::from_snapshot(id, game));
         }
+    }
+
+    pub fn refresh_standings(&mut self) {
+        self.standings = standings_from_played(&self.engine_names, &self.played_games);
     }
 
     pub fn game(&self, id: usize) -> Option<&PlayedGame> {
@@ -478,6 +493,78 @@ impl LiveTournamentHandle {
     }
 }
 
+pub fn ui_fingerprint(snap: &LiveTournamentSnapshot) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snap.running.hash(&mut hasher);
+    snap.finished.hash(&mut hasher);
+    snap.paused.hash(&mut hasher);
+    snap.cancelled.hash(&mut hasher);
+    snap.completed_matches.hash(&mut hasher);
+    snap.played_games.len().hash(&mut hasher);
+    snap.status_line.hash(&mut hasher);
+    for game in &snap.live_games {
+        game.game_key.hash(&mut hasher);
+        game.moves.len().hash(&mut hasher);
+        game.last_uci.hash(&mut hasher);
+        game.score_cp.hash(&mut hasher);
+        game.white_clock_ms.hash(&mut hasher);
+        game.black_clock_ms.hash(&mut hasher);
+    }
+    for row in &snap.standings {
+        row.points.to_bits().hash(&mut hasher);
+        row.wins.hash(&mut hasher);
+        row.performance
+            .map(f64::to_bits)
+            .unwrap_or(0)
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Opponents that beat `engine`, with how many games they won against it.
+pub fn engines_lost_to(engine: &str, games: &[PlayedGame]) -> Vec<(String, usize)> {
+    let mut counts = Vec::new();
+    for game in games {
+        let opponent = if game.white == engine && game.white_score <= 0.25 {
+            Some(game.black.as_str())
+        } else if game.black == engine && game.white_score >= 0.75 {
+            Some(game.white.as_str())
+        } else {
+            None
+        };
+        let Some(opponent) = opponent else {
+            continue;
+        };
+        if let Some((_, count)) = counts.iter_mut().find(|(name, _)| name == opponent) {
+            *count += 1;
+        } else {
+            counts.push((opponent.to_owned(), 1));
+        }
+    }
+    counts.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    counts
+}
+
+pub fn losses_to_label(engine: &str, games: &[PlayedGame]) -> String {
+    let lost = engines_lost_to(engine, games);
+    if lost.is_empty() {
+        return "Undefeated".to_owned();
+    }
+    let detail = lost
+        .iter()
+        .map(|(name, count)| {
+            if *count > 1 {
+                format!("{name} ×{count}")
+            } else {
+                name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Lost to {detail}")
+}
+
 pub fn standings_from_played(engine_names: &[String], games: &[PlayedGame]) -> Vec<StandingRow> {
     use mujrim_study::rating::published_reference_elo;
     use mujrim_study::tournament::{Entrant, Pairing, TournamentResult, standings};
@@ -633,6 +720,27 @@ mod tests {
             "live standings must show Elo"
         );
         assert_ne!(rows[0].elo_label(), "—");
+        assert!(rows[0].score_line().starts_with("Elo "));
+        assert!(rows[0].score_line().contains("pts"));
+        let loss = PlayedGame {
+            id: 1,
+            match_index: 1,
+            round: 1,
+            white: "Alpha".into(),
+            black: "Beta".into(),
+            white_score: 0.0,
+            initial_fen: String::new(),
+            moves: Vec::new(),
+        };
+        assert_eq!(
+            engines_lost_to("Alpha", std::slice::from_ref(&loss)),
+            vec![("Beta".to_owned(), 1)]
+        );
+        assert_eq!(losses_to_label("Beta", &[loss]), "Undefeated");
+        let mut snap = LiveTournamentSnapshot::default();
+        let first = ui_fingerprint(&snap);
+        snap.completed_matches = 1;
+        assert_ne!(ui_fingerprint(&snap), first);
         assert_eq!(PodiumTier::from_rank(1), Some(PodiumTier::Gold));
         assert_eq!(PodiumTier::from_rank(2), Some(PodiumTier::Silver));
         assert_eq!(PodiumTier::from_rank(3), Some(PodiumTier::Bronze));

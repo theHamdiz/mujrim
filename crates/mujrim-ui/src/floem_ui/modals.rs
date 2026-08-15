@@ -6,6 +6,7 @@ use updater::syzygy::SyzygyPieceSet;
 
 use crate::app_core::arrows::{ArrowColor, ArrowShape, ArrowSize};
 use crate::app_core::audio::{GameMood, SoundTheme};
+use crate::app_core::layout;
 use crate::app_core::motion::AnimPace;
 use crate::app_core::palette::BoardTheme;
 use crate::app_core::pieces::PieceSet;
@@ -743,6 +744,127 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
     )
 }
 
+pub fn tournament_results_modal(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    widgets::overlay_frame(
+        state,
+        move || state.show_tournament_results.set(false),
+        Stack::vertical((
+            widgets::curious_title("Tournament results", 30.0),
+            Label::derived(move || {
+                let snap = state.tournament_snapshot.get();
+                let games = snap.played_games.len();
+                let phase = snap.phase_label();
+                format!("{phase} · {games} games · field Elo from every finished pairing")
+            })
+            .style(move |s| {
+                s.font_size(13.0)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_secondary))
+            }),
+            (0..layout::STANDING_SLOTS)
+                .map(|index| results_rank_card(state, index))
+                .collect::<Vec<_>>()
+                .into_view()
+                .style(|s| s.width_full().flex_col().row_gap(10.0).min_width(0.0)),
+            widgets::primary_button(state, "Close", move || {
+                state.show_tournament_results.set(false);
+            }),
+        ))
+        .style(|s| s.width_full().row_gap(16.0).min_width(0.0)),
+    )
+}
+
+fn results_rank_card(state: AppState, index: usize) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    let row = move || {
+        state
+            .tournament_snapshot
+            .get()
+            .standings
+            .get(index)
+            .cloned()
+    };
+    Stack::vertical((
+        Stack::horizontal((
+            Label::derived(move || {
+                row()
+                    .map(|row| format!("#{}", row.rank))
+                    .unwrap_or_default()
+            })
+            .style(move |s| {
+                let (tr, tg, tb) = row()
+                    .and_then(|row| row.podium())
+                    .map(crate::app_core::tournament_live::PodiumTier::rgb)
+                    .unwrap_or((160, 160, 168));
+                s.font_size(18.0)
+                    .font_bold()
+                    .width(44.0)
+                    .color(Color::from_rgb8(tr, tg, tb))
+            }),
+            Stack::vertical((
+                Label::derived(move || row().map(|row| row.name).unwrap_or_default()).style(
+                    move |s| {
+                        s.font_size(16.0)
+                            .font_bold()
+                            .min_width(0.0)
+                            .width_full()
+                            .text_ellipsis()
+                            .color(theme::rgba(pal().text_primary))
+                    },
+                ),
+                Label::derived(move || row().map(|row| row.score_line()).unwrap_or_default())
+                    .style(move |s| {
+                        s.font_size(12.0)
+                            .min_width(0.0)
+                            .width_full()
+                            .text_wrap()
+                            .color(theme::rgba(pal().text_secondary))
+                    }),
+            ))
+            .style(|s| s.flex_grow(1.0f32).min_width(0.0).row_gap(2.0)),
+        ))
+        .style(|s| s.width_full().col_gap(10.0).items_center().min_width(0.0)),
+        Label::derived(move || {
+            let snap = state.tournament_snapshot.get();
+            snap.standings
+                .get(index)
+                .map(|row| {
+                    crate::app_core::tournament_live::losses_to_label(&row.name, &snap.played_games)
+                })
+                .unwrap_or_default()
+        })
+        .style(move |s| {
+            s.font_size(13.0)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(pal().accent_alt))
+        }),
+    ))
+    .style(move |s| {
+        let Some(row) = row() else {
+            return s.display(Display::None);
+        };
+        let s = s
+            .width_full()
+            .row_gap(6.0)
+            .padding(14.0)
+            .border_radius(14.0)
+            .border(1.0)
+            .border_color(theme::rgba(pal().border))
+            .min_width(0.0);
+        if let Some(podium) = row.podium() {
+            let (tr, tg, tb) = podium.rgb();
+            s.background(Color::from_rgba8(tr, tg, tb, 32))
+        } else {
+            s.background(theme::rgba(pal().bg))
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -763,6 +885,10 @@ mod tests {
             "Threat highlights",
             "Eval-bar engine",
             "Simultaneous games",
+            "tournament_results_modal",
+            "results_rank_card",
+            "losses_to_label",
+            "field Elo from every finished pairing",
             "OptionsTab::Display",
             "OptionsTab::Motion",
             "OptionsTab::Arrows",

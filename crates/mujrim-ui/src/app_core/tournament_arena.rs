@@ -5,7 +5,13 @@ use super::tournament_live::{LiveGameBoard, PlayedGame};
 /// Cap concurrent live boards shown in the arena grid.
 pub fn visible_live_boards(live: &[LiveGameBoard], concurrency: usize) -> Vec<LiveGameBoard> {
     let limit = concurrency.clamp(1, 16);
-    live.iter().rev().take(limit).cloned().rev().collect()
+    let boards: Vec<LiveGameBoard> = live
+        .iter()
+        .filter(|game| !game.is_placeholder())
+        .cloned()
+        .collect();
+    let start = boards.len().saturating_sub(limit);
+    boards[start..].to_vec()
 }
 
 pub fn finished_strip(games: &[PlayedGame], limit: usize) -> Vec<PlayedGame> {
@@ -44,5 +50,22 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].game_key, "g4");
         assert_eq!(visible[1].game_key, "g5");
+    }
+
+    #[test]
+    fn visible_live_boards_skips_placeholders() {
+        let boards = vec![
+            LiveGameBoard {
+                game_key: "pending-0".into(),
+                ..LiveGameBoard::default()
+            },
+            LiveGameBoard {
+                game_key: "g1".into(),
+                ..LiveGameBoard::default()
+            },
+        ];
+        let visible = visible_live_boards(&boards, 8);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].game_key, "g1");
     }
 }

@@ -919,10 +919,7 @@ fn run_quick_tournament_body(
                         moves,
                     } => {
                         guard.finish_live_game(&game_key, white_score, moves);
-                        guard.standings = tournament_live::standings_from_played(
-                            &guard.engine_names,
-                            &guard.played_games,
-                        );
+                        guard.refresh_standings();
                     }
                     TournamentEvent::MatchFinished {
                         index,
@@ -933,7 +930,7 @@ fn run_quick_tournament_body(
                         white_points,
                         black_points,
                         error,
-                        standings,
+                        standings: _,
                         game_results,
                         games,
                     } => {
@@ -950,8 +947,6 @@ fn run_quick_tournament_body(
                                 black_points,
                                 error: error.clone(),
                             });
-                        guard.standings =
-                            tournament_live::standing_rows(&guard.engine_names, &standings);
                         guard.game_results = game_results;
                         let already_live = guard
                             .played_games
@@ -960,6 +955,7 @@ fn run_quick_tournament_body(
                         if !already_live {
                             guard.append_games(games);
                         }
+                        guard.refresh_standings();
                         guard.current_white.clear();
                         guard.current_black.clear();
                         guard.status_line = if let Some(error) = error {
@@ -973,15 +969,14 @@ fn run_quick_tournament_body(
                         };
                     }
                     TournamentEvent::Cancelled {
-                        standings,
+                        standings: _,
                         game_results,
                     } => {
                         guard.cancelled = true;
                         guard.running = false;
                         guard.paused = false;
-                        guard.standings =
-                            tournament_live::standing_rows(&guard.engine_names, &standings);
                         guard.game_results = game_results;
+                        guard.refresh_standings();
                         guard.status_line =
                             "Tournament cancelled. Partial standings are available.".to_owned();
                     }
@@ -1019,14 +1014,14 @@ fn run_quick_tournament_body(
             .iter()
             .map(|engine| engine.engine.name.clone())
             .collect::<Vec<_>>();
-        guard.engine_names = names.clone();
-        guard.standings = tournament_live::standing_rows(&names, &summary.standings);
+        guard.engine_names = names;
         guard.game_results = summary.game_results.clone();
         let games = mujrim_benchmarker::strength::games_from_summary(&summary);
         if guard.played_games.len() < games.len() {
             guard.played_games.clear();
             guard.append_games(games);
         }
+        guard.refresh_standings();
     }
     summary
 }
@@ -1552,6 +1547,31 @@ mod tests {
         assert_eq!(
             names,
             ["round-robin", "double-round-robin", "swiss", "knockout"]
+        );
+    }
+
+    #[test]
+    fn live_tournament_standings_stay_on_played_games() {
+        let src = include_str!("logic.rs");
+        let body = src
+            .split("fn run_quick_tournament_body")
+            .nth(1)
+            .expect("tournament body");
+        assert!(body.contains("refresh_standings"));
+        let match_finished = body
+            .split("TournamentEvent::MatchFinished")
+            .nth(1)
+            .expect("match finished")
+            .split("TournamentEvent::Cancelled")
+            .next()
+            .expect("cancelled follows match");
+        assert!(
+            match_finished.contains("refresh_standings"),
+            "match completion must keep the same field Elo as live games"
+        );
+        assert!(
+            !match_finished.contains("standing_rows"),
+            "match completion must not swap in a second Elo scale"
         );
     }
 

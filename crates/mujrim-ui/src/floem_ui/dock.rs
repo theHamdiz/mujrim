@@ -149,12 +149,32 @@ fn finish_dock_drag(state: AppState, dragging: RwSignal<bool>) {
     state.persist_settings();
 }
 
+fn arena_layout(state: AppState) -> bool {
+    layout::tournament_arena_layout(
+        state.screen.get(),
+        state.tournament_setup.get().concurrency,
+        &state.tournament_snapshot.get().live_games,
+    )
+}
+
 fn tab_bar(state: AppState) -> impl IntoView {
     Stack::horizontal((
         Stack::horizontal((
             dock_tab(state, DockTab::Results, "Results"),
-            dock_tab(state, DockTab::Histogram, "Histogram"),
-            dock_tab(state, DockTab::EngineLog, "Engine"),
+            dock_tab(state, DockTab::Histogram, "Histogram").style(move |s| {
+                if arena_layout(state) {
+                    s.display(Display::None)
+                } else {
+                    s
+                }
+            }),
+            dock_tab(state, DockTab::EngineLog, "Engine").style(move |s| {
+                if arena_layout(state) {
+                    s.display(Display::None)
+                } else {
+                    s
+                }
+            }),
         ))
         .style(|s| s.col_gap(4.0).items_center()),
         Button::new(Label::derived(move || {
@@ -230,7 +250,12 @@ fn dock_body(state: AppState, handles: AppHandles) -> impl IntoView {
 }
 
 fn dock_tab_host(style: floem::style::Style, state: AppState, tab: DockTab) -> floem::style::Style {
-    if state.dock_tab.get() == tab {
+    let show = if arena_layout(state) {
+        tab == DockTab::Results
+    } else {
+        state.dock_tab.get() == tab
+    };
+    if show {
         style.size_full().min_height(0.0)
     } else {
         style.display(Display::None)
@@ -240,10 +265,23 @@ fn dock_tab_host(style: floem::style::Style, state: AppState, tab: DockTab) -> f
 fn results_pane(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
-        widgets::results_export_bar(state, handles),
+        widgets::results_export_bar(state, handles).style(move |s| {
+            if arena_layout(state) {
+                s.display(Display::None)
+            } else {
+                s
+            }
+        }),
         Stack::horizontal((
-            widgets::standing_rows_list(state, "Standings appear as matches finish.")
-                .style(|s| s.width_pct(42.0).min_width(0.0).min_height(0.0)),
+            widgets::standing_rows_list(state, "Standings appear as matches finish.").style(
+                move |s| {
+                    if arena_layout(state) {
+                        s.width_pct(100.0).min_width(0.0).min_height(0.0)
+                    } else {
+                        s.width_pct(42.0).min_width(0.0).min_height(0.0)
+                    }
+                },
+            ),
             widgets::filling_scroll(
                 (0..12)
                     .map(|index| played_game_slot(state, index, pal))
@@ -251,7 +289,13 @@ fn results_pane(state: AppState, handles: AppHandles) -> impl IntoView {
                     .into_view()
                     .style(|s| s.width_full().flex_col().row_gap(2.0).min_width(0.0)),
             )
-            .style(|s| s.width_pct(58.0).min_width(0.0).min_height(0.0)),
+            .style(move |s| {
+                if arena_layout(state) {
+                    s.display(Display::None)
+                } else {
+                    s.width_pct(58.0).min_width(0.0).min_height(0.0)
+                }
+            }),
         ))
         .style(|s| s.size_full().col_gap(16.0).min_height(0.0)),
     ))
@@ -405,5 +449,11 @@ mod tests {
         assert!(production.contains("dock_resize_window_height"));
         assert!(production.contains("LostPointerCapture"));
         assert!(production.contains("#{}"));
+        assert!(production.contains("arena_layout"));
+        assert!(production.contains("tournament_arena_layout"));
+        assert!(
+            production.contains("tab == DockTab::Results"),
+            "arena dock must stay on rankings"
+        );
     }
 }

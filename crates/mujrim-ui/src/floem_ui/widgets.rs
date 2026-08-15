@@ -625,28 +625,15 @@ fn standing_row_slot(state: AppState, index: usize) -> impl IntoView {
             }),
         ))
         .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0)),
-        Label::derived(move || {
-            let Some(row) = row() else {
-                return String::new();
-            };
-            match row.performance {
-                Some(elo) => format!(
-                    "{elo:.0} Elo · {:.1}  ({}-{}-{})",
-                    row.points, row.wins, row.draws, row.losses
-                ),
-                None => format!(
-                    "{:.1}  ({}-{}-{})",
-                    row.points, row.wins, row.draws, row.losses
-                ),
-            }
-        })
-        .style(move |s| {
-            s.font_size(theme::TYPE_CAPTION)
-                .min_width(0.0)
-                .width_full()
-                .text_wrap()
-                .color(theme::rgba(pal().text_secondary))
-        }),
+        Label::derived(move || row().map(|row| row.score_line()).unwrap_or_default()).style(
+            move |s| {
+                s.font_size(theme::TYPE_CAPTION)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(pal().text_secondary))
+            },
+        ),
     ))
     .style(move |s| {
         let Some(row) = row() else {
@@ -701,6 +688,10 @@ mod tests {
         assert!(
             production.contains("standing_rows_list"),
             "podium standings widget must be shared"
+        );
+        assert!(
+            production.contains("score_line"),
+            "standings must show one tournament Elo line"
         );
         assert!(
             production.contains("text_wrap()"),

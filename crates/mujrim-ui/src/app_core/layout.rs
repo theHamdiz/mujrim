@@ -1,5 +1,6 @@
 //! Shared desktop layout metrics for the Floem (and future) workspaces.
 
+use super::settings::Screen;
 use super::tournament_live::{LiveGameBoard, PlayedGame, format_clock_ms};
 
 pub const BOARD_PANE_PCT: f64 = 76.0;
@@ -155,6 +156,28 @@ pub fn next_dock_state(current: DockTab, open: bool, clicked: DockTab) -> (DockT
 
 pub fn focused_live_game(live: &[LiveGameBoard]) -> Option<&LiveGameBoard> {
     live.last()
+}
+
+/// Concurrent tournament: hide the single-board sidebar and show every live game.
+pub fn is_arena_mode(concurrency: u32, live: &[LiveGameBoard]) -> bool {
+    concurrency > 1 || live.iter().filter(|game| !game.is_placeholder()).count() > 1
+}
+
+pub fn tournament_arena_layout(screen: Screen, concurrency: u32, live: &[LiveGameBoard]) -> bool {
+    matches!(screen, Screen::Tournaments) && is_arena_mode(concurrency, live)
+}
+
+pub fn live_white_to_move(game: &LiveGameBoard) -> bool {
+    let starts_white = game
+        .initial_fen
+        .split_whitespace()
+        .nth(1)
+        .is_none_or(|side| side != "b");
+    if game.moves.len().is_multiple_of(2) {
+        starts_white
+    } else {
+        !starts_white
+    }
 }
 
 pub fn select_live_game<'a>(
@@ -489,6 +512,23 @@ mod tests {
             "g2"
         );
         assert_eq!(select_live_game(&mixed, None).expect("real").game_key, "g2");
+    }
+
+    #[test]
+    fn arena_mode_is_on_for_concurrent_or_multiple_live_boards() {
+        assert!(!is_arena_mode(1, &[]));
+        assert!(is_arena_mode(15, &[]));
+        let two = vec![board("g0", None, None), board("g1", None, None)];
+        assert!(is_arena_mode(1, &two));
+        let pending = vec![board("pending-0", None, None), board("g0", None, None)];
+        assert!(!is_arena_mode(1, &pending));
+        assert!(!tournament_arena_layout(Screen::Playing, 15, &[]));
+        assert!(tournament_arena_layout(Screen::Tournaments, 15, &[]));
+        let mut start = board("g0", None, None);
+        start.initial_fen = mujrim_study::opening::START_FEN.to_owned();
+        assert!(live_white_to_move(&start));
+        start.moves.push("e2e4".into());
+        assert!(!live_white_to_move(&start));
     }
 
     #[test]

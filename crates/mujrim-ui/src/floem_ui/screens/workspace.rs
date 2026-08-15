@@ -105,6 +105,13 @@ fn workspace(
                 pane_width,
             ),
             sidebar.style(move |s| {
+                if arena_layout(state) {
+                    return s
+                        .display(Display::None)
+                        .width(0.0)
+                        .min_width(0.0)
+                        .max_width(0.0);
+                }
                 let width = layout::clamp_sidebar_width(
                     state.settings.get().sidebar_width_px,
                     pane_width.get(),
@@ -149,6 +156,14 @@ fn workspace(
             .overflow_x(Overflow::Clip)
             .overflow_y(Overflow::Clip)
     })
+}
+
+fn arena_layout(state: AppState) -> bool {
+    layout::tournament_arena_layout(
+        state.screen.get(),
+        state.tournament_setup.get().concurrency,
+        &state.tournament_snapshot.get().live_games,
+    )
 }
 
 fn split_handle(
@@ -222,6 +237,13 @@ fn split_handle(
                 state.persist_settings();
             }
         })
+        .style(move |s| {
+            if arena_layout(state) {
+                s.display(Display::None).width(0.0)
+            } else {
+                s
+            }
+        })
 }
 
 fn window_pointer_x(cx: &floem::event::EventCx, local: floem::kurbo::Point) -> f64 {
@@ -240,10 +262,16 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
     Stack::vertical((
         chrome::screen_tools(state, handles.clone())
             .style(|s| s.width_full().padding_bottom(6.0).min_width(0.0)),
-        clocks,
+        clocks.style(move |s| {
+            if arena_layout(state) {
+                s.display(Display::None).height(0.0)
+            } else {
+                s
+            }
+        }),
         Stack::horizontal((
             eval_bar::eval_bar(state).style(move |s| {
-                if state.game.get().is_none() {
+                if arena_layout(state) || state.game.get().is_none() {
                     s.display(Display::None)
                 } else {
                     s
@@ -253,7 +281,7 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
                 board::board_view(state, handles.clone())
                     .style(|s| s.size_full().min_width(0.0).min_height(0.0)),
                 empty_board(state, handles.clone(), show_clocks).style(move |s| {
-                    if state.game.get().is_some() {
+                    if arena_layout(state) || state.game.get().is_some() {
                         s.display(Display::None)
                     } else {
                         s.size_full()
@@ -267,14 +295,20 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
                     .min_height(0.0)
             }),
         ))
-        .style(|s| {
-            s.size_full()
+        .style(move |s| {
+            let s = s
+                .size_full()
                 .flex_grow(1.0f32)
                 .min_width(0.0)
                 .min_height(0.0)
-                .col_gap(8.0)
+                .col_gap(8.0);
+            if arena_layout(state) {
+                s.display(Display::None).flex_grow(0.0f32).height(0.0)
+            } else {
+                s
+            }
         }),
-        live_board_grid(state),
+        live_board_grid(state, handles),
         Label::derived(move || state.status.get()).style(move |s| {
             s.font_size(11.0)
                 .padding_top(4.0)
@@ -355,9 +389,9 @@ fn empty_board(state: AppState, handles: AppHandles, tournament_board: bool) -> 
     })
 }
 
-fn live_board_grid(state: AppState) -> impl IntoView {
+fn live_board_grid(state: AppState, handles: AppHandles) -> impl IntoView {
     let slots = (0..layout::LIVE_BOARD_SLOTS)
-        .map(|index| live_board_slot(state, index))
+        .map(|index| live_board_slot(state, handles.clone(), index))
         .collect::<Vec<_>>();
     Stack::vertical((
         Label::new("Live boards").style(move |s| {
@@ -369,24 +403,29 @@ fn live_board_grid(state: AppState) -> impl IntoView {
             s.width_full()
                 .flex_row()
                 .flex_wrap(FlexWrap::Wrap)
-                .col_gap(8.0)
-                .row_gap(8.0)
+                .col_gap(10.0)
+                .row_gap(10.0)
+                .flex_grow(1.0f32)
+                .min_height(0.0)
         }),
     ))
     .style(move |s| {
-        let snap = state.tournament_snapshot.get();
-        let concurrency = state.tournament_setup.get().concurrency.max(1) as usize;
-        let count = tournament_arena::visible_live_boards(&snap.live_games, concurrency).len();
-        let s = s.width_full().padding_top(8.0).row_gap(6.0).min_width(0.0);
-        if count <= 1 {
-            s.display(Display::None)
-        } else {
+        let s = s
+            .width_full()
+            .flex_grow(1.0f32)
+            .min_width(0.0)
+            .min_height(0.0)
+            .row_gap(8.0)
+            .overflow_y(Overflow::Scroll);
+        if arena_layout(state) {
             s
+        } else {
+            s.display(Display::None).flex_grow(0.0f32).height(0.0)
         }
     })
 }
 
-fn live_board_slot(state: AppState, index: usize) -> impl IntoView {
+fn live_board_slot(state: AppState, handles: AppHandles, index: usize) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let board = move || {
         let snap = state.tournament_snapshot.get();
@@ -401,21 +440,36 @@ fn live_board_slot(state: AppState, index: usize) -> impl IntoView {
                 .map(|game| format!("{} vs {}", game.white, game.black))
                 .unwrap_or_default()
         })
-        .style(|s| s.font_size(11.0).font_bold().min_width(0.0).text_ellipsis()),
+        .style(|s| s.font_size(12.0).font_bold().min_width(0.0).text_ellipsis()),
+        Label::derived(move || {
+            let Some(game) = board() else {
+                return String::new();
+            };
+            let snap = state.tournament_snapshot.get();
+            let (white, black) = layout::live_clock_faces_at(
+                Some(&game),
+                None,
+                None,
+                layout::live_white_to_move(&game),
+                Some(state.clock_now_ms.get()),
+                snap.paused,
+            );
+            format!("{}  ·  {}", white.display, black.display)
+        })
+        .style(move |s| {
+            s.font_size(11.0)
+                .min_width(0.0)
+                .color(theme::rgba(pal().text_secondary))
+        }),
+        board::live_mini_board(state, handles, index),
         Label::derived(move || {
             board()
                 .map(|game| {
-                    let last = if game.last_uci.is_empty() {
-                        "—"
+                    if game.last_uci.is_empty() {
+                        format!("{:+} cp", game.score_cp)
                     } else {
-                        game.last_uci.as_str()
-                    };
-                    format!(
-                        "{}  {} · {}",
-                        last,
-                        layout::format_clock_live(game.white_clock_ms),
-                        layout::format_clock_live(game.black_clock_ms)
-                    )
+                        format!("{}  {:+} cp", game.last_uci, game.score_cp)
+                    }
                 })
                 .unwrap_or_default()
         })
@@ -426,27 +480,18 @@ fn live_board_slot(state: AppState, index: usize) -> impl IntoView {
         }),
     ))
     .style(move |s| {
-        let focused = state.focused_live_key.get();
-        let Some(game) = board() else {
+        let Some(_) = board() else {
             return s.display(Display::None);
         };
-        let active = focused.as_deref() == Some(game.game_key.as_str());
-        s.width(168.0)
-            .padding(8.0)
-            .row_gap(4.0)
-            .border_radius(10.0)
+        s.min_width(220.0)
+            .flex_grow(1.0f32)
+            .flex_basis(220.0)
+            .padding(10.0)
+            .row_gap(6.0)
+            .border_radius(12.0)
             .border(1.0)
-            .border_color(theme::rgba(if active {
-                pal().accent
-            } else {
-                pal().border
-            }))
+            .border_color(theme::rgba(pal().border))
             .background(theme::rgba(pal().panel))
-    })
-    .on_event_stop(el::PointerDown, move |_, _| {
-        if let Some(game) = board() {
-            state.focused_live_key.set(Some(game.game_key));
-        }
     })
 }
 
@@ -1497,6 +1542,9 @@ mod tests {
             "LIST_SCROLL_PX",
             "eval_bar::eval_bar",
             "live_board_grid",
+            "live_mini_board",
+            "arena_layout",
+            "tournament_arena_layout",
             "LIVE_BOARD_SLOTS",
             "tournament_live_card",
             "remaining_games_label",
