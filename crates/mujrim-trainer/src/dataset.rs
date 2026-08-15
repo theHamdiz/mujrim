@@ -37,7 +37,11 @@ pub fn parse_training_line(line: &str) -> Result<Option<TrainingPosition>, Strin
     }))
 }
 
-pub fn fetch_dataset(url: &str, dest: &Path) -> Result<(), String> {
+pub fn fetch_dataset(url: &str, dest: &Path) -> Result<crate::ingest::IngestReport, String> {
+    crate::ingest::fetch_and_ingest(url, dest)
+}
+
+pub fn download_dataset(url: &str, dest: &Path) -> Result<(), String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("dataset URL must be http(s)".to_string());
     }
@@ -76,14 +80,18 @@ pub fn load_mixed_positions(
     crate::merge::merge_weighted(&sources, &weights, seed)
 }
 
-pub fn fetch_catalog_dataset(id: Option<&str>, url: &str, dest: &Path) -> Result<(), String> {
+pub fn fetch_catalog_dataset(
+    id: Option<&str>,
+    url: &str,
+    dest: &Path,
+) -> Result<crate::ingest::IngestReport, String> {
     let (url, filename) = updater::datasets::resolve_fetch_url(id, url)?;
     let dest = if dest.as_os_str().is_empty() {
         Path::new(&filename)
     } else {
         dest
     };
-    fetch_dataset(&url, dest)
+    crate::ingest::fetch_and_ingest(&url, dest)
 }
 
 #[cfg(test)]
@@ -132,7 +140,7 @@ mod tests {
                 .contains("http(s)")
         );
         assert!(
-            fetch_catalog_dataset(Some("stockfish-binpack"), "", &dest)
+            fetch_catalog_dataset(Some("stockfish-plain"), "", &dest)
                 .unwrap_err()
                 .contains("directory")
         );

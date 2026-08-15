@@ -476,7 +476,7 @@ pub fn plan_job(
             }
             Ok(AteedJobPlan {
                 kind,
-                summary: format!("Fetch {http} HTTP source(s) via mujrim train fetch"),
+                summary: format!("Fetch and convert {http} HTTP source(s) via mujrim train fetch"),
             })
         }
         AteedJobKind::Train => {
@@ -651,6 +651,7 @@ mod tests {
         let local = [validate_source(AteedSourceKind::LocalFile, "data.txt").unwrap()];
         let fetch = plan_job(AteedJobKind::Fetch, &http, "heads", 8, true).unwrap();
         assert!(fetch.summary.contains("mujrim train fetch"));
+        assert!(fetch.summary.contains("convert"));
         assert!(
             plan_job(AteedJobKind::Fetch, &http, "heads", 8, false)
                 .unwrap_err()

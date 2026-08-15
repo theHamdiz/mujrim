@@ -16,6 +16,8 @@ pub mod config;
 pub mod datagen;
 pub mod dataset;
 pub mod formats;
+pub mod ingest;
+pub mod lc0;
 pub mod merge;
 pub mod train;
 

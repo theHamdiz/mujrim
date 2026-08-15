@@ -21,32 +21,55 @@ use super::state::{AppHandles, AppState};
 use super::svg_cache;
 use super::theme;
 
-pub fn live_mini_board(state: AppState, handles: AppHandles, index: usize) -> impl IntoView {
+pub fn live_mini_board(
+    state: AppState,
+    handles: AppHandles,
+    row: usize,
+    col: usize,
+) -> impl IntoView {
     canvas({
         let handles = handles.clone();
         move |cx, size| {
-            let snap = state.tournament_snapshot.get();
-            let concurrency = state.tournament_setup.get().concurrency.max(1) as usize;
-            let Some(game) = crate::app_core::tournament_arena::visible_live_boards(
-                &snap.live_games,
-                concurrency,
-            )
-            .get(index)
-            .cloned() else {
-                return;
-            };
-            paint_live_position(cx, size, state, &handles, &game);
+            let index = arena_cell_index(state, row, col);
+            let game = state
+                .arena_slots
+                .with(|slots| slots.get(index).and_then(|slot| slot.game.clone()));
+            match game {
+                Some(game) => paint_live_position(cx, size, state, &handles, &game),
+                None => paint_empty_board(cx, size, state),
+            }
         }
     })
     .style(move |s| {
-        let _ = state.tournament_snapshot.get();
+        let token = state.arena_slots.with(|slots| {
+            let index = arena_cell_index(state, row, col);
+            slots.get(index).map(|slot| slot.paint_token()).unwrap_or(0)
+        });
+        let _ = token;
         let _ = state.settings.get();
-        s.width_full()
+        s.size_full()
             .min_width(0.0)
-            .min_height(140.0)
-            .height(200.0)
+            .min_height(0.0)
             .flex_grow(1.0f32)
     })
+}
+
+fn arena_cell_index(state: AppState, row: usize, col: usize) -> usize {
+    let count = crate::app_core::tournament_arena::arena_slot_count(
+        state.tournament_setup.get().concurrency,
+    );
+    let columns = crate::app_core::tournament_arena::grid_columns(count);
+    row * columns + col
+}
+
+fn paint_empty_board(
+    cx: &mut floem::context::PaintCx<'_>,
+    size: floem::kurbo::Size,
+    state: AppState,
+) {
+    let settings = state.settings.get_untracked();
+    let geom = layout::board_geom(size.width, size.height);
+    paint_board_squares(cx, geom, settings.board_theme.colors(), &[], None);
 }
 
 fn paint_live_position(
@@ -56,42 +79,35 @@ fn paint_live_position(
     handles: &AppHandles,
     live: &crate::app_core::tournament_live::LiveGameBoard,
 ) {
+    types::init();
     let settings = state.settings.get_untracked();
     let geom = layout::board_geom(size.width, size.height);
-    let Ok(game) = crate::app_core::logic::replay_study_game(&live.initial_fen, &live.moves) else {
+    let board = types::Board::from_fen(live.paint_fen())
+        .ok()
+        .or_else(|| {
+            crate::app_core::logic::replay_study_game(&live.initial_fen, &live.moves)
+                .ok()
+                .map(|game| game.board)
+        })
+        .or_else(|| types::Board::from_fen(mujrim_study::opening::START_FEN).ok());
+    let Some(board) = board else {
+        paint_board_squares(cx, geom, settings.board_theme.colors(), &[], None);
         return;
     };
-    let sq = geom.square();
-    let colors = settings.board_theme.colors();
-    let last = if let Some(mv) = types::Move::from_uci(&live.last_uci) {
-        vec![mv.from, mv.to]
+    let last = if settings.show_last_move {
+        types::Move::from_uci(&live.last_uci)
+            .map(|mv| vec![mv.from, mv.to])
+            .unwrap_or_default()
     } else {
-        game.last_move_squares.clone()
+        Vec::new()
     };
-    for row in 0..8 {
-        for col in 0..8 {
-            let light = (row + col) % 2 == 0;
-            let sq_id = game::display_to_square(row, col, false);
-            let mut fill = if light { colors.light } else { colors.dark };
-            if settings.show_last_move && last.contains(&sq_id) {
-                fill = if light {
-                    colors.last_light
-                } else {
-                    colors.last_dark
-                };
-            }
-            let x = geom.origin_x + col as f64 * sq;
-            let y = geom.origin_y + row as f64 * sq;
-            cx.fill(&Rect::new(x, y, x + sq, y + sq), theme::rgba(fill), 0.0);
-            if game.board.is_in_check(game.board.side_to_move)
-                && sq_id == game.board.king_square(game.board.side_to_move)
-            {
-                paint_check_square(cx, x, y, sq);
-            }
-        }
-    }
+    let check = board
+        .is_in_check(board.side_to_move)
+        .then(|| board.king_square(board.side_to_move));
+    paint_board_squares(cx, geom, settings.board_theme.colors(), &last, check);
+    let sq = geom.square();
     for square in types::Square::ALL {
-        let Some((piece, color)) = game.board.piece_on(square) else {
+        let Some((piece, color)) = board.piece_on(square) else {
             continue;
         };
         let (row, col) = square_display(square, false);
@@ -103,6 +119,37 @@ fn paint_live_position(
             geom.origin_y + row as f64 * sq,
             sq,
         );
+    }
+}
+
+fn paint_board_squares(
+    cx: &mut floem::context::PaintCx<'_>,
+    geom: layout::BoardGeom,
+    colors: crate::app_core::palette::ThemeColors,
+    last: &[types::Square],
+    check: Option<types::Square>,
+) {
+    let settings_show_last = !last.is_empty();
+    let sq = geom.square();
+    for row in 0..8 {
+        for col in 0..8 {
+            let light = (row + col) % 2 == 0;
+            let sq_id = game::display_to_square(row, col, false);
+            let mut fill = if light { colors.light } else { colors.dark };
+            if settings_show_last && last.contains(&sq_id) {
+                fill = if light {
+                    colors.last_light
+                } else {
+                    colors.last_dark
+                };
+            }
+            let x = geom.origin_x + col as f64 * sq;
+            let y = geom.origin_y + row as f64 * sq;
+            cx.fill(&Rect::new(x, y, x + sq, y + sq), theme::rgba(fill), 0.0);
+            if check == Some(sq_id) {
+                paint_check_square(cx, x, y, sq);
+            }
+        }
     }
 }
 
@@ -849,6 +896,10 @@ mod tests {
             "king_square",
             "live_mini_board",
             "paint_live_position",
+            "paint_empty_board",
+            "paint_board_squares",
+            "paint_fen",
+            "arena_slots",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

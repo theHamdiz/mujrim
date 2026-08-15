@@ -50,6 +50,12 @@ impl RatingPrior {
                 virtual_draws: STOCKFISH_VIRTUAL_DRAWS,
             };
         }
+        if let Some(elo) = published_seed_elo(name) {
+            return Self {
+                elo,
+                virtual_draws: SEEDED_VIRTUAL_DRAWS,
+            };
+        }
         Self {
             elo: UNANCHORED_PRIOR_ELO,
             virtual_draws: UNKNOWN_VIRTUAL_DRAWS,
@@ -71,6 +77,50 @@ pub fn published_reference_elo(name: &str) -> Option<f64> {
         None
     }
 }
+
+/// Soft seeds for well-known engines. These are not CCRL 40/15 ratings.
+pub fn published_seed_elo(name: &str) -> Option<f64> {
+    let key = normalize_engine_key(name);
+    if is_stockfish_reference(&key) {
+        return Some(STOCKFISH_REFERENCE_ELO);
+    }
+    let tokens: Vec<&str> = key.split(' ').collect();
+    if tokens.iter().any(|token| token.contains("mujrim"))
+        && tokens
+            .iter()
+            .any(|token| token.contains("lc0") || token.contains("leela"))
+    {
+        return None;
+    }
+    for token in &tokens {
+        if *token == "lc0" || token.starts_with("leela") {
+            return Some(3_550.0);
+        }
+        if *token == "v60" || token.contains("v60") || *token == "reckless" {
+            return Some(3_560.0);
+        }
+        if *token == "akimbo" || *token == "ak" {
+            return Some(3_480.0);
+        }
+        if *token == "viridithas" || *token == "viri" {
+            return Some(3_520.0);
+        }
+        if *token == "obsidian" || *token == "obs" {
+            return Some(3_540.0);
+        }
+        if *token == "plentychess" || *token == "plenty" {
+            return Some(3_500.0);
+        }
+    }
+    None
+}
+
+pub fn seed_elo_for_engine(name: &str) -> Option<f64> {
+    published_reference_elo(name).or_else(|| published_seed_elo(name))
+}
+
+/// Live table caption: these numbers are event ratings, not CCRL 40/15.
+pub const EVENT_ELO_CAPTION: &str = "event Elo from this field (not CCRL 40/15)";
 
 fn normalize_engine_key(name: &str) -> String {
     name.chars()
@@ -161,6 +211,7 @@ pub fn estimate_field_ratings(
                     .iter()
                     .filter(|(white, black, _)| *white == index || *black == index)
                     .count();
+                estimate.elo = shrink_toward_prior(estimate.elo, priors[index].elo, estimate.games);
                 estimate
             })
         })
@@ -208,6 +259,14 @@ pub fn apply_isotonic_ratings(ratings: &mut [Option<EloEstimate>]) {
             }
         }
     }
+}
+
+fn shrink_toward_prior(mle: f64, prior: f64, games: usize) -> f64 {
+    if games >= 8 {
+        return mle.clamp(RATING_FLOOR, RATING_CEILING);
+    }
+    let weight = games as f64 / (games as f64 + 3.0);
+    (prior + (mle - prior) * weight).clamp(RATING_FLOOR, RATING_CEILING)
 }
 
 fn samples_for(
@@ -368,6 +427,28 @@ mod tests {
         assert_eq!(published_reference_elo("Fairy-Stockfish 14"), None);
         assert_eq!(published_reference_elo("Koivisto"), None);
         assert_eq!(published_reference_elo("MyClubEngine"), None);
+        assert_eq!(published_seed_elo("Mujrim v60"), Some(3_560.0));
+        assert_eq!(published_seed_elo("Mujrim Akimbo"), Some(3_480.0));
+        assert_eq!(published_seed_elo("Mujrim Lc0"), None);
+        assert_eq!(published_seed_elo("Lc0"), Some(3_550.0));
+        assert_eq!(published_seed_elo("Weak"), None);
+        assert_eq!(published_seed_elo("ClubEngine"), None);
+        assert_eq!(
+            seed_elo_for_engine("Stockfish 17"),
+            Some(STOCKFISH_REFERENCE_ELO)
+        );
+    }
+
+    #[test]
+    fn early_win_against_stockfish_does_not_jump_to_the_ceiling() {
+        let names = ["Stockfish".to_owned(), "Contender".to_owned()];
+        let ratings = estimate_field_ratings(&names, &[None, None], &[(1, 0, 1.0)]);
+        let contender = ratings[1].unwrap().elo;
+        assert!(
+            contender < 4_000.0,
+            "one game must not print a 4400 Elo: {contender}"
+        );
+        assert!(contender > 2_100.0, "{contender}");
     }
 
     #[test]

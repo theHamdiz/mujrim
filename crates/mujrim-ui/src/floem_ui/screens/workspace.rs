@@ -384,33 +384,52 @@ fn empty_board(state: AppState, handles: AppHandles, tournament_board: bool) -> 
 }
 
 fn live_board_grid(state: AppState, handles: AppHandles) -> impl IntoView {
-    let slots = (0..layout::LIVE_BOARD_SLOTS)
-        .map(|index| live_board_slot(state, handles.clone(), index))
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    let axis = tournament_arena::grid_columns(layout::LIVE_BOARD_SLOTS);
+    let rows = (0..axis)
+        .map(|row| live_board_row(state, handles.clone(), row))
         .collect::<Vec<_>>();
     Stack::vertical((
-        Label::new("Live boards").style(move |s| {
-            s.font_size(12.0).font_bold().color(theme::rgba(
-                theme::palette(state.settings.get().board_theme).accent_alt,
-            ))
-        }),
-        slots.into_view().style(|s| {
-            s.width_full()
-                .flex_row()
-                .flex_wrap(FlexWrap::Wrap)
-                .col_gap(10.0)
-                .row_gap(10.0)
+        Stack::horizontal((
+            Label::new("Live boards").style(move |s| {
+                s.font_size(12.0)
+                    .font_bold()
+                    .color(theme::rgba(pal().accent_alt))
+            }),
+            Label::derived(move || {
+                let live = state.arena_slots.with(|slots| {
+                    slots
+                        .iter()
+                        .filter(|slot| slot.phase == tournament_arena::ArenaSlotPhase::Live)
+                        .count()
+                });
+                let n =
+                    tournament_arena::arena_slot_count(state.tournament_setup.get().concurrency);
+                format!("{live} / {n} concurrent")
+            })
+            .style(move |s| {
+                s.font_size(11.0)
+                    .min_width(0.0)
+                    .color(theme::rgba(pal().text_secondary))
+            }),
+        ))
+        .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0)),
+        rows.into_view().style(|s| {
+            s.size_full()
+                .flex_col()
                 .flex_grow(1.0f32)
+                .min_width(0.0)
                 .min_height(0.0)
+                .row_gap(8.0)
         }),
     ))
     .style(move |s| {
         let s = s
-            .width_full()
+            .size_full()
             .flex_grow(1.0f32)
             .min_width(0.0)
             .min_height(0.0)
-            .row_gap(8.0)
-            .overflow_y(Overflow::Scroll);
+            .row_gap(6.0);
         if arena_layout(state) {
             s
         } else {
@@ -419,73 +438,197 @@ fn live_board_grid(state: AppState, handles: AppHandles) -> impl IntoView {
     })
 }
 
-fn live_board_slot(state: AppState, handles: AppHandles, index: usize) -> impl IntoView {
+fn live_board_row(state: AppState, handles: AppHandles, row: usize) -> impl IntoView {
+    let axis = tournament_arena::grid_columns(layout::LIVE_BOARD_SLOTS);
+    let cells = (0..axis)
+        .map(|col| live_board_slot(state, handles.clone(), row, col))
+        .collect::<Vec<_>>();
+    cells.into_view().style(move |s| {
+        let count = tournament_arena::arena_slot_count(state.tournament_setup.get().concurrency);
+        let rows = tournament_arena::grid_rows(count);
+        let s = s
+            .width_full()
+            .flex_row()
+            .col_gap(8.0)
+            .flex_grow(1.0f32)
+            .flex_basis(0.0)
+            .min_width(0.0)
+            .min_height(0.0);
+        if row >= rows {
+            s.display(Display::None).flex_grow(0.0f32).height(0.0)
+        } else {
+            s
+        }
+    })
+}
+
+fn arena_slot_text(
+    state: AppState,
+    index: usize,
+    format: impl Fn(&tournament_arena::ArenaSlot) -> String,
+) -> String {
+    state.arena_slots.with(|slots| match slots.get(index) {
+        Some(slot) => format(slot),
+        None => format(&tournament_arena::ArenaSlot::waiting()),
+    })
+}
+
+fn live_board_slot(state: AppState, handles: AppHandles, row: usize, col: usize) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    let board = move || {
-        let snap = state.tournament_snapshot.get();
-        let concurrency = state.tournament_setup.get().concurrency.max(1) as usize;
-        tournament_arena::visible_live_boards(&snap.live_games, concurrency)
-            .get(index)
-            .cloned()
+    let slot_index = move || {
+        let count = tournament_arena::arena_slot_count(state.tournament_setup.get().concurrency);
+        let columns = tournament_arena::grid_columns(count);
+        row * columns + col
     };
     Stack::vertical((
+        Stack::horizontal((
+            Label::derived(move || {
+                arena_slot_text(state, slot_index(), |slot| {
+                    match slot.phase {
+                        tournament_arena::ArenaSlotPhase::Live => "Live",
+                        tournament_arena::ArenaSlotPhase::Settled => "Done",
+                        tournament_arena::ArenaSlotPhase::Waiting => "Waiting",
+                    }
+                    .to_owned()
+                })
+            })
+            .style(move |s| {
+                let phase = state.arena_slots.with(|slots| {
+                    slots
+                        .get(slot_index())
+                        .map(|slot| slot.phase)
+                        .unwrap_or(tournament_arena::ArenaSlotPhase::Waiting)
+                });
+                let pal = pal();
+                let (bg, fg) = match phase {
+                    tournament_arena::ArenaSlotPhase::Live => {
+                        (theme::rgba(pal.accent), theme::rgba(pal.text_primary))
+                    }
+                    tournament_arena::ArenaSlotPhase::Settled => {
+                        (theme::rgba(pal.panel), theme::rgba(pal.accent_alt))
+                    }
+                    tournament_arena::ArenaSlotPhase::Waiting => {
+                        (theme::rgba(pal.bg), theme::rgba(pal.text_secondary))
+                    }
+                };
+                s.padding_horiz(6.0)
+                    .padding_vert(2.0)
+                    .border_radius(999.0)
+                    .font_size(9.0)
+                    .font_bold()
+                    .background(bg)
+                    .color(fg)
+            }),
+            Label::derived(move || {
+                arena_slot_text(state, slot_index(), |slot| {
+                    slot.game
+                        .as_ref()
+                        .map(|game| format!("{} vs {}", game.white, game.black))
+                        .unwrap_or_else(|| "Open board".to_owned())
+                })
+            })
+            .style(|s| {
+                s.font_size(12.0)
+                    .font_bold()
+                    .min_width(0.0)
+                    .flex_grow(1.0f32)
+                    .text_ellipsis()
+            }),
+        ))
+        .style(|s| s.width_full().col_gap(6.0).items_center().min_width(0.0)),
         Label::derived(move || {
-            board()
-                .map(|game| format!("{} vs {}", game.white, game.black))
-                .unwrap_or_default()
-        })
-        .style(|s| s.font_size(12.0).font_bold().min_width(0.0).text_ellipsis()),
-        Label::derived(move || {
-            let Some(game) = board() else {
-                return String::new();
-            };
-            let snap = state.tournament_snapshot.get();
-            let (white, black) = layout::live_clock_faces_at(
-                Some(&game),
-                None,
-                None,
-                layout::live_white_to_move(&game),
-                Some(state.clock_now_ms.get()),
-                snap.paused,
-            );
-            format!("{}  ·  {}", white.display, black.display)
+            let paused = state.tournament_snapshot.with(|snap| snap.paused);
+            let now = state.clock_now_ms.get();
+            let index = slot_index();
+            state.arena_slots.with(|slots| {
+                let Some(game) = slots.get(index).and_then(|slot| slot.game.as_ref()) else {
+                    return "Waiting for the next pairing…".to_owned();
+                };
+                let (white, black) = layout::live_clock_faces_at(
+                    Some(game),
+                    None,
+                    None,
+                    layout::live_white_to_move(game),
+                    Some(now),
+                    paused,
+                );
+                format!("{}  ·  {}", white.display, black.display)
+            })
         })
         .style(move |s| {
             s.font_size(11.0)
                 .min_width(0.0)
                 .color(theme::rgba(pal().text_secondary))
         }),
-        board::live_mini_board(state, handles, index),
+        board::live_mini_board(state, handles, row, col),
         Label::derived(move || {
-            board()
-                .map(|game| {
-                    if game.last_uci.is_empty() {
-                        format!("{:+} cp", game.score_cp)
-                    } else {
-                        format!("{}  {:+} cp", game.last_uci, game.score_cp)
-                    }
-                })
-                .unwrap_or_default()
+            arena_slot_text(state, slot_index(), |slot| {
+                slot.game
+                    .as_ref()
+                    .map(|game| {
+                        if game.last_uci.is_empty() {
+                            format!(
+                                "{}  d{}",
+                                tournament_arena::score_text(game.score_cp),
+                                game.depth
+                            )
+                        } else {
+                            format!(
+                                "{}  {}  d{}",
+                                game.last_uci,
+                                tournament_arena::score_text(game.score_cp),
+                                game.depth
+                            )
+                        }
+                    })
+                    .unwrap_or_default()
+            })
         })
         .style(move |s| {
             s.font_size(10.0)
                 .min_width(0.0)
+                .text_ellipsis()
                 .color(theme::rgba(pal().text_secondary))
         }),
     ))
     .style(move |s| {
-        let Some(_) = board() else {
+        let count = tournament_arena::arena_slot_count(state.tournament_setup.get().concurrency);
+        let columns = tournament_arena::grid_columns(count);
+        if col >= columns || slot_index() >= count {
             return s.display(Display::None);
-        };
-        s.min_width(220.0)
-            .flex_grow(1.0f32)
-            .flex_basis(220.0)
-            .padding(10.0)
-            .row_gap(6.0)
+        }
+        let focused = state.arena_slots.with(|slots| {
+            slots
+                .get(slot_index())
+                .and_then(tournament_arena::ArenaSlot::game_key)
+                == state.focused_live_key.get().as_deref()
+        });
+        s.flex_grow(1.0f32)
+            .flex_basis(0.0)
+            .min_width(0.0)
+            .min_height(0.0)
+            .height_full()
+            .padding(8.0)
+            .row_gap(4.0)
             .border_radius(12.0)
-            .border(1.0)
-            .border_color(theme::rgba(pal().border))
+            .border(if focused { 2.0 } else { 1.0 })
+            .border_color(theme::rgba(if focused {
+                pal().accent
+            } else {
+                pal().border
+            }))
             .background(theme::rgba(pal().panel))
+    })
+    .on_event_stop(el::PointerDown, move |_, _| {
+        let key = state.arena_slots.with(|slots| {
+            slots
+                .get(slot_index())
+                .and_then(tournament_arena::ArenaSlot::game_key)
+                .map(str::to_owned)
+        });
+        if let Some(key) = key {
+            state.focused_live_key.set(Some(key));
+        }
     })
 }
 
@@ -892,7 +1035,15 @@ fn tournament_live_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         .to_string()
                 }),
                 tournament_stat_chip(state, "Live", move || {
-                    state.tournament_snapshot.get().live_games.len().to_string()
+                    state
+                        .arena_slots
+                        .with(|slots| {
+                            slots
+                                .iter()
+                                .filter(|slot| slot.phase == tournament_arena::ArenaSlotPhase::Live)
+                                .count()
+                        })
+                        .to_string()
                 }),
             ))
             .style(|s| s.width_full().col_gap(6.0).min_width(0.0)),
@@ -1542,9 +1693,14 @@ mod tests {
             "LIST_SCROLL_PX",
             "eval_bar::eval_bar",
             "live_board_grid",
+            "live_board_row",
             "live_mini_board",
             "arena_layout",
             "tournament_arena_layout",
+            "arena_slots",
+            "grid_columns",
+            "ArenaSlotPhase",
+            "arena_slot_text",
             "show_tournament_move_list",
             "LIVE_BOARD_SLOTS",
             "tournament_live_card",

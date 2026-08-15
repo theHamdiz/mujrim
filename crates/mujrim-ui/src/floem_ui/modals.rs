@@ -502,245 +502,270 @@ fn tools_tab(state: AppState, handles: AppHandles) -> impl IntoView {
 
 pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    widgets::overlay_frame(
+    widgets::overlay_frame_sized(
         state,
         move || state.show_tournament_setup.set(false),
         Stack::vertical((
             Stack::vertical((
                 widgets::curious_title("Tournament Setup", 26.0),
-                Label::new(
-                    "Engines from this UI's local engines/ folder. Native builds preferred.",
-                )
-                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+                widgets::body_copy(
+                    "Local engines/ binaries only. Hash, threads, and nets are routed to each engine's advertised UCI options. Native builds preferred.",
+                    pal,
+                ),
             ))
-            .style(|s| s.width_full().row_gap(8.0).min_width(0.0)),
-            Stack::vertical((
-                widgets::section_label("Event", pal),
-                Label::new("Event name")
-                    .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
-                TextInput::new(state.tournament_event).style(|s| {
-                    s.width_full()
-                        .height(36.0)
-                        .border_radius(10.0)
-                        .min_width(0.0)
-                }),
-                Label::new("Site (optional)")
-                    .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
-                TextInput::new(state.tournament_site).style(|s| {
-                    s.width_full()
-                        .height(36.0)
-                        .border_radius(10.0)
-                        .min_width(0.0)
-                }),
-                widgets::picker_row(
-                    state,
-                    "Format",
-                    move || state.tournament_setup.get().format,
-                    TournamentFormat::ALL,
-                    move |format| {
-                        state.tournament_setup.update(|setup| setup.format = format);
-                    },
-                ),
-                widgets::stepper_row(
-                    state,
-                    "Swiss rounds",
-                    "",
-                    move || state.tournament_setup.get().swiss_rounds as i32,
-                    move |value| {
-                        state
-                            .tournament_setup
-                            .update(|setup| setup.swiss_rounds = value.max(1) as u32);
-                    },
-                    1,
-                    16,
-                )
-                .style(move |s| {
-                    if state.tournament_setup.get().format == TournamentFormat::Swiss {
-                        s
-                    } else {
-                        s.display(Display::None)
-                    }
-                }),
-                widgets::picker_row(
-                    state,
-                    "Time control",
-                    move || state.tournament_setup.get().time_control,
-                    TimeControlPreset::ALL,
-                    move |time| {
-                        state
-                            .tournament_setup
-                            .update(|setup| setup.time_control = time);
-                    },
-                ),
-                widgets::stepper_row(
-                    state,
-                    "Games / pairing",
-                    "",
-                    move || state.tournament_setup.get().games_per_encounter as i32,
-                    move |value| {
-                        state.tournament_setup.update(|setup| {
-                            setup.games_per_encounter = (value as u32).clamp(1, 4);
-                        });
-                    },
-                    1,
-                    4,
-                ),
-                widgets::picker_row(
-                    state,
-                    "Hash",
-                    move || state.tournament_setup.get().hash_mb as i32,
-                    [16, 32, 64],
-                    move |value| {
-                        state.tournament_setup.update(|setup| {
-                            setup.hash_mb = (value as u32).clamp(
-                                16,
-                                crate::app_core::tournament_setup::GUI_TOURNAMENT_MAX_HASH_MB,
-                            );
-                        });
-                    },
-                ),
-                widgets::stepper_row(
-                    state,
-                    "Threads",
-                    "",
-                    move || state.tournament_setup.get().engine_threads as i32,
-                    move |value| {
-                        state.tournament_setup.update(|setup| {
-                            setup.engine_threads = value.max(1) as u32;
-                            setup.sanitize_for_gui();
-                        });
-                    },
-                    1,
-                    1,
-                ),
-                widgets::stepper_row(
-                    state,
-                    "Simultaneous games",
-                    "",
-                    move || state.tournament_setup.get().concurrency as i32,
-                    move |value| {
-                        state.tournament_setup.update(|setup| {
-                            setup.concurrency = value.max(1) as u32;
-                            setup.sanitize_for_gui();
-                        });
-                    },
-                    1,
-                    crate::app_core::tournament_setup::detected_safe_games() as i32,
-                ),
-                Label::derived(move || {
-                    let cores = std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1);
-                    let safe = crate::app_core::tournament_setup::detected_safe_games();
-                    format!(
-                        "{cores} CPU cores detected · up to {safe} simultaneous games (2 threads/game, 2 cores reserved for UI). Engine crashes and missing binaries forfeit that game."
+            .style(|s| s.width_full().row_gap(6.0).min_width(0.0)),
+            Stack::new((
+                Stack::vertical((
+                    widgets::section_label("Event", pal),
+                    Label::new("Event name")
+                        .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+                    TextInput::new(state.tournament_event).style(|s| {
+                        s.width_full()
+                            .height(36.0)
+                            .border_radius(10.0)
+                            .min_width(0.0)
+                    }),
+                    Label::new("Site (optional)")
+                        .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
+                    TextInput::new(state.tournament_site).style(|s| {
+                        s.width_full()
+                            .height(36.0)
+                            .border_radius(10.0)
+                            .min_width(0.0)
+                    }),
+                    widgets::picker_row(
+                        state,
+                        "Format",
+                        move || state.tournament_setup.get().format,
+                        TournamentFormat::ALL,
+                        move |format| {
+                            state.tournament_setup.update(|setup| setup.format = format);
+                        },
+                    ),
+                    widgets::stepper_row(
+                        state,
+                        "Swiss rounds",
+                        "",
+                        move || state.tournament_setup.get().swiss_rounds as i32,
+                        move |value| {
+                            state
+                                .tournament_setup
+                                .update(|setup| setup.swiss_rounds = value.max(1) as u32);
+                        },
+                        1,
+                        16,
                     )
-                })
-                .style(move |s| s.font_size(12.0).color(theme::rgba(pal().text_secondary))),
-            ))
-            .style(|s| s.width_full().row_gap(10.0).min_width(0.0)),
-            Stack::vertical((
-                widgets::section_label("Players", pal),
-                widgets::ghost_button(state, "Toggle all local engines", {
-                    let handles = handles.clone();
-                    move || {
-                        let roster = crate::app_core::logic::tournament_engine_roster(
-                            &handles.bundled,
-                            &handles.catalog.borrow(),
-                        );
-                        state.tournament_setup.update(|setup| {
-                            if setup.selected_engine_paths.len() == roster.len() {
-                                setup.selected_engine_paths.clear();
-                            } else {
-                                setup.selected_engine_paths =
-                                    roster.iter().map(|engine| engine.path.clone()).collect();
-                            }
-                        });
-                    }
-                }),
-                dyn_view({
-                    let handles = handles.clone();
-                    move || {
-                        let roster = crate::app_core::logic::tournament_engine_roster(
-                            &handles.bundled,
-                            &handles.catalog.borrow(),
-                        );
-                        if roster.is_empty() {
-                            return Label::new(
-                                "No UCI engines were found under the local engines/ folder.",
-                            )
-                            .style(move |s| {
-                                s.font_size(13.0).color(theme::rgba(pal().text_secondary))
-                            })
-                            .into_any();
+                    .style(move |s| {
+                        if state.tournament_setup.get().format == TournamentFormat::Swiss {
+                            s
+                        } else {
+                            s.display(Display::None)
                         }
-                        let list = roster
-                            .into_iter()
-                            .map(|engine| {
-                                let path = engine.path.clone();
-                                let selected_path = path.clone();
-                                widgets::toggle_row(
-                                    state,
-                                    engine.name,
-                                    move || {
-                                        crate::app_core::logic::engine_is_selected(
-                                            &state.tournament_setup.get().selected_engine_paths,
-                                            &selected_path,
-                                        )
-                                    },
-                                    move |enable| {
-                                        state.tournament_setup.update(|setup| {
-                                            if enable {
-                                                if !crate::app_core::logic::engine_is_selected(
-                                                    &setup.selected_engine_paths,
-                                                    &path,
-                                                ) {
-                                                    setup.selected_engine_paths.push(path.clone());
-                                                }
-                                            } else {
-                                                let key =
-                                                    crate::app_core::logic::engine_identity_key(
-                                                        &path,
-                                                    );
-                                                setup.selected_engine_paths.retain(|item| {
-                                                    crate::app_core::logic::engine_identity_key(
-                                                        item,
-                                                    ) != key
-                                                });
-                                            }
-                                        });
-                                    },
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .into_view()
-                            .style(|s| s.width_full().row_gap(6.0).flex_col());
-                        widgets::capped_scroll(list, crate::app_core::layout::MODAL_LIST_SCROLL_PX)
-                            .into_any()
-                    }
-                }),
-                Label::derived(move || {
-                    format!(
-                        "{} engines selected",
-                        state.tournament_setup.get().selected_engine_paths.len()
-                    )
-                }),
-                Label::derived(move || state.tournament_status.get())
-                    .style(move |s| s.font_size(12.0).color(theme::rgba(pal().accent_alt))),
-                Stack::horizontal((
-                    widgets::primary_button(state, "Start", {
-                        let handles = handles.clone();
-                        move || actions::start_tournament(state, &handles)
                     }),
-                    widgets::ghost_button(state, "Close", move || {
-                        state.show_tournament_setup.set(false)
-                    }),
+                    widgets::picker_row(
+                        state,
+                        "Time control",
+                        move || state.tournament_setup.get().time_control,
+                        TimeControlPreset::ALL,
+                        move |time| {
+                            state
+                                .tournament_setup
+                                .update(|setup| setup.time_control = time);
+                        },
+                    ),
+                    widgets::stepper_row(
+                        state,
+                        "Games / pairing",
+                        "",
+                        move || state.tournament_setup.get().games_per_encounter as i32,
+                        move |value| {
+                            state.tournament_setup.update(|setup| {
+                                setup.games_per_encounter = (value as u32).clamp(1, 4);
+                            });
+                        },
+                        1,
+                        4,
+                    ),
+                    widgets::picker_row(
+                        state,
+                        "Hash",
+                        move || state.tournament_setup.get().hash_mb as i32,
+                        [16, 32, 64, 128, 256],
+                        move |value| {
+                            state.tournament_setup.update(|setup| {
+                                setup.hash_mb = (value as u32).clamp(
+                                    16,
+                                    crate::app_core::tournament_setup::GUI_TOURNAMENT_MAX_HASH_MB,
+                                );
+                            });
+                        },
+                    ),
+                    widgets::stepper_row(
+                        state,
+                        "Threads",
+                        "",
+                        move || state.tournament_setup.get().engine_threads as i32,
+                        move |value| {
+                            state.tournament_setup.update(|setup| {
+                                setup.engine_threads = value.max(1) as u32;
+                                setup.sanitize_for_gui();
+                            });
+                        },
+                        1,
+                        crate::app_core::tournament_setup::GUI_TOURNAMENT_MAX_THREADS as i32,
+                    ),
+                    widgets::stepper_row(
+                        state,
+                        "Simultaneous games",
+                        "",
+                        move || state.tournament_setup.get().concurrency as i32,
+                        move |value| {
+                            state.tournament_setup.update(|setup| {
+                                setup.concurrency = value.max(1) as u32;
+                                setup.sanitize_for_gui();
+                            });
+                        },
+                        1,
+                        crate::app_core::tournament_setup::detected_safe_games() as i32,
+                    ),
+                    widgets::wrapping_label(
+                        move || {
+                            let cores = std::thread::available_parallelism()
+                                .map(|n| n.get())
+                                .unwrap_or(1);
+                            let safe = crate::app_core::tournament_setup::detected_safe_games();
+                            format!(
+                                "{cores} CPU cores · up to {safe} simultaneous games. Hash/threads are sent only when the engine advertises them. Crashes and missing nets forfeit that game."
+                            )
+                        },
+                        pal,
+                    ),
                 ))
-                .style(|s| s.col_gap(8.0)),
+                .style(|s| s.min_width(300.0).flex_grow(1.0f32).row_gap(8.0)),
+                Stack::vertical((
+                    widgets::section_label("Players", pal),
+                    widgets::ghost_button(state, "Toggle all local engines", {
+                        let handles = handles.clone();
+                        move || {
+                            let roster = crate::app_core::logic::tournament_engine_roster(
+                                &handles.bundled,
+                                &handles.catalog.borrow(),
+                            );
+                            state.tournament_setup.update(|setup| {
+                                if setup.selected_engine_paths.len() == roster.len() {
+                                    setup.selected_engine_paths.clear();
+                                } else {
+                                    setup.selected_engine_paths =
+                                        roster.iter().map(|engine| engine.path.clone()).collect();
+                                }
+                            });
+                        }
+                    }),
+                    dyn_view({
+                        let handles = handles.clone();
+                        move || {
+                            let roster = crate::app_core::logic::tournament_engine_roster(
+                                &handles.bundled,
+                                &handles.catalog.borrow(),
+                            );
+                            if roster.is_empty() {
+                                return Label::new(
+                                    "No UCI engines were found under the local engines/ folder.",
+                                )
+                                .style(move |s| {
+                                    s.font_size(13.0)
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_wrap()
+                                        .color(theme::rgba(pal().text_secondary))
+                                })
+                                .into_any();
+                            }
+                            let list = roster
+                                .into_iter()
+                                .map(|engine| {
+                                    let path = engine.path.clone();
+                                    let selected_path = path.clone();
+                                    widgets::toggle_row(
+                                        state,
+                                        engine.name,
+                                        move || {
+                                            crate::app_core::logic::engine_is_selected(
+                                                &state.tournament_setup.get().selected_engine_paths,
+                                                &selected_path,
+                                            )
+                                        },
+                                        move |enable| {
+                                            state.tournament_setup.update(|setup| {
+                                                if enable {
+                                                    if !crate::app_core::logic::engine_is_selected(
+                                                        &setup.selected_engine_paths,
+                                                        &path,
+                                                    ) {
+                                                        setup.selected_engine_paths.push(path.clone());
+                                                    }
+                                                } else {
+                                                    let key =
+                                                        crate::app_core::logic::engine_identity_key(
+                                                            &path,
+                                                        );
+                                                    setup.selected_engine_paths.retain(|item| {
+                                                        crate::app_core::logic::engine_identity_key(
+                                                            item,
+                                                        ) != key
+                                                    });
+                                                }
+                                            });
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .into_view()
+                                .style(|s| s.width_full().row_gap(6.0).flex_col());
+                            widgets::capped_scroll(
+                                list,
+                                crate::app_core::layout::MODAL_LIST_SCROLL_PX,
+                            )
+                            .into_any()
+                        }
+                    }),
+                    Label::derived(move || {
+                        format!(
+                            "{} engines selected",
+                            state.tournament_setup.get().selected_engine_paths.len()
+                        )
+                    }),
+                    Label::derived(move || state.tournament_status.get()).style(move |s| {
+                        s.font_size(12.0)
+                            .min_width(0.0)
+                            .width_full()
+                            .text_wrap()
+                            .color(theme::rgba(pal().accent_alt))
+                    }),
+                    Stack::horizontal((
+                        widgets::primary_button(state, "Start", {
+                            let handles = handles.clone();
+                            move || actions::start_tournament(state, &handles)
+                        }),
+                        widgets::ghost_button(state, "Close", move || {
+                            state.show_tournament_setup.set(false)
+                        }),
+                    ))
+                    .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
+                ))
+                .style(|s| s.min_width(300.0).flex_grow(1.0f32).row_gap(8.0)),
             ))
-            .style(|s| s.width_full().row_gap(10.0).min_width(0.0)),
+            .style(|s| {
+                s.width_full()
+                    .col_gap(20.0)
+                    .row_gap(16.0)
+                    .flex_row()
+                    .flex_wrap(FlexWrap::Wrap)
+                    .min_width(0.0)
+            }),
         ))
-        .style(|s| s.width_full().row_gap(10.0).min_width(0.0)),
+        .style(|s| s.width_full().row_gap(12.0).min_width(0.0)),
+        crate::app_core::layout::TOURNAMENT_OVERLAY_MAX_WIDTH,
     )
 }
 
@@ -755,7 +780,10 @@ pub fn tournament_results_modal(state: AppState) -> impl IntoView {
                 let snap = state.tournament_snapshot.get();
                 let games = snap.played_games.len();
                 let phase = snap.phase_label();
-                format!("{phase} · {games} games · field Elo from every finished pairing")
+                format!(
+                    "{phase} · {games} games · {}",
+                    mujrim_study::rating::EVENT_ELO_CAPTION
+                )
             })
             .style(move |s| {
                 s.font_size(13.0)
@@ -888,7 +916,7 @@ mod tests {
             "tournament_results_modal",
             "results_rank_card",
             "losses_to_label",
-            "field Elo from every finished pairing",
+            "EVENT_ELO_CAPTION",
             "OptionsTab::Display",
             "OptionsTab::Motion",
             "OptionsTab::Arrows",

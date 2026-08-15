@@ -13,6 +13,7 @@ pub const SPLIT_HANDLE_PX: f64 = 10.0;
 pub const BOARD_MIN_PX: f64 = 120.0;
 pub const TITLE_BAR_PX: f64 = 44.0;
 pub const OVERLAY_MAX_WIDTH: f64 = 760.0;
+pub const TOURNAMENT_OVERLAY_MAX_WIDTH: f64 = 920.0;
 pub const OVERLAY_PAD: f64 = 24.0;
 pub const DOCK_TAB_BAR_PX: f64 = 36.0;
 pub const DOCK_OPEN_PX: f64 = 248.0;
@@ -377,6 +378,7 @@ mod tests {
             white: "Alpha".into(),
             black: "Beta".into(),
             initial_fen: String::new(),
+            position_fen: String::new(),
             moves: Vec::new(),
             last_uci: String::new(),
             score_cp: 12,
@@ -395,6 +397,7 @@ mod tests {
         const {
             assert!((BOARD_PANE_PCT + SIDE_PANE_PCT - 100.0).abs() < f64::EPSILON);
             assert!(BOARD_PANE_PCT > SIDE_PANE_PCT);
+            assert!(TOURNAMENT_OVERLAY_MAX_WIDTH > OVERLAY_MAX_WIDTH);
         }
     }
 

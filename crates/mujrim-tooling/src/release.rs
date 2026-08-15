@@ -468,6 +468,9 @@ fn snapshot_engine(source_stem: &str, destination_stem: &str) -> Result<(), Stri
     let destination = Path::new("target")
         .join("release")
         .join(format!("{destination_stem}{suffix}"));
+    if source == destination {
+        return Ok(());
+    }
     fs::copy(&source, &destination).map_err(|error| {
         format!(
             "failed to snapshot {} as {}: {error}",
@@ -1067,6 +1070,20 @@ mod tests {
                 "missing installer snapshot {stem}"
             );
         }
+    }
+
+    #[test]
+    fn snapshot_engine_skips_copying_a_binary_onto_itself() {
+        let src = include_str!("release.rs");
+        let snapshot = src
+            .split("fn snapshot_engine(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn build_darwin(").next())
+            .expect("snapshot_engine");
+        assert!(
+            snapshot.contains("if source == destination"),
+            "copying mujrim-v60 onto itself truncates the file to 0 bytes"
+        );
     }
 
     #[test]

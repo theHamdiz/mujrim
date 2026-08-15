@@ -28,18 +28,18 @@ pub struct DatasetOffer {
 
 pub const DATASETS: &[DatasetOffer] = &[
     DatasetOffer {
-        id: "stockfish-binpack",
+        id: "stockfish-plain",
         kind: DatasetKind::Stockfish,
         url: "https://data.stockfishchess.org/nnue/",
-        filename: "training.binpack",
-        notes: "Official Stockfish NNUE data root. Pass --url for a concrete .binpack or .plain file.",
+        filename: "training.plain.gz",
+        notes: "Stockfish self-play as .plain or .plain.gz only. Pass --url for a concrete file; fetch decompresses and decodes it.",
     },
     DatasetOffer {
         id: "lc0-training",
         kind: DatasetKind::Lc0,
         url: "https://storage.lczero.org/files/training_data/",
         filename: "training.gz",
-        notes: "Lc0 self-play training chunks. Pass --url for a dated .gz file, then decode to plain/text.",
+        notes: "Lc0 self-play v3–v6 chunks. Pass --url for a dated .gz; fetch decompresses and decodes to text.",
     },
     DatasetOffer {
         id: "selfplay-gz",
@@ -51,7 +51,17 @@ pub const DATASETS: &[DatasetOffer] = &[
 ];
 
 pub fn find_dataset(id: &str) -> Option<&'static DatasetOffer> {
-    DATASETS.iter().find(|offer| offer.id == id)
+    match id {
+        "stockfish-binpack" | "stockfish-plain" => DATASETS
+            .iter()
+            .find(|offer| offer.kind == DatasetKind::Stockfish),
+        other => DATASETS.iter().find(|offer| offer.id == other),
+    }
+}
+
+fn stockfish_url_is_plain(url: &str) -> bool {
+    let name = url.rsplit('/').next().unwrap_or(url);
+    name.ends_with(".plain") || name.ends_with(".plain.gz") || name.ends_with(".plain.zst")
 }
 
 pub fn resolve_fetch_url(id: Option<&str>, url: &str) -> Result<(String, String), String> {
@@ -69,6 +79,12 @@ pub fn resolve_fetch_url(id: Option<&str>, url: &str) -> Result<(String, String)
                 "dataset `{}` is a directory root ({chosen}); pass --url for a specific file",
                 offer.id
             ));
+        }
+        if offer.kind == DatasetKind::Stockfish && !stockfish_url_is_plain(chosen) {
+            return Err(
+                "Stockfish dumps must be .plain, .plain.gz, or .plain.zst (not BINP/binpack)"
+                    .into(),
+            );
         }
         return Ok((chosen.to_string(), offer.filename.to_string()));
     }
@@ -98,8 +114,12 @@ mod tests {
     fn catalog_covers_stockfish_lc0_and_selfplay() {
         assert_eq!(DATASETS.len(), 3);
         assert_eq!(
-            find_dataset("stockfish-binpack").map(|offer| offer.kind),
+            find_dataset("stockfish-plain").map(|offer| offer.kind),
             Some(DatasetKind::Stockfish)
+        );
+        assert_eq!(
+            find_dataset("stockfish-binpack").map(|offer| offer.id),
+            Some("stockfish-plain")
         );
         assert_eq!(
             find_dataset("lc0-training").map(|offer| offer.kind),
@@ -111,10 +131,25 @@ mod tests {
     #[test]
     fn resolve_fetch_url_rejects_directory_roots() {
         assert!(
-            resolve_fetch_url(Some("stockfish-binpack"), "")
+            resolve_fetch_url(Some("stockfish-plain"), "")
                 .unwrap_err()
                 .contains("directory")
         );
+        assert!(
+            resolve_fetch_url(
+                Some("stockfish-plain"),
+                "https://example.test/games.binpack"
+            )
+            .unwrap_err()
+            .contains(".plain")
+        );
+        let (url, name) = resolve_fetch_url(
+            Some("stockfish-plain"),
+            "https://example.test/games.plain.gz",
+        )
+        .unwrap();
+        assert!(url.ends_with(".plain.gz"));
+        assert_eq!(name, "training.plain.gz");
         assert!(
             resolve_fetch_url(Some("selfplay-gz"), "")
                 .unwrap_err()

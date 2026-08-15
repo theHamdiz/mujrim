@@ -1188,6 +1188,8 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     state.announced_tournament_over.set(false);
     state.show_tournament_results.set(false);
     state.tournament_ui_fingerprint.set(0);
+    state.tournament_heavy_fingerprint.set(0);
+    state.arena_slots.set(Vec::new());
     state.eval_bar_fen.set(String::new());
     let resumed = resume_id.as_ref().and_then(|id| {
         handles
@@ -1237,7 +1239,9 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
             .initial_fen
             .set(mujrim_study::opening::START_FEN.to_owned());
     }
-    state.tournament_snapshot.set(handle.clone_snapshot());
+    let started_snap = handle.clone_snapshot();
+    state.tournament_snapshot.set(started_snap.clone());
+    refresh_arena_slots(state, &started_snap);
     crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
         tournament_id,
         &setup,
@@ -1318,37 +1322,49 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
                 Err(poisoned) => poisoned.into_inner(),
             };
             let running = guard.running;
-            let fingerprint = crate::app_core::tournament_live::ui_fingerprint(&guard);
-            if fingerprint == state.tournament_ui_fingerprint.get_untracked() {
+            let arena_fp = crate::app_core::tournament_live::arena_fingerprint(&guard);
+            let heavy_fp = crate::app_core::tournament_live::heavy_fingerprint(&guard);
+            let arena_changed = arena_fp != state.tournament_ui_fingerprint.get_untracked();
+            let heavy_changed = heavy_fp != state.tournament_heavy_fingerprint.get_untracked();
+            if !arena_changed && !heavy_changed {
                 return running;
             }
-            state.tournament_ui_fingerprint.set(fingerprint);
-            state.tournament_snapshot.set(guard.clone());
-            state.tournament_status.set(guard.status_line.clone());
-            let arena = layout::is_arena_mode(
-                state.tournament_setup.get_untracked().concurrency,
-                &guard.live_games,
-            );
-            if !arena
-                && match_controller::should_sync_tournament_board(state.screen.get_untracked())
-            {
-                sync_tournament_board(state, &handles, &guard);
+            if arena_changed {
+                state.tournament_ui_fingerprint.set(arena_fp);
+                refresh_arena_slots(state, &guard);
+                state.tournament_status.set(guard.status_line.clone());
+                state
+                    .tournament_snapshot
+                    .update(|snap| snap.copy_arena_from(&guard));
+                let arena = layout::is_arena_mode(
+                    state.tournament_setup.get_untracked().concurrency,
+                    &guard.live_games,
+                );
+                if !arena
+                    && match_controller::should_sync_tournament_board(state.screen.get_untracked())
+                {
+                    sync_tournament_board(state, &handles, &guard);
+                }
             }
-            persist_tournament_progress(state, &handles, &guard);
-            announce_tournament_outcomes(state, &handles, &guard);
-            if running {
-                let id = state
-                    .current_tournament_id
-                    .get_untracked()
-                    .unwrap_or_default();
-                crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
-                    id,
-                    &state.tournament_setup.get_untracked(),
-                    &guard,
-                )
-                .save();
-            } else {
-                crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+            if heavy_changed {
+                state.tournament_heavy_fingerprint.set(heavy_fp);
+                state.tournament_snapshot.set(guard.clone());
+                persist_tournament_progress(state, &handles, &guard);
+                announce_tournament_outcomes(state, &handles, &guard);
+                if running {
+                    let id = state
+                        .current_tournament_id
+                        .get_untracked()
+                        .unwrap_or_default();
+                    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
+                        id,
+                        &state.tournament_setup.get_untracked(),
+                        &guard,
+                    )
+                    .save();
+                } else {
+                    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+                }
             }
             running
         }))
@@ -1357,6 +1373,19 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
             poll_tournament(state, handles.clone());
         }
     });
+}
+
+fn refresh_arena_slots(
+    state: AppState,
+    snap: &crate::app_core::tournament_live::LiveTournamentSnapshot,
+) {
+    let concurrency = state.tournament_setup.get_untracked().concurrency.max(1) as usize;
+    let next = crate::app_core::tournament_arena::stable_arena_slots(
+        &snap.live_games,
+        concurrency,
+        &state.arena_slots.get_untracked(),
+    );
+    state.arena_slots.set(next);
 }
 
 fn sync_tournament_board(
@@ -1608,6 +1637,9 @@ pub fn discard_paused_tournament(state: AppState, handles: &AppHandles) {
     state.game.set(None);
     state.move_log.set(Vec::new());
     state.tournament_snapshot.set(Default::default());
+    state.arena_slots.set(Vec::new());
+    state.tournament_ui_fingerprint.set(0);
+    state.tournament_heavy_fingerprint.set(0);
     state
         .tournament_status
         .set("Previous tournament discarded.".to_owned());
@@ -1628,7 +1660,8 @@ fn apply_tournament_control(
     apply(&handle);
     let snap = handle.clone_snapshot();
     state.tournament_snapshot.set(snap.clone());
-    state.tournament_status.set(snap.status_line);
+    state.tournament_status.set(snap.status_line.clone());
+    refresh_arena_slots(state, &snap);
 }
 
 pub fn stop_engine_search(state: AppState, handles: &AppHandles) {
@@ -1737,6 +1770,7 @@ pub fn delete_historical_tournament(state: AppState, handles: &AppHandles, id: S
     if state.current_tournament_id.get_untracked().as_deref() == Some(id.as_str()) {
         state.current_tournament_id.set(None);
         state.tournament_snapshot.set(Default::default());
+        state.arena_slots.set(Vec::new());
         state.selected_tournament_game_id.set(None);
     }
     refresh_tournament_history(state, handles);
@@ -1802,7 +1836,9 @@ pub fn load_historical_tournament(state: AppState, handles: &AppHandles, id: Str
                 })
             })
             .collect();
+        snap.live_games.clear();
     });
+    state.arena_slots.set(Vec::new());
     state.screen.set(Screen::Tournaments);
     state.dock_tab.set(DockTab::Results);
     state.dock_open.set(true);
@@ -2266,6 +2302,10 @@ mod tests {
             "announce_tournament_outcomes",
             "show_tournament_results",
             "ui_fingerprint",
+            "arena_fingerprint",
+            "heavy_fingerprint",
+            "refresh_arena_slots",
+            "copy_arena_from",
             "Tournament finished.",
             "optimistic_live_board",
             "request_pause",

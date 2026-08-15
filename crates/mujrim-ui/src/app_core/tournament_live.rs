@@ -119,6 +119,7 @@ pub struct LiveGameBoard {
     pub white: String,
     pub black: String,
     pub initial_fen: String,
+    pub position_fen: String,
     pub moves: Vec<String>,
     pub last_uci: String,
     pub score_cp: i32,
@@ -134,6 +135,16 @@ pub struct LiveGameBoard {
 impl LiveGameBoard {
     pub fn is_placeholder(&self) -> bool {
         self.game_key.starts_with("pending-")
+    }
+
+    pub fn paint_fen(&self) -> &str {
+        if !self.position_fen.is_empty() {
+            &self.position_fen
+        } else if !self.initial_fen.is_empty() {
+            &self.initial_fen
+        } else {
+            mujrim_study::opening::START_FEN
+        }
     }
 }
 
@@ -303,7 +314,14 @@ impl LiveTournamentSnapshot {
         self.played_games.last().map(|game| game.id)
     }
 
-    pub fn upsert_live_game(&mut self, board: LiveGameBoard) {
+    pub fn upsert_live_game(&mut self, mut board: LiveGameBoard) {
+        if board.position_fen.is_empty() {
+            board.position_fen = if board.initial_fen.is_empty() {
+                mujrim_study::opening::START_FEN.to_owned()
+            } else {
+                board.initial_fen.clone()
+            };
+        }
         if !board.is_placeholder() {
             self.drop_placeholder_games();
         }
@@ -320,6 +338,16 @@ impl LiveTournamentSnapshot {
 
     pub fn drop_placeholder_games(&mut self) {
         self.live_games.retain(|game| !game.is_placeholder());
+    }
+
+    pub fn copy_arena_from(&mut self, src: &Self) {
+        self.running = src.running;
+        self.paused = src.paused;
+        self.status_line = src.status_line.clone();
+        self.current_round = src.current_round;
+        self.current_white = src.current_white.clone();
+        self.current_black = src.current_black.clone();
+        self.live_games = src.live_games.clone();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -340,6 +368,17 @@ impl LiveTournamentSnapshot {
             .iter_mut()
             .find(|game| game.game_key == game_key)
         {
+            let previous_len = game.moves.len();
+            let incremental = previous_len + 1 == moves.len() && moves.last() == Some(&uci);
+            if incremental {
+                if let Some(next) = apply_uci_to_fen(game.paint_fen(), &uci) {
+                    game.position_fen = next;
+                } else {
+                    game.position_fen = replay_fen(&game.initial_fen, &moves);
+                }
+            } else {
+                game.position_fen = replay_fen(&game.initial_fen, &moves);
+            }
             game.moves = moves;
             game.last_uci = uci;
             game.score_cp = score_cp;
@@ -496,21 +535,40 @@ impl LiveTournamentHandle {
 pub fn ui_fingerprint(snap: &LiveTournamentSnapshot) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    arena_fingerprint(snap).hash(&mut hasher);
+    heavy_fingerprint(snap).hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn arena_fingerprint(snap: &LiveTournamentSnapshot) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     snap.running.hash(&mut hasher);
-    snap.finished.hash(&mut hasher);
     snap.paused.hash(&mut hasher);
-    snap.cancelled.hash(&mut hasher);
-    snap.completed_matches.hash(&mut hasher);
-    snap.played_games.len().hash(&mut hasher);
     snap.status_line.hash(&mut hasher);
+    snap.current_round.hash(&mut hasher);
+    snap.current_white.hash(&mut hasher);
+    snap.current_black.hash(&mut hasher);
     for game in &snap.live_games {
         game.game_key.hash(&mut hasher);
         game.moves.len().hash(&mut hasher);
         game.last_uci.hash(&mut hasher);
+        game.position_fen.hash(&mut hasher);
         game.score_cp.hash(&mut hasher);
+        game.depth.hash(&mut hasher);
         game.white_clock_ms.hash(&mut hasher);
         game.black_clock_ms.hash(&mut hasher);
     }
+    hasher.finish()
+}
+
+pub fn heavy_fingerprint(snap: &LiveTournamentSnapshot) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snap.finished.hash(&mut hasher);
+    snap.cancelled.hash(&mut hasher);
+    snap.completed_matches.hash(&mut hasher);
+    snap.played_games.len().hash(&mut hasher);
     for row in &snap.standings {
         row.points.to_bits().hash(&mut hasher);
         row.wins.hash(&mut hasher);
@@ -520,6 +578,44 @@ pub fn ui_fingerprint(snap: &LiveTournamentSnapshot) -> u64 {
             .hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn apply_uci_to_fen(fen: &str, uci: &str) -> Option<String> {
+    types::init();
+    let mut board = types::Board::from_fen(fen).ok()?;
+    let wanted = uci.trim().to_ascii_lowercase();
+    let mv = board
+        .generate_legal_moves()
+        .iter()
+        .copied()
+        .find(|candidate| candidate.to_uci() == wanted)?;
+    board.make_move(mv);
+    Some(board.to_fen())
+}
+
+fn replay_fen(initial_fen: &str, moves: &[String]) -> String {
+    types::init();
+    let start = if initial_fen.is_empty() {
+        mujrim_study::opening::START_FEN
+    } else {
+        initial_fen
+    };
+    let Ok(mut board) = types::Board::from_fen(start) else {
+        return mujrim_study::opening::START_FEN.to_owned();
+    };
+    for notation in moves {
+        let wanted = notation.trim().to_ascii_lowercase();
+        let Some(mv) = board
+            .generate_legal_moves()
+            .iter()
+            .copied()
+            .find(|candidate| candidate.to_uci() == wanted)
+        else {
+            break;
+        };
+        board.make_move(mv);
+    }
+    board.to_fen()
 }
 
 /// Opponents that beat `engine`, with how many games they won against it.
@@ -566,7 +662,7 @@ pub fn losses_to_label(engine: &str, games: &[PlayedGame]) -> String {
 }
 
 pub fn standings_from_played(engine_names: &[String], games: &[PlayedGame]) -> Vec<StandingRow> {
-    use mujrim_study::rating::published_reference_elo;
+    use mujrim_study::rating::seed_elo_for_engine;
     use mujrim_study::tournament::{Entrant, Pairing, TournamentResult, standings};
     let entrants: Vec<Entrant> = engine_names
         .iter()
@@ -574,7 +670,7 @@ pub fn standings_from_played(engine_names: &[String], games: &[PlayedGame]) -> V
         .map(|(index, name)| Entrant {
             id: index.to_string(),
             name: name.clone(),
-            seed_elo: published_reference_elo(name),
+            seed_elo: seed_elo_for_engine(name),
         })
         .collect();
     let results: Vec<TournamentResult> = games
@@ -851,6 +947,11 @@ mod tests {
         );
         assert_eq!(snap.live_games[0].moves.len(), 1);
         assert_eq!(snap.live_games[0].white_clock_ms, Some(179_000));
+        assert!(snap.live_games[0].position_fen.contains("4P3"));
+        assert_ne!(
+            snap.live_games[0].position_fen,
+            mujrim_study::opening::START_FEN
+        );
         snap.finish_live_game("g1", 1.0, vec!["e2e4".into(), "e7e5".into()]);
         assert!(snap.live_games.is_empty());
         assert_eq!(snap.played_games.len(), 1);
@@ -944,6 +1045,40 @@ mod tests {
         assert_eq!(b.pv, vec!["d7d5".to_owned()]);
         assert_eq!(b.black_clock_ms, Some(2000));
         assert_eq!(a.black_clock_ms, None);
+        assert_ne!(a.position_fen, mujrim_study::opening::START_FEN);
+        assert_eq!(a.paint_fen(), a.position_fen.as_str());
+    }
+
+    #[test]
+    fn heavy_fingerprint_ignores_live_eval_churn() {
+        let mut snap = LiveTournamentSnapshot::default();
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "g1".into(),
+            initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+            ..LiveGameBoard::default()
+        });
+        let heavy = heavy_fingerprint(&snap);
+        let arena = arena_fingerprint(&snap);
+        snap.apply_thinking(
+            "g1",
+            40,
+            12,
+            8_000,
+            vec!["e2e4".into()],
+            Vec::new(),
+            Some(170_000),
+            Some(180_000),
+        );
+        assert_eq!(heavy_fingerprint(&snap), heavy);
+        assert_ne!(arena_fingerprint(&snap), arena);
+        let mut light = LiveTournamentSnapshot::default();
+        light.copy_arena_from(&snap);
+        assert_eq!(light.live_games[0].score_cp, 40);
+        assert!(light.played_games.is_empty());
+        assert_eq!(
+            LiveGameBoard::default().paint_fen(),
+            mujrim_study::opening::START_FEN
+        );
     }
 
     #[test]

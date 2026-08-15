@@ -11,12 +11,14 @@ use std::time::{Duration, Instant};
 pub mod binary_arch;
 pub mod catalog;
 pub mod lc0_backend;
+pub mod uci_options;
 
 pub use binary_arch::{BinaryArch, detect_binary_arch, is_host_native_binary};
 pub use lc0_backend::{
     LC0_BUNDLED_WEIGHTS_NAME, LC0_WEIGHT_NAMES, Lc0DeviceKind, Lc0Launch, detect_device_kind,
     discover_lc0_weights, plan_launch,
 };
+pub use uci_options::{AdvertisedUciOption, parse_uci_option_line, routed_setoption_commands};
 
 /// Run a protocol engine directly on the caller's standard streams while
 /// retaining the same kill-on-close and memory protections as managed sessions.
@@ -915,7 +917,7 @@ impl EngineSession {
     ) -> Result<Self, String> {
         let mut io = EngineIo::spawn_bounded(path, args, memory_limit_bytes)?;
         let mut driver: Box<dyn ProtocolDriver + Send> = match protocol {
-            ProtocolKind::Uci => Box::new(UciDriver),
+            ProtocolKind::Uci => Box::new(UciDriver::default()),
             ProtocolKind::Xboard => Box::new(XboardDriver),
         };
         driver.initialize(&mut io)?;
@@ -1135,7 +1137,9 @@ pub fn analyze_once(
 }
 
 #[derive(Default)]
-struct UciDriver;
+struct UciDriver {
+    advertised: Vec<uci_options::AdvertisedUciOption>,
+}
 
 impl UciDriver {
     fn parse_info_line(&self, line: &str, info: &mut SearchInfo) {
@@ -1275,6 +1279,9 @@ impl ProtocolDriver for UciDriver {
             if line == "uciok" {
                 break;
             }
+            if let Some(option) = uci_options::parse_uci_option_line(&line) {
+                self.advertised.push(option);
+            }
         }
         io.send("isready")?;
         loop {
@@ -1286,17 +1293,14 @@ impl ProtocolDriver for UciDriver {
     }
 
     fn configure(&mut self, io: &mut EngineIo, options: &EngineOptions) -> Result<(), String> {
-        if let Some(hash_mb) = options.hash_mb {
-            io.send(&format!("setoption name Hash value {hash_mb}"))?;
-        }
-        if let Some(threads) = options.threads {
-            io.send(&format!("setoption name Threads value {threads}"))?;
-        }
-        if let Some(own_book) = options.own_book {
-            io.send(&format!("setoption name OwnBook value {own_book}"))?;
-        }
-        for (name, value) in &options.custom {
-            io.send(&uci_setoption_command(name, value)?)?;
+        for (name, value) in uci_options::routed_setoption_commands(
+            &self.advertised,
+            options.hash_mb,
+            options.threads,
+            options.own_book,
+            &options.custom,
+        ) {
+            io.send(&uci_setoption_command(&name, &value)?)?;
         }
         io.send("isready")?;
         loop {
@@ -1517,7 +1521,7 @@ mod tests {
 
     #[test]
     fn test_uci_info_line_parse_cp() {
-        let drv = UciDriver;
+        let drv = UciDriver::default();
         let mut info = SearchInfo::default();
         drv.parse_info_line(
             "info depth 12 seldepth 18 score cp 45 nodes 12345 nps 900000 time 27 hashfull 12 tbhits 3 currmove e2e4 currmovenumber 4 pv e2e4 e7e5",
@@ -1540,7 +1544,7 @@ mod tests {
     fn uci_and_xboard_advertise_stop_commands() {
         assert_eq!(protocol_stop_command(ProtocolKind::Uci), Some("stop"));
         assert_eq!(protocol_stop_command(ProtocolKind::Xboard), Some("?"));
-        assert!(UciDriver.supports_stop());
+        assert!(UciDriver::default().supports_stop());
         assert!(XboardDriver.supports_stop());
     }
 
@@ -1590,7 +1594,7 @@ mod tests {
 
     #[test]
     fn test_uci_info_line_accumulates_multipv() {
-        let drv = UciDriver;
+        let drv = UciDriver::default();
         let mut info = SearchInfo::default();
         drv.parse_info_line(
             "info depth 10 multipv 1 score cp 30 pv e2e4 e7e5",
@@ -1609,7 +1613,7 @@ mod tests {
 
     #[test]
     fn test_uci_info_line_parse_mate() {
-        let drv = UciDriver;
+        let drv = UciDriver::default();
         let mut info = SearchInfo::default();
         drv.parse_info_line("info depth 10 score mate 3 nodes 1000", &mut info);
         assert_eq!(info.depth, 10);
@@ -1619,7 +1623,7 @@ mod tests {
 
     #[test]
     fn test_uci_bestmove_parse_ponder() {
-        let mut driver = UciDriver;
+        let mut driver = UciDriver::default();
         let mut info = SearchInfo::default();
         let best = driver.parse_output_line("bestmove e2e4 ponder e7e5", &mut info);
         assert_eq!(best.as_deref(), Some("e2e4"));

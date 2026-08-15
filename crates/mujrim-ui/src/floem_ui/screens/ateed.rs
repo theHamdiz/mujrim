@@ -150,11 +150,11 @@ fn sources_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
         widgets::section_label("Data sources", pal),
         widgets::body_copy(
-            "Queue Stockfish / Lc0 / self-play dumps, local files, or a game count. Fetch decompresses after download via Decode. Mix weights interleave sources during train.",
+            "Queue Stockfish .plain/.plain.gz, Lc0 chunks, self-play dumps, or a game count. Fetch downloads, decompresses, and decodes into the dataset path. Mix weights interleave sources during train.",
             pal,
         ),
         Stack::horizontal((
-            catalog_chip(state, "stockfish-binpack", "Stockfish"),
+            catalog_chip(state, "stockfish-plain", "Stockfish"),
             catalog_chip(state, "lc0-training", "Lc0"),
             catalog_chip(state, "selfplay-gz", "Self-play"),
         ))
@@ -861,7 +861,7 @@ mod tests {
         assert!(production.contains("ateed_studio"));
         assert!(production.contains("cli_ready"));
         assert!(production.contains("Start train"));
-        assert!(production.contains("stockfish-binpack"));
+        assert!(production.contains("stockfish-plain"));
         assert!(production.contains("Decode"));
         assert!(production.contains("Merge"));
         assert!(
