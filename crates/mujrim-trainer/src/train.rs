@@ -11,7 +11,7 @@ use types::{Board, Color};
 
 use crate::config::TrainingConfig;
 use crate::datagen::TrainingPosition;
-use crate::dataset::load_training_positions;
+use crate::dataset::load_mixed_positions;
 
 const SCORE_SCALE: f32 = SCALE as f32 / (QA * QB) as f32;
 
@@ -308,7 +308,7 @@ fn step_heads(
     target_wdl: f32,
     lr: f32,
     wdl_weight: f32,
-) {
+) -> f32 {
     let (pred, logits) = forward_heads(state);
     let score_weight = 1.0 - wdl_weight;
     state.eval_b -= lr * score_weight * (pred - target_score) / SCORE_SCALE;
@@ -317,6 +317,7 @@ fn step_heads(
     for (bias, (&prob, &tgt)) in state.wdl_b.iter_mut().zip(probs.iter().zip(&target)) {
         *bias -= lr * wdl_weight * (prob - tgt) / 64.0;
     }
+    (pred - target_score).abs()
 }
 
 fn route_gate(logits: [f32; EXPERTS]) -> usize {
@@ -466,20 +467,19 @@ pub fn train_ateed(
     let compute = training_compute();
     let lr = config.learning_rate as f32;
     let wdl_weight = config.wdl_weight.clamp(0.0, 1.0) as f32;
-    for _ in 0..config.epochs {
+    for epoch in 1..=config.epochs {
+        let mut abs_err = 0.0f32;
         for position in positions {
             let board = Board::from_fen(&position.fen)?;
             let target_wdl = stm_wdl(&board, position.wdl);
-            match scope {
-                AteedTrainScope::OutputBiases => {
-                    step_heads(
-                        &mut state,
-                        position.score as f32,
-                        target_wdl,
-                        lr,
-                        wdl_weight,
-                    );
-                }
+            let residual = match scope {
+                AteedTrainScope::OutputBiases => step_heads(
+                    &mut state,
+                    position.score as f32,
+                    target_wdl,
+                    lr,
+                    wdl_weight,
+                ),
                 AteedTrainScope::Expert0 => {
                     step_expert0(
                         &mut state,
@@ -490,6 +490,7 @@ pub fn train_ateed(
                         wdl_weight,
                         &compute,
                     );
+                    0.0
                 }
                 AteedTrainScope::Moe => {
                     step_moe(
@@ -499,9 +500,18 @@ pub fn train_ateed(
                         lr,
                         wdl_weight,
                     );
+                    0.0
                 }
-            }
+            };
+            abs_err += residual;
         }
+        let loss = abs_err / positions.len() as f32;
+        updater::progress::emit_progress(&updater::progress::JobProgress::train(
+            epoch,
+            config.epochs,
+            loss,
+            0,
+        ));
     }
     if scope != AteedTrainScope::Moe {
         for eval_b in &mut state.moe_eval_b {
@@ -516,8 +526,7 @@ pub fn train_ateed(
 }
 
 pub fn train_ateed_to_file(config: &TrainingConfig, scope: AteedTrainScope) -> Result<(), String> {
-    let positions =
-        load_training_positions(Path::new(&config.data_path)).map_err(|e| e.to_string())?;
+    let positions = load_mixed_positions(&config.data_path, &config.mix_weights, config.mix_seed)?;
     let net = train_ateed(&positions, config, scope)?;
     crate::ateed::emit_network(Path::new(&config.output_path), &net).map_err(|e| e.to_string())
 }
@@ -637,6 +646,41 @@ mod tests {
             "one-epoch heads train budget exceeded: {elapsed:?}"
         );
         assert!(net.evaluate(&Board::new()).abs() < 10_000);
+    }
+
+    #[test]
+    fn train_ateed_to_file_mixes_two_decoded_sources() {
+        types::init();
+        let dir = std::env::temp_dir();
+        let a = dir.join(format!("mujrim-train-mix-a-{}.txt", std::process::id()));
+        let b = dir.join(format!("mujrim-train-mix-b-{}.plain", std::process::id()));
+        let out = dir.join(format!("mujrim-train-mix-{}.bin", std::process::id()));
+        std::fs::write(
+            &a,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|40|0.5\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &b,
+            crate::formats::encode_stockfish_plain(&[startpos_line(40, 0.5)]),
+        )
+        .unwrap();
+        let config = TrainingConfig {
+            data_path: format!("{},{}", a.display(), b.display()),
+            output_path: out.to_string_lossy().into_owned(),
+            epochs: 1,
+            learning_rate: 1.0,
+            wdl_weight: 0.0,
+            mix_weights: "1,1".into(),
+            mix_seed: 2,
+            ..Default::default()
+        };
+        train_ateed_to_file(&config, AteedTrainScope::OutputBiases).expect("mix train");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+        let size = std::fs::metadata(&out).map(|meta| meta.len()).unwrap_or(0);
+        let _ = std::fs::remove_file(&out);
+        assert!(size > 0);
     }
 
     #[test]

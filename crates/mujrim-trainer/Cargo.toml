@@ -14,4 +14,7 @@ search = { package = "mujrim-search", path = "../mujrim-search" }
 eval = { package = "mujrim-eval", path = "../mujrim-eval" }
 gpu = { package = "mujrim-gpu", path = "../mujrim-gpu" }
 updater = { package = "mujrim-updater", path = "../mujrim-updater" }
+mujrim-study = { path = "../mujrim-study" }
+flate2 = "1.1"
+zstd = "0.13.3"
 rand = "0.9"

@@ -55,8 +55,17 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     println!("{info}");
     println!();
 
-    let file = open_datagen_output(&config.output_path)?;
-    let mut writer = BufWriter::new(file);
+    let format = crate::formats::DatasetFormat::parse(&config.format)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let stream_text = format == crate::formats::DatasetFormat::MujrimText
+        && !config.output_path.ends_with(".gz")
+        && !config.output_path.ends_with(".zst");
+    let mut writer = if stream_text {
+        Some(BufWriter::new(open_datagen_output(&config.output_path)?))
+    } else {
+        None
+    };
+    let mut buffered = Vec::new();
 
     for _game_idx in 0..config.num_games {
         if stopped.load(Ordering::Relaxed) {
@@ -66,24 +75,42 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
         let result = play_one_game(config, &stopped);
 
         if let Some(game) = result {
-            for pos in &game.positions {
-                // Simple text format: FEN | score | wdl
-                // A proper implementation would use bulletformat binary encoding
-                writeln!(writer, "{}|{}|{:.1}", pos.fen, pos.score, pos.wdl)?;
+            if let Some(writer) = writer.as_mut() {
+                for pos in &game.positions {
+                    writeln!(writer, "{}|{}|{:.1}", pos.fen, pos.score, pos.wdl)?;
+                }
+            } else {
+                buffered.extend(game.positions.iter().cloned());
             }
             total_positions.fetch_add(game.positions.len() as u64, Ordering::Relaxed);
         }
 
         let completed = games_completed.fetch_add(1, Ordering::Relaxed) + 1;
-        if completed.is_multiple_of(100) || completed == config.num_games {
-            let elapsed = start.elapsed().as_secs_f64();
-            let pos_count = total_positions.load(Ordering::Relaxed);
+        let pos_count = total_positions.load(Ordering::Relaxed);
+        if updater::progress::should_report_step(completed, config.num_games) {
+            updater::progress::emit_progress(&updater::progress::JobProgress::datagen(
+                completed,
+                config.num_games,
+                pos_count,
+            ));
+            let elapsed = start.elapsed().as_secs_f64().max(0.001);
             println!(
                 "  [{completed}/{}] {pos_count} positions, {:.0} pos/sec",
                 config.num_games,
                 pos_count as f64 / elapsed
             );
         }
+    }
+
+    if let Some(mut writer) = writer {
+        writer.flush()?;
+    } else {
+        crate::formats::write_positions(
+            std::path::Path::new(&config.output_path),
+            &buffered,
+            format,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     }
 
     let total = total_positions.load(Ordering::Relaxed);

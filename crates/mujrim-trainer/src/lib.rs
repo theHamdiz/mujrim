@@ -15,4 +15,8 @@ pub mod ateed;
 pub mod config;
 pub mod datagen;
 pub mod dataset;
+pub mod formats;
+pub mod merge;
 pub mod train;
+
+pub use updater::datasets as catalog;

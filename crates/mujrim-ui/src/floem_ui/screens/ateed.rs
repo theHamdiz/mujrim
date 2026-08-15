@@ -1,16 +1,19 @@
-//! Password-gated Ateed studio: sources, dry-run train, live metrics.
+//! Password-gated Ateed studio: sources, CLI jobs, live metrics.
+
+use std::path::PathBuf;
 
 use floem::ext_event::create_ext_action;
 use floem::prelude::*;
 use floem::taffy::style::{Display, FlexWrap, Overflow};
 
 use crate::app_core::ateed_studio::{
-    AteedJobKind, AteedMonitorTick, AteedPerfReport, AteedSourceKind, AteedStrengthReport,
-    dry_run_train, evaluate_zero_net, format_perf, format_strength, plan_job, probe_compute,
-    unlock_ateed, validate_source,
+    AteedCliCommand, AteedJobKind, AteedMonitorTick, AteedPerfReport, AteedSourceKind,
+    AteedStrengthReport, catalog_draft, cli_args, dataset_format_for_path, evaluate_zero_net,
+    format_perf, format_strength, local_mix, monitor_from_progress, plan_job, probe_compute,
+    run_mujrim_cli, unlock_ateed, validate_source, validate_weighted_source,
 };
 
-use super::super::state::{AppHandles, AppState};
+use super::super::state::{AppHandles, AppState, refresh_ateed_cli};
 use super::super::theme;
 use super::super::widgets;
 
@@ -48,7 +51,7 @@ fn lock_gate(state: AppState) -> impl IntoView {
                     .color(theme::rgba(pal().accent_alt))
             }),
             widgets::body_copy(
-                "Enter the studio key to plan multi-source datasets, dry-run MoE training, and inspect in-memory network strength. Downloads and full trains stay queued until you start them from the CLI.",
+                "Enter the studio key to fetch Stockfish/Lc0/self-play dumps, decode them, merge mix weights, generate data, and train Ateed from the CLI.",
                 pal,
             ),
             TextInput::new(state.ateed.password).style(|s| {
@@ -79,8 +82,8 @@ fn lock_gate(state: AppState) -> impl IntoView {
 
 fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    let sources = widgets::card(state, sources_panel(state));
-    let train = widgets::card(state, train_panel(state));
+    let sources = widgets::card(state, sources_panel(state, handles.clone()));
+    let train = widgets::card(state, train_panel(state, handles.clone()));
     let monitor = widgets::card(state, monitor_panel(state));
     let strength = widgets::card(state, strength_panel(state, handles));
     Stack::vertical((
@@ -99,14 +102,25 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
                 .items_center()
                 .flex_wrap(FlexWrap::Wrap)
         }),
-        Label::new("Queue sources, dry-run a train, then evaluate the in-memory net. Nothing leaves this machine until you run `mujrim train fetch` or `mujrim train ateed`.")
-            .style(move |s| {
-                s.font_size(13.0)
-                    .color(theme::rgba(pal().text_secondary))
-                    .min_width(0.0)
-                    .width_full()
-                    .text_wrap()
-            }),
+        Label::derived(move || {
+            if state.ateed.cli_available.get() {
+                format!("CLI ready · {}", state.ateed.cli_path.get())
+            } else {
+                "CLI missing · fetch, train, and datagen are disabled until mujrim is beside the UI or in target/debug."
+                    .to_owned()
+            }
+        })
+        .style(move |s| {
+            s.font_size(13.0)
+                .color(theme::rgba(if state.ateed.cli_available.get() {
+                    pal().accent_alt
+                } else {
+                    pal().text_secondary
+                }))
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+        }),
         Stack::horizontal((
             Stack::vertical((sources, train))
                 .style(|s| s.row_gap(16.0).flex_grow(1.0f32).min_width(280.0).max_width(560.0)),
@@ -131,14 +145,20 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
     .scroll()
 }
 
-fn sources_panel(state: AppState) -> impl IntoView {
+fn sources_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
         widgets::section_label("Data sources", pal),
         widgets::body_copy(
-            "Local files, HTTP Range URLs, or a self-play game count. Adding a source only validates it.",
+            "Queue Stockfish / Lc0 / self-play dumps, local files, or a game count. Fetch decompresses after download via Decode. Mix weights interleave sources during train.",
             pal,
         ),
+        Stack::horizontal((
+            catalog_chip(state, "stockfish-binpack", "Stockfish"),
+            catalog_chip(state, "lc0-training", "Lc0"),
+            catalog_chip(state, "selfplay-gz", "Self-play"),
+        ))
+        .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
         Stack::horizontal((
             source_kind_chip(state, "http", "HTTP"),
             source_kind_chip(state, "local", "Local"),
@@ -150,9 +170,45 @@ fn sources_panel(state: AppState) -> impl IntoView {
                 .height(36.0)
                 .border_radius(10.0)
         }),
+        labeled_field(state, "Mix weight", state.ateed.source_weight),
         Stack::horizontal((
             widgets::primary_button(state, "Add source", move || add_source(state)),
-            widgets::ghost_button(state, "Queue fetch", move || queue_fetch(state)),
+            widgets::primary_button_when(
+                state,
+                "Fetch",
+                move || cli_ready(state),
+                {
+                    let handles = handles.clone();
+                    move || start_fetch(state, &handles)
+                },
+            ),
+            widgets::primary_button_when(
+                state,
+                "Decode",
+                move || cli_ready(state),
+                {
+                    let handles = handles.clone();
+                    move || start_decode(state, &handles)
+                },
+            ),
+            widgets::primary_button_when(
+                state,
+                "Merge",
+                move || cli_ready(state),
+                {
+                    let handles = handles.clone();
+                    move || start_merge(state, &handles)
+                },
+            ),
+            widgets::primary_button_when(
+                state,
+                "Datagen",
+                move || cli_ready(state),
+                {
+                    let handles = handles.clone();
+                    move || start_datagen(state, &handles)
+                },
+            ),
             widgets::ghost_button(state, "Clear", move || {
                 state.ateed.sources.set(Vec::new());
                 push_log(state, "cleared sources");
@@ -166,7 +222,14 @@ fn sources_panel(state: AppState) -> impl IntoView {
             } else {
                 sources
                     .iter()
-                    .map(|source| format!("{} · {}", source.kind.label(), source.value))
+                    .map(|source| {
+                        format!(
+                            "{} · {} · w={}",
+                            source.kind.label(),
+                            source.value,
+                            source.weight
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -182,20 +245,38 @@ fn sources_panel(state: AppState) -> impl IntoView {
     .style(|s| s.row_gap(10.0).width_full())
 }
 
-fn train_panel(state: AppState) -> impl IntoView {
+fn train_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
         widgets::section_label("Training plan", pal),
         widgets::body_copy(
-            "Scope heads, expert0, or moe. Start runs a timed dry-run so the monitor updates without writing a net.",
+            "Scope heads, expert0, or moe. Start trains on every local source using mix weights (interleave, not concat).",
             pal,
         ),
         labeled_field(state, "Scope", state.ateed.scope),
         labeled_field(state, "Epochs", state.ateed.epochs),
         labeled_field(state, "Learning rate", state.ateed.lr),
         labeled_field(state, "WDL weight", state.ateed.wdl_weight),
+        labeled_field(state, "Dataset", state.ateed.data_path),
+        labeled_field(state, "Output net", state.ateed.output_path),
         Stack::horizontal((
-            widgets::primary_button(state, "Dry-run train", move || start_dry_train(state)),
+            widgets::primary_button_when(
+                state,
+                "Start train",
+                move || cli_ready(state),
+                {
+                    let handles = handles.clone();
+                    move || start_train(state, &handles)
+                },
+            ),
+            widgets::ghost_button(state, "Rescan CLI", move || {
+                refresh_ateed_cli(state);
+                if state.ateed.cli_available.get_untracked() {
+                    push_log(state, "Mujrim CLI found");
+                } else {
+                    push_log(state, "Mujrim CLI not found");
+                }
+            }),
             widgets::ghost_button(state, "Lock studio", move || {
                 state.ateed.unlocked.set(false);
                 state.ateed.password.set(String::new());
@@ -300,6 +381,22 @@ fn strength_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     .style(|s| s.row_gap(10.0).width_full())
 }
 
+fn catalog_chip(state: AppState, id: &'static str, label: &'static str) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Button::new(label)
+        .action(move || apply_catalog(state, id))
+        .style(move |s| {
+            s.padding_horiz(12.0)
+                .padding_vert(8.0)
+                .border_radius(10.0)
+                .border(1.0)
+                .border_color(theme::rgba(pal().border))
+                .font_size(12.0)
+                .background(theme::rgba(pal().panel))
+                .color(theme::rgba(pal().text_primary))
+        })
+}
+
 fn source_kind_chip(state: AppState, kind: &'static str, label: &'static str) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Button::new(label)
@@ -389,10 +486,35 @@ fn try_unlock(state: AppState) {
         state.ateed.unlocked.set(true);
         state.ateed.gate_error.set(String::new());
         state.ateed.password.set(String::new());
+        refresh_ateed_cli(state);
         push_log(state, "studio unlocked");
         state.status.set("Ateed studio unlocked.".to_owned());
     } else {
         state.ateed.gate_error.set("Access denied.".to_owned());
+    }
+}
+
+fn cli_ready(state: AppState) -> bool {
+    state.ateed.cli_available.get() && !state.ateed.running.get()
+}
+
+fn apply_catalog(state: AppState, id: &'static str) {
+    match catalog_draft(id) {
+        Ok((kind, value)) => {
+            state.ateed.source_kind.set(match kind {
+                AteedSourceKind::Http => "http".to_owned(),
+                AteedSourceKind::LocalFile => "local".to_owned(),
+                AteedSourceKind::Datagen => "datagen".to_owned(),
+            });
+            state.ateed.source_value.set(value.to_owned());
+            push_log(
+                state,
+                &format!(
+                    "catalog {id} — append a filename if this is a directory root, then Add source"
+                ),
+            );
+        }
+        Err(error) => push_log(state, &error),
     }
 }
 
@@ -404,7 +526,13 @@ fn add_source(state: AppState) {
             return;
         }
     };
-    match validate_source(kind, &state.ateed.source_value.get_untracked()) {
+    let weight = state
+        .ateed
+        .source_weight
+        .get_untracked()
+        .parse::<u32>()
+        .unwrap_or(0);
+    match validate_weighted_source(kind, &state.ateed.source_value.get_untracked(), weight) {
         Ok(source) => {
             state
                 .ateed
@@ -413,60 +541,214 @@ fn add_source(state: AppState) {
             state.ateed.source_value.set(String::new());
             push_log(
                 state,
-                &format!("queued {} · {}", source.kind.label(), source.value),
+                &format!(
+                    "queued {} · {} · w={}",
+                    source.kind.label(),
+                    source.value,
+                    source.weight
+                ),
             );
         }
         Err(error) => push_log(state, &error),
     }
 }
 
-fn queue_fetch(state: AppState) {
+fn start_fetch(state: AppState, handles: &AppHandles) {
     let sources = state.ateed.sources.get_untracked();
-    match plan_job(
-        AteedJobKind::Fetch,
-        &sources,
-        &state.ateed.scope.get_untracked(),
-        1,
-    ) {
-        Ok(plan) => push_log(state, &plan.summary),
-        Err(error) => push_log(state, &error),
-    }
-}
-
-fn start_dry_train(state: AppState) {
-    if state.ateed.running.get_untracked() {
-        push_log(state, "a job is already running");
+    if !begin_cli_job(state, AteedJobKind::Fetch) {
         return;
     }
+    let Some(url) = sources
+        .iter()
+        .find(|source| source.kind == AteedSourceKind::Http)
+        .map(|source| source.value.clone())
+    else {
+        state.ateed.running.set(false);
+        push_log(state, "add at least one HTTP data source");
+        return;
+    };
+    let output = state.ateed.data_path.get_untracked();
+    spawn_cli(
+        state,
+        handles,
+        AteedCliCommand::Fetch {
+            id: None,
+            url,
+            output,
+        },
+        "fetch complete",
+    );
+}
+
+fn start_train(state: AppState, handles: &AppHandles) {
     let sources = state.ateed.sources.get_untracked();
-    let scope = state.ateed.scope.get_untracked();
     let epochs = state
         .ateed
         .epochs
         .get_untracked()
         .parse::<u32>()
         .unwrap_or(0);
-    match plan_job(AteedJobKind::Train, &sources, &scope, epochs) {
-        Ok(plan) => {
-            state.ateed.running.set(true);
-            state.ateed.progress.set(0.0);
-            push_log(state, &plan.summary);
-            pump_ticks_ui(state, dry_run_train(epochs, 0), 0);
+    if !begin_cli_job(state, AteedJobKind::Train) {
+        return;
+    }
+    let (data, mix) = local_mix(&sources);
+    let data = if data.is_empty() {
+        state.ateed.data_path.get_untracked()
+    } else {
+        data
+    };
+    spawn_cli(
+        state,
+        handles,
+        AteedCliCommand::Train {
+            data,
+            mix,
+            output: state.ateed.output_path.get_untracked(),
+            epochs,
+            lr: state.ateed.lr.get_untracked(),
+            wdl_weight: state.ateed.wdl_weight.get_untracked(),
+            scope: state.ateed.scope.get_untracked(),
+            base: None,
+        },
+        "train complete",
+    );
+}
+
+fn start_decode(state: AppState, handles: &AppHandles) {
+    let sources = state.ateed.sources.get_untracked();
+    if !begin_cli_job(state, AteedJobKind::Decode) {
+        return;
+    }
+    let input = sources
+        .iter()
+        .find(|source| source.kind == AteedSourceKind::LocalFile)
+        .map(|source| source.value.clone())
+        .unwrap_or_else(|| state.ateed.data_path.get_untracked());
+    let output = state.ateed.data_path.get_untracked();
+    spawn_cli(
+        state,
+        handles,
+        AteedCliCommand::Decode {
+            format: dataset_format_for_path(&output).to_owned(),
+            input,
+            output,
+        },
+        "decode complete",
+    );
+}
+
+fn start_merge(state: AppState, handles: &AppHandles) {
+    let sources = state.ateed.sources.get_untracked();
+    if !begin_cli_job(state, AteedJobKind::Merge) {
+        return;
+    }
+    let (data, mix) = local_mix(&sources);
+    let output = state.ateed.data_path.get_untracked();
+    spawn_cli(
+        state,
+        handles,
+        AteedCliCommand::Merge {
+            data,
+            mix,
+            format: dataset_format_for_path(&output).to_owned(),
+            output,
+        },
+        "merge complete",
+    );
+}
+
+fn start_datagen(state: AppState, handles: &AppHandles) {
+    if !begin_cli_job(state, AteedJobKind::Datagen) {
+        return;
+    }
+    let games = state
+        .ateed
+        .sources
+        .get_untracked()
+        .iter()
+        .find(|source| source.kind == AteedSourceKind::Datagen)
+        .and_then(|source| source.value.parse().ok())
+        .unwrap_or(0);
+    spawn_cli(
+        state,
+        handles,
+        AteedCliCommand::Datagen {
+            games,
+            depth: 6,
+            output: state.ateed.data_path.get_untracked(),
+            format: dataset_format_for_path(&state.ateed.data_path.get_untracked()).to_owned(),
+        },
+        "datagen complete",
+    );
+}
+
+fn spawn_cli(state: AppState, _handles: &AppHandles, command: AteedCliCommand, done: &'static str) {
+    let cli = PathBuf::from(state.ateed.cli_path.get_untracked());
+    let args = cli_args(&command);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let send = |event: StudioEvent| {
+            let _ = tx.send(event);
+        };
+        match run_mujrim_cli(&cli, &args, |line| {
+            send(StudioEvent::Line(line.to_owned()));
+        }) {
+            Ok(0) => send(StudioEvent::Done(Ok(()))),
+            Ok(code) => send(StudioEvent::Done(Err(format!("CLI exited {code}")))),
+            Err(error) => send(StudioEvent::Done(Err(error))),
         }
-        Err(error) => push_log(state, &error),
+    });
+    pump_cli_events(state, rx, done);
+}
+
+fn pump_cli_events(
+    state: AppState,
+    rx: std::sync::mpsc::Receiver<StudioEvent>,
+    done: &'static str,
+) {
+    let mut finished = false;
+    loop {
+        match rx.try_recv() {
+            Ok(StudioEvent::Line(line)) => {
+                if let Some(progress) = updater::progress::parse_progress_line(&line) {
+                    apply_tick(state, &monitor_from_progress(&progress));
+                } else {
+                    push_log(state, &line);
+                }
+            }
+            Ok(StudioEvent::Done(Ok(()))) => {
+                state.ateed.running.set(false);
+                state.ateed.progress.set(1.0);
+                push_log(state, done);
+                finished = true;
+            }
+            Ok(StudioEvent::Done(Err(error))) => {
+                state.ateed.running.set(false);
+                push_log(state, &error);
+                finished = true;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                if state.ateed.running.get_untracked() {
+                    state.ateed.running.set(false);
+                    push_log(state, "CLI stopped");
+                }
+                finished = true;
+                break;
+            }
+        }
+    }
+    if !finished {
+        floem::action::exec_after(std::time::Duration::from_millis(80), move |_| {
+            pump_cli_events(state, rx, done);
+        });
     }
 }
 
-fn pump_ticks_ui(state: AppState, ticks: Vec<AteedMonitorTick>, index: usize) {
-    if index >= ticks.len() {
-        state.ateed.running.set(false);
-        push_log(state, "dry-run complete");
-        return;
-    }
-    apply_tick(state, &ticks[index]);
-    floem::action::exec_after(std::time::Duration::from_millis(90), move |_| {
-        pump_ticks_ui(state, ticks, index + 1);
-    });
+#[derive(Clone)]
+enum StudioEvent {
+    Line(String),
+    Done(Result<(), String>),
 }
 
 fn apply_tick(state: AppState, tick: &AteedMonitorTick) {
@@ -505,18 +787,46 @@ fn start_bench(state: AppState, handles: &AppHandles) {
 }
 
 fn begin_job(state: AppState, kind: AteedJobKind) -> bool {
+    begin_planned_job(state, kind, 1)
+}
+
+fn begin_cli_job(state: AppState, kind: AteedJobKind) -> bool {
+    let epochs = state
+        .ateed
+        .epochs
+        .get_untracked()
+        .parse::<u32>()
+        .unwrap_or(1);
+    begin_planned_job(state, kind, epochs)
+}
+
+fn begin_planned_job(state: AppState, kind: AteedJobKind, epochs: u32) -> bool {
     if state.ateed.running.get_untracked() {
         push_log(state, "a job is already running");
         return false;
     }
+    refresh_ateed_cli(state);
+    let mut sources = state.ateed.sources.get_untracked();
+    if matches!(kind, AteedJobKind::Train | AteedJobKind::Decode)
+        && sources
+            .iter()
+            .all(|source| source.kind != AteedSourceKind::LocalFile)
+    {
+        let data = state.ateed.data_path.get_untracked();
+        if let Ok(source) = validate_source(AteedSourceKind::LocalFile, &data) {
+            sources.push(source);
+        }
+    }
     match plan_job(
         kind,
-        &state.ateed.sources.get_untracked(),
+        &sources,
         &state.ateed.scope.get_untracked(),
-        1,
+        epochs,
+        state.ateed.cli_available.get_untracked(),
     ) {
         Ok(plan) => {
             state.ateed.running.set(true);
+            state.ateed.progress.set(0.0);
             push_log(state, &plan.summary);
             true
         }
@@ -549,6 +859,11 @@ mod tests {
         assert!(production.contains("Display::None"));
         assert!(!production.contains("JAHANAM"));
         assert!(production.contains("ateed_studio"));
+        assert!(production.contains("cli_ready"));
+        assert!(production.contains("Start train"));
+        assert!(production.contains("stockfish-binpack"));
+        assert!(production.contains("Decode"));
+        assert!(production.contains("Merge"));
         assert!(
             !production.contains("dyn_view"),
             "lock/dashboard must stay mounted"

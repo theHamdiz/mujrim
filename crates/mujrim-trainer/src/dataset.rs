@@ -1,6 +1,6 @@
 //! Text dataset used by datagen and the Ateed trainer: `FEN|score|wdl`.
 
-use std::io::{self, BufRead};
+use std::io;
 use std::path::Path;
 
 use crate::datagen::TrainingPosition;
@@ -46,27 +46,44 @@ pub fn fetch_dataset(url: &str, dest: &Path) -> Result<(), String> {
     {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    updater::download::download_url(url, dest, None)
+    updater::download::download_url_with_progress(url, dest, None, |bytes, total| {
+        updater::progress::emit_progress(&updater::progress::JobProgress::fetch(bytes, total));
+    })
 }
 
 pub fn load_training_positions(path: &Path) -> io::Result<Vec<TrainingPosition>> {
-    let file = std::fs::File::open(path)?;
-    let reader = io::BufReader::new(file);
-    let mut positions = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
-        let line = line?;
-        match parse_training_line(&line) {
-            Ok(Some(position)) => positions.push(position),
-            Ok(None) => {}
-            Err(error) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("line {}: {error}", index + 1),
-                ));
-            }
-        }
+    crate::formats::load_positions_from_path(path)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub fn load_mixed_positions(
+    data_path: &str,
+    mix_weights: &str,
+    seed: u64,
+) -> Result<Vec<TrainingPosition>, String> {
+    let paths = crate::merge::parse_csv_list(data_path);
+    if paths.is_empty() {
+        return Err("pass at least one dataset path".into());
     }
-    Ok(positions)
+    let weights = crate::merge::parse_mix_weights(mix_weights, paths.len())?;
+    let mut sources = Vec::with_capacity(paths.len());
+    for path in &paths {
+        sources.push(crate::formats::load_positions_from_path(Path::new(path))?);
+    }
+    if sources.len() == 1 {
+        return Ok(sources.remove(0));
+    }
+    crate::merge::merge_weighted(&sources, &weights, seed)
+}
+
+pub fn fetch_catalog_dataset(id: Option<&str>, url: &str, dest: &Path) -> Result<(), String> {
+    let (url, filename) = updater::datasets::resolve_fetch_url(id, url)?;
+    let dest = if dest.as_os_str().is_empty() {
+        Path::new(&filename)
+    } else {
+        dest
+    };
+    fetch_dataset(&url, dest)
 }
 
 #[cfg(test)]
@@ -114,5 +131,34 @@ mod tests {
                 .unwrap_err()
                 .contains("http(s)")
         );
+        assert!(
+            fetch_catalog_dataset(Some("stockfish-binpack"), "", &dest)
+                .unwrap_err()
+                .contains("directory")
+        );
+    }
+
+    #[test]
+    fn load_mixed_positions_interleaves_two_text_files() {
+        let dir = std::env::temp_dir();
+        let a = dir.join(format!("mujrim-mix-a-{}.txt", std::process::id()));
+        let b = dir.join(format!("mujrim-mix-b-{}.txt", std::process::id()));
+        std::fs::write(
+            &a,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|1|1.0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &b,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|2|0.0\n",
+        )
+        .unwrap();
+        let mixed =
+            load_mixed_positions(&format!("{},{}", a.display(), b.display()), "1,1", 1).unwrap();
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+        assert_eq!(mixed.len(), 2);
+        let scores: Vec<i32> = mixed.iter().map(|p| p.score).collect();
+        assert!(scores.contains(&1) && scores.contains(&2));
     }
 }

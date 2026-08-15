@@ -107,6 +107,43 @@ pub fn primary_button(
     })
 }
 
+pub fn primary_button_when(
+    state: AppState,
+    label: &'static str,
+    enabled: impl Fn() -> bool + Copy + 'static,
+    action: impl Fn() + 'static,
+) -> impl IntoView {
+    Button::new(label)
+        .action(move || {
+            if enabled() {
+                action();
+            }
+        })
+        .style(move |s| {
+            let pal = theme::palette(state.settings.get().board_theme);
+            let on = enabled();
+            let s = s
+                .min_width(0.0)
+                .padding_horiz(16.0)
+                .padding_vert(10.0)
+                .border_radius(12.0)
+                .border(0.0)
+                .font_size(13.0)
+                .font_bold()
+                .background(theme::rgba(if on { pal.accent } else { pal.panel }))
+                .color(theme::rgba(if on {
+                    pal.text_primary
+                } else {
+                    pal.text_secondary
+                }));
+            if on {
+                s.hover(|s| s.background(theme::rgba(pal.accent_alt)))
+            } else {
+                s.pointer_events_none()
+            }
+        })
+}
+
 pub fn ghost_button(
     state: AppState,
     label: &'static str,
@@ -704,6 +741,10 @@ mod tests {
         assert!(
             production.contains("capped_scroll"),
             "dropdown and sidebar lists must share a viewport-capped scroller"
+        );
+        assert!(
+            production.contains("primary_button_when"),
+            "CLI-backed actions must use a gated primary button"
         );
         let scroller = production
             .split("pub fn capped_scroll")

@@ -6280,12 +6280,15 @@ dependencies = [
 name = "mujrim-trainer"
 version = "1.0.0"
 dependencies = [
+ "flate2",
  "mujrim-eval",
  "mujrim-gpu",
  "mujrim-search",
+ "mujrim-study",
  "mujrim-types",
  "mujrim-updater",
  "rand 0.9.2",
+ "zstd",
 ]
 
 [[package]]

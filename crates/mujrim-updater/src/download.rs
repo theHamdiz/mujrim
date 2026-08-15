@@ -27,6 +27,15 @@ pub fn validate_size(actual: u64, expected: Option<u64>) -> Result<(), String> {
 }
 
 pub fn download_url(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<(), String> {
+    download_url_with_progress(url, dest, expected_size, |_, _| {})
+}
+
+pub fn download_url_with_progress(
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("mujrim-updater/1.0.0")
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -34,7 +43,7 @@ pub fn download_url(url: &str, dest: &Path, expected_size: Option<u64>) -> Resul
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
-    download_resumable(&client, url, dest, expected_size)
+    download_resumable_with_progress(&client, url, dest, expected_size, on_progress)
 }
 
 pub fn download_resumable(
@@ -42,6 +51,16 @@ pub fn download_resumable(
     url: &str,
     dest: &Path,
     expected_size: Option<u64>,
+) -> Result<(), String> {
+    download_resumable_with_progress(client, url, dest, expected_size, |_, _| {})
+}
+
+pub fn download_resumable_with_progress(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<(), String> {
     let part = part_path(dest);
     let resume_at = resume_len(&part);
@@ -73,6 +92,9 @@ pub fn download_resumable(
         .map_err(|e| format!("Create partial file: {e}"))?;
 
     let mut buffer = vec![0u8; 65_536].into_boxed_slice();
+    let mut written = starting_size;
+    let mut last_report = starting_size;
+    on_progress(written, expected);
     loop {
         let n = response
             .read(&mut buffer)
@@ -82,6 +104,14 @@ pub fn download_resumable(
         }
         file.write_all(&buffer[..n])
             .map_err(|e| format!("Write: {e}"))?;
+        written += n as u64;
+        if written - last_report >= 65_536 || expected.is_some_and(|total| written >= total) {
+            on_progress(written, expected);
+            last_report = written;
+        }
+    }
+    if written != last_report {
+        on_progress(written, expected);
     }
 
     file.flush().map_err(|e| format!("Flush: {e}"))?;

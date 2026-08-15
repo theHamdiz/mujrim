@@ -111,6 +111,7 @@ pub struct AteedStudioState {
     pub gate_error: RwSignal<String>,
     pub source_kind: RwSignal<String>,
     pub source_value: RwSignal<String>,
+    pub source_weight: RwSignal<String>,
     pub sources: RwSignal<Vec<AteedDataSource>>,
     pub scope: RwSignal<String>,
     pub epochs: RwSignal<String>,
@@ -126,6 +127,10 @@ pub struct AteedStudioState {
     pub latency: RwSignal<String>,
     pub strength: RwSignal<String>,
     pub log: RwSignal<Vec<String>>,
+    pub cli_available: RwSignal<bool>,
+    pub cli_path: RwSignal<String>,
+    pub data_path: RwSignal<String>,
+    pub output_path: RwSignal<String>,
 }
 
 #[derive(Clone)]
@@ -242,6 +247,7 @@ impl AppState {
                 gate_error: RwSignal::new(String::new()),
                 source_kind: RwSignal::new("http".to_owned()),
                 source_value: RwSignal::new(String::new()),
+                source_weight: RwSignal::new("1".to_owned()),
                 sources: RwSignal::new(Vec::new()),
                 scope: RwSignal::new("heads".to_owned()),
                 epochs: RwSignal::new("8".to_owned()),
@@ -257,6 +263,10 @@ impl AppState {
                 latency: RwSignal::new("idle".to_owned()),
                 strength: RwSignal::new("Evaluate a net to populate strength.".to_owned()),
                 log: RwSignal::new(Vec::new()),
+                cli_available: RwSignal::new(false),
+                cli_path: RwSignal::new(String::new()),
+                data_path: RwSignal::new("data.txt".to_owned()),
+                output_path: RwSignal::new("ateed_default.bin".to_owned()),
             },
         };
         let study_path = crate::app_core::logic::study_database_path();
@@ -305,6 +315,7 @@ impl AppState {
             #[cfg(feature = "book")]
             book: Rc::new(search::book::OpeningBook::load_embedded().ok()),
         };
+        refresh_ateed_cli(state);
         (state, handles)
     }
 
@@ -314,5 +325,18 @@ impl AppState {
 
     pub fn anim_pace(self) -> AnimPace {
         AnimPace::from_setting(self.settings.get_untracked().anim_speed)
+    }
+}
+
+pub fn refresh_ateed_cli(state: AppState) {
+    match crate::app_core::ateed_studio::discover_mujrim_cli_from_environment() {
+        Some(path) => {
+            state.ateed.cli_available.set(true);
+            state.ateed.cli_path.set(path.display().to_string());
+        }
+        None => {
+            state.ateed.cli_available.set(false);
+            state.ateed.cli_path.set(String::new());
+        }
     }
 }

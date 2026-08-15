@@ -380,6 +380,13 @@ fn main() {
                                 .value_name("PATH")
                                 .default_value("data.txt")
                                 .help("Append-only dataset path"),
+                        )
+                        .arg(
+                            Arg::new("format")
+                                .long("format")
+                                .value_name("text|plain|binpack")
+                                .default_value("text")
+                                .help("Write Mujrim text, Stockfish plain, or MJBP binpack"),
                         ),
                 )
                 .subcommand(
@@ -389,9 +396,22 @@ fn main() {
                             Arg::new("data")
                                 .short('d')
                                 .long("data")
-                                .value_name("PATH")
+                                .value_name("PATH[,PATH]")
                                 .default_value("data.txt")
-                                .help("Dataset of FEN|score|wdl lines"),
+                                .help("One or more datasets (text, plain, MJBP, PGN, gz, zst)"),
+                        )
+                        .arg(
+                            Arg::new("mix")
+                                .long("mix")
+                                .value_name("W[,W]")
+                                .help("Per-source mix weights; interleaves instead of concatenating"),
+                        )
+                        .arg(
+                            Arg::new("seed")
+                                .long("seed")
+                                .value_name("N")
+                                .default_value("1")
+                                .help("Shuffle seed after the weighted mix"),
                         )
                         .arg(
                             Arg::new("output")
@@ -439,13 +459,41 @@ fn main() {
                 )
                 .subcommand(
                     Command::new("fetch")
-                        .about("Download a remote dataset with HTTP Range resume")
+                        .about("Download a catalog or remote dataset with HTTP Range resume")
+                        .arg(
+                            Arg::new("id")
+                                .long("id")
+                                .value_name("ID")
+                                .help("Catalog id from `mujrim train catalog`"),
+                        )
                         .arg(
                             Arg::new("url")
                                 .long("url")
                                 .value_name("URL")
+                                .help("http(s) file URL; required when the catalog id is a directory root"),
+                        )
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("PATH")
+                                .help("Destination path; resumes into a .part file"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("catalog")
+                        .about("List Stockfish, Lc0, and self-play dataset ids"),
+                )
+                .subcommand(
+                    Command::new("decode")
+                        .about("Decompress and decode a dump into a training dataset")
+                        .arg(
+                            Arg::new("input")
+                                .short('i')
+                                .long("input")
+                                .value_name("PATH")
                                 .required(true)
-                                .help("http(s) dataset URL"),
+                                .help("Source dump (gz, zst, plain, MJBP, PGN, text)"),
                         )
                         .arg(
                             Arg::new("output")
@@ -453,7 +501,54 @@ fn main() {
                                 .long("output")
                                 .value_name("PATH")
                                 .default_value("data.txt")
-                                .help("Destination path; resumes into a .part file"),
+                                .help("Decoded dataset path"),
+                        )
+                        .arg(
+                            Arg::new("format")
+                                .long("format")
+                                .value_name("text|plain|binpack")
+                                .default_value("text")
+                                .help("Output encoding"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("merge")
+                        .about("Weighted-interleave multiple decoded sources into one epoch")
+                        .arg(
+                            Arg::new("data")
+                                .short('d')
+                                .long("data")
+                                .value_name("PATH[,PATH]")
+                                .required(true)
+                                .help("Comma-separated source paths"),
+                        )
+                        .arg(
+                            Arg::new("mix")
+                                .long("mix")
+                                .value_name("W[,W]")
+                                .help("Per-source mix weights (default 1 per source)"),
+                        )
+                        .arg(
+                            Arg::new("seed")
+                                .long("seed")
+                                .value_name("N")
+                                .default_value("1")
+                                .help("Shuffle seed after the mix"),
+                        )
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("PATH")
+                                .default_value("mix.txt")
+                                .help("Merged dataset path"),
+                        )
+                        .arg(
+                            Arg::new("format")
+                                .long("format")
+                                .value_name("text|plain|binpack")
+                                .default_value("text")
+                                .help("Output encoding"),
                         ),
                 ),
         )
@@ -590,6 +685,10 @@ fn main() {
                             .get_one::<String>("output")
                             .cloned()
                             .unwrap_or_else(|| "data.txt".to_string()),
+                        format: datagen
+                            .get_one::<String>("format")
+                            .cloned()
+                            .unwrap_or_else(|| "text".to_string()),
                         ..Default::default()
                     };
                     if let Err(error) = trainer::datagen::generate_data(&config) {
@@ -620,6 +719,11 @@ fn main() {
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(0.25),
                         base_network: train.get_one::<String>("base").cloned(),
+                        mix_weights: train.get_one::<String>("mix").cloned().unwrap_or_default(),
+                        mix_seed: train
+                            .get_one::<String>("seed")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(1),
                         ..Default::default()
                     };
                     let scope = match trainer::train::AteedTrainScope::parse(
@@ -640,20 +744,115 @@ fn main() {
                     println!("wrote Ateed checkpoint to {}", config.output_path);
                 }
                 Some(("fetch", fetch)) => {
+                    let id = fetch.get_one::<String>("id").map(String::as_str);
                     let url = fetch.get_one::<String>("url").map_or("", String::as_str);
+                    let (resolved, filename) = match trainer::catalog::resolve_fetch_url(id, url) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                    };
                     let output = fetch
                         .get_one::<String>("output")
-                        .map_or("data.txt", String::as_str);
+                        .cloned()
+                        .unwrap_or(filename);
                     if let Err(error) =
-                        trainer::dataset::fetch_dataset(url, std::path::Path::new(output))
+                        trainer::dataset::fetch_dataset(&resolved, std::path::Path::new(&output))
                     {
                         eprintln!("dataset fetch failed: {error}");
                         std::process::exit(1);
                     }
                     println!("wrote dataset to {output}");
                 }
+                Some(("catalog", _)) => {
+                    for offer in trainer::catalog::DATASETS {
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            offer.id,
+                            offer.kind.as_str(),
+                            offer.filename,
+                            offer.notes
+                        );
+                    }
+                }
+                Some(("decode", decode)) => {
+                    let input = decode.get_one::<String>("input").map_or("", String::as_str);
+                    let output = decode
+                        .get_one::<String>("output")
+                        .map_or("data.txt", String::as_str);
+                    let format = match trainer::formats::DatasetFormat::parse(
+                        decode
+                            .get_one::<String>("format")
+                            .map_or("text", String::as_str),
+                    ) {
+                        Ok(format) => format,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                    };
+                    let positions = match trainer::formats::load_positions_from_path(
+                        std::path::Path::new(input),
+                    ) {
+                        Ok(positions) => positions,
+                        Err(error) => {
+                            eprintln!("decode failed: {error}");
+                            std::process::exit(1);
+                        }
+                    };
+                    if let Err(error) = trainer::formats::write_positions(
+                        std::path::Path::new(output),
+                        &positions,
+                        format,
+                    ) {
+                        eprintln!("decode write failed: {error}");
+                        std::process::exit(1);
+                    }
+                    println!("decoded {} positions to {output}", positions.len());
+                }
+                Some(("merge", merge)) => {
+                    let data = merge.get_one::<String>("data").map_or("", String::as_str);
+                    let mix = merge.get_one::<String>("mix").map_or("", String::as_str);
+                    let seed = merge
+                        .get_one::<String>("seed")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(1);
+                    let output = merge
+                        .get_one::<String>("output")
+                        .map_or("mix.txt", String::as_str);
+                    let format = match trainer::formats::DatasetFormat::parse(
+                        merge
+                            .get_one::<String>("format")
+                            .map_or("text", String::as_str),
+                    ) {
+                        Ok(format) => format,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                    };
+                    let positions = match trainer::dataset::load_mixed_positions(data, mix, seed) {
+                        Ok(positions) => positions,
+                        Err(error) => {
+                            eprintln!("merge failed: {error}");
+                            std::process::exit(1);
+                        }
+                    };
+                    if let Err(error) = trainer::formats::write_positions(
+                        std::path::Path::new(output),
+                        &positions,
+                        format,
+                    ) {
+                        eprintln!("merge write failed: {error}");
+                        std::process::exit(1);
+                    }
+                    println!("merged {} positions to {output}", positions.len());
+                }
                 _ => {
-                    eprintln!("usage: mujrim train <emit-ateed|datagen|ateed|fetch> [options]");
+                    eprintln!(
+                        "usage: mujrim train <emit-ateed|datagen|ateed|fetch|catalog|decode|merge> [options]"
+                    );
                     std::process::exit(2);
                 }
             }

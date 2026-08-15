@@ -11,7 +11,7 @@ use crate::app_core::settings::Screen;
 
 use super::actions;
 use super::icons;
-use super::state::{AppHandles, AppState};
+use super::state::{AppHandles, AppState, refresh_ateed_cli};
 use super::theme;
 
 pub fn shell(
@@ -173,7 +173,10 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             icons::FLAME,
             "Ateed",
             move || matches!(state.screen.get(), Screen::Ateed),
-            move || state.screen.set(Screen::Ateed),
+            move || {
+                refresh_ateed_cli(state);
+                state.screen.set(Screen::Ateed);
+            },
         ),
     ))
     .style(|s| s.col_gap(3.0).items_center().min_width(0.0))
@@ -404,6 +407,10 @@ mod tests {
         assert!(
             production.contains("icons::FLAME"),
             "Ateed nav must use the flame icon"
+        );
+        assert!(
+            production.contains("refresh_ateed_cli"),
+            "opening Ateed must rescan the Mujrim CLI"
         );
         assert!(
             !production.contains("FlexWrap::Wrap"),

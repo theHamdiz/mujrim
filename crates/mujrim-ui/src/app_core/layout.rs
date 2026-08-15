@@ -167,6 +167,14 @@ pub fn tournament_arena_layout(screen: Screen, concurrency: u32, live: &[LiveGam
     matches!(screen, Screen::Tournaments) && is_arena_mode(concurrency, live)
 }
 
+pub fn tournament_shows_move_list(
+    screen: Screen,
+    concurrency: u32,
+    live: &[LiveGameBoard],
+) -> bool {
+    !tournament_arena_layout(screen, concurrency, live)
+}
+
 pub fn live_white_to_move(game: &LiveGameBoard) -> bool {
     let starts_white = game
         .initial_fen
@@ -524,6 +532,9 @@ mod tests {
         assert!(!is_arena_mode(1, &pending));
         assert!(!tournament_arena_layout(Screen::Playing, 15, &[]));
         assert!(tournament_arena_layout(Screen::Tournaments, 15, &[]));
+        assert!(tournament_shows_move_list(Screen::Playing, 15, &[]));
+        assert!(tournament_shows_move_list(Screen::Tournaments, 1, &[]));
+        assert!(!tournament_shows_move_list(Screen::Tournaments, 15, &[]));
         let mut start = board("g0", None, None);
         start.initial_fen = mujrim_study::opening::START_FEN.to_owned();
         assert!(live_white_to_move(&start));

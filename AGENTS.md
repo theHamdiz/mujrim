@@ -16,7 +16,9 @@ Updated: 2026-08-15
 - Phase 3: Ateed WDL variance widens futility/RFP and relieves LMR; NNUE downloads resume via HTTP Range; `mujrim train emit-ateed` writes a zero net.
 - Phase 4: CPU `TrainCompute` matvec; `mujrim train datagen` / `mujrim train ateed` parse `FEN|score|wdl` and SGD Ateed heads (or expert 0 + FT).
 - Phase 5: `--scope moe` trains the routed expert’s heads; `mujrim train fetch` resumes remote datasets via HTTP Range.
-- Floem title-bar **Ateed** tab is password-gated (secret stored only as Base64 `SkFIQU5BTQ==`). The studio plans multi-source fetch, dry-runs train ticks, and evaluates an in-memory zero net — it does not download datasets or run a full train.
+- Training data: `mujrim train catalog|fetch|decode|merge|datagen|ateed` download Stockfish/Lc0/self-play dumps, decompress gzip/zstd, decode Mujrim text / Stockfish `.plain` / MJBP binpack / PGN, and train. Official chained Stockfish `BINP` stays out (GPL reader); convert those to `.plain` first. `--mix` weighted-interleaves sources instead of concatenating them.
+- Floem title-bar **Ateed** tab is password-gated (secret stored only as Base64 `SkFIQU5BTQ==`). Fetch / decode / merge / train / datagen call the discovered `mujrim` CLI and stream `progress` lines; those actions stay disabled when the binary is missing. Evaluate and latency probes stay in-process.
+- Concurrent (arena) tournaments keep the right sidebar but hide the move list; single-board tournaments and other game screens still show it.
 - Product surfaces: `--backend universal` (selectable), `--backend mujrim-hce` (classical HCE), `--backend v60`/`v10`/`akimbo` (packaged adapters), `--backend ateed` (in-process MoE), external upstream passthrough.
 - Do not use “native” as an engine/backend product name (`RuntimeCompatibility::Native` is host-ISA packaging only).
 - A structured AI-agent tool surface is implemented in `mujrim-tooling`.
@@ -47,7 +49,7 @@ Updated: 2026-08-15
 
 ## Open UI Workstream
 - Additional piece sets live under `crates/mujrim-ui/assets/pieces/` and switch at runtime in Options.
-- Ateed studio lives behind the title-bar Ateed pill (`Screen::Ateed`); unlock compares against the decoded Base64 gate.
+- Ateed studio lives behind the title-bar Ateed pill (`Screen::Ateed`); unlock compares against the decoded Base64 gate. Fetch/decode/merge/train/datagen stay disabled until a `mujrim` CLI is discovered.
 
 ## CI/CD Baseline (Required)
 - CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test (`uciok` + `Mujrim 1.0.0`).

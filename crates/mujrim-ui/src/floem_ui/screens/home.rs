@@ -10,7 +10,7 @@ use crate::app_core::settings::Screen;
 use crate::app_core::uci_process::ExternalEngineProtocol;
 
 use super::super::actions;
-use super::super::state::{AppHandles, AppState};
+use super::super::state::{AppHandles, AppState, refresh_ateed_cli};
 use super::super::theme;
 use super::super::widgets;
 
@@ -62,6 +62,7 @@ pub fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
                 }
             }),
             widgets::ghost_button(state, "Ateed Studio", move || {
+                refresh_ateed_cli(state);
                 state.screen.set(Screen::Ateed);
             }),
         ))

@@ -27,6 +27,8 @@ pub struct DatagenConfig {
     /// Search parameter preset to use during self-play.
     /// Maps to `SearchParams::for_preset()` (e.g. "akimbo", "stockfish").
     pub search_preset: String,
+    /// Output encoding: `text`, `plain`, or `binpack`.
+    pub format: String,
 }
 
 impl Default for DatagenConfig {
@@ -45,6 +47,7 @@ impl Default for DatagenConfig {
             win_adjudication_cp: 1000,
             network_path: None,
             search_preset: "akimbo".to_string(),
+            format: "text".to_string(),
         }
     }
 }
@@ -71,6 +74,10 @@ pub struct TrainingConfig {
     /// Optional base network path to use for fine-tuning.
     /// If `None`, trains from scratch.
     pub base_network: Option<String>,
+    /// Comma-separated mix weights matching `data_path` entries.
+    pub mix_weights: String,
+    /// Seed for the post-mix epoch shuffle.
+    pub mix_seed: u64,
 }
 
 impl Default for TrainingConfig {
@@ -85,6 +92,8 @@ impl Default for TrainingConfig {
             wdl_weight: 0.5,
             architecture: "768->1024x2->1".to_string(),
             base_network: None,
+            mix_weights: String::new(),
+            mix_seed: 1,
         }
     }
 }

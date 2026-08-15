@@ -105,13 +105,6 @@ fn workspace(
                 pane_width,
             ),
             sidebar.style(move |s| {
-                if arena_layout(state) {
-                    return s
-                        .display(Display::None)
-                        .width(0.0)
-                        .min_width(0.0)
-                        .max_width(0.0);
-                }
                 let width = layout::clamp_sidebar_width(
                     state.settings.get().sidebar_width_px,
                     pane_width.get(),
@@ -160,6 +153,14 @@ fn workspace(
 
 fn arena_layout(state: AppState) -> bool {
     layout::tournament_arena_layout(
+        state.screen.get(),
+        state.tournament_setup.get().concurrency,
+        &state.tournament_snapshot.get().live_games,
+    )
+}
+
+fn show_tournament_move_list(state: AppState) -> bool {
+    layout::tournament_shows_move_list(
         state.screen.get(),
         state.tournament_setup.get().concurrency,
         &state.tournament_snapshot.get().live_games,
@@ -235,13 +236,6 @@ fn split_handle(
             if dragging.get_untracked() {
                 dragging.set(false);
                 state.persist_settings();
-            }
-        })
-        .style(move |s| {
-            if arena_layout(state) {
-                s.display(Display::None).width(0.0)
-            } else {
-                s
             }
         })
 }
@@ -740,14 +734,20 @@ fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
             pane_title("Moves"),
             move_list(state, handles.clone()),
             ply_nav(state, handles.clone()),
-            eval_graph::eval_graph(state),
         ))
-        .style(|s| {
-            s.row_gap(8.0)
+        .style(move |s| {
+            let s = s
+                .row_gap(8.0)
                 .width_full()
                 .flex_grow(1.0f32)
-                .min_height(0.0)
+                .min_height(0.0);
+            if show_tournament_move_list(state) {
+                s
+            } else {
+                s.display(Display::None)
+            }
         }),
+        eval_graph::eval_graph(state),
         Stack::vertical((
             pane_title("Standings"),
             widgets::standing_rows_list(
@@ -1545,6 +1545,7 @@ mod tests {
             "live_mini_board",
             "arena_layout",
             "tournament_arena_layout",
+            "show_tournament_move_list",
             "LIVE_BOARD_SLOTS",
             "tournament_live_card",
             "remaining_games_label",
@@ -1572,6 +1573,10 @@ mod tests {
         assert!(
             !split.contains("sidebar_scroll"),
             "every right panel including Tournament must scroll"
+        );
+        assert!(
+            !split.contains("display(Display::None)"),
+            "multi-game tournaments must keep the right panel"
         );
         assert!(
             !production.contains("board::board_view(state, handles.clone()).into_any()"),

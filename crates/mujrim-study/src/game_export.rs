@@ -125,6 +125,26 @@ pub fn encode_games(games: &[GameRecord], format: GameExportFormat) -> Result<Ve
     }
 }
 
+pub fn encode_positions_binpack(positions: &[TrainingPosition]) -> Result<Vec<u8>, String> {
+    let records = encode_training_records(positions);
+    let mut compressed = Vec::new();
+    {
+        let mut encoder = GzEncoder::new(&mut compressed, Compression::default());
+        encoder
+            .write_all(&records)
+            .map_err(|error| format!("failed to compress binpack: {error}"))?;
+        encoder
+            .finish()
+            .map_err(|error| format!("failed to finish binpack: {error}"))?;
+    }
+    let mut out = Vec::with_capacity(14 + compressed.len());
+    out.extend_from_slice(BINPACK_MAGIC);
+    out.extend_from_slice(&BINPACK_VERSION.to_le_bytes());
+    out.extend_from_slice(&(records.len() as u64).to_le_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
+}
+
 pub fn write_games(
     games: &[GameRecord],
     path: impl AsRef<Path>,
@@ -353,23 +373,7 @@ fn encode_plain(games: &[GameRecord]) -> Result<String, String> {
 }
 
 fn encode_binpack(games: &[GameRecord]) -> Result<Vec<u8>, String> {
-    let records = encode_training_records(&training_positions(games)?);
-    let mut compressed = Vec::new();
-    {
-        let mut encoder = GzEncoder::new(&mut compressed, Compression::default());
-        encoder
-            .write_all(&records)
-            .map_err(|error| format!("failed to compress binpack: {error}"))?;
-        encoder
-            .finish()
-            .map_err(|error| format!("failed to finish binpack: {error}"))?;
-    }
-    let mut out = Vec::with_capacity(14 + compressed.len());
-    out.extend_from_slice(BINPACK_MAGIC);
-    out.extend_from_slice(&BINPACK_VERSION.to_le_bytes());
-    out.extend_from_slice(&(records.len() as u64).to_le_bytes());
-    out.extend_from_slice(&compressed);
-    Ok(out)
+    encode_positions_binpack(&training_positions(games)?)
 }
 
 fn training_positions(games: &[GameRecord]) -> Result<Vec<TrainingPosition>, String> {
@@ -642,6 +646,8 @@ mod tests {
                 .fen
                 .contains("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
         );
+        let scored = encode_positions_binpack(&positions).unwrap();
+        assert_eq!(decode_binpack(&scored).unwrap(), positions);
     }
 
     #[test]
