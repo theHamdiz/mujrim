@@ -59,8 +59,9 @@ pub fn library_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
 pub fn learn_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
         training_card(state, handles.clone()),
-        gambit_card(state),
-        coaching_card(state),
+        gambit_card(state, handles.clone()),
+        book_replies_card(state, handles.clone()),
+        coaching_card(state, handles.clone()),
         widgets::explanation_card(state, move || workspace::explanation_text(state)),
         notes_card(state, handles.clone()),
         Stack::vertical((
@@ -248,27 +249,55 @@ fn library_card(state: AppState, handles: AppHandles) -> impl IntoView {
     )
 }
 
-fn coaching_card(state: AppState) -> impl IntoView {
+fn coaching_card(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     widgets::card(
         state,
         Stack::vertical((
             widgets::section_label("Coach & Review", pal),
-            Label::new("Move-quality vocabulary ready").style(|s| {
-                s.font_size(16.0)
+            Label::derived(move || {
+                let id = state.active_gambit_id.get();
+                let catalog = state.learn_catalog.get();
+                id.and_then(|id| {
+                    mujrim_study::gambit::find_owned(&id, &catalog).map(|lesson| {
+                        format!("{} · click a numbered disc or use ← → ↑ ↓", lesson.name)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    "Click a gambit, then step the line. ← → previous/next, ↑ ↓ first/last."
+                        .to_owned()
+                })
+            })
+            .style(|s| {
+                s.font_size(13.0)
                     .font_bold()
                     .min_width(0.0)
                     .width_full()
                     .text_wrap()
             }),
             widgets::body_copy(
-                "Aura !!!, Brilliant !!, Great !, Best, Excellent, Good, OK, Book, Novelty, Inaccuracy, Mistake, and Blunder share one review model.",
+                "Numbered discs on the board jump to that ply. Blunder and mistake badges sit on the destination square after Coach review.",
                 pal,
             ),
-            widgets::body_copy(
-                "Click a move in the list to jump the board. Annotation badges paint on the destination square.",
-                pal,
-            ),
+            Stack::horizontal((
+                widgets::ghost_button(state, "◀", {
+                    let handles = handles.clone();
+                    move || actions::gambit_step(state, &handles, -1)
+                }),
+                widgets::ghost_button(state, "▶", {
+                    let handles = handles.clone();
+                    move || actions::gambit_step(state, &handles, 1)
+                }),
+                widgets::ghost_button(state, "Start", {
+                    let handles = handles.clone();
+                    move || actions::navigate_board_ply(state, &handles, logic::BoardPlyNav::First)
+                }),
+                widgets::ghost_button(state, "End", {
+                    let handles = handles.clone();
+                    move || actions::navigate_board_ply(state, &handles, logic::BoardPlyNav::Last)
+                }),
+            ))
+            .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap).min_width(0.0)),
         )),
     )
 }
@@ -718,49 +747,176 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
     )
 }
 
-fn gambit_card(state: AppState) -> impl IntoView {
+fn book_replies_card(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("Book replies", pal),
+            widgets::body_copy(
+                "Polyglot replies from this position. Click one to play it on the board.",
+                pal,
+            ),
+            dyn_view({
+                let handles = handles.clone();
+                move || {
+                    let fen = logic::displayed_study_fen(
+                        &state.initial_fen.get(),
+                        &state.move_log.get(),
+                        state.review_ply.get(),
+                        state.game.get().map(|game| game.board.to_fen()),
+                    );
+                    let replies = logic::book_replies(handles.book.as_ref().as_ref(), &fen);
+                    if replies.is_empty() {
+                        return Label::new("No book move from here.")
+                            .style(move |s| {
+                                s.font_size(12.0)
+                                    .min_width(0.0)
+                                    .width_full()
+                                    .text_wrap()
+                                    .color(theme::rgba(pal().text_secondary))
+                            })
+                            .into_any();
+                    }
+                    replies
+                        .into_iter()
+                        .map(|reply| {
+                            let uci = reply.uci.clone();
+                            Stack::horizontal((
+                                Label::new(format!("{} · wt {}", reply.san, reply.weight)).style(
+                                    |s| {
+                                        s.font_size(12.0)
+                                            .flex_grow(1.0f32)
+                                            .min_width(0.0)
+                                            .text_wrap()
+                                    },
+                                ),
+                                widgets::ghost_button(state, "Play", {
+                                    let handles = handles.clone();
+                                    move || actions::play_learn_reply(state, &handles, uci.clone())
+                                }),
+                            ))
+                            .style(|s| s.width_full().col_gap(8.0).items_center().min_width(0.0))
+                        })
+                        .collect::<Vec<_>>()
+                        .into_view()
+                        .style(|s| s.width_full().row_gap(6.0).flex_col().min_width(0.0))
+                        .into_any()
+                }
+            }),
+        )),
+    )
+}
+
+fn gambit_card(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     widgets::card(
         state,
         Stack::vertical((
             widgets::section_label("Gambit Laboratory", pal),
-            widgets::body_copy("Interactive lines with numbered coaching arrows.", pal),
-            widgets::capped_scroll(
-                gambit::catalog()
+            Label::derived(move || {
+                let total = state.learn_catalog.get().len().max(gambit::catalog().len());
+                let book = state
+                    .learn_catalog
+                    .get()
                     .iter()
-                    .map(|lesson| {
-                        let id = lesson.id.to_owned();
-                        Stack::horizontal((
-                            Stack::vertical((
-                                Label::new(format!("{} ({})", lesson.name, lesson.eco)).style(
-                                    |s| {
+                    .filter(|lesson| lesson.in_book || lesson.eco == "Book")
+                    .count();
+                format!("{total} lines · {book} from the opening book")
+            })
+            .style(|s| {
+                s.font_size(13.0)
+                    .font_bold()
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+            }),
+            widgets::body_copy(
+                "Search ECO or name. Learn loads the full line; numbered discs and arrow keys step it.",
+                pal,
+            ),
+            TextInput::new(state.gambit_query).style(|s| {
+                s.width_full()
+                    .min_width(120.0)
+                    .height(34.0)
+                    .border_radius(10.0)
+            }),
+            widgets::ghost_button(state, "Refresh from book", {
+                let handles = handles.clone();
+                move || actions::refresh_learn_catalog(state, &handles)
+            }),
+            dyn_view({
+                let handles = handles.clone();
+                move || {
+                    let query = state.gambit_query.get();
+                    let query = query.trim().to_ascii_lowercase();
+                    let catalog = {
+                        let live = state.learn_catalog.get();
+                        if live.is_empty() {
+                            gambit::catalog()
+                                .iter()
+                                .map(gambit::OwnedGambit::from)
+                                .collect()
+                        } else {
+                            live
+                        }
+                    };
+                    let rows = catalog
+                        .into_iter()
+                        .filter(|lesson| {
+                            query.is_empty()
+                                || lesson.name.to_ascii_lowercase().contains(&query)
+                                || lesson.eco.to_ascii_lowercase().contains(&query)
+                                || lesson.summary.to_ascii_lowercase().contains(&query)
+                        })
+                        .map(|lesson| {
+                            let id = lesson.id.clone();
+                            let badge = if lesson.in_book || lesson.eco == "Book" {
+                                "Book"
+                            } else {
+                                lesson.eco.as_str()
+                            };
+                            Stack::horizontal((
+                                Stack::vertical((
+                                    Label::new(format!("{} ({badge})", lesson.name)).style(|s| {
                                         s.font_size(13.0)
                                             .font_bold()
                                             .min_width(0.0)
                                             .width_full()
                                             .text_wrap()
-                                    },
-                                ),
-                                Label::new(lesson.summary).style(move |s| {
-                                    s.font_size(11.0)
-                                        .min_width(0.0)
-                                        .width_full()
-                                        .text_wrap()
-                                        .color(theme::rgba(pal().text_secondary))
+                                    }),
+                                    Label::new(format!(
+                                        "{} · {} plies",
+                                        lesson.summary,
+                                        lesson.moves.len()
+                                    ))
+                                    .style(move |s| {
+                                        s.font_size(11.0)
+                                            .min_width(0.0)
+                                            .width_full()
+                                            .text_wrap()
+                                            .color(theme::rgba(pal().text_secondary))
+                                    }),
+                                ))
+                                .style(|s| s.flex_grow(1.0f32).row_gap(2.0).min_width(0.0)),
+                                widgets::ghost_button(state, "Learn", {
+                                    let handles = handles.clone();
+                                    move || {
+                                        actions::start_gambit_lesson(state, &handles, id.clone())
+                                    }
                                 }),
                             ))
-                            .style(|s| s.flex_grow(1.0f32).row_gap(2.0).min_width(0.0)),
-                            widgets::ghost_button(state, "Learn", {
-                                move || actions::start_gambit_lesson(state, id.clone())
-                            }),
-                        ))
-                        .style(|s| s.width_full().col_gap(8.0).items_start().min_width(0.0))
-                    })
-                    .collect::<Vec<_>>()
-                    .into_view()
-                    .style(|s| s.width_full().row_gap(6.0).flex_col()),
-                layout::LIST_SCROLL_PX,
-            ),
+                            .style(|s| s.width_full().col_gap(8.0).items_start().min_width(0.0))
+                        })
+                        .collect::<Vec<_>>();
+                    widgets::capped_scroll(
+                        rows.into_view()
+                            .style(|s| s.width_full().row_gap(6.0).flex_col()),
+                        layout::LIST_SCROLL_PX,
+                    )
+                    .into_any()
+                }
+            }),
         )),
     )
 }
@@ -777,6 +933,13 @@ mod tests {
             "Training Queue",
             "Opening Explorer",
             "Gambit Laboratory",
+            "Book replies",
+            "gambit_query",
+            "learn_catalog",
+            "start_gambit_lesson",
+            "refresh_learn_catalog",
+            "book_replies",
+            "BoardPlyNav",
             "Install starter set",
             "Save current",
             "Preparations",

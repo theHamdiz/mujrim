@@ -173,7 +173,16 @@ pub fn board_view(state: AppState, handles: AppHandles) -> impl IntoView {
     });
 
     Stack::new((painted, coord_layer(state)))
-        .style(|s| s.size_full().min_width(0.0).min_height(0.0))
+        .style(|s| {
+            s.size_full()
+                .min_width(0.0)
+                .min_height(0.0)
+                .keyboard_navigable()
+        })
+        .on_event(el::KeyDown, {
+            let handles = handles.clone();
+            move |_, event: &KeyboardEvent| actions::handle_board_key(state, &handles, event)
+        })
         .on_event_stop(el::PointerDown, {
             let handles = handles.clone();
             move |_, event: &PointerButtonEvent| {
@@ -417,7 +426,7 @@ fn paint_board(
         &state.move_annotations.get(),
     ) {
         let (row, col) = square_display(square, game.flipped);
-        let size = sq * 0.38;
+        let size = sq * 0.46;
         let x = geom.origin_x + (col as f64 + 1.0) * sq - size - sq * 0.04;
         let y = geom.origin_y + row as f64 * sq + sq * 0.04;
         draw_annotation_badge(cx, annotation, x, y, size);
@@ -493,17 +502,19 @@ fn paint_arrow(
             head.close_path();
             cx.fill(&head, theme::rgba(geom_arrow.fill), 0.0);
         }
-        if let Some((tip, _step, fill)) = geom_arrow.step {
-            let center = Point::new(origin_x + tip.x as f64, origin_y + tip.y as f64);
-            cx.fill(
-                &Circle::new(center, sq * 0.16),
-                Color::from_rgba8(20, 20, 24, 210),
-                0.0,
-            );
+        if let Some((tip, step, fill)) = geom_arrow.step {
+            let size = sq * 0.40;
+            let x = origin_x + tip.x as f64 - size * 0.5;
+            let y = origin_y + tip.y as f64 - size * 0.5;
+            let svg = mujrim_study::board_marks::step_badge_svg(step);
+            svg_cache::draw(cx, &svg, Rect::new(x, y, x + size, y + size), &[step]);
             cx.stroke(
-                &Circle::new(center, sq * 0.16),
+                &Circle::new(
+                    Point::new(origin_x + tip.x as f64, origin_y + tip.y as f64),
+                    size * 0.48,
+                ),
                 theme::rgba(fill),
-                &Stroke::new(1.5),
+                &Stroke::new(2.0),
             );
         }
     }
@@ -752,6 +763,17 @@ fn event_square(state: AppState, x: f64, y: f64) -> Option<Square> {
 
 fn on_pointer_down(state: AppState, handles: &AppHandles, event: &PointerButtonEvent) {
     let point = event.state.logical_point();
+    if event.button == Some(PointerButton::Primary) {
+        let geom = state.board_geom.get_untracked();
+        if actions::try_board_mark_click(
+            state,
+            handles,
+            point.x - geom.origin_x,
+            point.y - geom.origin_y,
+        ) {
+            return;
+        }
+    }
     let Some(square) = event_square(state, point.x, point.y) else {
         return;
     };
@@ -886,6 +908,10 @@ mod tests {
             "state.slide_t.get()",
             "state.capture_burst.get()",
             "paint_arrow",
+            "step_badge_svg",
+            "try_board_mark_click",
+            "handle_board_key",
+            "keyboard_navigable",
             "piece_flight",
             "capture_marks",
             "last_move_arrow",

@@ -22,6 +22,13 @@ struct BookEntry {
     weight: u16,
 }
 
+/// A legal book move with its polyglot weight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeightedBookMove {
+    pub mv: Move,
+    pub weight: u16,
+}
+
 /// Polyglot opening book.
 pub struct OpeningBook {
     entries: Vec<BookEntry>,
@@ -119,6 +126,31 @@ impl OpeningBook {
         // Pick the highest-weight move (deterministic, strongest line)
         let best = matches.iter().max_by_key(|e| e.weight)?;
         decode_polyglot_move(board, best.raw_move)
+    }
+
+    /// Every legal book reply in `board`, highest weight first.
+    pub fn weighted_moves(&self, board: &Board) -> Vec<WeightedBookMove> {
+        let key = polyglot_hash(board);
+        let mut moves = Vec::new();
+        for entry in self.find_entries(key) {
+            if let Some(mv) = decode_polyglot_move(board, entry.raw_move) {
+                moves.push(WeightedBookMove {
+                    mv,
+                    weight: entry.weight,
+                });
+            }
+        }
+        moves.sort_by(|left, right| {
+            right
+                .weight
+                .cmp(&left.weight)
+                .then_with(|| left.mv.to_uci().cmp(&right.mv.to_uci()))
+        });
+        moves
+    }
+
+    pub fn contains_position(&self, board: &Board) -> bool {
+        !self.find_entries(polyglot_hash(board)).is_empty()
     }
 
     /// Binary search to find all entries matching the key.
@@ -392,5 +424,7 @@ mod tests {
         let book = OpeningBook::from_bytes(&[]).unwrap();
         let board = Board::new();
         assert!(book.probe(&board).is_none());
+        assert!(book.weighted_moves(&board).is_empty());
+        assert!(!book.contains_position(&board));
     }
 }

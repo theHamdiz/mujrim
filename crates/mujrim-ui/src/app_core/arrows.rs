@@ -145,6 +145,36 @@ pub fn sq_center(file: u8, rank: u8, sq_size: f32, flipped: bool) -> Point {
     )
 }
 
+pub fn step_badge_center(arrow: &BoardArrow, sq_size: f32, flipped: bool) -> Option<(Point, u8)> {
+    let step = arrow.step.filter(|_| arrow.role.shows_step())?;
+    let tip = sq_center(arrow.to.file(), arrow.to.rank(), sq_size, flipped);
+    Some((
+        Point::new(tip.x + sq_size * 0.18, tip.y - sq_size * 0.18),
+        step,
+    ))
+}
+
+pub fn hit_step_badge(
+    arrows: &[BoardArrow],
+    local_x: f32,
+    local_y: f32,
+    sq_size: f32,
+    flipped: bool,
+) -> Option<u8> {
+    let radius = sq_size * 0.20;
+    for arrow in arrows.iter().rev() {
+        let Some((center, step)) = step_badge_center(arrow, sq_size, flipped) else {
+            continue;
+        };
+        let dx = local_x - center.x;
+        let dy = local_y - center.y;
+        if dx * dx + dy * dy <= radius * radius {
+            return Some(step);
+        }
+    }
+    None
+}
+
 pub fn display_square_at(x: f32, y: f32, sq_size: f32) -> Option<(usize, usize)> {
     super::game::point_to_display(x, y, sq_size)
 }
@@ -468,6 +498,34 @@ mod tests {
         let sq = 64.0;
         assert_eq!(display_square_at(sq * 0.5, sq * 0.5, sq), Some((0, 0)));
         assert_eq!(display_square_at(-1.0, 10.0, sq), None);
+    }
+
+    #[test]
+    fn step_badge_hit_uses_numbered_tip() {
+        types::init();
+        let arrow = BoardArrow::new(
+            types::Square::from_index(12),
+            types::Square::from_index(28),
+            MarkColor::Orange,
+            ArrowRole::Gambit,
+        )
+        .with_step(3);
+        let (center, step) = step_badge_center(&arrow, 64.0, false).expect("badge");
+        assert_eq!(step, 3);
+        assert_eq!(
+            hit_step_badge(
+                std::slice::from_ref(&arrow),
+                center.x,
+                center.y,
+                64.0,
+                false
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            hit_step_badge(std::slice::from_ref(&arrow), 0.0, 0.0, 64.0, false),
+            None
+        );
     }
 
     #[test]

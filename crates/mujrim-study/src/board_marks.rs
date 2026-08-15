@@ -123,6 +123,19 @@ pub fn arrows_from_uci_pv(
     max_plies: usize,
     label: Option<&str>,
 ) -> Result<Vec<BoardArrow>, String> {
+    arrows_from_uci_pv_offset(fen, pv, color, role, max_plies, label, 0)
+}
+
+/// Like [`arrows_from_uci_pv`], numbering steps from `step_offset + 1`.
+pub fn arrows_from_uci_pv_offset(
+    fen: &str,
+    pv: &[String],
+    color: MarkColor,
+    role: ArrowRole,
+    max_plies: usize,
+    label: Option<&str>,
+    step_offset: u8,
+) -> Result<Vec<BoardArrow>, String> {
     types::init();
     let mut board = types::Board::from_fen(fen)?;
     let mut arrows = Vec::new();
@@ -134,14 +147,49 @@ pub fn arrows_from_uci_pv(
             .find(|candidate| candidate.to_uci() == *uci)
             .copied()
             .ok_or_else(|| format!("illegal PV move '{uci}' at ply {}", index + 1))?;
-        let mut arrow = BoardArrow::new(mv.from, mv.to, color, role).with_step((index + 1) as u8);
+        let step = step_offset.saturating_add((index + 1) as u8);
+        let mut arrow = BoardArrow::new(mv.from, mv.to, color, role).with_step(step);
         if let Some(label) = label {
-            arrow = arrow.with_label(format!("{label} · {}", index + 1));
+            arrow = arrow.with_label(format!("{label} · {step}"));
         }
         arrows.push(arrow);
         board.make_move(mv);
     }
     Ok(arrows)
+}
+
+/// Numbered coaching disc drawn on arrow tips.
+pub fn step_badge_svg(step: u8) -> String {
+    let digits = if step >= 10 {
+        format!(
+            r##"<g transform="translate(-5 0)">{}</g><g transform="translate(5 0)">{}</g>"##,
+            digit_paths(step / 10),
+            digit_paths(step % 10)
+        )
+    } else {
+        digit_paths(step).to_owned()
+    };
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <circle cx="16" cy="16" r="14.6" fill="#14141a" stroke="#f4f4f7" stroke-width="2.4"/>
+  {digits}
+</svg>"##
+    )
+}
+
+fn digit_paths(digit: u8) -> &'static str {
+    match digit % 10 {
+        0 => r##"<path fill="#fff" d="M11 8h10v2.4H13.4v11.2H21V24H11z"/>"##,
+        1 => r##"<path fill="#fff" d="M14.2 8h3.4v13.6H21V24h-8.4v-2.4h1.6z"/>"##,
+        2 => r##"<path fill="#fff" d="M11 8h10v2.4h-6.6v3.2H21v10.4H11v-2.4h6.6v-3.2H11z"/>"##,
+        3 => r##"<path fill="#fff" d="M11 8h10v16H11v-2.4h6.6v-3.2H12.2v-2.4h5.4V10.4H11z"/>"##,
+        4 => r##"<path fill="#fff" d="M11 8h2.6v6.4H21V8h2.4v16h-2.4v-6.4h-7.4V8z"/>"##,
+        5 => r##"<path fill="#fff" d="M11 8h10v2.4h-7.4v3.2H21v10.4H11v-2.4h7.4v-3.2H11z"/>"##,
+        6 => r##"<path fill="#fff" d="M11 8h10v2.4h-7.4v3.2H21v10.4H11zm2.6 8.8v4.8h7.4v-4.8z"/>"##,
+        7 => r##"<path fill="#fff" d="M11 8h10v2.6l-5.2 13.4h-2.8L18.4 10.6H11z"/>"##,
+        8 => r##"<path fill="#fff" d="M11 8h10v16H11zm2.4 2.4v3.4h5.2V10.4zm0 6.2v5h5.2v-5z"/>"##,
+        _ => r##"<path fill="#fff" d="M11 8h10v16h-2.6V14.8H11V8zm2.4 2.4v2h5.2v-2z"/>"##,
+    }
 }
 
 /// Last-move highlight as a solid arrow.
@@ -175,6 +223,21 @@ mod tests {
         assert_eq!(arrows[2].step, Some(3));
         assert!(arrows[0].label.as_deref().unwrap().contains("SF"));
         assert!(arrows.iter().all(|a| a.role == ArrowRole::EngineBest));
+        let offset = arrows_from_uci_pv_offset(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            &["e2e4".into()],
+            MarkColor::Orange,
+            ArrowRole::Gambit,
+            1,
+            None,
+            2,
+        )
+        .unwrap();
+        assert_eq!(offset[0].step, Some(3));
+        let badge = step_badge_svg(3);
+        assert!(badge.contains("<circle"));
+        assert!(badge.contains("path"));
+        assert!(!badge.contains("> <"));
     }
 
     #[test]

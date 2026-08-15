@@ -6,12 +6,14 @@ use std::sync::Arc;
 use mujrim_protocols::catalog::{DiscoveredEngine, RuntimeCompatibility};
 use mujrim_study::annotation::{AnnotationContext, MoveAnnotation};
 use mujrim_study::database::{EngineMetadata, GameQuery, GameSummary, StudyDatabase};
+use mujrim_study::gambit::OwnedGambit;
 use mujrim_study::game_export::{self, GameExportFormat, GameRecord};
 use mujrim_study::opening::{MoveStatistics, OpeningExplorer, PrepSide, SavedLine};
 use mujrim_study::tournament::{Entrant, TournamentFormat};
 use mujrim_study::tournament_store::{StoredTournament, StoredTournamentGame};
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::TrainingStore;
+use search::book::OpeningBook;
 
 use super::engine::{GameMode, PlayerConfig, QuickTournamentEngine, bundled_engine_label};
 use super::game::GameState;
@@ -158,6 +160,160 @@ pub fn uci_to_san(board: &types::Board, uci: &str) -> String {
 
 fn file_char(square: types::Square) -> char {
     (b'a' + square.file()) as char
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardPlyNav {
+    First,
+    Prev,
+    Next,
+    Last,
+}
+
+impl BoardPlyNav {
+    pub fn target(self, current: usize, len: usize) -> usize {
+        match self {
+            Self::First => 0,
+            Self::Prev => current.saturating_sub(1),
+            Self::Next => current.saturating_add(1).min(len),
+            Self::Last => len,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BookReply {
+    pub uci: String,
+    pub san: String,
+    pub weight: u16,
+}
+
+pub fn book_replies(book: Option<&OpeningBook>, fen: &str) -> Vec<BookReply> {
+    let Some(book) = book else {
+        return Vec::new();
+    };
+    types::init();
+    let Ok(board) = types::Board::from_fen(fen) else {
+        return Vec::new();
+    };
+    book.weighted_moves(&board)
+        .into_iter()
+        .take(8)
+        .map(|entry| {
+            let uci = entry.mv.to_uci();
+            BookReply {
+                san: uci_to_san(&board, &uci),
+                uci,
+                weight: entry.weight,
+            }
+        })
+        .collect()
+}
+
+pub fn learn_gambit_catalog(book: Option<&OpeningBook>) -> Vec<OwnedGambit> {
+    let mut catalog: Vec<OwnedGambit> = mujrim_study::gambit::catalog()
+        .iter()
+        .map(OwnedGambit::from)
+        .collect();
+    let Some(book) = book else {
+        return catalog;
+    };
+    for lesson in &mut catalog {
+        lesson.in_book = line_is_in_book(book, &lesson.moves);
+        extend_line_from_book(book, &mut lesson.moves, 8);
+    }
+    catalog.extend(discover_book_gambits(book, &catalog));
+    catalog
+}
+
+fn line_is_in_book(book: &OpeningBook, moves: &[String]) -> bool {
+    types::init();
+    let Ok(mut board) = types::Board::from_fen(mujrim_study::opening::START_FEN) else {
+        return false;
+    };
+    let mut seen = book.contains_position(&board);
+    for uci in moves {
+        if apply_uci_move(&mut board, uci).is_err() {
+            return false;
+        }
+        seen |= book.contains_position(&board);
+    }
+    seen
+}
+
+fn extend_line_from_book(book: &OpeningBook, moves: &mut Vec<String>, extra: usize) {
+    types::init();
+    let Ok(mut board) = types::Board::from_fen(mujrim_study::opening::START_FEN) else {
+        return;
+    };
+    for uci in moves.iter() {
+        if apply_uci_move(&mut board, uci).is_err() {
+            return;
+        }
+    }
+    for _ in 0..extra {
+        let Some(best) = book.weighted_moves(&board).into_iter().next() else {
+            break;
+        };
+        let uci = best.mv.to_uci();
+        if moves.last().is_some_and(|last| last == &uci) {
+            break;
+        }
+        moves.push(uci);
+        board.make_move(best.mv);
+    }
+}
+
+fn discover_book_gambits(book: &OpeningBook, existing: &[OwnedGambit]) -> Vec<OwnedGambit> {
+    types::init();
+    let Ok(start) = types::Board::from_fen(mujrim_study::opening::START_FEN) else {
+        return Vec::new();
+    };
+    let mut extras = Vec::new();
+    let mut queue = vec![(Vec::new(), start)];
+    let mut seen = 0usize;
+    while let Some((moves, board)) = queue.pop() {
+        if extras.len() >= 24 || seen >= 160 || moves.len() >= 8 {
+            continue;
+        }
+        seen += 1;
+        for entry in book.weighted_moves(&board).into_iter().take(3) {
+            let mut next_board = board.clone();
+            next_board.make_move(entry.mv);
+            let mut next_moves = moves.clone();
+            next_moves.push(entry.mv.to_uci());
+            if is_pawn_offer(&next_board) && !line_covered(&next_moves, existing, &extras) {
+                let san = uci_to_san(&board, &entry.mv.to_uci());
+                extras.push(OwnedGambit {
+                    id: format!("book-{}", next_moves.join("")),
+                    name: format!("Book gambit · {san}"),
+                    eco: "Book".to_owned(),
+                    summary: "Discovered from the polyglot opening book as a pawn offer."
+                        .to_owned(),
+                    key_ply: next_moves.len().saturating_sub(1),
+                    moves: next_moves.clone(),
+                    in_book: true,
+                });
+            }
+            if next_moves.len() < 8 {
+                queue.push((next_moves, next_board));
+            }
+        }
+    }
+    extras
+}
+
+fn is_pawn_offer(board: &types::Board) -> bool {
+    let white = board.piece_count(types::Piece::Pawn, types::Color::White);
+    let black = board.piece_count(types::Piece::Pawn, types::Color::Black);
+    (white < 8 && black >= 8) || (black < 8 && white >= 8)
+}
+
+fn line_covered(line: &[String], existing: &[OwnedGambit], extras: &[OwnedGambit]) -> bool {
+    existing
+        .iter()
+        .chain(extras.iter())
+        .any(|lesson| lesson.moves.starts_with(line) || line.starts_with(lesson.moves.as_slice()))
 }
 
 pub fn save_current_line(
@@ -862,6 +1018,7 @@ pub fn run_quick_tournament(
     engines: Vec<QuickTournamentEngine>,
     setup: TournamentSetup,
     handle: LiveTournamentHandle,
+    tournament_id: String,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     let cancel = Arc::clone(&handle.cancel);
     let pause = Arc::clone(&handle.pause);
@@ -873,7 +1030,15 @@ pub fn run_quick_tournament(
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_quick_tournament_body(engines, setup, cancel, pause, abort_game, snapshot)
+                run_quick_tournament_body(
+                    engines,
+                    setup,
+                    cancel,
+                    pause,
+                    abort_game,
+                    snapshot,
+                    tournament_id,
+                )
             }))
             .unwrap_or_else(|_| mujrim_benchmarker::strength::TournamentSummary {
                 format,
@@ -920,6 +1085,7 @@ fn run_quick_tournament_body(
     pause: Arc<std::sync::atomic::AtomicBool>,
     abort_game: Arc<std::sync::atomic::AtomicBool>,
     snapshot: Arc<std::sync::Mutex<tournament_live::LiveTournamentSnapshot>>,
+    tournament_id: String,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     use mujrim_benchmarker::strength::{
         TournamentConfig, TournamentEvent, TournamentProgress, run_tournament_with_control,
@@ -1135,10 +1301,7 @@ fn run_quick_tournament_body(
             format,
             swiss_rounds: matches!(format, TournamentFormat::Swiss)
                 .then_some(setup.swiss_rounds.max(1) as usize),
-            checkpoint_directory: study_database_path().parent().map(|path| {
-                path.join("tournaments")
-                    .join(tournament_directory_name(format))
-            }),
+            checkpoint_directory: Some(tournament_checkpoint_dir(format, &tournament_id)),
             completed_pairings: setup.completed_pairings.clone(),
         },
         cancel,
@@ -1164,6 +1327,37 @@ fn run_quick_tournament_body(
         guard.refresh_standings();
     }
     summary
+}
+
+pub fn tournament_checkpoint_dir(format: TournamentFormat, tournament_id: &str) -> PathBuf {
+    let id: String = tournament_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .collect();
+    let id = if id.is_empty() {
+        "event".to_owned()
+    } else {
+        id
+    };
+    study_database_path()
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tournaments")
+        .join(tournament_directory_name(format))
+        .join(id)
+}
+
+pub fn reset_open_match_checkpoints(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "jsonl") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 pub fn tournament_directory_name(format: TournamentFormat) -> &'static str {
@@ -1661,6 +1855,39 @@ mod tests {
     use mujrim_study::database::{GameMetadata, GameSummary};
 
     #[test]
+    fn board_ply_nav_matches_arrow_keys() {
+        assert_eq!(BoardPlyNav::First.target(5, 10), 0);
+        assert_eq!(BoardPlyNav::Prev.target(5, 10), 4);
+        assert_eq!(BoardPlyNav::Next.target(5, 10), 6);
+        assert_eq!(BoardPlyNav::Last.target(5, 10), 10);
+        assert_eq!(BoardPlyNav::Next.target(10, 10), 10);
+        assert_eq!(BoardPlyNav::Prev.target(0, 10), 0);
+    }
+
+    #[test]
+    fn learn_catalog_includes_curated_gambits() {
+        let catalog = learn_gambit_catalog(None);
+        assert!(catalog.len() >= 24);
+        assert!(catalog.iter().any(|gambit| gambit.id == "kings-gambit"));
+        assert!(catalog.iter().any(|gambit| gambit.id == "queens-gambit"));
+    }
+
+    #[test]
+    fn learn_catalog_uses_opening_book_when_present() {
+        let Ok(book) = search::book::OpeningBook::load_embedded() else {
+            return;
+        };
+        let catalog = learn_gambit_catalog(Some(&book));
+        assert!(
+            catalog
+                .iter()
+                .any(|gambit| gambit.in_book || gambit.id.starts_with("book-")),
+            "the polyglot book should mark or add gambit lines"
+        );
+        assert!(catalog.iter().any(|gambit| gambit.moves.len() > 3));
+    }
+
+    #[test]
     fn persist_play_result_imports_a_finished_game() {
         types::init();
         let dir = std::env::temp_dir().join(format!(
@@ -1734,6 +1961,37 @@ mod tests {
             names,
             ["round-robin", "double-round-robin", "swiss", "knockout"]
         );
+        let dir = tournament_checkpoint_dir(TournamentFormat::RoundRobin, "t-99");
+        assert!(dir.ends_with(Path::new("tournaments/round-robin/t-99")));
+        let body = include_str!("logic.rs")
+            .split("fn run_quick_tournament_body")
+            .nth(1)
+            .expect("body");
+        assert!(
+            body.contains("tournament_checkpoint_dir(format, &tournament_id)"),
+            "a new Start must not reuse the shared format folder's old jsonl files"
+        );
+    }
+
+    #[test]
+    fn reset_open_match_checkpoints_drops_jsonl_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "mujrim-checkpoint-reset-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jsonl = dir.join("01-a-vs-b.jsonl");
+        let keep = dir.join("notes.txt");
+        std::fs::write(&jsonl, b"[]\n").unwrap();
+        std::fs::write(&keep, b"keep").unwrap();
+        reset_open_match_checkpoints(&dir);
+        assert!(!jsonl.exists());
+        assert!(keep.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

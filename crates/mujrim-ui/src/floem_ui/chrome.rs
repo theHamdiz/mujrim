@@ -141,8 +141,7 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             {
                 let handles = handles.clone();
                 move || {
-                    actions::ensure_study_board(state, &handles);
-                    state.screen.set(Screen::Learn);
+                    actions::open_learn(state, &handles);
                 }
             },
         ),
@@ -399,6 +398,10 @@ mod tests {
         assert!(
             production.contains("GRADUATION_CAP"),
             "Learn nav must use the graduation-cap icon"
+        );
+        assert!(
+            production.contains("open_learn"),
+            "Learn nav must load the book-backed gambit catalog"
         );
         assert!(
             production.contains("\"Ateed\""),

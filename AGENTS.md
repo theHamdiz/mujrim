@@ -52,6 +52,8 @@ Updated: 2026-08-15
 ## Open UI Workstream
 - Additional piece sets live under `crates/mujrim-ui/assets/pieces/` and switch at runtime in Options.
 - Ateed studio lives behind the title-bar Ateed pill (`Screen::Ateed`); unlock compares against the decoded Base64 gate. Fetch/decode/merge/train/datagen stay disabled until a `mujrim` CLI is discovered.
+- Learn builds a searchable gambit catalog from the curated ECO set plus the polyglot opening book. Numbered coaching discs are clickable; ← → ↑ ↓ step any on-screen board (previous / next / first / last).
+- Tournament **Start** always opens a new event with its own checkpoint folder. **Resume event** is the only path that keeps finished games.
 
 ## CI/CD Baseline (Required)
 - CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test (`uciok` + `Mujrim 1.0.0`).

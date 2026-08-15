@@ -4,8 +4,10 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use floem::event::EventPropagation;
 use floem::ext_event::create_ext_action;
 use floem::prelude::{SignalGet, SignalUpdate, SignalWith};
+use floem::ui_events::keyboard::{Key, KeyboardEvent, NamedKey};
 use mujrim_study::database::GameQuery;
 use mujrim_study::game_export::{self, GameExportFormat, GameRecord};
 use types::{Color, Move, Square};
@@ -235,6 +237,14 @@ pub fn on_board_press(state: AppState, handles: &AppHandles, square: Square) {
         return;
     };
     if game.game_over {
+        return;
+    }
+    if try_follow_lesson_square(state, handles, square) {
+        return;
+    }
+    if state.active_gambit_id.get_untracked().is_some()
+        && state.review_ply.get_untracked().is_some()
+    {
         return;
     }
     if state.review_ply.get_untracked().is_some() {
@@ -1010,6 +1020,20 @@ pub fn resume_from_review(state: AppState) {
     state.review_ply.set(None);
 }
 
+pub fn play_learn_reply(state: AppState, handles: &AppHandles, uci: String) {
+    if let Some(lesson) = active_owned_gambit(state) {
+        let ply = state
+            .review_ply
+            .get_untracked()
+            .unwrap_or(state.move_log.get_untracked().len());
+        if lesson.moves.get(ply) == Some(&uci) {
+            view_ply(state, handles, ply + 1);
+            return;
+        }
+    }
+    study_opening_move(state, uci);
+}
+
 pub fn study_opening_move(state: AppState, uci: String) {
     types::init();
     resume_from_review(state);
@@ -1096,9 +1120,127 @@ pub fn view_ply(state: AppState, handles: &AppHandles, ply: usize) {
                 format!("Reviewing ply {ply}.")
             });
             sync_move_note(state, handles);
+            sync_lesson_overlays(state);
         }
         Err(error) => state.status.set(format!("Could not navigate: {error}")),
     }
+}
+
+pub fn navigate_board_ply(state: AppState, handles: &AppHandles, nav: logic::BoardPlyNav) {
+    if state.game.get_untracked().is_none() && state.move_log.get_untracked().is_empty() {
+        return;
+    }
+    let len = state.move_log.get_untracked().len();
+    let current = state.review_ply.get_untracked().unwrap_or(len);
+    view_ply(state, handles, nav.target(current, len));
+}
+
+pub fn handle_board_key(
+    state: AppState,
+    handles: &AppHandles,
+    event: &KeyboardEvent,
+) -> EventPropagation {
+    if !event.modifiers.is_empty() {
+        return EventPropagation::Continue;
+    }
+    let nav = match event.key {
+        Key::Named(NamedKey::ArrowLeft) => logic::BoardPlyNav::Prev,
+        Key::Named(NamedKey::ArrowRight) => logic::BoardPlyNav::Next,
+        Key::Named(NamedKey::ArrowUp) => logic::BoardPlyNav::First,
+        Key::Named(NamedKey::ArrowDown) => logic::BoardPlyNav::Last,
+        _ => return EventPropagation::Continue,
+    };
+    navigate_board_ply(state, handles, nav);
+    EventPropagation::Stop
+}
+
+pub fn try_board_mark_click(
+    state: AppState,
+    handles: &AppHandles,
+    local_x: f64,
+    local_y: f64,
+) -> bool {
+    let Some(game) = state.game.get_untracked() else {
+        return false;
+    };
+    let sq = state.board_geom.get_untracked().square() as f32;
+    if let Some(step) = crate::app_core::arrows::hit_step_badge(
+        &game.overlay_arrows,
+        local_x as f32,
+        local_y as f32,
+        sq,
+        game.flipped,
+    ) {
+        view_ply(state, handles, usize::from(step));
+        return true;
+    }
+    false
+}
+
+fn try_follow_lesson_square(state: AppState, handles: &AppHandles, square: Square) -> bool {
+    let Some(lesson) = active_owned_gambit(state) else {
+        return false;
+    };
+    let ply = state
+        .review_ply
+        .get_untracked()
+        .unwrap_or(state.move_log.get_untracked().len());
+    let Some(uci) = lesson.moves.get(ply) else {
+        return false;
+    };
+    let Ok(fen) = lesson.fen_after_plies(ply) else {
+        return false;
+    };
+    let Ok(mut board) = types::Board::from_fen(&fen) else {
+        return false;
+    };
+    let Ok(mv) = logic::apply_uci_move(&mut board, uci) else {
+        return false;
+    };
+    if mv.to != square && mv.from != square {
+        return false;
+    }
+    view_ply(state, handles, ply + 1);
+    true
+}
+
+fn active_owned_gambit(state: AppState) -> Option<mujrim_study::gambit::OwnedGambit> {
+    let id = state.active_gambit_id.get_untracked()?;
+    if let Some(lesson) =
+        mujrim_study::gambit::find_owned(&id, &state.learn_catalog.get_untracked())
+    {
+        return Some(lesson.clone());
+    }
+    mujrim_study::gambit::find_gambit(&id).map(mujrim_study::gambit::OwnedGambit::from)
+}
+
+fn sync_lesson_overlays(state: AppState) {
+    let Some(lesson) = active_owned_gambit(state) else {
+        return;
+    };
+    let ply = state
+        .review_ply
+        .get_untracked()
+        .unwrap_or(state.move_log.get_untracked().len());
+    state.gambit_ply.set(ply);
+    let arrows = lesson.coaching_arrows_from(ply).unwrap_or_default();
+    state.game.update(|game| {
+        if let Some(game) = game.as_mut() {
+            game.overlay_arrows = arrows;
+        }
+    });
+}
+
+pub fn refresh_learn_catalog(state: AppState, handles: &AppHandles) {
+    state
+        .learn_catalog
+        .set(logic::learn_gambit_catalog(handles.book.as_ref().as_ref()));
+}
+
+pub fn open_learn(state: AppState, handles: &AppHandles) {
+    ensure_study_board(state, handles);
+    refresh_learn_catalog(state, handles);
+    state.screen.set(Screen::Learn);
 }
 
 pub fn refresh_saved_lines(state: AppState, handles: &AppHandles) {
@@ -1190,8 +1332,11 @@ pub fn delete_preparation(state: AppState, handles: &AppHandles, id: String) {
     }
 }
 
-pub fn start_gambit_lesson(state: AppState, id: String) {
-    let Some(lesson) = mujrim_study::gambit::find_gambit(&id) else {
+pub fn start_gambit_lesson(state: AppState, handles: &AppHandles, id: String) {
+    if state.learn_catalog.get_untracked().is_empty() {
+        refresh_learn_catalog(state, handles);
+    }
+    let Some(lesson) = active_lesson_by_id(state, &id) else {
         state.status.set(format!("Gambit '{id}' was not found."));
         return;
     };
@@ -1200,25 +1345,25 @@ pub fn start_gambit_lesson(state: AppState, id: String) {
         Ok(fen) => match types::Board::from_fen(&fen) {
             Ok(board) => {
                 let mut game = GameState::new(board);
-                if let Ok(arrows) = lesson.coaching_arrows(ply.max(1)) {
-                    game.overlay_arrows = arrows;
-                }
+                game.overlay_arrows = lesson.coaching_arrows_from(ply).unwrap_or_default();
                 state.game.set(Some(game));
-                state.initial_fen.set(fen);
-                state.move_log.set(
-                    lesson.moves[..ply]
-                        .iter()
-                        .map(|mv| (*mv).to_owned())
-                        .collect(),
-                );
-                state.move_annotations.set(vec![None; ply]);
-                state.active_gambit_id.set(Some(id));
+                state
+                    .initial_fen
+                    .set(mujrim_study::opening::START_FEN.to_owned());
+                state.move_log.set(lesson.moves.clone());
+                state.move_annotations.set(vec![None; lesson.moves.len()]);
+                state.active_gambit_id.set(Some(lesson.id.clone()));
                 state.gambit_ply.set(ply);
+                state
+                    .review_ply
+                    .set(settings::review_cursor_for_view(ply, lesson.moves.len()));
                 state.active_puzzle.set(None);
                 state.screen.set(Screen::Learn);
-                state
-                    .status
-                    .set(format!("Gambit: {} ({})", lesson.name, lesson.eco));
+                state.status.set(format!(
+                    "Gambit: {} ({}) · arrows and ← → step the line.",
+                    lesson.name, lesson.eco
+                ));
+                view_ply(state, handles, ply);
             }
             Err(error) => state.status.set(error),
         },
@@ -1226,34 +1371,24 @@ pub fn start_gambit_lesson(state: AppState, id: String) {
     }
 }
 
-pub fn gambit_step(state: AppState, delta: i32) {
-    let Some(id) = state.active_gambit_id.get_untracked() else {
-        return;
-    };
-    let Some(lesson) = mujrim_study::gambit::find_gambit(&id) else {
-        return;
-    };
-    let next = (state.gambit_ply.get_untracked() as i32 + delta).clamp(0, lesson.moves.len() as i32)
-        as usize;
-    if let Ok(fen) = lesson.fen_after_plies(next)
-        && let Ok(board) = types::Board::from_fen(&fen)
+fn active_lesson_by_id(state: AppState, id: &str) -> Option<mujrim_study::gambit::OwnedGambit> {
+    if let Some(lesson) = mujrim_study::gambit::find_owned(id, &state.learn_catalog.get_untracked())
     {
-        state.game.update(|game| {
-            if let Some(game) = game.as_mut() {
-                game.board = board;
-                game.overlay_arrows = lesson.coaching_arrows(next.max(1)).unwrap_or_default();
-            }
-        });
-        state.initial_fen.set(fen);
-        state.move_log.set(
-            lesson.moves[..next]
-                .iter()
-                .map(|mv| (*mv).to_owned())
-                .collect(),
-        );
-        state.move_annotations.set(vec![None; next]);
-        state.gambit_ply.set(next);
+        return Some(lesson.clone());
     }
+    mujrim_study::gambit::find_gambit(id).map(mujrim_study::gambit::OwnedGambit::from)
+}
+
+pub fn gambit_step(state: AppState, handles: &AppHandles, delta: i32) {
+    let Some(lesson) = active_owned_gambit(state) else {
+        return;
+    };
+    let current = state
+        .review_ply
+        .get_untracked()
+        .unwrap_or(state.move_log.get_untracked().len());
+    let next = (current as i32 + delta).clamp(0, lesson.moves.len() as i32) as usize;
+    view_ply(state, handles, next);
 }
 
 pub fn set_analysis_engine(state: AppState, id: String, enabled: bool) {
@@ -1276,6 +1411,10 @@ pub fn index_openings(state: AppState, handles: &AppHandles) {
 }
 
 pub fn start_tournament(state: AppState, handles: &AppHandles) {
+    begin_tournament(state, handles, false);
+}
+
+fn begin_tournament(state: AppState, handles: &AppHandles, resume: bool) {
     if state.tournament_snapshot.get_untracked().running {
         state
             .tournament_status
@@ -1309,12 +1448,19 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     state.analysis_scores.set(Vec::new());
     state.move_annotations.set(Vec::new());
     state.review_ply.set(None);
-    let resume_id = state
-        .resume_prompt
-        .get_untracked()
-        .map(|checkpoint| checkpoint.id)
-        .filter(|id| !id.is_empty());
+    let resume_id = resume
+        .then(|| {
+            state
+                .resume_prompt
+                .get_untracked()
+                .map(|checkpoint| checkpoint.id)
+                .filter(|id| !id.is_empty())
+        })
+        .flatten();
     state.resume_prompt.set(None);
+    if !resume {
+        crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+    }
     state.dock_tab.set(DockTab::Results);
     state.dock_open.set(true);
     let started = SystemTime::now()
@@ -1322,6 +1468,12 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let tournament_id = resume_id.clone().unwrap_or_else(|| format!("t-{started}"));
+    if resume {
+        logic::reset_open_match_checkpoints(&logic::tournament_checkpoint_dir(
+            setup.format,
+            &tournament_id,
+        ));
+    }
     state.current_tournament_id.set(Some(tournament_id.clone()));
     state.persisted_tournament_games.set(0);
     state.focused_live_key.set(None);
@@ -1383,6 +1535,7 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     let started_snap = handle.clone_snapshot();
     state.tournament_snapshot.set(started_snap.clone());
     refresh_arena_slots(state, &started_snap);
+    let worker_tournament_id = tournament_id.clone();
     crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
         tournament_id,
         &setup,
@@ -1425,7 +1578,7 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
         .spawn(move || {
             let format = setup.format;
             let summary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                logic::run_quick_tournament(selected, setup, handle)
+                logic::run_quick_tournament(selected, setup, handle, worker_tournament_id)
             }))
             .unwrap_or_else(|_| mujrim_benchmarker::strength::TournamentSummary {
                 format,
@@ -1752,7 +1905,7 @@ pub fn resume_paused_tournament(state: AppState, handles: &AppHandles) {
     });
     state.tournament_event.set(checkpoint.event.clone());
     state.tournament_site.set(checkpoint.site.clone());
-    start_tournament(state, handles);
+    begin_tournament(state, handles, true);
 }
 
 pub fn discard_paused_tournament(state: AppState, handles: &AppHandles) {
@@ -1763,12 +1916,10 @@ pub fn discard_paused_tournament(state: AppState, handles: &AppHandles) {
         if let Some(database) = handles.study.borrow_mut().as_mut() {
             let _ = database.delete_tournament(&checkpoint.id);
         }
-        if let Some(parent) = logic::study_database_path().parent() {
-            let dir = parent
-                .join("tournaments")
-                .join(logic::tournament_directory_name(checkpoint.parsed_format()));
-            let _ = std::fs::remove_dir_all(dir);
-        }
+        let _ = std::fs::remove_dir_all(logic::tournament_checkpoint_dir(
+            checkpoint.parsed_format(),
+            &checkpoint.id,
+        ));
     }
     refresh_tournament_history(state, handles);
     state.game.set(None);
@@ -2463,8 +2614,62 @@ mod tests {
             "apply_play_thinking_overlays",
             "arrows_from_uci_pv",
             "next_incremental_uci",
+            "fn begin_tournament",
+            "fn open_learn",
+            "fn handle_board_key",
+            "fn navigate_board_ply",
+            "fn try_board_mark_click",
+            "fn play_learn_reply",
+            "fn refresh_learn_catalog",
+            "ArrowLeft",
+            "ArrowRight",
+            "ArrowUp",
+            "ArrowDown",
+            "begin_tournament(state, handles, false)",
+            "begin_tournament(state, handles, true)",
+            "reset_open_match_checkpoints",
+            "tournament_checkpoint_dir",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
+        let start = production
+            .split("pub fn start_tournament")
+            .nth(1)
+            .and_then(|rest| rest.split("fn begin_tournament").next())
+            .expect("start");
+        assert!(
+            start.contains("begin_tournament(state, handles, false)"),
+            "Start must open a new event, not the last one"
+        );
+        let resume = production
+            .split("pub fn resume_paused_tournament")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn discard_paused_tournament").next())
+            .expect("resume");
+        assert!(resume.contains("begin_tournament(state, handles, true)"));
+        assert!(
+            !resume.contains("start_tournament(state, handles)"),
+            "Resume must not go through the fresh-start entry"
+        );
+        let begin = production
+            .split("fn begin_tournament")
+            .nth(1)
+            .and_then(|rest| rest.split("fn poll_tournament").next())
+            .expect("begin");
+        assert!(begin.contains("if !resume"));
+        assert!(begin.contains("reset_open_match_checkpoints"));
+        assert!(
+            begin.contains("run_quick_tournament(selected, setup, handle, worker_tournament_id)")
+        );
+        let discard = production
+            .split("pub fn discard_paused_tournament")
+            .nth(1)
+            .and_then(|rest| rest.split("fn apply_tournament_control").next())
+            .expect("discard");
+        assert!(discard.contains("tournament_checkpoint_dir"));
+        assert!(
+            !discard.contains("join(logic::tournament_directory_name"),
+            "discard must not wipe every event in the format folder"
+        );
     }
 }

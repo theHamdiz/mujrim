@@ -9,6 +9,7 @@ use floem::prelude::{RwSignal, SignalGet, SignalUpdate};
 use mujrim_protocols::catalog::DiscoveredEngine;
 use mujrim_study::annotation::MoveAnnotation;
 use mujrim_study::database::{EngineMetadata, GameSummary, StudyDatabase};
+use mujrim_study::gambit::OwnedGambit;
 use mujrim_study::opening::{OpeningExplorer, PrepSide, SavedLine};
 use mujrim_study::tournament_store::StoredTournament;
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
@@ -83,6 +84,8 @@ pub struct AppState {
     pub analysis_multipv: RwSignal<i32>,
     pub active_gambit_id: RwSignal<Option<String>>,
     pub gambit_ply: RwSignal<usize>,
+    pub gambit_query: RwSignal<String>,
+    pub learn_catalog: RwSignal<Vec<OwnedGambit>>,
     pub saved_lines: RwSignal<Vec<SavedLine>>,
     pub line_name: RwSignal<String>,
     pub prep_notes: RwSignal<String>,
@@ -228,6 +231,8 @@ impl AppState {
             analysis_multipv: RwSignal::new(3),
             active_gambit_id: RwSignal::new(None),
             gambit_ply: RwSignal::new(0),
+            gambit_query: RwSignal::new(String::new()),
+            learn_catalog: RwSignal::new(Vec::new()),
             saved_lines: RwSignal::new(Vec::new()),
             line_name: RwSignal::new("New preparation".to_owned()),
             prep_notes: RwSignal::new(String::new()),

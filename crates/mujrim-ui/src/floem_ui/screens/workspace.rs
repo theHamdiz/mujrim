@@ -139,7 +139,7 @@ fn workspace(
                 pane_width.set(size.width);
             }
         }),
-        dock::bottom_dock(state, handles),
+        dock::bottom_dock(state, handles.clone()),
     ))
     .style(move |s| {
         s.size_full()
@@ -148,6 +148,10 @@ fn workspace(
             .color(theme::rgba(pal().text_primary))
             .overflow_x(Overflow::Clip)
             .overflow_y(Overflow::Clip)
+            .keyboard_navigable()
+    })
+    .on_event(el::KeyDown, move |_, event: &KeyboardEvent| {
+        actions::handle_board_key(state, &handles, event)
     })
 }
 
@@ -754,7 +758,7 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
         })
         .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
         pane_title("Gambit coach"),
-        gambit_controls(state),
+        gambit_controls(state, handles.clone()),
         Stack::vertical((
             move_list(state, handles.clone()),
             ply_nav(state, handles.clone()),
@@ -830,26 +834,45 @@ fn analysis_engine_toggles(state: AppState, handles: AppHandles) -> impl IntoVie
     })
 }
 
-fn gambit_controls(state: AppState) -> impl IntoView {
+fn gambit_controls(state: AppState, handles: AppHandles) -> impl IntoView {
     dyn_view(move || {
         let Some(id) = state.active_gambit_id.get() else {
-            return Label::new("Load a gambit from Study for stepped coaching arrows.")
+            return Label::new("Load a gambit from Learn. Click numbered discs or use ← →.")
                 .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap())
                 .into_any();
         };
-        let Some(lesson) = mujrim_study::gambit::find_gambit(&id) else {
+        let catalog = state.learn_catalog.get();
+        let lesson = mujrim_study::gambit::find_owned(&id, &catalog)
+            .cloned()
+            .or_else(|| {
+                mujrim_study::gambit::find_gambit(&id).map(mujrim_study::gambit::OwnedGambit::from)
+            });
+        let Some(lesson) = lesson else {
             return Empty::new().into_any();
         };
+        let handles = handles.clone();
         Stack::vertical((
             Label::new(format!("{} · {}", lesson.name, lesson.eco))
                 .style(|s| s.font_size(14.0).min_width(0.0).width_full().text_wrap()),
             Label::new(lesson.summary)
                 .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
             Stack::horizontal((
-                widgets::ghost_button(state, "◀ Step", move || actions::gambit_step(state, -1)),
-                Label::derived(move || format!("Ply {}", state.gambit_ply.get()))
-                    .style(|s| s.font_size(13.0)),
-                widgets::ghost_button(state, "Step ▶", move || actions::gambit_step(state, 1)),
+                widgets::ghost_button(state, "◀ Step", {
+                    let handles = handles.clone();
+                    move || actions::gambit_step(state, &handles, -1)
+                }),
+                Label::derived(move || {
+                    format!(
+                        "Ply {} / {}",
+                        state.gambit_ply.get(),
+                        state.move_log.get().len()
+                    )
+                })
+                .style(|s| s.font_size(13.0)),
+                widgets::ghost_button(state, "Step ▶", {
+                    let handles = handles.clone();
+                    move || actions::gambit_step(state, &handles, 1)
+                }),
             ))
             .style(|s| {
                 s.col_gap(8.0)
@@ -1704,6 +1727,9 @@ mod tests {
             "tournament_progress_bar",
             "tournament_stat_chip",
             "phase_label",
+            "handle_board_key",
+            "keyboard_navigable",
+            "gambit_step(state, &handles",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }
