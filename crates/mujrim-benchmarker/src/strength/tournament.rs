@@ -415,6 +415,10 @@ struct PlanOutcome {
     error: Option<String>,
 }
 
+fn match_game_key_prefix(match_index: usize) -> String {
+    format!("m{match_index}-")
+}
+
 fn execute_plan(
     engines: &[TournamentEngine],
     config: &TournamentConfig,
@@ -481,6 +485,7 @@ fn execute_plan(
         if let Some(flag) = config.match_config.stop_flag.as_ref() {
             match_config.stop_flag = Some(Arc::clone(flag));
         }
+        match_config.game_key_prefix = match_game_key_prefix(index);
         match_config.checkpoint_path = config.checkpoint_directory.as_ref().map(|directory| {
             directory.join(format!(
                 "{:02}-{}-vs-{}.jsonl",
@@ -696,6 +701,7 @@ fn execute_plan_parallel(
                     if let Some(flag) = config.match_config.stop_flag.as_ref() {
                         match_config.stop_flag = Some(Arc::clone(flag));
                     }
+                    match_config.game_key_prefix = match_game_key_prefix(index);
                     match_config.checkpoint_path =
                         config.checkpoint_directory.as_ref().map(|directory| {
                             directory.join(format!(
@@ -945,6 +951,25 @@ fn safe_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_pairings_get_distinct_live_board_prefixes() {
+        assert_eq!(match_game_key_prefix(1), "m1-");
+        assert_ne!(match_game_key_prefix(1), match_game_key_prefix(2));
+        assert_ne!(
+            crate::strength::progress_game_key(&match_game_key_prefix(1), 0, true),
+            crate::strength::progress_game_key(&match_game_key_prefix(2), 0, true)
+        );
+        let src = include_str!("tournament.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert_eq!(
+            production
+                .matches("game_key_prefix = match_game_key_prefix")
+                .count(),
+            2,
+            "serial and parallel pairings must both scope live game keys"
+        );
+    }
 
     #[test]
     fn tournament_defaults_are_safe_and_complete() {

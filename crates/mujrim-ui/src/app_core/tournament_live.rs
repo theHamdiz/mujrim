@@ -1116,6 +1116,47 @@ mod tests {
     }
 
     #[test]
+    fn parallel_pairings_keep_separate_live_boards() {
+        let mut snap = LiveTournamentSnapshot::default();
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "pair0-cw".into(),
+            white: "A".into(),
+            black: "B".into(),
+            ..LiveGameBoard::default()
+        });
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "pair0-cw".into(),
+            white: "C".into(),
+            black: "D".into(),
+            ..LiveGameBoard::default()
+        });
+        assert_eq!(snap.live_games.len(), 1, "unscoped keys collide");
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "m1-pair0-cw".into(),
+            white: "A".into(),
+            black: "B".into(),
+            ..LiveGameBoard::default()
+        });
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "m2-pair0-cw".into(),
+            white: "C".into(),
+            black: "D".into(),
+            ..LiveGameBoard::default()
+        });
+        assert_eq!(snap.live_games.len(), 3);
+        assert!(
+            snap.live_games
+                .iter()
+                .any(|game| game.game_key == "m1-pair0-cw" && game.white == "A")
+        );
+        assert!(
+            snap.live_games
+                .iter()
+                .any(|game| game.game_key == "m2-pair0-cw" && game.white == "C")
+        );
+    }
+
+    #[test]
     fn copy_arena_from_keeps_live_progress_and_standings() {
         let mut src = LiveTournamentSnapshot {
             total_matches: 6,

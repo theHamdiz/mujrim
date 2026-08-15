@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 /// - `mujrim-obs` — Obsidian search + runtime net
 /// - `mujrim-plenty` — PlentyChess search profile
 /// - `mujrim-ateed` — Ateed MoE search profile
-/// - `mujrim-lc0` — official Lc0 passthrough with GPU/CPU selection
 pub const BUNDLED_ENGINES: &[(&str, &str)] = &[
     ("mujrim-elite", "Mujrim Elite"),
     ("mujrim-external", "Mujrim External"),
@@ -21,7 +20,6 @@ pub const BUNDLED_ENGINES: &[(&str, &str)] = &[
     ("mujrim-obs", "Mujrim Obsidian"),
     ("mujrim-plenty", "Mujrim PlentyChess"),
     ("mujrim-ateed", "Mujrim Ateed"),
-    ("mujrim-lc0", "Mujrim Lc0"),
     ("stockfish", "Stockfish"),
     ("plentychess", "PlentyChess"),
     ("obsidian", "Obsidian"),
@@ -48,7 +46,6 @@ const ENGINE_ID_ALIASES: &[(&str, &str)] = &[
     ("mujrim-obsidian", "mujrim-obs"),
     ("mujrim-plentychess", "mujrim-plenty"),
     ("mujrim-ateed-moe", "mujrim-ateed"),
-    ("mujrim-leela", "mujrim-lc0"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +129,6 @@ pub fn is_arch_suffixed_adapter(engine_id: &str) -> bool {
             | "mujrim-obs"
             | "mujrim-plenty"
             | "mujrim-ateed"
-            | "mujrim-lc0"
     )
 }
 
@@ -213,7 +209,7 @@ fn packaged_executable_filename(engine_id: &str, _target_directory: &str) -> Str
 fn package_directory(engine_id: &str) -> &str {
     match canonical_engine_id(engine_id) {
         "mujrim-elite" | "mujrim-external" | "mujrim-v60" | "mujrim-ak" | "mujrim-viri"
-        | "mujrim-obs" | "mujrim-plenty" | "mujrim-ateed" | "mujrim-lc0" => "mujrim",
+        | "mujrim-obs" | "mujrim-plenty" | "mujrim-ateed" => "mujrim",
         other => other,
     }
 }
@@ -565,7 +561,6 @@ mod tests {
             "mujrim-obs",
             "mujrim-plenty",
             "mujrim-ateed",
-            "mujrim-lc0",
         ] {
             let candidates = engine_candidates(
                 product,
@@ -706,10 +701,8 @@ mod tests {
             adapter_binary_stem("mujrim-ateed-moe", "x86_64"),
             "mujrim-ateed"
         );
-        assert_eq!(adapter_binary_stem("mujrim-leela", "aarch64"), "mujrim-lc0");
         assert_eq!(package_directory("mujrim-plenty"), "mujrim");
         assert_eq!(package_directory("mujrim-ateed"), "mujrim");
-        assert_eq!(package_directory("mujrim-lc0"), "mujrim");
     }
 
     #[test]
@@ -825,7 +818,7 @@ mod tests {
         assert!(ids.contains(&"mujrim-obs"));
         assert!(ids.contains(&"mujrim-plenty"));
         assert!(ids.contains(&"mujrim-ateed"));
-        assert!(ids.contains(&"mujrim-lc0"));
+        assert!(!ids.contains(&"mujrim-lc0"));
         assert!(ids.contains(&"lc0"));
         assert!(ids.contains(&"viridithas"));
         assert!(ids.contains(&"hobbes"));

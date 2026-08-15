@@ -19,7 +19,6 @@ const PRODUCT_ENGINE_STEMS: &[&str] = &[
     "mujrim-ateed",
     "mujrim-elite",
     "mujrim-external",
-    "mujrim-lc0",
     "mujrim-obs",
     "mujrim-plenty",
     "mujrim-v60",
@@ -309,20 +308,6 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     snapshot_engine("mujrim", "mujrim-ateed")?;
-    run(
-        "cargo",
-        &[
-            "build",
-            "--release",
-            "-p",
-            "mujrim",
-            "--no-default-features",
-            "--features",
-            "xboard,book,nnue,simd",
-        ],
-        &environment,
-    )?;
-    snapshot_engine("mujrim", "mujrim-lc0")?;
     // Leave mujrim.exe as the lean external (no embedded net).
     snapshot_engine("mujrim-external", "mujrim")?;
     run(
@@ -1026,7 +1011,6 @@ mod tests {
             "mujrim-obs",
             "mujrim-plenty",
             "mujrim-ateed",
-            "mujrim-lc0",
         ] {
             let stem = adapter_binary_stem(adapter, &arch);
             assert!(!stem.contains("native"), "{stem}");
@@ -1056,7 +1040,6 @@ mod tests {
             "mujrim-obs",
             "mujrim-plenty",
             "mujrim-ateed",
-            "mujrim-lc0",
         ] {
             assert!(
                 native.contains(&format!("\"{stem}\"")),
@@ -1129,7 +1112,6 @@ mod tests {
                 "mujrim-ateed",
                 "mujrim-elite",
                 "mujrim-external",
-                "mujrim-lc0",
                 "mujrim-obs",
                 "mujrim-plenty",
                 "mujrim-v60",

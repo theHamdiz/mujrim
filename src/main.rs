@@ -43,7 +43,6 @@ const MUJRIM_ADAPTERS: &[&str] = &[
     "mujrim-obs",
     "mujrim-plenty",
     "mujrim-ateed",
-    "mujrim-lc0",
 ];
 const V60_PASSTHROUGH_MARKER: &str = "MUJRIM_V60_PASSTHROUGH_ACTIVE";
 
@@ -95,7 +94,7 @@ fn resolve_backend_engine_id(backend: &str) -> Option<&'static str> {
         "obsidian" | "obs" | "mujrim-obs" => Some("obsidian"),
         "plentychess" | "plenty" | "mujrim-plenty" => Some("plentychess"),
         "ateed" | "mujrim-ateed" => Some("ateed"),
-        "lc0" | "mujrim-lc0" => Some("lc0"),
+        "lc0" => Some("lc0"),
         "external" => Some("mujrim-external"),
         other => EXTERNAL_BACKENDS
             .iter()
@@ -142,7 +141,6 @@ fn product_adapter_from_exe_stem(stem: &str) -> Option<&'static str> {
         "mujrim-obs" | "mujrim-obsidian" => Some("obsidian"),
         "mujrim-plenty" | "mujrim-plentychess" => Some("plentychess"),
         "mujrim-ateed" => Some("ateed"),
-        "mujrim-lc0" | "mujrim-leela" => Some("lc0"),
         "mujrim-elite" | "mujrim-embedded" => Some("stockfish"),
         "mujrim-ak" | "mujrim-akimbo" => Some("akimbo"),
         "mujrim-v60" | "mujrim-v60-embedded" => Some("reckless"),
@@ -906,7 +904,6 @@ mod tests {
                         | "mujrim-obs"
                         | "mujrim-plenty"
                         | "mujrim-ateed"
-                        | "mujrim-lc0"
                         | "akimbo"
                 ) || EXTERNAL_BACKENDS.contains(&engine.0)
             );
@@ -984,7 +981,7 @@ mod tests {
             Some("plentychess")
         );
         assert_eq!(product_adapter_from_exe_stem("mujrim-ateed"), Some("ateed"));
-        assert_eq!(product_adapter_from_exe_stem("mujrim-lc0"), Some("lc0"));
+        assert_eq!(product_adapter_from_exe_stem("mujrim-lc0"), None);
         assert!(MUJRIM_ADAPTERS.iter().all(|id| is_mujrim_adapter(id)));
     }
 

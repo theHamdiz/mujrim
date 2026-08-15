@@ -17,7 +17,7 @@ name = "mujrim-ui"
 path = "src/main.rs"
 
 [dependencies]
-floem = { git = "https://github.com/lapce/floem", rev = "778bb5f2aa08429e579ee2e6ac97e84fbf18b618", features = ["tokio", "default-image-formats", "vger", "editor"] }
+floem = { git = "https://github.com/lapce/floem", rev = "778bb5f2aa08429e579ee2e6ac97e84fbf18b618", features = ["tokio", "default-image-formats", "vger"] }
 usvg = "0.46"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 types = { package = "mujrim-types", path = "../mujrim-types" }

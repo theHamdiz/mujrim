@@ -131,6 +131,9 @@ pub struct MatchConfig {
     pub abort_game_flag: Option<Arc<AtomicBool>>,
     /// Optional ply-by-ply progress hook for live tournament boards.
     pub game_progress: Option<GameProgress>,
+    /// Distinguishes live boards when several pairings run at once.
+    /// Parallel matches otherwise all emit `pair0-cw` and the UI keeps one board.
+    pub game_key_prefix: String,
 }
 
 impl std::fmt::Debug for MatchConfig {
@@ -181,8 +184,16 @@ impl Default for MatchConfig {
             pause_flag: None,
             abort_game_flag: None,
             game_progress: None,
+            game_key_prefix: String::new(),
         }
     }
+}
+
+pub fn progress_game_key(prefix: &str, pair_index: usize, candidate_white: bool) -> String {
+    format!(
+        "{prefix}pair{pair_index}-{}",
+        if candidate_white { "cw" } else { "cb" }
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -991,7 +1002,7 @@ pub fn run_match(
                     &config,
                     &candidate.name,
                     &reference.name,
-                    &format!("pair{index}-cw"),
+                    &progress_game_key(&config.game_key_prefix, index, true),
                 );
                 if let Some(message) = resource_limit_detail(&white) {
                     // Record the forfeited game, skip the return game, and stop the match.
@@ -1068,7 +1079,7 @@ pub fn run_match(
                     &config,
                     &candidate.name,
                     &reference.name,
-                    &format!("pair{index}-cb"),
+                    &progress_game_key(&config.game_key_prefix, index, false),
                 );
                 if let Some(message) = resource_limit_detail(&black) {
                     *lock_recover(&error) = Some(message.to_string());
@@ -2157,6 +2168,17 @@ mod tests {
         assert_eq!(json["opening_count"], 512);
         assert_eq!(json["opening_fingerprint"], "0123456789abcdef");
         assert_eq!(json["sprt"]["elo0"], config.sprt.elo0);
+    }
+
+    #[test]
+    fn progress_game_keys_stay_unique_across_parallel_matches() {
+        assert_eq!(progress_game_key("", 0, true), "pair0-cw");
+        assert_eq!(progress_game_key("", 0, false), "pair0-cb");
+        assert_ne!(
+            progress_game_key("m1-", 0, true),
+            progress_game_key("m2-", 0, true)
+        );
+        assert_eq!(progress_game_key("m3-", 1, false), "m3-pair1-cb");
     }
 
     #[test]
