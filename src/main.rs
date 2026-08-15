@@ -353,6 +353,89 @@ fn main() {
                                 .default_value("ateed_default.bin")
                                 .help("Destination path for the Ateed payload"),
                         ),
+                )
+                .subcommand(
+                    Command::new("datagen")
+                        .about("Self-play dataset generation (append-only)")
+                        .arg(
+                            Arg::new("games")
+                                .short('g')
+                                .long("games")
+                                .value_name("N")
+                                .default_value("1")
+                                .help("Number of self-play games"),
+                        )
+                        .arg(
+                            Arg::new("depth")
+                                .short('d')
+                                .long("depth")
+                                .value_name("DEPTH")
+                                .default_value("6")
+                                .help("Search depth per move"),
+                        )
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("PATH")
+                                .default_value("data.txt")
+                                .help("Append-only dataset path"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("ateed")
+                        .about("Train an Ateed checkpoint from a text dataset")
+                        .arg(
+                            Arg::new("data")
+                                .short('d')
+                                .long("data")
+                                .value_name("PATH")
+                                .default_value("data.txt")
+                                .help("Dataset of FEN|score|wdl lines"),
+                        )
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("PATH")
+                                .default_value("ateed_default.bin")
+                                .help("Destination Ateed payload"),
+                        )
+                        .arg(
+                            Arg::new("epochs")
+                                .short('e')
+                                .long("epochs")
+                                .value_name("N")
+                                .default_value("8")
+                                .help("Training epochs"),
+                        )
+                        .arg(
+                            Arg::new("lr")
+                                .long("lr")
+                                .value_name("RATE")
+                                .default_value("1.0")
+                                .help("SGD learning rate"),
+                        )
+                        .arg(
+                            Arg::new("wdl-weight")
+                                .long("wdl-weight")
+                                .value_name("W")
+                                .default_value("0.25")
+                                .help("Mixture weight for WDL cross-entropy"),
+                        )
+                        .arg(
+                            Arg::new("scope")
+                                .long("scope")
+                                .value_name("heads|expert0")
+                                .default_value("heads")
+                                .help("Train output biases or expert 0 + FT"),
+                        )
+                        .arg(
+                            Arg::new("base")
+                                .long("base")
+                                .value_name("PATH")
+                                .help("Optional Ateed checkpoint to fine-tune"),
+                        ),
                 ),
         )
         .subcommand(
@@ -474,8 +557,71 @@ fn main() {
                     }
                     println!("wrote Ateed zero network to {output}");
                 }
+                Some(("datagen", datagen)) => {
+                    let config = trainer::config::DatagenConfig {
+                        num_games: datagen
+                            .get_one::<String>("games")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(1),
+                        depth: datagen
+                            .get_one::<String>("depth")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(6),
+                        output_path: datagen
+                            .get_one::<String>("output")
+                            .cloned()
+                            .unwrap_or_else(|| "data.txt".to_string()),
+                        ..Default::default()
+                    };
+                    if let Err(error) = trainer::datagen::generate_data(&config) {
+                        eprintln!("datagen failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(("ateed", train)) => {
+                    let config = trainer::config::TrainingConfig {
+                        data_path: train
+                            .get_one::<String>("data")
+                            .cloned()
+                            .unwrap_or_else(|| "data.txt".to_string()),
+                        output_path: train
+                            .get_one::<String>("output")
+                            .cloned()
+                            .unwrap_or_else(|| "ateed_default.bin".to_string()),
+                        epochs: train
+                            .get_one::<String>("epochs")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(8),
+                        learning_rate: train
+                            .get_one::<String>("lr")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(1.0),
+                        wdl_weight: train
+                            .get_one::<String>("wdl-weight")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(0.25),
+                        base_network: train.get_one::<String>("base").cloned(),
+                        ..Default::default()
+                    };
+                    let scope = match trainer::train::AteedTrainScope::parse(
+                        train
+                            .get_one::<String>("scope")
+                            .map_or("heads", String::as_str),
+                    ) {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            eprintln!("{error}");
+                            std::process::exit(2);
+                        }
+                    };
+                    if let Err(error) = trainer::train::train_ateed_to_file(&config, scope) {
+                        eprintln!("Ateed training failed: {error}");
+                        std::process::exit(1);
+                    }
+                    println!("wrote Ateed checkpoint to {}", config.output_path);
+                }
                 _ => {
-                    eprintln!("usage: mujrim train emit-ateed [--output ateed_default.bin]");
+                    eprintln!("usage: mujrim train <emit-ateed|datagen|ateed> [options]");
                     std::process::exit(2);
                 }
             }

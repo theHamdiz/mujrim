@@ -13,7 +13,7 @@ use rand::Rng;
 use types::{Board, Color};
 
 /// A single training position recorded during self-play.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrainingPosition {
     /// Board position in FEN
     pub fen: String,

@@ -1,0 +1,521 @@
+//! Phase 4 CPU trainer for Ateed output heads and a single expert.
+
+use std::path::Path;
+
+use eval::nnue::ateed_format::{
+    FEATURES, KING_BUCKETS, L1, L2, L3, QA, QB, SCALE, WDL_OUTPUTS, stm_piece_features,
+};
+use eval::nnue::{AteedExpertUpdate, AteedNetwork};
+use gpu::{CpuCompute, TrainCompute};
+use types::{Board, Color};
+
+use crate::config::TrainingConfig;
+use crate::datagen::TrainingPosition;
+use crate::dataset::load_training_positions;
+
+const SCORE_SCALE: f32 = SCALE as f32 / (QA * QB) as f32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AteedTrainScope {
+    /// SGD on eval/WDL biases. Works from a zero net.
+    OutputBiases,
+    /// Sparse FT + expert 0 dense layers.
+    Expert0,
+}
+
+impl AteedTrainScope {
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "heads" | "output-biases" => Ok(Self::OutputBiases),
+            "expert0" => Ok(Self::Expert0),
+            other => Err(format!("unknown Ateed train scope `{other}`")),
+        }
+    }
+}
+
+struct AteedTrainState {
+    ft: Vec<f32>,
+    ft_bias: Vec<f32>,
+    l1_w: Vec<f32>,
+    l1_b: [f32; L2],
+    l2_w: Vec<f32>,
+    l2_b: [f32; L3],
+    eval_w: [f32; L3],
+    eval_b: f32,
+    wdl_w: [f32; L3 * WDL_OUTPUTS],
+    wdl_b: [f32; WDL_OUTPUTS],
+}
+
+impl AteedTrainState {
+    fn from_network(net: &AteedNetwork) -> Self {
+        let mut state = Self::zero_like();
+        state.load_from(net);
+        state
+    }
+
+    fn zero_like() -> Self {
+        Self {
+            ft: vec![0.0; KING_BUCKETS * FEATURES * L1],
+            ft_bias: vec![0.0; L1],
+            l1_w: vec![0.0; L2 * L1],
+            l1_b: [0.0; L2],
+            l2_w: vec![0.0; L3 * L2],
+            l2_b: [0.0; L3],
+            eval_w: [0.0; L3],
+            eval_b: 0.0,
+            wdl_w: [0.0; L3 * WDL_OUTPUTS],
+            wdl_b: [0.0; WDL_OUTPUTS],
+        }
+    }
+
+    fn load_from(&mut self, net: &AteedNetwork) {
+        for (slot, &weight) in self.ft.iter_mut().zip(net.feature_weights()) {
+            *slot = f32::from(weight);
+        }
+        for (slot, &bias) in self.ft_bias.iter_mut().zip(net.feature_biases()) {
+            *slot = f32::from(bias);
+        }
+        let expert = net.expert(0).expect("Ateed expert 0 is present");
+        for (slot, &weight) in self.l1_w.iter_mut().zip(expert.l1_weights()) {
+            *slot = f32::from(weight);
+        }
+        for (slot, &bias) in self.l1_b.iter_mut().zip(expert.l1_biases()) {
+            *slot = bias as f32;
+        }
+        for (slot, &weight) in self.l2_w.iter_mut().zip(expert.l2_weights()) {
+            *slot = f32::from(weight);
+        }
+        for (slot, &bias) in self.l2_b.iter_mut().zip(expert.l2_biases()) {
+            *slot = bias as f32;
+        }
+        for (slot, &weight) in self.eval_w.iter_mut().zip(expert.eval_weights()) {
+            *slot = f32::from(weight);
+        }
+        self.eval_b = expert.eval_bias() as f32;
+        for (slot, &weight) in self.wdl_w.iter_mut().zip(expert.wdl_weights()) {
+            *slot = f32::from(weight);
+        }
+        for (slot, &bias) in self.wdl_b.iter_mut().zip(expert.wdl_biases()) {
+            *slot = bias as f32;
+        }
+    }
+
+    fn seed_expert0_signal(&mut self) {
+        for (index, weight) in self.ft.iter_mut().enumerate() {
+            *weight = (index % 11) as f32 * 0.02 - 0.1;
+        }
+        for (index, weight) in self.l1_w.iter_mut().enumerate() {
+            *weight = (index % 7) as f32 * 0.01 - 0.03;
+        }
+        for (index, weight) in self.l2_w.iter_mut().enumerate() {
+            *weight = (index % 5) as f32 * 0.02 - 0.04;
+        }
+        self.eval_w[0] = 1.0;
+        self.l2_b[0] = 8.0;
+        self.l1_b[0] = 8.0;
+    }
+
+    fn apply_to_network(&self, net: &mut AteedNetwork) -> Result<(), String> {
+        let ft: Vec<i16> = self.ft.iter().copied().map(quant_i16).collect();
+        let ft_bias: Vec<i16> = self.ft_bias.iter().copied().map(quant_i16).collect();
+        net.set_feature_transformer(&ft, &ft_bias)?;
+        let l1_w: Vec<i8> = self.l1_w.iter().copied().map(quant_i8).collect();
+        let l1_b: Vec<i32> = self.l1_b.iter().copied().map(quant_i32).collect();
+        let l2_w: Vec<i8> = self.l2_w.iter().copied().map(quant_i8).collect();
+        let l2_b: Vec<i32> = self.l2_b.iter().copied().map(quant_i32).collect();
+        let eval_w: Vec<i8> = self.eval_w.iter().copied().map(quant_i8).collect();
+        let wdl_w: Vec<i8> = self.wdl_w.iter().copied().map(quant_i8).collect();
+        let wdl_b: Vec<i32> = self.wdl_b.iter().copied().map(quant_i32).collect();
+        net.set_expert(
+            0,
+            AteedExpertUpdate {
+                l1_weights: &l1_w,
+                l1_biases: &l1_b,
+                l2_weights: &l2_w,
+                l2_biases: &l2_b,
+                eval_weights: &eval_w,
+                eval_bias: quant_i32(self.eval_b),
+                wdl_weights: &wdl_w,
+                wdl_biases: &wdl_b,
+            },
+        )?;
+        net.set_output_biases(
+            quant_i32(self.eval_b),
+            [
+                quant_i32(self.wdl_b[0]),
+                quant_i32(self.wdl_b[1]),
+                quant_i32(self.wdl_b[2]),
+            ],
+        );
+        Ok(())
+    }
+}
+
+fn quant_i16(value: f32) -> i16 {
+    value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+fn quant_i8(value: f32) -> i8 {
+    value.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
+}
+
+fn quant_i32(value: f32) -> i32 {
+    value.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+fn stm_wdl(board: &Board, white_wdl: f32) -> f32 {
+    if board.side_to_move == Color::White {
+        white_wdl
+    } else {
+        1.0 - white_wdl
+    }
+}
+
+fn wdl_target(wdl: f32) -> [f32; WDL_OUTPUTS] {
+    let win = (2.0 * wdl - 1.0).max(0.0);
+    let loss = (1.0 - 2.0 * wdl).max(0.0);
+    [win, 1.0 - win - loss, loss]
+}
+
+fn softmax(logits: [f32; WDL_OUTPUTS]) -> [f32; WDL_OUTPUTS] {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut exp = [0.0; WDL_OUTPUTS];
+    let mut sum = 0.0;
+    for (slot, logit) in exp.iter_mut().zip(logits) {
+        *slot = ((logit - max) / 64.0).exp();
+        sum += *slot;
+    }
+    if sum <= 0.0 {
+        return [1.0 / 3.0; WDL_OUTPUTS];
+    }
+    for slot in &mut exp {
+        *slot /= sum;
+    }
+    exp
+}
+
+fn clamp_ste(value: f32, lo: f32, hi: f32) -> (f32, bool) {
+    (value.clamp(lo, hi), value > lo && value < hi)
+}
+
+struct Expert0Forward {
+    score: f32,
+    wdl: [f32; WDL_OUTPUTS],
+    features: Vec<usize>,
+    l1: [f32; L1],
+    l2: [f32; L2],
+    l3: [f32; L3],
+    a1: [f32; L1],
+    a2: [f32; L2],
+    a3: [f32; L3],
+}
+
+fn forward_heads(state: &AteedTrainState) -> (f32, [f32; WDL_OUTPUTS]) {
+    (state.eval_b * SCORE_SCALE, state.wdl_b)
+}
+
+fn forward_expert0(
+    state: &AteedTrainState,
+    board: &Board,
+    compute: &impl TrainCompute,
+) -> Expert0Forward {
+    let features = stm_piece_features(board);
+    let mut l1 = [0.0; L1];
+    l1.copy_from_slice(&state.ft_bias);
+    for &feature in &features {
+        let start = feature * L1;
+        for (dst, &weight) in l1.iter_mut().zip(&state.ft[start..start + L1]) {
+            *dst += weight;
+        }
+    }
+    let mut a1 = [0.0; L1];
+    for (dst, &value) in a1.iter_mut().zip(&l1) {
+        *dst = value.clamp(0.0, QA as f32);
+    }
+    let mut l2 = [0.0; L2];
+    compute.matvec_f32(&state.l1_w, &a1, L2, L1, &mut l2);
+    for (dst, &bias) in l2.iter_mut().zip(&state.l1_b) {
+        *dst += bias;
+    }
+    let mut a2 = [0.0; L2];
+    for (dst, &value) in a2.iter_mut().zip(&l2) {
+        *dst = value.clamp(0.0, 127.0);
+    }
+    let mut l3 = [0.0; L3];
+    compute.matvec_f32(&state.l2_w, &a2, L3, L2, &mut l3);
+    for (dst, &bias) in l3.iter_mut().zip(&state.l2_b) {
+        *dst += bias;
+    }
+    let mut a3 = [0.0; L3];
+    for (dst, &value) in a3.iter_mut().zip(&l3) {
+        *dst = value.clamp(0.0, 127.0);
+    }
+    let eval = state.eval_b
+        + a3.iter()
+            .zip(&state.eval_w)
+            .map(|(a, w)| a * w)
+            .sum::<f32>();
+    let mut wdl = state.wdl_b;
+    for (logit, row) in wdl.iter_mut().zip(state.wdl_w.chunks_exact(L3)) {
+        *logit += a3.iter().zip(row).map(|(a, w)| a * w).sum::<f32>();
+    }
+    Expert0Forward {
+        score: eval * SCORE_SCALE,
+        wdl,
+        features,
+        l1,
+        l2,
+        l3,
+        a1,
+        a2,
+        a3,
+    }
+}
+
+fn step_heads(
+    state: &mut AteedTrainState,
+    target_score: f32,
+    target_wdl: f32,
+    lr: f32,
+    wdl_weight: f32,
+) {
+    let (pred, logits) = forward_heads(state);
+    let score_weight = 1.0 - wdl_weight;
+    state.eval_b -= lr * score_weight * (pred - target_score) / SCORE_SCALE;
+    let probs = softmax(logits);
+    let target = wdl_target(target_wdl);
+    for (bias, (&prob, &tgt)) in state.wdl_b.iter_mut().zip(probs.iter().zip(&target)) {
+        *bias -= lr * wdl_weight * (prob - tgt) / 64.0;
+    }
+}
+
+fn step_expert0(
+    state: &mut AteedTrainState,
+    board: &Board,
+    target_score: f32,
+    target_wdl: f32,
+    lr: f32,
+    wdl_weight: f32,
+    compute: &impl TrainCompute,
+) {
+    let fwd = forward_expert0(state, board, compute);
+    let score_weight = 1.0 - wdl_weight;
+    let d_eval = score_weight * (fwd.score - target_score) / SCORE_SCALE;
+    let probs = softmax(fwd.wdl);
+    let target = wdl_target(target_wdl);
+    let mut d_wdl = [0.0; WDL_OUTPUTS];
+    for (grad, (&prob, &tgt)) in d_wdl.iter_mut().zip(probs.iter().zip(&target)) {
+        *grad = wdl_weight * (prob - tgt) / 64.0;
+    }
+
+    state.eval_b -= lr * d_eval;
+    for (bias, &grad) in state.wdl_b.iter_mut().zip(&d_wdl) {
+        *bias -= lr * grad;
+    }
+
+    let mut d_a3 = [0.0; L3];
+    for (i, (d_act, &a3)) in d_a3.iter_mut().zip(&fwd.a3).enumerate() {
+        *d_act += d_eval * state.eval_w[i];
+        state.eval_w[i] -= lr * d_eval * a3;
+        for (k, &wdl_grad) in d_wdl.iter().enumerate() {
+            *d_act += wdl_grad * state.wdl_w[k * L3 + i];
+            state.wdl_w[k * L3 + i] -= lr * wdl_grad * a3;
+        }
+    }
+
+    let mut d_l3 = [0.0; L3];
+    for (((d_pre, &pre), &d_act), bias) in
+        d_l3.iter_mut().zip(&fwd.l3).zip(&d_a3).zip(&mut state.l2_b)
+    {
+        let (_, pass) = clamp_ste(pre, 0.0, 127.0);
+        *d_pre = if pass { d_act } else { 0.0 };
+        *bias -= lr * *d_pre;
+    }
+    let mut d_a2 = [0.0; L2];
+    for (i, &d_pre) in d_l3.iter().enumerate() {
+        let row = i * L2;
+        for (d_act, &weight) in d_a2.iter_mut().zip(&state.l2_w[row..row + L2]) {
+            *d_act += d_pre * weight;
+        }
+        for (weight, &a2) in state.l2_w[row..row + L2].iter_mut().zip(&fwd.a2) {
+            *weight -= lr * d_pre * a2;
+        }
+    }
+    let mut d_l2 = [0.0; L2];
+    for (((d_pre, &pre), &d_act), bias) in
+        d_l2.iter_mut().zip(&fwd.l2).zip(&d_a2).zip(&mut state.l1_b)
+    {
+        let (_, pass) = clamp_ste(pre, 0.0, 127.0);
+        *d_pre = if pass { d_act } else { 0.0 };
+        *bias -= lr * *d_pre;
+    }
+    let mut d_a1 = [0.0; L1];
+    for (j, &d_pre) in d_l2.iter().enumerate() {
+        let row = j * L1;
+        for (d_act, &weight) in d_a1.iter_mut().zip(&state.l1_w[row..row + L1]) {
+            *d_act += d_pre * weight;
+        }
+        for (weight, &a1) in state.l1_w[row..row + L1].iter_mut().zip(&fwd.a1) {
+            *weight -= lr * d_pre * a1;
+        }
+    }
+    let mut d_l1 = [0.0; L1];
+    for (((d_pre, &pre), &d_act), bias) in d_l1
+        .iter_mut()
+        .zip(&fwd.l1)
+        .zip(&d_a1)
+        .zip(&mut state.ft_bias)
+    {
+        let (_, pass) = clamp_ste(pre, 0.0, QA as f32);
+        *d_pre = if pass { d_act } else { 0.0 };
+        *bias -= lr * *d_pre;
+    }
+    for &feature in &fwd.features {
+        let start = feature * L1;
+        for (weight, &grad) in state.ft[start..start + L1].iter_mut().zip(&d_l1) {
+            *weight -= lr * grad;
+        }
+    }
+}
+
+pub fn train_ateed(
+    positions: &[TrainingPosition],
+    config: &TrainingConfig,
+    scope: AteedTrainScope,
+) -> Result<AteedNetwork, String> {
+    if positions.is_empty() {
+        return Err("Ateed trainer needs at least one position".to_string());
+    }
+    let mut net = if let Some(base) = &config.base_network {
+        let loaded = eval::nnue::load_network(Path::new(base)).map_err(|e| e.to_string())?;
+        match loaded {
+            eval::nnue::ActiveNetwork::ExternalAteed { network, .. } => *network,
+            _ => return Err("base network is not Ateed".to_string()),
+        }
+    } else {
+        AteedNetwork::zero()
+    };
+    let mut state = AteedTrainState::from_network(&net);
+    if scope == AteedTrainScope::Expert0
+        && state.l1_w.iter().all(|w| *w == 0.0)
+        && state.ft.iter().all(|w| *w == 0.0)
+    {
+        state.seed_expert0_signal();
+    }
+    let compute = CpuCompute;
+    let lr = config.learning_rate as f32;
+    let wdl_weight = config.wdl_weight.clamp(0.0, 1.0) as f32;
+    for _ in 0..config.epochs {
+        for position in positions {
+            let board = Board::from_fen(&position.fen)?;
+            let target_wdl = stm_wdl(&board, position.wdl);
+            match scope {
+                AteedTrainScope::OutputBiases => {
+                    step_heads(
+                        &mut state,
+                        position.score as f32,
+                        target_wdl,
+                        lr,
+                        wdl_weight,
+                    );
+                }
+                AteedTrainScope::Expert0 => {
+                    step_expert0(
+                        &mut state,
+                        &board,
+                        position.score as f32,
+                        target_wdl,
+                        lr,
+                        wdl_weight,
+                        &compute,
+                    );
+                }
+            }
+        }
+    }
+    state.apply_to_network(&mut net)?;
+    Ok(net)
+}
+
+pub fn train_ateed_to_file(config: &TrainingConfig, scope: AteedTrainScope) -> Result<(), String> {
+    let positions =
+        load_training_positions(Path::new(&config.data_path)).map_err(|e| e.to_string())?;
+    let net = train_ateed(&positions, config, scope)?;
+    crate::ateed::emit_network(Path::new(&config.output_path), &net).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn startpos_line(score: i32, wdl: f32) -> TrainingPosition {
+        TrainingPosition {
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".to_string(),
+            score,
+            wdl,
+        }
+    }
+
+    #[test]
+    fn train_scope_parse_accepts_heads_and_expert0() {
+        assert_eq!(
+            AteedTrainScope::parse("heads").unwrap(),
+            AteedTrainScope::OutputBiases
+        );
+        assert_eq!(
+            AteedTrainScope::parse("expert0").unwrap(),
+            AteedTrainScope::Expert0
+        );
+        assert!(AteedTrainScope::parse("moe").is_err());
+    }
+
+    #[test]
+    fn heads_trainer_moves_zero_net_toward_a_constant_score() {
+        types::init();
+        let config = TrainingConfig {
+            epochs: 8,
+            learning_rate: 1.0,
+            wdl_weight: 0.0,
+            ..Default::default()
+        };
+        let net = train_ateed(
+            &[startpos_line(80, 0.5)],
+            &config,
+            AteedTrainScope::OutputBiases,
+        )
+        .expect("train heads");
+        let score = net.evaluate(&Board::new());
+        let bias = net.expert(0).expect("expert 0").eval_bias();
+        assert!(
+            score > 40,
+            "heads trainer should approach +80, got {score} bias={bias} scale={SCORE_SCALE}"
+        );
+    }
+
+    #[test]
+    fn expert0_trainer_changes_a_zero_net_eval() {
+        types::init();
+        let config = TrainingConfig {
+            epochs: 2,
+            learning_rate: 0.05,
+            wdl_weight: 0.0,
+            ..Default::default()
+        };
+        let before = AteedNetwork::zero().evaluate(&Board::new());
+        let net = train_ateed(&[startpos_line(60, 0.5)], &config, AteedTrainScope::Expert0)
+            .expect("train expert0");
+        assert_ne!(net.evaluate(&Board::new()), before);
+    }
+
+    #[test]
+    fn empty_dataset_is_rejected() {
+        let err = train_ateed(
+            &[],
+            &TrainingConfig::default(),
+            AteedTrainScope::OutputBiases,
+        )
+        .err()
+        .expect("empty dataset");
+        assert!(err.contains("at least one position"));
+    }
+}

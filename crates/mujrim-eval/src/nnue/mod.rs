@@ -67,5 +67,5 @@ pub use adapter::{
     nnue_search_directories,
 };
 #[cfg(feature = "ateed-nnue")]
-pub use ateed_format::{AteedEval, AteedNetwork, wdl_variance};
+pub use ateed_format::{AteedEval, AteedExpert, AteedExpertUpdate, AteedNetwork, wdl_variance};
 pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, forward_with_network, net};

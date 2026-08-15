@@ -59,6 +59,51 @@ pub struct AteedExpert {
     wdl_biases: [i32; WDL_OUTPUTS],
 }
 
+pub struct AteedExpertUpdate<'a> {
+    pub l1_weights: &'a [i8],
+    pub l1_biases: &'a [i32],
+    pub l2_weights: &'a [i8],
+    pub l2_biases: &'a [i32],
+    pub eval_weights: &'a [i8],
+    pub eval_bias: i32,
+    pub wdl_weights: &'a [i8],
+    pub wdl_biases: &'a [i32],
+}
+
+impl AteedExpert {
+    pub fn l1_weights(&self) -> &[i8] {
+        &self.l1_weights
+    }
+
+    pub fn l1_biases(&self) -> &[i32; L2] {
+        &self.l1_biases
+    }
+
+    pub fn l2_weights(&self) -> &[i8] {
+        &self.l2_weights
+    }
+
+    pub fn l2_biases(&self) -> &[i32; L3] {
+        &self.l2_biases
+    }
+
+    pub fn eval_weights(&self) -> &[i8; L3] {
+        &self.eval_weights
+    }
+
+    pub fn eval_bias(&self) -> i32 {
+        self.eval_bias
+    }
+
+    pub fn wdl_weights(&self) -> &[i8; L3 * WDL_OUTPUTS] {
+        &self.wdl_weights
+    }
+
+    pub fn wdl_biases(&self) -> &[i32; WDL_OUTPUTS] {
+        &self.wdl_biases
+    }
+}
+
 pub struct AteedNetwork {
     feature_weights: Box<[i16]>,
     feature_biases: Box<[i16]>,
@@ -151,6 +196,98 @@ impl AteedNetwork {
         add_pairs(self, board, Color::Black, &mut black);
         moe_forward(self, board, &white, &black)
     }
+
+    pub fn feature_weights(&self) -> &[i16] {
+        &self.feature_weights
+    }
+
+    pub fn feature_biases(&self) -> &[i16] {
+        &self.feature_biases
+    }
+
+    pub fn expert(&self, index: usize) -> Option<&AteedExpert> {
+        self.experts.get(index)
+    }
+
+    pub fn set_output_biases(&mut self, eval_bias: i32, wdl_biases: [i32; WDL_OUTPUTS]) {
+        for expert in &mut self.experts {
+            expert.eval_bias = eval_bias;
+            expert.wdl_biases = wdl_biases;
+        }
+    }
+
+    pub fn set_feature_transformer(
+        &mut self,
+        weights: &[i16],
+        biases: &[i16],
+    ) -> Result<(), String> {
+        if weights.len() != self.feature_weights.len() || biases.len() != self.feature_biases.len()
+        {
+            return Err("feature transformer size mismatch".to_string());
+        }
+        self.feature_weights.copy_from_slice(weights);
+        self.feature_biases.copy_from_slice(biases);
+        Ok(())
+    }
+
+    pub fn set_expert(
+        &mut self,
+        index: usize,
+        layers: AteedExpertUpdate<'_>,
+    ) -> Result<(), String> {
+        let expert = self
+            .experts
+            .get_mut(index)
+            .ok_or_else(|| format!("Ateed expert {index} is out of range"))?;
+        if layers.l1_weights.len() != expert.l1_weights.len()
+            || layers.l1_biases.len() != L2
+            || layers.l2_weights.len() != expert.l2_weights.len()
+            || layers.l2_biases.len() != L3
+            || layers.eval_weights.len() != L3
+            || layers.wdl_weights.len() != L3 * WDL_OUTPUTS
+            || layers.wdl_biases.len() != WDL_OUTPUTS
+        {
+            return Err("Ateed expert layer size mismatch".to_string());
+        }
+        expert.l1_weights.copy_from_slice(layers.l1_weights);
+        expert.l1_biases.copy_from_slice(layers.l1_biases);
+        expert.l2_weights.copy_from_slice(layers.l2_weights);
+        expert.l2_biases.copy_from_slice(layers.l2_biases);
+        expert.eval_weights.copy_from_slice(layers.eval_weights);
+        expert.eval_bias = layers.eval_bias;
+        expert.wdl_weights.copy_from_slice(layers.wdl_weights);
+        expert.wdl_biases.copy_from_slice(layers.wdl_biases);
+        Ok(())
+    }
+}
+
+/// STM king-relative piece features used by the Phase 4 sparse trainer.
+pub fn stm_piece_features(board: &Board) -> Vec<usize> {
+    let pov = board.side_to_move;
+    let king = board.king_square(pov).index();
+    let occupancy = snapshot_occupancy(board);
+    let mut features = Vec::with_capacity(32);
+    for color in 0..2 {
+        for piece in 0..Piece::COUNT {
+            let mut bb = occupancy[color * Piece::COUNT + piece];
+            while bb != 0 {
+                let sq = bb.trailing_zeros() as usize;
+                bb &= bb - 1;
+                features.push(feature_index(
+                    king,
+                    pov,
+                    Piece::from_index(piece).expect("piece index is valid"),
+                    if color == 0 {
+                        Color::White
+                    } else {
+                        Color::Black
+                    },
+                    sq,
+                ));
+            }
+        }
+    }
+    features
 }
 
 #[inline(always)]
@@ -883,6 +1020,49 @@ mod tests {
         assert_eq!(
             state.frames[state.index].values,
             scratch_piece_accumulators(net, board)
+        );
+    }
+
+    #[test]
+    fn stm_piece_features_lists_every_startpos_piece() {
+        types::init();
+        let features = stm_piece_features(&Board::new());
+        assert_eq!(features.len(), 32);
+        assert!(
+            features
+                .iter()
+                .all(|&index| index < KING_BUCKETS * FEATURES)
+        );
+    }
+
+    #[test]
+    fn set_output_biases_changes_zero_net_eval() {
+        types::init();
+        let mut net = AteedNetwork::zero();
+        net.set_output_biases(8_160, [4, 2, 0]);
+        assert_eq!(net.evaluate(&Board::new()), 100);
+        assert_eq!(net.evaluate_full(&Board::new()).wdl, [4, 2, 0]);
+        assert!(
+            net.set_feature_transformer(&[0], &[])
+                .unwrap_err()
+                .contains("size mismatch")
+        );
+        assert!(
+            net.set_expert(
+                9,
+                AteedExpertUpdate {
+                    l1_weights: &[],
+                    l1_biases: &[],
+                    l2_weights: &[],
+                    l2_biases: &[],
+                    eval_weights: &[],
+                    eval_bias: 0,
+                    wdl_weights: &[],
+                    wdl_biases: &[],
+                },
+            )
+            .unwrap_err()
+            .contains("out of range")
         );
     }
 

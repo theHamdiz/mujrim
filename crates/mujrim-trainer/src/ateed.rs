@@ -3,16 +3,20 @@
 use std::io;
 use std::path::Path;
 
-/// Write a well-formed zero Ateed payload so the train/eval loop can be tested
-/// before a real checkpoint exists.
-pub fn emit_zero_network(path: &Path) -> io::Result<()> {
-    let bytes = eval::nnue::AteedNetwork::zero().to_bytes();
+/// Write a well-formed Ateed payload, creating parent directories as needed.
+pub fn emit_network(path: &Path, network: &eval::nnue::AteedNetwork) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, bytes)
+    std::fs::write(path, network.to_bytes())
+}
+
+/// Write a well-formed zero Ateed payload so the train/eval loop can be tested
+/// before a real checkpoint exists.
+pub fn emit_zero_network(path: &Path) -> io::Result<()> {
+    emit_network(path, &eval::nnue::AteedNetwork::zero())
 }
 
 #[cfg(test)]
