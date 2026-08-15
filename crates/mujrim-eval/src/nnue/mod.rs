@@ -10,6 +10,7 @@
 //! - `viridithas-nnue` feature: Load Viridithas `.nnue.zst` simple and velarised nets
 //! - `obsidian-nnue` feature: Load Obsidian layered `net89perm.bin` nets
 //! - `plentychess-nnue` feature: Load PlentyChess SLEB128 `0179r.bin` nets
+//! - `ateed-nnue` feature: Load Ateed MoE nets (`ATEED001`)
 //!
 //! Modules:
 //! - `network`: Network struct, forward pass, feature indexing
@@ -53,6 +54,9 @@ pub mod obsidian_format;
 
 #[cfg(feature = "plentychess-nnue")]
 pub mod plentychess_format;
+
+#[cfg(feature = "ateed-nnue")]
+pub mod ateed_format;
 
 pub use accumulator::NNUEState;
 pub use adapter::{

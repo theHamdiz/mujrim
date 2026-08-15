@@ -17,7 +17,7 @@ pub use adapters::RecklessAdapter;
 #[cfg(feature = "stockfish-nnue")]
 pub use adapters::StockfishAdapter;
 pub use adapters::{
-    AkimboAdapter, EvalSearchAdapter, Lc0Adapter, MujrimHceAdapter, ObsidianAdapter,
+    AkimboAdapter, AteedAdapter, EvalSearchAdapter, Lc0Adapter, MujrimHceAdapter, ObsidianAdapter,
     PlentyChessAdapter, ViridithasAdapter, adapter_for_id, install_adapter,
 };
 pub use conversion::{DEFAULT_CONTEMPT, WIN_CONVERSION_CP};

@@ -23,6 +23,8 @@ pub struct NNUEState {
     obsidian: Option<super::obsidian_format::ObsidianAccumulatorState>,
     #[cfg(feature = "plentychess-nnue")]
     plentychess: Option<super::plentychess_format::PlentyChessAccumulatorState>,
+    #[cfg(feature = "ateed-nnue")]
+    ateed: Option<super::ateed_format::AteedAccumulatorState>,
     #[cfg(feature = "viridithas-nnue")]
     viridithas: Option<super::viridithas_format::ViridithasAccumulatorState>,
 }
@@ -54,6 +56,9 @@ impl NNUEState {
         #[cfg(feature = "plentychess-nnue")]
         let plentychess = matches!(parameters, NnueNetworkParameters::PlentyChess(_))
             .then(super::plentychess_format::PlentyChessAccumulatorState::new);
+        #[cfg(feature = "ateed-nnue")]
+        let ateed = matches!(parameters, NnueNetworkParameters::Ateed(_))
+            .then(super::ateed_format::AteedAccumulatorState::new);
         #[cfg(feature = "viridithas-nnue")]
         let viridithas = match parameters {
             NnueNetworkParameters::Viridithas(net) => {
@@ -72,6 +77,8 @@ impl NNUEState {
             obsidian,
             #[cfg(feature = "plentychess-nnue")]
             plentychess,
+            #[cfg(feature = "ateed-nnue")]
+            ateed,
             #[cfg(feature = "viridithas-nnue")]
             viridithas,
         }
@@ -101,11 +108,20 @@ impl NNUEState {
         #[cfg(feature = "obsidian-nnue")]
         if let Some(state) = &mut self.obsidian {
             state.push_move(board, mv);
-            #[cfg(any(feature = "plentychess-nnue", feature = "viridithas-nnue"))]
+            #[cfg(any(
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue",
+                feature = "viridithas-nnue"
+            ))]
             return;
         }
         #[cfg(feature = "plentychess-nnue")]
         if let Some(state) = &mut self.plentychess {
+            state.push_move(board, mv);
+            return;
+        }
+        #[cfg(feature = "ateed-nnue")]
+        if let Some(state) = &mut self.ateed {
             state.push_move(board, mv);
             return;
         }
@@ -147,6 +163,12 @@ impl NNUEState {
             board.make_move(mv);
             return;
         }
+        #[cfg(feature = "ateed-nnue")]
+        if let Some(state) = &mut self.ateed {
+            state.push_move(board, mv);
+            board.make_move(mv);
+            return;
+        }
         #[cfg(feature = "viridithas-nnue")]
         if let Some(state) = &mut self.viridithas {
             state.push_move(board, mv);
@@ -174,11 +196,20 @@ impl NNUEState {
         #[cfg(feature = "obsidian-nnue")]
         if let Some(state) = &mut self.obsidian {
             state.push_null();
-            #[cfg(any(feature = "plentychess-nnue", feature = "viridithas-nnue"))]
+            #[cfg(any(
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue",
+                feature = "viridithas-nnue"
+            ))]
             return;
         }
         #[cfg(feature = "plentychess-nnue")]
         if let Some(state) = &mut self.plentychess {
+            state.push_null();
+            return;
+        }
+        #[cfg(feature = "ateed-nnue")]
+        if let Some(state) = &mut self.ateed {
             state.push_null();
             return;
         }
@@ -208,11 +239,20 @@ impl NNUEState {
         #[cfg(feature = "obsidian-nnue")]
         if let Some(state) = &mut self.obsidian {
             state.pop();
-            #[cfg(any(feature = "plentychess-nnue", feature = "viridithas-nnue"))]
+            #[cfg(any(
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue",
+                feature = "viridithas-nnue"
+            ))]
             return;
         }
         #[cfg(feature = "plentychess-nnue")]
         if let Some(state) = &mut self.plentychess {
+            state.pop();
+            return;
+        }
+        #[cfg(feature = "ateed-nnue")]
+        if let Some(state) = &mut self.ateed {
             state.pop();
             return;
         }
@@ -283,6 +323,14 @@ impl NNUEState {
                     .expect("PlentyChess source has matching accumulator state")
                     .evaluate(board, network);
             }
+            #[cfg(feature = "ateed-nnue")]
+            ActiveNetwork::ExternalAteed { network, .. } => {
+                return self
+                    .ateed
+                    .as_mut()
+                    .expect("Ateed source has matching accumulator state")
+                    .evaluate(board, network);
+            }
         }
 
         let net = match self.source.parameters() {
@@ -292,7 +340,8 @@ impl NNUEState {
                 feature = "reckless-nnue",
                 feature = "viridithas-nnue",
                 feature = "obsidian-nnue",
-                feature = "plentychess-nnue"
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue"
             ))]
             _ => unreachable!("non-Akimbo backends are handled above"),
         };
@@ -376,6 +425,16 @@ impl NNUEState {
                 let _ = state.evaluate(board, network);
                 return;
             }
+            #[cfg(feature = "ateed-nnue")]
+            ActiveNetwork::ExternalAteed { network, .. } => {
+                let state = self
+                    .ateed
+                    .as_mut()
+                    .expect("Ateed source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, network);
+                return;
+            }
         }
 
         let net = match self.source.parameters() {
@@ -385,7 +444,8 @@ impl NNUEState {
                 feature = "reckless-nnue",
                 feature = "viridithas-nnue",
                 feature = "obsidian-nnue",
-                feature = "plentychess-nnue"
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue"
             ))]
             _ => unreachable!("non-Akimbo backends are handled above"),
         };

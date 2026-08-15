@@ -339,11 +339,13 @@ impl UciHandler {
                 handler.use_nnue = false;
             }
             "stockfish" | "reckless" | "akimbo" | "viridithas" | "obsidian" | "plentychess"
-            | "lc0" => {
+            | "ateed" | "lc0" => {
                 handler.eval_preset = adapter_id.to_string();
                 handler.use_nnue = true;
-                if matches!(adapter_id, "viridithas" | "obsidian" | "plentychess")
-                    && let Ok(network) = load_network_for_preset(adapter_id)
+                if matches!(
+                    adapter_id,
+                    "viridithas" | "obsidian" | "plentychess" | "ateed"
+                ) && let Ok(network) = load_network_for_preset(adapter_id)
                     && network.search_profile().as_str() == adapter_id
                 {
                     handler.eval_network = Arc::new(network);
@@ -831,7 +833,7 @@ impl UciHandler {
             self.advertised_eval_file()
         ));
         uci_println(
-            "option name EvalPreset type combo default auto var auto var akimbo var stockfish var reckless var viridithas var obsidian var plentychess var lc0 var mujrim-hce",
+            "option name EvalPreset type combo default auto var auto var akimbo var stockfish var reckless var viridithas var obsidian var plentychess var ateed var lc0 var mujrim-hce",
         );
         uci_println(&format!(
             "option name SearchExperiment type combo default none{}",
@@ -980,6 +982,7 @@ impl UciHandler {
                         | "viridithas"
                         | "obsidian"
                         | "plentychess"
+                        | "ateed"
                         | "lc0"
                         | "mujrim-hce"
                         | "hce"
@@ -995,7 +998,10 @@ impl UciHandler {
                         eprintln!("info string EvalPreset error: {error}");
                         return;
                     }
-                    if matches!(preset.as_str(), "viridithas" | "obsidian" | "plentychess") {
+                    if matches!(
+                        preset.as_str(),
+                        "viridithas" | "obsidian" | "plentychess" | "ateed"
+                    ) {
                         match load_network_for_preset(&preset) {
                             Ok(network) if network.search_profile().as_str() == preset => {
                                 self.eval_network = Arc::new(network);
@@ -1512,6 +1518,7 @@ impl UciHandler {
             "viridithas" => "viridithas",
             "obsidian" => "obsidian",
             "plentychess" => "plentychess",
+            "ateed" => "ateed",
             "lc0" => "lc0",
             "mujrim-hce" | "hce" => "mujrim-hce",
             _ => self.eval_network.search_profile().as_str(),
@@ -1542,7 +1549,7 @@ impl UciHandler {
         let apply = |engine: &mut SearchEngine| {
             if use_hce {
                 let _ = install_adapter(engine, "mujrim-hce");
-            } else if matches!(preset, "viridithas" | "obsidian" | "plentychess") {
+            } else if matches!(preset, "viridithas" | "obsidian" | "plentychess" | "ateed") {
                 if network.search_profile().as_str() == preset {
                     engine.set_nnue_network_source(network);
                     engine.set_use_nnue(true);
@@ -2081,6 +2088,14 @@ mod tests {
                 "plentychess"
             );
         }
+        let ateed = UciHandler::with_adapter("ateed");
+        assert_eq!(
+            ateed.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Ateed)
+        );
+        if ateed.engine.as_ref().unwrap().use_nnue() {
+            assert_eq!(ateed.engine.as_ref().unwrap().nnue_preset_hint(), "ateed");
+        }
         let lc0 = UciHandler::with_adapter("lc0");
         assert_eq!(
             lc0.engine.as_ref().unwrap().eval_mode(),
@@ -2411,6 +2426,11 @@ mod tests {
         assert_eq!(
             handler.engine.as_ref().unwrap().eval_mode(),
             EvalMode::Nnue(eval::nnue::NnueSearchProfile::PlentyChess)
+        );
+        handler.handle_setoption(&["name", "EvalPreset", "value", "ateed"]);
+        assert_eq!(
+            handler.engine.as_ref().unwrap().eval_mode(),
+            EvalMode::Nnue(eval::nnue::NnueSearchProfile::Ateed)
         );
         handler.handle_setoption(&["name", "EvalPreset", "value", "lc0"]);
         assert_eq!(

@@ -40,6 +40,7 @@ impl NnueInfo {
             eval::nnue::NetworkFormat::Viridithas => eval::nnue::NnueSearchProfile::Viridithas,
             eval::nnue::NetworkFormat::Obsidian => eval::nnue::NnueSearchProfile::Obsidian,
             eval::nnue::NetworkFormat::PlentyChess => eval::nnue::NnueSearchProfile::PlentyChess,
+            eval::nnue::NetworkFormat::Ateed => eval::nnue::NnueSearchProfile::Ateed,
             eval::nnue::NetworkFormat::Embedded | eval::nnue::NetworkFormat::Akimbo => {
                 eval::nnue::NnueSearchProfile::Akimbo
             }
@@ -365,6 +366,24 @@ mod tests {
             display.search_profile,
             eval::nnue::NnueSearchProfile::PlentyChess
         );
+    }
+
+    #[test]
+    fn from_runtime_maps_ateed_search_profile() {
+        let info = NnueNetworkInfo {
+            name: "ateed_default".into(),
+            format: NetworkFormat::Ateed,
+            architecture: "768×8hm i16 + 4560 pawn-pair i8 → 1024 CReLU → 4-expert MoE".into(),
+            hidden_size: 1024,
+            num_buckets: 8,
+            qa: 255,
+            qb: 128,
+            scale: 400,
+            file_size: 17_327_452,
+        };
+        let display = NnueInfo::from_runtime(info);
+        assert_eq!(display.format, "Ateed");
+        assert_eq!(display.search_profile, eval::nnue::NnueSearchProfile::Ateed);
     }
 
     #[test]

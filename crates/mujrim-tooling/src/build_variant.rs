@@ -21,6 +21,7 @@ pub enum BuildVariant {
     Obsidian,
     #[value(alias = "plentychess", alias = "plenty")]
     PlentyChess,
+    Ateed,
     #[value(alias = "leela")]
     Lc0,
     Benchmark,
@@ -39,7 +40,7 @@ impl ToolAction for BuildVariantAction {
         match self.variant {
             BuildVariant::List => {
                 println!(
-                    "build variants: full, akimbo, stockfish, reckless, v60, v60-embedded, viridithas, obsidian, plentychess, lc0, benchmark, embedded, minimal"
+                    "build variants: full, akimbo, stockfish, reckless, v60, v60-embedded, viridithas, obsidian, plentychess, ateed, lc0, benchmark, embedded, minimal"
                 );
                 Ok(())
             }
@@ -125,6 +126,15 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "--features",
             "xboard,book,nnue,simd,plentychess-nnue",
         ],
+        BuildVariant::Ateed => vec![
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,ateed-nnue",
+        ],
         BuildVariant::Lc0 => vec![
             "build",
             "--release",
@@ -173,6 +183,7 @@ fn variant_dist_mapping(variant: &BuildVariant) -> Option<(&'static str, &'stati
         BuildVariant::Viridithas => Some(("mujrim", "mujrim-viri")),
         BuildVariant::Obsidian => Some(("mujrim", "mujrim-obs")),
         BuildVariant::PlentyChess => Some(("mujrim", "mujrim-plenty")),
+        BuildVariant::Ateed => Some(("mujrim", "mujrim-ateed")),
         BuildVariant::Lc0 => Some(("mujrim", "mujrim-lc0")),
         _ => None,
     }
@@ -257,6 +268,7 @@ mod tests {
             BuildVariant::Viridithas,
             BuildVariant::Obsidian,
             BuildVariant::PlentyChess,
+            BuildVariant::Ateed,
             BuildVariant::Lc0,
         ] {
             assert!(
@@ -354,6 +366,14 @@ mod tests {
         assert!(!plenty.contains("reckless-nnue"));
         assert!(!plenty.contains("obsidian-nnue"));
 
+        let ateed = variant_args(&BuildVariant::Ateed)
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
+            .unwrap();
+        assert_eq!(ateed, "xboard,book,nnue,simd,ateed-nnue");
+        assert!(!ateed.contains("reckless-nnue"));
+        assert!(!ateed.contains("plentychess-nnue"));
+
         let lc0 = variant_args(&BuildVariant::Lc0)
             .windows(2)
             .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
@@ -390,6 +410,10 @@ mod tests {
         assert_eq!(
             variant_dist_mapping(&BuildVariant::PlentyChess),
             Some(("mujrim", "mujrim-plenty"))
+        );
+        assert_eq!(
+            variant_dist_mapping(&BuildVariant::Ateed),
+            Some(("mujrim", "mujrim-ateed"))
         );
         assert_eq!(
             variant_dist_mapping(&BuildVariant::Lc0),

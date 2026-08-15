@@ -7,7 +7,7 @@ description = "UCI and XBoard protocol handlers for the Mujrim engine"
 license = "MIT"
 
 [features]
-default = ["xboard", "book", "nnue", "reckless-nnue", "stockfish-nnue", "viridithas-nnue", "obsidian-nnue", "plentychess-nnue", "syzygy"]
+default = ["xboard", "book", "nnue", "reckless-nnue", "stockfish-nnue", "viridithas-nnue", "obsidian-nnue", "plentychess-nnue", "ateed-nnue", "syzygy"]
 xboard = []
 book = ["search/book"]
 nnue = ["search/nnue"]
@@ -16,6 +16,7 @@ stockfish-nnue = ["eval/stockfish-nnue", "search/stockfish-nnue"]
 viridithas-nnue = ["eval/viridithas-nnue", "search/viridithas-nnue"]
 obsidian-nnue = ["eval/obsidian-nnue", "search/obsidian-nnue"]
 plentychess-nnue = ["eval/plentychess-nnue", "search/plentychess-nnue"]
+ateed-nnue = ["eval/ateed-nnue", "search/ateed-nnue"]
 syzygy = ["search/syzygy"]
 
 [dependencies]

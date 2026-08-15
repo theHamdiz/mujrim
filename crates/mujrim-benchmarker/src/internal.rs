@@ -72,7 +72,14 @@ fn configure_engine_eval(
         }
     } else if matches!(
         eval_preset,
-        "stockfish" | "reckless" | "akimbo" | "viridithas" | "obsidian" | "plentychess" | "lc0"
+        "stockfish"
+            | "reckless"
+            | "akimbo"
+            | "viridithas"
+            | "obsidian"
+            | "plentychess"
+            | "ateed"
+            | "lc0"
     ) {
         let _ = search::install_adapter(engine, eval_preset);
         return;

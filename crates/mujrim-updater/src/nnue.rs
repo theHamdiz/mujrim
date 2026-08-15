@@ -111,6 +111,7 @@ pub struct NnueNetwork {
 /// viri_default     Viridithas  viri_default.nnue.zst sandhi-s2-b200.nnue.zst
 /// viri_velarised   Viridithas  viri_velarised.nnue.zst velarised-2-b800.nnue.zst
 /// plenty_default   PlentyChess plenty_default.bin    0179r.bin
+/// ateed_default    Ateed       ateed_default.bin     ateed_default.bin
 /// lc0_bt4          Lc0         lc0_bt4.pb.gz         BT4-1024x15x32h-swa-6147500-policytune-332.pb.gz
 /// lc0_default      Lc0         lc0_default.pb.gz     t1-256x10-distilled-swa-2432500.pb.gz
 /// alex_default     Alexandria  alex_default.net      nn.net
@@ -204,6 +205,18 @@ pub const NETWORKS: &[NnueNetwork] = &[
         approx_size: 76_368_704,
         search_preset: "plentychess",
         elo: 3600,
+    },
+    NnueNetwork {
+        id: "ateed_default",
+        name: "Ateed MoE v1",
+        engine: "Ateed",
+        architecture: "768×8hm i16 + 4560 pawn-pair i8 → 1024 CReLU → 4-expert MoE (16→32→eval+WDL)",
+        url: "https://github.com/theHamdiz/mujrim/releases/download/ateed-v1/ateed_default.bin",
+        filename: "ateed_default.bin",
+        upstream_name: "ateed_default.bin",
+        approx_size: 17_327_452,
+        search_preset: "ateed",
+        elo: 0,
     },
     NnueNetwork {
         id: "lc0_bt4",
@@ -713,6 +726,7 @@ mod tests {
         assert!(find_by_id("viri_default").is_some());
         assert!(find_by_id("obs_default").is_some());
         assert!(find_by_id("plenty_default").is_some());
+        assert!(find_by_id("ateed_default").is_some());
         assert!(find_by_id("lc0_bt4").is_some());
         assert!(find_by_id("lc0_default").is_some());
         assert!(find_by_id("lc0_t1_512").is_some());
@@ -736,6 +750,10 @@ mod tests {
         let plenty = find_by_id("plenty_default").expect("plenty_default");
         assert_eq!(plenty.search_preset, "plentychess");
         assert_eq!(plenty.upstream_name, "0179r.bin");
+        let ateed = find_by_id("ateed_default").expect("ateed_default");
+        assert_eq!(ateed.search_preset, "ateed");
+        assert_eq!(ateed.filename, "ateed_default.bin");
+        assert_eq!(ateed.approx_size, 17_327_452);
         let lc0 = find_by_id("lc0_bt4").expect("lc0_bt4");
         assert_eq!(lc0.search_preset, "lc0");
         assert_eq!(lc0.filename, "lc0_bt4.pb.gz");

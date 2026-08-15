@@ -42,6 +42,7 @@ const MUJRIM_ADAPTERS: &[&str] = &[
     "mujrim-viri",
     "mujrim-obs",
     "mujrim-plenty",
+    "mujrim-ateed",
     "mujrim-lc0",
 ];
 const V60_PASSTHROUGH_MARKER: &str = "MUJRIM_V60_PASSTHROUGH_ACTIVE";
@@ -93,6 +94,7 @@ fn resolve_backend_engine_id(backend: &str) -> Option<&'static str> {
         "viridithas" | "viri" | "mujrim-viri" => Some("viridithas"),
         "obsidian" | "obs" | "mujrim-obs" => Some("obsidian"),
         "plentychess" | "plenty" | "mujrim-plenty" => Some("plentychess"),
+        "ateed" | "mujrim-ateed" => Some("ateed"),
         "lc0" | "mujrim-lc0" => Some("lc0"),
         "external" => Some("mujrim-external"),
         other => EXTERNAL_BACKENDS
@@ -125,6 +127,8 @@ fn passthrough_engine_id(
             | "plentychess"
             | "plenty"
             | "mujrim-plenty"
+            | "ateed"
+            | "mujrim-ateed"
     ) && !explicit_path
     {
         return None;
@@ -137,6 +141,7 @@ fn product_adapter_from_exe_stem(stem: &str) -> Option<&'static str> {
         "mujrim-viri" | "mujrim-viridithas" => Some("viridithas"),
         "mujrim-obs" | "mujrim-obsidian" => Some("obsidian"),
         "mujrim-plenty" | "mujrim-plentychess" => Some("plentychess"),
+        "mujrim-ateed" => Some("ateed"),
         "mujrim-lc0" | "mujrim-leela" => Some("lc0"),
         "mujrim-elite" | "mujrim-embedded" => Some("stockfish"),
         "mujrim-ak" | "mujrim-akimbo" => Some("akimbo"),
@@ -258,6 +263,7 @@ fn main() {
                     "plentychess",
                     "obsidian",
                     "viridithas",
+                    "ateed",
                     "reckless",
                     "akimbo",
                     "ethereal",
@@ -473,6 +479,7 @@ mod tests {
                         | "mujrim-viri"
                         | "mujrim-obs"
                         | "mujrim-plenty"
+                        | "mujrim-ateed"
                         | "mujrim-lc0"
                         | "akimbo"
                 ) || EXTERNAL_BACKENDS.contains(&engine.0)
@@ -521,6 +528,11 @@ mod tests {
             passthrough_engine_id("plentychess", true, false, true),
             Some("plentychess")
         );
+        assert_eq!(passthrough_engine_id("ateed", true, false, false), None);
+        assert_eq!(
+            passthrough_engine_id("ateed", true, false, true),
+            Some("ateed")
+        );
         assert_eq!(
             passthrough_engine_id("lc0", true, false, false),
             Some("lc0")
@@ -545,6 +557,7 @@ mod tests {
             product_adapter_from_exe_stem("mujrim-plenty"),
             Some("plentychess")
         );
+        assert_eq!(product_adapter_from_exe_stem("mujrim-ateed"), Some("ateed"));
         assert_eq!(product_adapter_from_exe_stem("mujrim-lc0"), Some("lc0"));
         assert!(MUJRIM_ADAPTERS.iter().all(|id| is_mujrim_adapter(id)));
     }

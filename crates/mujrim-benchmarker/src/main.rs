@@ -121,11 +121,11 @@ enum Commands {
         #[arg(long)]
         tui: bool,
 
-        /// Runtime eval adapter (`auto`, `akimbo`, `stockfish`, `reckless`, `viridithas`, `obsidian`, `plentychess`, `lc0`, `mujrim-hce`).
+        /// Runtime eval adapter (`auto`, `akimbo`, `stockfish`, `reckless`, `viridithas`, `obsidian`, `plentychess`, `ateed`, `lc0`, `mujrim-hce`).
         #[arg(
             long,
             default_value = "auto",
-            value_parser = ["auto", "akimbo", "stockfish", "reckless", "viridithas", "obsidian", "plentychess", "lc0", "mujrim-hce"]
+            value_parser = ["auto", "akimbo", "stockfish", "reckless", "viridithas", "obsidian", "plentychess", "ateed", "lc0", "mujrim-hce"]
         )]
         eval_preset: String,
 
@@ -215,11 +215,11 @@ enum Commands {
         #[arg(short, long)]
         positions: Option<PathBuf>,
 
-        /// Runtime eval adapter (`auto`, `akimbo`, `stockfish`, `reckless`, `viridithas`, `obsidian`, `plentychess`, `lc0`, `mujrim-hce`).
+        /// Runtime eval adapter (`auto`, `akimbo`, `stockfish`, `reckless`, `viridithas`, `obsidian`, `plentychess`, `ateed`, `lc0`, `mujrim-hce`).
         #[arg(
             long,
             default_value = "auto",
-            value_parser = ["auto", "akimbo", "stockfish", "reckless", "viridithas", "obsidian", "plentychess", "lc0", "mujrim-hce"]
+            value_parser = ["auto", "akimbo", "stockfish", "reckless", "viridithas", "obsidian", "plentychess", "ateed", "lc0", "mujrim-hce"]
         )]
         eval_preset: String,
 

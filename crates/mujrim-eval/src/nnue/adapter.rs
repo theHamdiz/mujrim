@@ -44,6 +44,7 @@ pub enum NetworkFormat {
     Viridithas,
     Obsidian,
     PlentyChess,
+    Ateed,
 }
 
 /// Search-stack family required by an evaluator architecture.
@@ -55,6 +56,7 @@ pub enum NnueSearchProfile {
     Viridithas,
     Obsidian,
     PlentyChess,
+    Ateed,
     Lc0,
 }
 
@@ -68,6 +70,7 @@ impl NnueSearchProfile {
             Self::Viridithas => "viridithas",
             Self::Obsidian => "obsidian",
             Self::PlentyChess => "plentychess",
+            Self::Ateed => "ateed",
             Self::Lc0 => "lc0",
         }
     }
@@ -83,6 +86,7 @@ impl Display for NetworkFormat {
             Self::Viridithas => f.write_str("Viridithas"),
             Self::Obsidian => f.write_str("Obsidian"),
             Self::PlentyChess => f.write_str("PlentyChess"),
+            Self::Ateed => f.write_str("Ateed"),
         }
     }
 }
@@ -112,6 +116,8 @@ pub enum NnueNetworkParameters<'a> {
     Obsidian(&'a super::obsidian_format::ObsidianNetwork),
     #[cfg(feature = "plentychess-nnue")]
     PlentyChess(&'a super::plentychess_format::PlentyChessNetwork),
+    #[cfg(feature = "ateed-nnue")]
+    Ateed(&'a super::ateed_format::AteedNetwork),
 }
 
 pub trait NnueNetworkSource {
@@ -160,6 +166,11 @@ pub enum ActiveNetwork {
         network: Box<super::plentychess_format::PlentyChessNetwork>,
         info: NnueNetworkInfo,
     },
+    #[cfg(feature = "ateed-nnue")]
+    ExternalAteed {
+        network: Box<super::ateed_format::AteedNetwork>,
+        info: NnueNetworkInfo,
+    },
 }
 
 /// Default network selected by the engine.
@@ -192,7 +203,7 @@ pub fn embedded_network_for_preset(preset: &str) -> Option<ActiveNetwork> {
         "stockfish" => Some(ActiveNetwork::EmbeddedStockfish),
         #[cfg(feature = "reckless-nnue")]
         "reckless" => Some(ActiveNetwork::EmbeddedReckless),
-        "viridithas" | "obsidian" | "plentychess" | "lc0" => None,
+        "viridithas" | "obsidian" | "plentychess" | "ateed" | "lc0" => None,
         _ => None,
     }
 }
@@ -223,6 +234,8 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalPlentyChess { network, .. } => {
                 NnueNetworkParameters::PlentyChess(network)
             }
+            #[cfg(feature = "ateed-nnue")]
+            Self::ExternalAteed { network, .. } => NnueNetworkParameters::Ateed(network),
         }
     }
 
@@ -244,6 +257,8 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalObsidian { info, .. } => info.clone(),
             #[cfg(feature = "plentychess-nnue")]
             Self::ExternalPlentyChess { info, .. } => info.clone(),
+            #[cfg(feature = "ateed-nnue")]
+            Self::ExternalAteed { info, .. } => info.clone(),
         }
     }
 
@@ -264,6 +279,8 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::ExternalObsidian { .. } => NnueSearchProfile::Obsidian,
             #[cfg(feature = "plentychess-nnue")]
             Self::ExternalPlentyChess { .. } => NnueSearchProfile::PlentyChess,
+            #[cfg(feature = "ateed-nnue")]
+            Self::ExternalAteed { .. } => NnueSearchProfile::Ateed,
         }
     }
 }
@@ -332,6 +349,8 @@ pub fn enabled_network_formats() -> Vec<NetworkFormat> {
         NetworkFormat::Obsidian,
         #[cfg(feature = "plentychess-nnue")]
         NetworkFormat::PlentyChess,
+        #[cfg(feature = "ateed-nnue")]
+        NetworkFormat::Ateed,
     ]
 }
 
@@ -352,6 +371,11 @@ pub fn load_network(path: &Path) -> Result<ActiveNetwork, String> {
 
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to read NNUE file '{}': {error}", path.display()))?;
+
+    #[cfg(feature = "ateed-nnue")]
+    if super::ateed_format::looks_like_ateed(path, &bytes) {
+        return load_ateed_network(path, &bytes);
+    }
 
     #[cfg(feature = "viridithas-nnue")]
     if super::viridithas_format::looks_like_viridithas(path, &bytes) {
@@ -550,6 +574,31 @@ fn load_obsidian_network(path: &Path, bytes: &[u8]) -> Result<ActiveNetwork, Str
     })
 }
 
+#[cfg(feature = "ateed-nnue")]
+fn load_ateed_network(path: &Path, bytes: &[u8]) -> Result<ActiveNetwork, String> {
+    let network = super::ateed_format::AteedNetwork::from_bytes(bytes)?;
+    let name = path.file_stem().map_or_else(
+        || "External Ateed network".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    Ok(ActiveNetwork::ExternalAteed {
+        network: Box::new(network),
+        info: NnueNetworkInfo {
+            name,
+            format: NetworkFormat::Ateed,
+            architecture:
+                "768×8hm i16 + 4560 pawn-pair i8 → 1024 CReLU → 4-expert MoE (16→32→eval+WDL)"
+                    .to_string(),
+            hidden_size: super::ateed_format::L1,
+            num_buckets: super::ateed_format::KING_BUCKETS,
+            qa: super::ateed_format::QA,
+            qb: super::ateed_format::QB,
+            scale: super::ateed_format::SCALE,
+            file_size: bytes.len() as u64,
+        },
+    })
+}
+
 #[cfg(not(feature = "akimbo-nnue"))]
 fn load_native_network(path: &Path) -> Result<ActiveNetwork, String> {
     Err(format!(
@@ -715,6 +764,7 @@ pub fn load_network_for_preset(preset: &str) -> Result<ActiveNetwork, String> {
         ],
         "obsidian" => &["obs_default.bin", "net89perm.bin"],
         "plentychess" | "plenty" => &["plenty_default.bin", "0179r.bin"],
+        "ateed" => &["ateed_default.bin"],
         "lc0" => {
             return Err(
                 "Lc0 transformer nets (.pb.gz) are not an in-process NNUE; use the official lc0 binary"
@@ -921,6 +971,10 @@ mod tests {
             }
             #[cfg(feature = "plentychess-nnue")]
             NnueNetworkParameters::PlentyChess(_) => {
+                panic!("embedded network must use the Akimbo evaluator")
+            }
+            #[cfg(feature = "ateed-nnue")]
+            NnueNetworkParameters::Ateed(_) => {
                 panic!("embedded network must use the Akimbo evaluator")
             }
         };
@@ -1160,6 +1214,34 @@ mod tests {
             "obsidian preset must not load a Stockfish net, got {}",
             net.info().architecture
         );
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    #[test]
+    fn load_network_identifies_ateed_by_magic() {
+        let path = std::env::temp_dir().join("mujrim-ateed-magic.bin");
+        let bytes = super::super::ateed_format::AteedNetwork::zero().to_bytes();
+        std::fs::write(&path, &bytes).unwrap();
+        let net = load_network(&path).expect("ATEED001 must decode as Ateed");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(net.search_profile(), NnueSearchProfile::Ateed);
+        assert_eq!(net.info().format, NetworkFormat::Ateed);
+        assert_eq!(net.info().hidden_size, super::super::ateed_format::L1);
+        assert_eq!(
+            net.info().file_size,
+            super::super::ateed_format::FILE_SIZE as u64
+        );
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    #[test]
+    fn preset_loader_finds_downloaded_ateed_net() {
+        let Some(path) = discover_named_network("ateed_default.bin") else {
+            return;
+        };
+        let net = load_network(&path).expect("ateed_default must decode as Ateed");
+        assert_eq!(net.search_profile(), NnueSearchProfile::Ateed);
+        assert_eq!(net.info().format, NetworkFormat::Ateed);
     }
 
     #[cfg(feature = "plentychess-nnue")]

@@ -371,6 +371,12 @@ impl SearchParams {
         params
     }
 
+    /// Parameters paired with the Ateed MoE network. Starts from Reckless
+    /// until Ateed-specific SPRT tuning exists.
+    pub fn ateed() -> Self {
+        Self::reckless()
+    }
+
     /// Parameters for the in-process Lc0 fallback (official Lc0 is passthrough).
     ///
     /// Snapshotted from the Reckless-shaped set used when Lc0 last scored 20/24
@@ -419,6 +425,7 @@ impl SearchParams {
             "viridithas" => Self::viridithas(),
             "obsidian" => Self::obsidian(),
             "plentychess" | "plenty" => Self::plentychess(),
+            "ateed" => Self::ateed(),
             "lc0" => Self::lc0(),
             "mujrim-hce" | "hce" => Self::mujrim_hce(),
             _ => Self::akimbo(),
@@ -440,6 +447,7 @@ impl SearchParams {
                 | "obsidian"
                 | "plentychess"
                 | "plenty"
+                | "ateed"
                 | "lc0"
                 | "mujrim-hce"
                 | "hce"
@@ -720,6 +728,7 @@ mod tests {
         let viri = SearchParams::for_preset("viridithas");
         let obs = SearchParams::for_preset("obsidian");
         let plenty = SearchParams::for_preset("plentychess");
+        let ateed = SearchParams::for_preset("ateed");
         let lc0 = SearchParams::for_preset("lc0");
         let hce = SearchParams::for_preset("mujrim-hce");
         assert_eq!(viri.lmr_cut_node_bonus, 1);
@@ -733,6 +742,8 @@ mod tests {
         assert_eq!(akimbo.lmp_depth_limit, 3);
         assert_eq!(akimbo.lmr_base, 0.30);
         assert_eq!(plenty.lmr_base, 0.62);
+        assert_eq!(ateed.lmr_base, reckless.lmr_base);
+        assert_eq!(ateed.aspiration_window, reckless.aspiration_window);
         assert_eq!(lc0.lmr_base, reckless.lmr_base);
         assert_eq!(lc0.lmr_cut_node_bonus, 0);
         assert_eq!(lc0.nmp_depth_min, 4);

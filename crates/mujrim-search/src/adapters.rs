@@ -7,8 +7,8 @@ use eval::nnue::{ActiveNetwork, NnueNetworkSource, NnueSearchProfile};
 
 use crate::engine::SearchEngine;
 use crate::search_stack::{
-    Lc0SearchProfile, MujrimHceSearchProfile, ObsidianSearchProfile, PlentyChessSearchProfile,
-    SearchStack, SearchStackProfile, ViridithasSearchProfile,
+    AteedSearchProfile, Lc0SearchProfile, MujrimHceSearchProfile, ObsidianSearchProfile,
+    PlentyChessSearchProfile, SearchStack, SearchStackProfile, ViridithasSearchProfile,
 };
 
 /// Binds one evaluator to its compatible search composition.
@@ -26,6 +26,7 @@ pub struct AkimboAdapter;
 pub struct ViridithasAdapter;
 pub struct ObsidianAdapter;
 pub struct PlentyChessAdapter;
+pub struct AteedAdapter;
 pub struct Lc0Adapter;
 pub struct MujrimHceAdapter;
 
@@ -147,6 +148,21 @@ impl EvalSearchAdapter for PlentyChessAdapter {
     }
 }
 
+impl EvalSearchAdapter for AteedAdapter {
+    fn id(&self) -> &'static str {
+        "ateed"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Ateed"
+    }
+
+    fn install(&self, engine: &mut SearchEngine) {
+        engine.set_search_stack(AteedSearchProfile.compose());
+        bind_matching_disk_network(engine, "ateed", NnueSearchProfile::Ateed);
+    }
+}
+
 impl EvalSearchAdapter for Lc0Adapter {
     fn id(&self) -> &'static str {
         "lc0"
@@ -192,6 +208,7 @@ pub fn adapter_for_id(id: &str) -> Option<&'static dyn EvalSearchAdapter> {
         "viridithas" => Some(&ViridithasAdapter),
         "obsidian" => Some(&ObsidianAdapter),
         "plentychess" | "plenty" => Some(&PlentyChessAdapter),
+        "ateed" => Some(&AteedAdapter),
         "lc0" => Some(&Lc0Adapter),
         "mujrim-hce" | "hce" => Some(&MujrimHceAdapter),
         _ => None,
@@ -359,6 +376,14 @@ mod tests {
         plenty.set_contempt(48);
         assert_eq!(plenty.contempt(), 0);
 
+        let ateed_net = cfg!(feature = "ateed-nnue")
+            && eval::nnue::discover_named_network("ateed_default.bin").is_some();
+        assert_adapter_owns_its_network("ateed", NnueSearchProfile::Ateed, ateed_net);
+        let mut ateed = SearchEngine::new(1, 1);
+        assert!(install_adapter(&mut ateed, "ateed"));
+        ateed.set_contempt(48);
+        assert_eq!(ateed.contempt(), 0);
+
         let mut lc0 = SearchEngine::new(1, 1);
         assert!(install_adapter(&mut lc0, "lc0"));
         assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
@@ -392,6 +417,7 @@ mod tests {
             ("viridithas", "viridithas"),
             ("obsidian", "obsidian"),
             ("plentychess", "plentychess"),
+            ("ateed", "ateed"),
             ("lc0", "lc0"),
             ("mujrim-hce", "mujrim-hce"),
         ];
@@ -430,6 +456,7 @@ mod tests {
         assert_eq!(ViridithasAdapter.id(), "viridithas");
         assert_eq!(ObsidianAdapter.id(), "obsidian");
         assert_eq!(PlentyChessAdapter.id(), "plentychess");
+        assert_eq!(AteedAdapter.id(), "ateed");
         assert_eq!(Lc0Adapter.id(), "lc0");
         assert_eq!(MujrimHceAdapter.id(), "mujrim-hce");
         assert_eq!(MujrimHceAdapter.display_name(), "Mujrim HCE");

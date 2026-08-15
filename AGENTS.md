@@ -1,6 +1,6 @@
 # Mujrim Agent Guide
 
-Updated: 2026-08-13
+Updated: 2026-08-15
 
 ## Repository Rules
 - Always check latest dependency versions from the internet and read their docs before implementing updates.
@@ -11,8 +11,9 @@ Updated: 2026-08-13
 - Prefer modular, trait-based designs with no unnecessary runtime overhead.
 
 ## Current State
-- Multi-adapter in-process engine: Stockfish / Reckless / Akimbo / Mujrim HCE each bind eval + matching search via `EvalSearchAdapter`.
-- Product surfaces: `--backend universal` (selectable), `--backend mujrim-hce` (classical HCE), `--backend v60`/`v10`/`akimbo` (packaged adapters), external upstream passthrough.
+- Multi-adapter in-process engine: Stockfish / Reckless / Akimbo / Viridithas / Obsidian / PlentyChess / Ateed / Mujrim HCE each bind eval + matching search via `EvalSearchAdapter`.
+- Ateed is the Phase 2 MoE NNUE (`ATEED001`, disk `ateed_default.bin`, adapter id `ateed`, product binary `mujrim-ateed`). Default eval remains Reckless/`auto`.
+- Product surfaces: `--backend universal` (selectable), `--backend mujrim-hce` (classical HCE), `--backend v60`/`v10`/`akimbo` (packaged adapters), `--backend ateed` (in-process MoE), external upstream passthrough.
 - Do not use “native” as an engine/backend product name (`RuntimeCompatibility::Native` is host-ISA packaging only).
 - A structured AI-agent tool surface is implemented in `mujrim-tooling`.
 - Entry point: `mujrim-tooling agent`.

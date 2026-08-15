@@ -227,6 +227,7 @@ impl SearchStack {
             NnueSearchProfile::Viridithas => ViridithasSearchProfile.compose(),
             NnueSearchProfile::Obsidian => ObsidianSearchProfile.compose(),
             NnueSearchProfile::PlentyChess => PlentyChessSearchProfile.compose(),
+            NnueSearchProfile::Ateed => AteedSearchProfile.compose(),
             NnueSearchProfile::Lc0 => Lc0SearchProfile.compose(),
         }
     }
@@ -241,6 +242,7 @@ impl SearchStack {
             "viridithas" => ViridithasSearchProfile.compose(),
             "obsidian" => ObsidianSearchProfile.compose(),
             "plentychess" | "plenty" => PlentyChessSearchProfile.compose(),
+            "ateed" => AteedSearchProfile.compose(),
             "lc0" => Lc0SearchProfile.compose(),
             "mujrim-hce" | "hce" => MujrimHceSearchProfile.compose(),
             "reckless-full-lmr" => {
@@ -379,6 +381,22 @@ impl SearchStackProfile for PlentyChessSearchProfile {
     }
 }
 
+pub struct AteedSearchProfile;
+
+impl SearchStackProfile for AteedSearchProfile {
+    fn eval_mode(&self) -> EvalMode {
+        EvalMode::Nnue(NnueSearchProfile::Ateed)
+    }
+
+    fn parameters(&self) -> SearchParams {
+        SearchParams::for_preset_with_repo_tuning("ateed")
+    }
+
+    fn policies(&self) -> SearchPolicies {
+        SearchPolicies::reckless()
+    }
+}
+
 pub struct Lc0SearchProfile;
 
 impl SearchStackProfile for Lc0SearchProfile {
@@ -459,6 +477,7 @@ mod tests {
             NnueSearchProfile::Viridithas,
             NnueSearchProfile::Obsidian,
             NnueSearchProfile::PlentyChess,
+            NnueSearchProfile::Ateed,
             NnueSearchProfile::Lc0,
         ] {
             let mode = EvalMode::Nnue(profile);
@@ -492,6 +511,13 @@ mod tests {
             plenty.eval_mode(),
             EvalMode::Nnue(NnueSearchProfile::PlentyChess)
         );
+        let ateed = SearchStack::for_preset_name("ateed");
+        assert_eq!(ateed.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Ateed));
+        assert_eq!(
+            ateed.params.aspiration_window,
+            SearchParams::reckless().aspiration_window
+        );
+        assert_eq!(ateed.policies.move_ordering, MoveOrderingProfile::Reckless);
         let lc0 = SearchStack::for_network(NnueSearchProfile::Lc0);
         assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
         assert!(lc0.eval_mode().is_lc0_nnue());

@@ -16,6 +16,7 @@ const BINS: &[&str] = &[
 /// Dedicated product engines copied into `dist/<os-arch>/engines/mujrim/bin/<os-arch>/`.
 const PRODUCT_ENGINE_STEMS: &[&str] = &[
     "mujrim-ak",
+    "mujrim-ateed",
     "mujrim-elite",
     "mujrim-external",
     "mujrim-lc0",
@@ -296,6 +297,20 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     snapshot_engine("mujrim", "mujrim-plenty")?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,ateed-nnue",
+        ],
+        &environment,
+    )?;
+    snapshot_engine("mujrim", "mujrim-ateed")?;
     run(
         "cargo",
         &[
@@ -1014,6 +1029,7 @@ mod tests {
             "mujrim-viri",
             "mujrim-obs",
             "mujrim-plenty",
+            "mujrim-ateed",
             "mujrim-lc0",
         ] {
             let stem = adapter_binary_stem(adapter, &arch);
@@ -1043,6 +1059,7 @@ mod tests {
             "mujrim-viri",
             "mujrim-obs",
             "mujrim-plenty",
+            "mujrim-ateed",
             "mujrim-lc0",
         ] {
             assert!(
@@ -1099,6 +1116,7 @@ mod tests {
             PRODUCT_ENGINE_STEMS,
             &[
                 "mujrim-ak",
+                "mujrim-ateed",
                 "mujrim-elite",
                 "mujrim-external",
                 "mujrim-lc0",
@@ -1127,6 +1145,12 @@ mod tests {
             src.contains("snapshot_engine(\"mujrim\", \"mujrim-plenty\")")
                 && src.contains("\"xboard,book,nnue,simd,plentychess-nnue\""),
             "mujrim-plenty must be built from plentychess-nnue, not copied from another adapter"
+        );
+        assert!(src.contains("\"xboard,book,nnue,simd,ateed-nnue\""));
+        assert!(
+            src.contains("snapshot_engine(\"mujrim\", \"mujrim-ateed\")")
+                && src.contains("\"xboard,book,nnue,simd,ateed-nnue\""),
+            "mujrim-ateed must be built from ateed-nnue, not copied from another adapter"
         );
     }
 }
