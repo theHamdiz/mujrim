@@ -563,11 +563,15 @@ fn format_uci_score_value(score: i32, board: &Board, eval_mode: EvalMode) -> Str
 }
 
 #[inline]
-fn extend_checks(move_ordering: MoveOrderingProfile, eval_mode: EvalMode) -> bool {
-    // Reckless/v60 skips check extensions so fixed-node BK depth is not burned.
-    // Other adapters that reuse Reckless move ordering (Lc0) still extend.
+fn extend_checks(
+    move_ordering: MoveOrderingProfile,
+    eval_mode: EvalMode,
+    fixed_nodes: bool,
+) -> bool {
+    // Fixed-node BK gates skip Reckless/v60 check extensions so depth is not
+    // burned. Time-based games match upstream Reckless, which still extends.
     if eval_mode.is_reckless_nnue() {
-        return false;
+        return !fixed_nodes;
     }
     move_ordering != MoveOrderingProfile::Reckless
         || eval_mode.is_lc0_nnue()
@@ -663,6 +667,44 @@ fn undo_search_eval(state: &mut ThreadState) {
     }
 }
 
+fn stockfish_material(board: &Board) -> i32 {
+    let pawns = board
+        .piece_bb(Piece::Pawn, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Pawn, types::Color::Black)
+            .count_ones();
+    let knights = board
+        .piece_bb(Piece::Knight, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Knight, types::Color::Black)
+            .count_ones();
+    let bishops = board
+        .piece_bb(Piece::Bishop, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Bishop, types::Color::Black)
+            .count_ones();
+    let rooks = board
+        .piece_bb(Piece::Rook, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Rook, types::Color::Black)
+            .count_ones();
+    let queens = board
+        .piece_bb(Piece::Queen, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Queen, types::Color::Black)
+            .count_ones();
+    534 * pawns as i32
+        + 416 * knights as i32
+        + 441 * bishops as i32
+        + 663 * rooks as i32
+        + 1_292 * queens as i32
+}
+
 fn corrected_network_eval(
     board: &Board,
     raw_eval: i32,
@@ -670,6 +712,14 @@ fn corrected_network_eval(
     optimism: i32,
     eval_mode: EvalMode,
 ) -> i32 {
+    if eval_mode.is_stockfish_nnue() {
+        // official-stockfish/Stockfish evaluate.cpp: material blend + rule50 damp.
+        let material = stockfish_material(board);
+        let mut value = (raw_eval * (77_871 + material) + optimism * (7_191 + material)) / 77_871;
+        value -= value * board.halfmove_clock.min(199) as i32 / 199;
+        return (value + correction)
+            .clamp(-MATE_SCORE + MAX_PLY as i32, MATE_SCORE - MAX_PLY as i32);
+    }
     if !eval_mode.is_reckless_nnue() {
         return raw_eval + correction;
     }
@@ -688,7 +738,7 @@ fn update_reckless_optimism(
     shared_best_stat: u32,
     eval_mode: EvalMode,
 ) {
-    if !eval_mode.is_reckless_nnue() {
+    if !eval_mode.is_reckless_nnue() && !eval_mode.is_stockfish_nnue() {
         state.optimism = [0; 2];
         return;
     }
@@ -1985,9 +2035,8 @@ fn singular_multicut_score(
     beta: i32,
     move_ordering: MoveOrderingProfile,
 ) -> Option<i32> {
-    (move_ordering == MoveOrderingProfile::Reckless
-        && singular_score >= beta
-        && singular_score.abs() < MATE_SCORE - 100)
+    let _ = move_ordering;
+    (singular_score >= beta && singular_score.abs() < MATE_SCORE - 100)
         .then(|| (singular_score * 5_973 + beta * 4_027) / 10_000)
 }
 
@@ -2156,11 +2205,12 @@ fn search_ab(
     }
 
     let check_ext_budget = nominal_depth * 2;
-    let (extended_depth, total_extensions) = if extend_checks(move_ordering, eval_mode) {
-        budgeted_check_extension(depth, total_extensions, check_ext_budget, in_check)
-    } else {
-        (depth, total_extensions)
-    };
+    let (extended_depth, total_extensions) =
+        if extend_checks(move_ordering, eval_mode, context.node_limit.is_some()) {
+            budgeted_check_extension(depth, total_extensions, check_ext_budget, in_check)
+        } else {
+            (depth, total_extensions)
+        };
     depth = extended_depth;
 
     // Propagate double extension count from parent ply
@@ -4156,11 +4206,18 @@ mod tests {
         assert_eq!(budgeted_check_extension(8, 0, 16, false), (8, 0));
         assert!(!extend_checks(
             MoveOrderingProfile::Reckless,
-            EvalMode::Nnue(NnueSearchProfile::Reckless)
+            EvalMode::Nnue(NnueSearchProfile::Reckless),
+            true
+        ));
+        assert!(extend_checks(
+            MoveOrderingProfile::Reckless,
+            EvalMode::Nnue(NnueSearchProfile::Reckless),
+            false
         ));
         assert!(!extend_checks(
             MoveOrderingProfile::Reckless,
-            EvalMode::Nnue(NnueSearchProfile::Stockfish)
+            EvalMode::Nnue(NnueSearchProfile::Stockfish),
+            true
         ));
         assert!(full_depth_root_quiets(
             MoveOrderingProfile::Reckless,
@@ -4168,7 +4225,8 @@ mod tests {
         ));
         assert!(extend_checks(
             MoveOrderingProfile::Reckless,
-            EvalMode::Nnue(NnueSearchProfile::Lc0)
+            EvalMode::Nnue(NnueSearchProfile::Lc0),
+            true
         ));
         assert!(full_depth_root_quiets(
             MoveOrderingProfile::Reckless,
@@ -4176,7 +4234,8 @@ mod tests {
         ));
         assert!(extend_checks(
             MoveOrderingProfile::Reckless,
-            EvalMode::Nnue(NnueSearchProfile::Viridithas)
+            EvalMode::Nnue(NnueSearchProfile::Viridithas),
+            true
         ));
         assert!(full_depth_root_quiets(
             MoveOrderingProfile::Reckless,
@@ -4771,16 +4830,15 @@ mod tests {
     fn reckless_eval_adapter_scales_material_clock_and_optimism() {
         let mut board = Board::new();
         assert_eq!(reckless_material(&board), 10_296);
-        assert_eq!(
-            corrected_network_eval(
-                &board,
-                100,
-                7,
-                0,
-                EvalMode::Nnue(NnueSearchProfile::Stockfish)
-            ),
-            107
+        let stockfish = corrected_network_eval(
+            &board,
+            100,
+            7,
+            0,
+            EvalMode::Nnue(NnueSearchProfile::Stockfish),
         );
+        assert_ne!(stockfish, 107);
+        assert!(stockfish > 100);
         assert_eq!(
             corrected_network_eval(
                 &board,
@@ -4820,27 +4878,29 @@ mod tests {
             root_score_stat(7, 200),
             EvalMode::Nnue(NnueSearchProfile::Stockfish),
         );
-        assert_eq!(state.optimism, [0; 2]);
+        assert_ne!(state.optimism, [0; 2]);
     }
 
     #[test]
-    fn stockfish_net_keeps_raw_cp_even_with_reckless_move_ordering() {
+    fn stockfish_net_uses_upstream_material_blend_not_reckless_scale() {
         let board = Board::new();
-        // Reckless policies on an SF net must not apply Reckless material scaling.
-        assert_eq!(
-            corrected_network_eval(
-                &board,
-                9,
-                0,
-                0,
-                EvalMode::Nnue(NnueSearchProfile::Stockfish)
-            ),
-            9
+        let stockfish = corrected_network_eval(
+            &board,
+            100,
+            0,
+            0,
+            EvalMode::Nnue(NnueSearchProfile::Stockfish),
         );
-        assert_ne!(
-            corrected_network_eval(&board, 9, 0, 0, EvalMode::Nnue(NnueSearchProfile::Reckless)),
-            9
+        let reckless = corrected_network_eval(
+            &board,
+            100,
+            0,
+            0,
+            EvalMode::Nnue(NnueSearchProfile::Reckless),
         );
+        assert_eq!(stockfish, 122);
+        assert_eq!(reckless, 115);
+        assert_eq!(stockfish_material(&board), 17_208);
     }
 
     #[test]
@@ -5138,7 +5198,7 @@ mod tests {
     }
 
     #[test]
-    fn singular_multicut_is_reckless_only_and_preserves_mate_scores() {
+    fn singular_multicut_applies_to_stockfish_and_preserves_mate_scores() {
         assert_eq!(
             singular_multicut_score(200, 100, MoveOrderingProfile::Reckless),
             Some(159)
@@ -5149,7 +5209,7 @@ mod tests {
         );
         assert_eq!(
             singular_multicut_score(200, 100, MoveOrderingProfile::StockLike),
-            None
+            Some(159)
         );
         assert_eq!(
             singular_multicut_score(MATE_SCORE - 1, 100, MoveOrderingProfile::Reckless),
@@ -5317,7 +5377,13 @@ mod tests {
                 // Get raw eval for comparison
                 let raw_eval = hybrid_eval(&board, &mut state, true);
                 let corr = state.correction(&board, MoveOrderingProfile::StockLike);
-                let stand_pat_val = raw_eval + corr;
+                let stand_pat_val = corrected_network_eval(
+                    &board,
+                    raw_eval,
+                    corr,
+                    0,
+                    EvalMode::Nnue(NnueSearchProfile::Stockfish),
+                );
 
                 assert!(stand_pat_val > 100);
                 let beta = stand_pat_val - 50;

@@ -1167,7 +1167,8 @@ fn tournament_live_card(state: AppState, handles: AppHandles) -> impl IntoView {
                 svg(icons::TROPHY).style(move |s| s.size(14, 14).color(theme::rgba(pal().accent))),
                 Label::derived(move || {
                     let snap = state.tournament_snapshot.get();
-                    let games = state.tournament_setup.get().games_per_encounter;
+                    let games =
+                        snap.encounter_games(state.tournament_setup.get().games_per_encounter);
                     snap.remaining_games_label(games)
                 })
                 .style(move |s| {
@@ -1180,12 +1181,13 @@ fn tournament_live_card(state: AppState, handles: AppHandles) -> impl IntoView {
                 }),
                 Label::derived(move || {
                     let snap = state.tournament_snapshot.get();
-                    let games = state.tournament_setup.get().games_per_encounter;
+                    let games =
+                        snap.encounter_games(state.tournament_setup.get().games_per_encounter);
                     let planned = snap.planned_games(games);
                     if planned == 0 {
                         return String::new();
                     }
-                    format!("{} / {planned}", snap.played_games.len())
+                    format!("{} / {planned}", snap.unique_played_count())
                 })
                 .style(move |s| {
                     s.font_size(theme::TYPE_CAPTION)
@@ -1196,7 +1198,8 @@ fn tournament_live_card(state: AppState, handles: AppHandles) -> impl IntoView {
             Stack::horizontal((
                 tournament_stat_chip(state, "Left", move || {
                     let snap = state.tournament_snapshot.get();
-                    let games = state.tournament_setup.get().games_per_encounter;
+                    let games =
+                        snap.encounter_games(state.tournament_setup.get().games_per_encounter);
                     if snap.planned_games(games) == 0 {
                         "—".to_owned()
                     } else {
@@ -1207,8 +1210,7 @@ fn tournament_live_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     state
                         .tournament_snapshot
                         .get()
-                        .played_games
-                        .len()
+                        .unique_played_count()
                         .to_string()
                 }),
                 tournament_stat_chip(state, "Live", move || {
@@ -1266,7 +1268,7 @@ fn tournament_progress_bar(state: AppState) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let fraction = move || {
         let snap = state.tournament_snapshot.get();
-        let games = state.tournament_setup.get().games_per_encounter;
+        let games = snap.encounter_games(state.tournament_setup.get().games_per_encounter);
         snap.game_progress_fraction(games)
     };
     Stack::horizontal((
@@ -1337,10 +1339,31 @@ fn resume_banner(state: AppState, handles: AppHandles) -> impl IntoView {
                 .resume_prompt
                 .get()
                 .map_or_else(String::new, |checkpoint| {
-                    format!(
-                        "Paused: {} · {} vs {}",
-                        checkpoint.event, checkpoint.white, checkpoint.black
-                    )
+                    let snap = state.tournament_snapshot.get();
+                    let games = snap.encounter_games(state.tournament_setup.get().games_per_encounter);
+                    let live = state.tournament_setup.get().concurrency.max(1);
+                    if snap.planned_games(games) > 0 {
+                        format!(
+                            "Paused: {} · {}",
+                            checkpoint.event,
+                            snap.progress_summary(games, live as usize)
+                        )
+                    } else if checkpoint.planned_games > 0 {
+                        format!(
+                            "Paused: {} · {}/{} played · {} left · {live} boards",
+                            checkpoint.event,
+                            checkpoint.played_games,
+                            checkpoint.planned_games,
+                            checkpoint
+                                .planned_games
+                                .saturating_sub(checkpoint.played_games),
+                        )
+                    } else {
+                        format!(
+                            "Paused: {} · {} vs {}",
+                            checkpoint.event, checkpoint.white, checkpoint.black
+                        )
+                    }
                 })
         })
         .style(move |s| {
@@ -1467,13 +1490,7 @@ fn tournament_history(state: AppState, handles: AppHandles) -> impl IntoView {
                         .tournament_history
                         .get()
                         .get(idx)
-                        .map(|tournament| {
-                            if tournament.games.is_empty() {
-                                tournament.name.clone()
-                            } else {
-                                format!("{} · {} games", tournament.name, tournament.games.len())
-                            }
-                        })
+                        .map(logic::tournament_history_label)
                         .unwrap_or_default()
                 }))
                 .action({
@@ -1882,6 +1899,7 @@ mod tests {
             "display(Display::None)",
             "annotation_tint",
             "resume_banner",
+            "progress_summary",
             "Resume event",
             "Start fresh",
             "flex_grow(1.0f32)",
@@ -1889,6 +1907,7 @@ mod tests {
             "Stop game",
             "Stop tournament",
             "tournament_history",
+            "tournament_history_label",
             "delete_historical_tournament",
             "icons::TRASH",
             "border_radius(999.0)",
@@ -1933,6 +1952,8 @@ mod tests {
             "LIVE_BOARD_SLOTS",
             "tournament_live_card",
             "remaining_games_label",
+            "encounter_games",
+            "unique_played_count",
             "tournament_progress_bar",
             "tournament_stat_chip",
             "phase_label",

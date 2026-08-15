@@ -311,7 +311,16 @@ where
     Stack::vertical((
         Button::new({
             let active = active.clone();
-            Label::derived(move || format!("{}  {}", active(), if open.get() { "▴" } else { "▾" }))
+            Stack::horizontal((
+                Label::derived(move || active().to_string())
+                    .style(|s| s.flex_grow(1.0f32).min_width(0.0).text_ellipsis()),
+                dyn_view(move || {
+                    svg(icons::chevron(open.get()))
+                        .style(|s| s.size(14, 14))
+                        .into_any()
+                }),
+            ))
+            .style(|s| s.width_full().items_center().col_gap(8.0))
         })
         .action(move || open.update(|value| *value = !*value))
         .style(move |s| {
@@ -829,6 +838,18 @@ mod tests {
                 .expect("picker")
                 .contains("capped_scroll"),
             "engine and theme pickers must scroll when the roster is long"
+        );
+        let picker = production
+            .split("pub fn picker")
+            .nth(1)
+            .expect("picker source");
+        assert!(
+            picker.contains("icons::chevron"),
+            "picker disclosure must use a bundled Lucide chevron, not a missing Inter glyph"
+        );
+        assert!(
+            !picker.contains('▴') && !picker.contains('▾'),
+            "picker must not depend on geometric triangles missing from Inter"
         );
         let standings = production
             .split("pub fn standing_rows_list")

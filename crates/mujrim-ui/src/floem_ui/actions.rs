@@ -10,6 +10,7 @@ use floem::prelude::{SignalGet, SignalUpdate, SignalWith};
 use floem::ui_events::keyboard::{Key, KeyboardEvent, NamedKey};
 use mujrim_study::database::GameQuery;
 use mujrim_study::game_export::{self, GameExportFormat, GameRecord};
+use mujrim_study::tournament_store::StoredTournament;
 use types::{Color, Move, Square};
 
 use crate::app_core::analysis::{AnalysisEngineSpec, AnalysisRequest, run_multi_engine_analysis};
@@ -146,9 +147,18 @@ pub fn offer_crash_resume(state: AppState, handles: &AppHandles) {
     if state.tournament_snapshot.get_untracked().running {
         return;
     }
+    refresh_tournament_history(state, handles);
     if let Some(checkpoint) = crate::app_core::tournament_resume::ActiveTournamentCheckpoint::load()
     {
-        offer_resume(state, checkpoint);
+        let remaining = state
+            .tournament_history
+            .get_untracked()
+            .into_iter()
+            .find(|tournament| tournament.id == checkpoint.id)
+            .is_some_and(|tournament| tournament_can_resume(&tournament));
+        if remaining {
+            offer_resume(state, handles, checkpoint);
+        }
     }
     if let Some(job) = crate::app_core::ateed_resume::ActiveAteedJob::load() {
         state.ateed.resume_prompt.set(Some(job));
@@ -1989,6 +1999,51 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     begin_tournament(state, handles, false);
 }
 
+pub fn start_follow_up_tournament(state: AppState, handles: &AppHandles, size: usize) {
+    let snap = state.tournament_snapshot.get_untracked();
+    let field = crate::app_core::tournament_results::follow_up_field(
+        snap.standings.len(),
+        snap.engine_names.len(),
+    );
+    let Some(choice) = crate::app_core::tournament_results::follow_up_choices(field)
+        .into_iter()
+        .find(|choice| choice.size == size)
+    else {
+        state
+            .tournament_status
+            .set("No follow-up field is available from these results.".to_owned());
+        return;
+    };
+    let names = crate::app_core::tournament_results::follow_up_names(&snap.standings, choice.size);
+    let catalog = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    let setup = state.tournament_setup.get_untracked();
+    let paths =
+        logic::resolve_follow_up_engine_paths(&names, &setup.selected_engine_paths, &catalog);
+    if paths.len() < 2 {
+        state.tournament_status.set(
+            "Could not resolve two engines from the finished standings for a follow-up.".to_owned(),
+        );
+        return;
+    }
+    let event = crate::app_core::tournament_results::follow_up_event_name(&setup.event, choice);
+    state.tournament_setup.update(|setup| {
+        setup.selected_engine_paths = paths;
+        setup.completed_pairings.clear();
+        setup.event = event.clone();
+        setup.concurrency = setup
+            .concurrency
+            .min(crate::app_core::tournament_setup::detected_safe_games())
+            .max(1);
+        setup.sanitize_for_gui();
+    });
+    state.tournament_event.set(event);
+    state.show_tournament_results.set(false);
+    state.resume_prompt.set(None);
+    state.current_tournament_id.set(None);
+    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+    begin_tournament(state, handles, false);
+}
+
 fn begin_tournament(state: AppState, handles: &AppHandles, resume: bool) {
     if state.tournament_snapshot.get_untracked().running {
         state
@@ -2000,13 +2055,59 @@ fn begin_tournament(state: AppState, handles: &AppHandles, resume: bool) {
     setup.event = state.tournament_event.get_untracked();
     setup.site = state.tournament_site.get_untracked();
     setup.sanitize_for_gui();
-    state.tournament_setup.set(setup.clone());
-    let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    let catalog = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    let resume_id = resume
+        .then(|| {
+            state
+                .resume_prompt
+                .get_untracked()
+                .map(|checkpoint| checkpoint.id)
+                .filter(|id| !id.is_empty())
+        })
+        .flatten();
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let tournament_id = resume_id.clone().unwrap_or_else(|| format!("t-{started}"));
+    let resumed = if resume {
+        let created_at = tournament_id
+            .strip_prefix("t-")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let mut stored = handles
+            .study
+            .borrow()
+            .as_ref()
+            .and_then(|database| database.load_tournament(&tournament_id).ok().flatten())
+            .unwrap_or_else(|| {
+                logic::stored_from_engine_paths(
+                    &tournament_id,
+                    &setup.event,
+                    setup.format,
+                    created_at,
+                    &setup.selected_engine_paths,
+                    &catalog,
+                )
+            });
+        logic::restore_setup_from_event(&mut setup, &mut stored, &catalog);
+        if let Some(database) = handles.study.borrow_mut().as_mut() {
+            let _ = database.save_tournament(&stored);
+        }
+        logic::reset_incomplete_match_checkpoints(
+            &logic::tournament_checkpoint_dir(setup.format, &tournament_id),
+            setup.games_per_encounter.max(1) as usize,
+        );
+        Some(stored)
+    } else {
+        setup.completed_pairings.clear();
+        None
+    };
     if setup.selected_engine_paths.is_empty() {
-        setup.selected_engine_paths = logic::default_tournament_engine_paths(&roster);
-        state.tournament_setup.set(setup.clone());
+        setup.selected_engine_paths = logic::default_tournament_engine_paths(&catalog);
     }
-    let selected: Vec<_> = roster
+    state.tournament_setup.set(setup.clone());
+    let selected: Vec<_> = catalog
         .into_iter()
         .filter(|engine| logic::engine_is_selected(&setup.selected_engine_paths, &engine.path))
         .collect();
@@ -2023,32 +2124,12 @@ fn begin_tournament(state: AppState, handles: &AppHandles, resume: bool) {
     state.analysis_scores.set(Vec::new());
     state.move_annotations.set(Vec::new());
     state.review_ply.set(None);
-    let resume_id = resume
-        .then(|| {
-            state
-                .resume_prompt
-                .get_untracked()
-                .map(|checkpoint| checkpoint.id)
-                .filter(|id| !id.is_empty())
-        })
-        .flatten();
     state.resume_prompt.set(None);
     if !resume {
         crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
     }
     state.dock_tab.set(DockTab::Results);
     state.dock_open.set(true);
-    let started = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let tournament_id = resume_id.clone().unwrap_or_else(|| format!("t-{started}"));
-    if resume {
-        logic::reset_open_match_checkpoints(&logic::tournament_checkpoint_dir(
-            setup.format,
-            &tournament_id,
-        ));
-    }
     state.current_tournament_id.set(Some(tournament_id.clone()));
     state.persisted_tournament_games.set(0);
     state.focused_live_key.set(None);
@@ -2059,20 +2140,6 @@ fn begin_tournament(state: AppState, handles: &AppHandles, resume: bool) {
     state.tournament_heavy_fingerprint.set(0);
     state.arena_slots.set(Vec::new());
     state.eval_bar_fen.set(String::new());
-    let resumed = resume_id.as_ref().and_then(|id| {
-        handles
-            .study
-            .borrow()
-            .as_ref()
-            .and_then(|database| database.load_tournament(id).ok().flatten())
-    });
-    if let Some(stored) = resumed.as_ref() {
-        setup.completed_pairings = stored.results.iter().map(|result| result.pairing).collect();
-        state.tournament_setup.set(setup.clone());
-    } else {
-        setup.completed_pairings.clear();
-        state.tournament_setup.set(setup.clone());
-    }
     let handle = crate::app_core::tournament_live::LiveTournamentHandle::new(setup.format);
     let white_name = selected[0].name.clone();
     let black_name = selected[1].name.clone();
@@ -2082,23 +2149,28 @@ fn begin_tournament(state: AppState, handles: &AppHandles, resume: bool) {
         guard.current_white = white_name.clone();
         guard.current_black = black_name.clone();
         guard.current_round = 1;
+        if let Some(stored) = resumed.as_ref() {
+            logic::seed_live_snapshot_from_stored(&mut guard, stored, setup.games_per_encounter);
+            state
+                .persisted_tournament_games
+                .set(guard.unique_played_count());
+        }
+        guard.games_per_encounter = setup.games_per_encounter.max(1);
+        guard.running = true;
+        guard.paused = false;
+        guard.finished = false;
+        guard.cancelled = false;
         guard.upsert_live_game(logic::optimistic_live_board(
             white_name.clone(),
             black_name.clone(),
             clock_ms,
         ));
-        if let Some(stored) = resumed.as_ref() {
-            guard.played_games = logic::stored_to_played(&stored.games);
-            guard.game_results = stored.results.clone();
-            guard.standings = crate::app_core::tournament_live::standings_from_played(
-                &guard.engine_names,
-                &guard.played_games,
-            );
-            state
-                .persisted_tournament_games
-                .set(guard.played_games.len());
-        }
-        guard.status_line = format!("Starting {white_name} vs {black_name}…");
+        let live = setup.concurrency.max(1) as usize;
+        guard.status_line = format!(
+            "{} · {} engines · {live} boards · {white_name} vs {black_name}",
+            guard.progress_summary(setup.games_per_encounter, live),
+            selected.len(),
+        );
     }
     if let Ok(game) = logic::replay_study_game(mujrim_study::opening::START_FEN, &[]) {
         state.game.set(Some(game));
@@ -2221,7 +2293,10 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
                 state.tournament_snapshot.set(guard.clone());
                 persist_tournament_progress(state, &handles, &guard);
                 announce_tournament_outcomes(state, &handles, &guard);
-                if running {
+                if running
+                    || guard.paused
+                    || (!guard.finished && !guard.cancelled && !guard.played_games.is_empty())
+                {
                     let id = state
                         .current_tournament_id
                         .get_untracked()
@@ -2383,11 +2458,25 @@ fn apply_live_thinking_overlays(
 
 pub fn pause_tournament(state: AppState, handles: &AppHandles) {
     apply_tournament_control(state, handles, |handle| handle.request_pause());
+    uci_process::cancel_all_pondering();
     persist_active_checkpoint(state, handles);
 }
 
 pub fn resume_tournament(state: AppState, handles: &AppHandles) {
     apply_tournament_control(state, handles, |handle| handle.request_resume());
+    persist_active_checkpoint(state, handles);
+}
+
+pub fn shutdown_ui_resources(state: AppState, handles: &AppHandles) {
+    if let Some(handle) = handles.tournament.borrow().as_ref() {
+        handle.request_pause();
+        let snap = handle.clone_snapshot();
+        state.tournament_snapshot.set(snap);
+    }
+    persist_active_checkpoint(state, handles);
+    uci_process::cancel_all_pondering();
+    uci_process::shutdown_external_engines();
+    mujrim_protocols::kill_all_engine_processes();
 }
 
 pub fn abort_tournament_game(state: AppState, handles: &AppHandles) {
@@ -2396,6 +2485,7 @@ pub fn abort_tournament_game(state: AppState, handles: &AppHandles) {
 
 pub fn cancel_tournament(state: AppState, handles: &AppHandles) {
     apply_tournament_control(state, handles, |handle| handle.request_cancel());
+    persist_tournament_progress(state, handles, &state.tournament_snapshot.get_untracked());
     crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
 }
 
@@ -2418,6 +2508,11 @@ fn persist_active_checkpoint(state: AppState, handles: &AppHandles) {
     persist_tournament_progress(state, handles, &snap);
 }
 
+fn tournament_can_resume(tournament: &StoredTournament) -> bool {
+    mujrim_study::tournament_store::is_resumable_status(&tournament.status)
+        && tournament.games.len() < logic::planned_tournament_games(tournament)
+}
+
 pub fn open_tournaments_screen(state: AppState, handles: &AppHandles) {
     state.screen.set(Screen::Tournaments);
     refresh_tournament_history(state, handles);
@@ -2426,17 +2521,34 @@ pub fn open_tournaments_screen(state: AppState, handles: &AppHandles) {
     }
     if let Some(checkpoint) = crate::app_core::tournament_resume::ActiveTournamentCheckpoint::load()
     {
-        offer_resume(state, checkpoint);
-        return;
+        if state
+            .tournament_history
+            .get_untracked()
+            .iter()
+            .any(|tournament| tournament.id == checkpoint.id && tournament_can_resume(tournament))
+        {
+            offer_resume(state, handles, checkpoint);
+            return;
+        }
+        if state
+            .tournament_history
+            .get_untracked()
+            .iter()
+            .any(|tournament| tournament.id == checkpoint.id)
+        {
+            load_historical_tournament(state, handles, checkpoint.id);
+            return;
+        }
     }
     if let Some(stored) = state
         .tournament_history
         .get_untracked()
         .into_iter()
-        .find(|tournament| mujrim_study::tournament_store::is_resumable_status(&tournament.status))
+        .find(tournament_can_resume)
     {
         offer_resume(
             state,
+            handles,
             crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_stored(
                 &stored,
                 &state.tournament_setup.get_untracked(),
@@ -2449,18 +2561,64 @@ pub fn open_tournaments_screen(state: AppState, handles: &AppHandles) {
 
 fn offer_resume(
     state: AppState,
+    handles: &AppHandles,
     checkpoint: crate::app_core::tournament_resume::ActiveTournamentCheckpoint,
 ) {
-    state.resume_prompt.set(Some(checkpoint.clone()));
+    let catalog = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    let mut setup = state.tournament_setup.get_untracked();
+    checkpoint.apply_setup(&mut setup);
+    let created_at = checkpoint
+        .id
+        .strip_prefix("t-")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let mut stored = handles
+        .study
+        .borrow()
+        .as_ref()
+        .and_then(|database| database.load_tournament(&checkpoint.id).ok().flatten())
+        .unwrap_or_else(|| {
+            logic::stored_from_engine_paths(
+                &checkpoint.id,
+                &checkpoint.event,
+                checkpoint.parsed_format(),
+                created_at,
+                &checkpoint.selected_engine_paths,
+                &catalog,
+            )
+        });
+    logic::restore_setup_from_event(&mut setup, &mut stored, &catalog);
+    if let Some(database) = handles.study.borrow_mut().as_mut() {
+        let _ = database.save_tournament(&stored);
+    }
+    state.tournament_setup.set(setup.clone());
+    state.tournament_event.set(setup.event.clone());
+    state.current_tournament_id.set(Some(checkpoint.id.clone()));
+    let mut snap = state.tournament_snapshot.get_untracked();
+    logic::seed_live_snapshot_from_stored(&mut snap, &stored, setup.games_per_encounter);
+    snap.running = false;
+    snap.paused = true;
+    state.tournament_snapshot.set(snap.clone());
+    refresh_arena_slots(state, &snap);
+    let repaired = crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
+        checkpoint.id.clone(),
+        &setup,
+        &snap,
+    );
+    repaired.save();
+    state.resume_prompt.set(Some(repaired.clone()));
     state.show_tournament_setup.set(false);
     if let Ok(game) = logic::replay_study_game(&checkpoint.initial_fen, &checkpoint.moves) {
         state.game.set(Some(game));
         state.move_log.set(checkpoint.moves.clone());
         state.initial_fen.set(checkpoint.initial_fen.clone());
     }
+    let live = setup.concurrency.max(1);
     state.tournament_status.set(format!(
-        "Interrupted event “{}” · {} vs {}. Resume to keep finished games and replay the current pairing.",
-        checkpoint.event, checkpoint.white, checkpoint.black
+        "Paused “{}” · {} · {} engines · {live} boards. Resume keeps finished games.",
+        repaired.event,
+        snap.progress_summary(setup.games_per_encounter, live as usize),
+        setup.selected_engine_paths.len(),
     ));
 }
 
@@ -2470,13 +2628,7 @@ pub fn resume_paused_tournament(state: AppState, handles: &AppHandles) {
         return;
     };
     state.tournament_setup.update(|setup| {
-        setup.event = checkpoint.event.clone();
-        setup.site = checkpoint.site.clone();
-        setup.format = checkpoint.parsed_format();
-        if !checkpoint.selected_engine_paths.is_empty() {
-            setup.selected_engine_paths = checkpoint.selected_engine_paths.clone();
-        }
-        setup.sanitize_for_gui();
+        checkpoint.apply_setup(setup);
     });
     state.tournament_event.set(checkpoint.event.clone());
     state.tournament_site.set(checkpoint.site.clone());
@@ -2553,7 +2705,7 @@ fn persist_tournament_progress(
     let Some(id) = state.current_tournament_id.get_untracked() else {
         return;
     };
-    let count = snap.played_games.len();
+    let count = snap.unique_played_count();
     if count == 0 && !snap.finished && !snap.paused && !snap.running && snap.live_games.is_empty() {
         return;
     }
@@ -2647,9 +2799,78 @@ pub fn delete_historical_tournament(state: AppState, handles: &AppHandles, id: S
 }
 
 pub fn refresh_tournament_history(state: AppState, handles: &AppHandles) {
-    if let Some(database) = handles.study.borrow().as_ref()
-        && let Ok(history) = database.list_tournaments()
-    {
+    if let Some(database) = handles.study.borrow_mut().as_mut() {
+        let mut history = database.list_tournaments().unwrap_or_default();
+        let active = crate::app_core::tournament_resume::ActiveTournamentCheckpoint::load();
+        let games_per = state
+            .tournament_setup
+            .get_untracked()
+            .games_per_encounter
+            .max(
+                active
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.games_per_encounter)
+                    .unwrap_or(0),
+            );
+        for tournament in &mut history {
+            let before_games = tournament.games.len();
+            let before_entrants = tournament.entrants.len();
+            let before_status = tournament.status.clone();
+            let _ = logic::hydrate_stored_tournament_from_disk(tournament, games_per);
+            if tournament.games.len() != before_games
+                || tournament.entrants.len() != before_entrants
+                || tournament.status != before_status
+            {
+                let _ = database.save_tournament(tournament);
+            }
+        }
+        if let Some(checkpoint) = active.as_ref()
+            && !history
+                .iter()
+                .any(|tournament| tournament.id == checkpoint.id)
+        {
+            let roster: Vec<String> = checkpoint
+                .selected_engine_paths
+                .iter()
+                .map(|path| {
+                    let stem = path
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "engine".to_owned());
+                    logic::catalog_display_name(&stem, &[])
+                })
+                .collect();
+            if roster.len() >= 2 {
+                let created_at = checkpoint
+                    .id
+                    .strip_prefix("t-")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                let mut stored = StoredTournament {
+                    id: checkpoint.id.clone(),
+                    name: checkpoint.event.clone(),
+                    format: checkpoint.parsed_format(),
+                    created_at,
+                    status: mujrim_study::tournament_store::STATUS_PAUSED.to_owned(),
+                    entrants: roster
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| mujrim_study::tournament::Entrant {
+                            id: format!("engine-{index}"),
+                            name: name.clone(),
+                            seed_elo: mujrim_study::rating::seed_elo_for_engine(name),
+                        })
+                        .collect(),
+                    results: Vec::new(),
+                    games: Vec::new(),
+                };
+                let completed = logic::hydrate_stored_tournament_from_disk(&mut stored, games_per);
+                if !completed.is_empty() || !stored.games.is_empty() {
+                    let _ = database.save_tournament(&stored);
+                    history.insert(0, stored);
+                }
+            }
+        }
         state.tournament_history.set(history);
     }
 }
@@ -2669,40 +2890,27 @@ pub fn load_historical_tournament(state: AppState, handles: &AppHandles, id: Str
     if tournament.games.is_empty() {
         tournament.games = database.recover_tournament_games(&tournament);
     }
-    let played = logic::stored_to_played(&tournament.games);
+    drop(study);
+    if mujrim_study::tournament_store::is_resumable_status(&tournament.status) {
+        offer_resume(
+            state,
+            handles,
+            crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_stored(
+                &tournament,
+                &state.tournament_setup.get_untracked(),
+            ),
+        );
+        return;
+    }
     state.current_tournament_id.set(Some(tournament.id.clone()));
     state.tournament_event.set(tournament.name.clone());
     state.tournament_snapshot.update(|snap| {
+        logic::seed_live_snapshot_from_stored(
+            snap,
+            &tournament,
+            state.tournament_setup.get_untracked().games_per_encounter,
+        );
         snap.running = false;
-        snap.finished = true;
-        snap.format_label = tournament.format.to_string();
-        snap.engine_names = tournament
-            .entrants
-            .iter()
-            .map(|entrant| entrant.name.clone())
-            .collect();
-        snap.game_results = tournament.results.clone();
-        snap.played_games = played;
-        snap.status_line = tournament.status.clone();
-        snap.standings = tournament
-            .standings()
-            .into_iter()
-            .enumerate()
-            .filter_map(|(rank, standing)| {
-                tournament.entrants.get(standing.entrant).map(|entrant| {
-                    crate::app_core::tournament_live::StandingRow {
-                        rank: rank + 1,
-                        name: entrant.name.clone(),
-                        played: standing.played,
-                        wins: standing.wins,
-                        draws: standing.draws,
-                        losses: standing.losses,
-                        points: standing.points,
-                        performance: standing.performance.map(|elo| elo.elo),
-                    }
-                })
-            })
-            .collect();
         snap.live_games.clear();
     });
     state.arena_slots.set(Vec::new());
@@ -3199,6 +3407,9 @@ mod tests {
         for needle in [
             "fn pause_tournament",
             "fn resume_tournament",
+            "fn shutdown_ui_resources",
+            "kill_all_engine_processes",
+            "guard.paused = false",
             "fn abort_tournament_game",
             "fn stop_engine_search",
             "fn resume_paused_tournament",
@@ -3208,6 +3419,7 @@ mod tests {
             "fn discard_paused_game",
             "fn offer_crash_resume",
             "fn open_tournaments_screen",
+            "fn tournament_can_resume",
             "apply_live_settings",
             "follow_live_tail",
             "open_library",
@@ -3238,6 +3450,10 @@ mod tests {
             "arrows_from_uci_pv",
             "next_incremental_uci",
             "fn begin_tournament",
+            "fn start_follow_up_tournament",
+            "follow_up_choices",
+            "follow_up_field",
+            "resolve_follow_up_engine_paths",
             "fn highlight_explain",
             "fn set_live_analysis",
             "fn set_edit_side",
@@ -3255,7 +3471,11 @@ mod tests {
             "ArrowDown",
             "begin_tournament(state, handles, false)",
             "begin_tournament(state, handles, true)",
-            "reset_open_match_checkpoints",
+            "reset_incomplete_match_checkpoints",
+            "hydrate_stored_tournament_from_disk",
+            "restore_setup_from_event",
+            "seed_live_snapshot_from_stored",
+            "persist_active_checkpoint",
             "tournament_checkpoint_dir",
         ] {
             assert!(production.contains(needle), "missing {needle}");
@@ -3285,7 +3505,13 @@ mod tests {
             .and_then(|rest| rest.split("fn poll_tournament").next())
             .expect("begin");
         assert!(begin.contains("if !resume"));
-        assert!(begin.contains("reset_open_match_checkpoints"));
+        assert!(begin.contains("reset_incomplete_match_checkpoints"));
+        assert!(begin.contains("restore_setup_from_event"));
+        assert!(begin.contains("seed_live_snapshot_from_stored"));
+        assert!(
+            begin.contains("hydrate_stored_tournament_from_disk")
+                || begin.contains("restore_setup_from_event")
+        );
         assert!(
             begin.contains("run_quick_tournament(selected, setup, handle, worker_tournament_id)")
         );
@@ -3298,6 +3524,16 @@ mod tests {
         assert!(
             !discard.contains("join(logic::tournament_directory_name"),
             "discard must not wipe every event in the format folder"
+        );
+        let refresh = production
+            .split("pub fn refresh_tournament_history")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn load_historical_tournament").next())
+            .expect("refresh");
+        assert!(refresh.contains("hydrate_stored_tournament_from_disk"));
+        assert!(
+            !refresh.contains("is_resumable_status"),
+            "finished 2-engine stubs must still be rebuilt from jsonl"
         );
     }
 }

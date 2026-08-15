@@ -1,11 +1,11 @@
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub mod binary_arch;
@@ -657,6 +657,20 @@ impl EngineIo {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: runs in the child after fork and before exec.
+            unsafe {
+                command.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                    if libc::getppid() == 1 {
+                        libc::_exit(127);
+                    }
+                    Ok(())
+                });
+            }
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -681,6 +695,7 @@ impl EngineIo {
         let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
         let stderr_sink = Arc::clone(&stderr_tail);
         std::thread::spawn(move || pump_stderr(stderr, &stderr_sink));
+        register_engine_pid(child.id());
 
         Ok(Self {
             child,
@@ -840,12 +855,16 @@ fn record_stderr_line(tail: &Mutex<VecDeque<String>>, line: &str) {
 
 impl Drop for EngineIo {
     fn drop(&mut self) {
+        let pid = self.child.id();
         let _ = writeln!(self.stdin, "quit");
         let _ = self.stdin.flush();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
         loop {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(_)) => {
+                    unregister_engine_pid(pid);
+                    return;
+                }
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -854,6 +873,45 @@ impl Drop for EngineIo {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        unregister_engine_pid(pid);
+    }
+}
+
+fn live_engine_pids() -> &'static Mutex<HashSet<u32>> {
+    static PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn register_engine_pid(pid: u32) {
+    live_engine_pids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(pid);
+}
+
+fn unregister_engine_pid(pid: u32) {
+    live_engine_pids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&pid);
+}
+
+/// Force-kill every engine process spawned through `EngineSession` / `EngineIo`.
+pub fn kill_all_engine_processes() {
+    let pids: Vec<u32> = live_engine_pids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .drain()
+        .collect();
+    for pid in pids {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        {
+            let _ = pid;
+        }
     }
 }
 
@@ -1908,5 +1966,15 @@ mod tests {
         assert!(output.contains("option name Threads type spin default 1 min 1 max 12\n"));
         assert!(output.contains("info depth 20 nodes 1000000 nps 900000 pv e2e4\n"));
         assert!(output.ends_with("bestmove e2e4\n"));
+    }
+
+    #[test]
+    fn kill_all_engine_processes_is_safe_when_none_are_live() {
+        kill_all_engine_processes();
+        kill_all_engine_processes();
+        let src = include_str!("lib.rs");
+        assert!(src.contains("PR_SET_PDEATHSIG"));
+        assert!(src.contains("kill_all_engine_processes"));
+        assert!(src.contains("register_engine_pid"));
     }
 }

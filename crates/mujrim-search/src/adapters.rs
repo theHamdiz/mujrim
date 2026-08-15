@@ -252,6 +252,7 @@ mod tests {
         );
         engine.set_contempt(48);
         assert_eq!(engine.contempt(), 0);
+        assert!(engine.eval_mode().is_stockfish_nnue());
     }
 
     #[cfg(feature = "reckless-nnue")]

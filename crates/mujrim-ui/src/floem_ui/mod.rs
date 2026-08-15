@@ -98,9 +98,9 @@ fn app_view(window_id: WindowId) -> impl IntoView {
     let shell = chrome::shell(window_id, state, handles.clone(), content);
     let options = modals::options_modal(state, handles.clone())
         .style(move |s| overlay_host_style(s, state.show_options.get()));
-    let tournament = modals::tournament_setup_modal(state, handles)
+    let tournament = modals::tournament_setup_modal(state, handles.clone())
         .style(move |s| overlay_host_style(s, state.show_tournament_setup.get()));
-    let results = modals::tournament_results_modal(state)
+    let results = modals::tournament_results_modal(state, handles)
         .style(move |s| overlay_host_style(s, state.show_tournament_results.get()));
     Stack::new((shell.style(|s| s.size_full()), options, tournament, results))
         .style(move |s| {
@@ -196,6 +196,10 @@ mod tests {
         assert!(
             production.contains("show_tournament_results"),
             "finished tournaments must mount the results overlay"
+        );
+        assert!(
+            production.contains("tournament_results_modal(state, handles)"),
+            "results overlay must receive handles so follow-up events can start"
         );
         assert!(
             production.contains("Display::None"),

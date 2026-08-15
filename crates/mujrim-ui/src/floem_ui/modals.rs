@@ -820,7 +820,7 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
     )
 }
 
-pub fn tournament_results_modal(state: AppState) -> impl IntoView {
+pub fn tournament_results_modal(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     widgets::overlay_frame(
         state,
@@ -848,12 +848,90 @@ pub fn tournament_results_modal(state: AppState) -> impl IntoView {
                 .collect::<Vec<_>>()
                 .into_view()
                 .style(|s| s.width_full().flex_col().row_gap(10.0).min_width(0.0)),
+            follow_up_actions(state, handles),
             widgets::primary_button(state, "Close", move || {
                 state.show_tournament_results.set(false);
             }),
         ))
         .style(|s| s.width_full().row_gap(16.0).min_width(0.0)),
     )
+}
+
+fn follow_up_actions(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::horizontal((
+        follow_up_choice_button(state, handles.clone(), 0),
+        follow_up_choice_button(state, handles.clone(), 1),
+        follow_up_choice_button(state, handles, 2),
+    ))
+    .style(move |s| {
+        let snap = state.tournament_snapshot.get();
+        let field = crate::app_core::tournament_results::follow_up_field(
+            snap.standings.len(),
+            snap.engine_names.len(),
+        );
+        let s = s
+            .width_full()
+            .col_gap(8.0)
+            .row_gap(8.0)
+            .flex_wrap(FlexWrap::Wrap)
+            .min_width(0.0);
+        if crate::app_core::tournament_results::follow_up_choices(field).is_empty() {
+            s.display(Display::None)
+        } else {
+            s
+        }
+    })
+}
+
+fn follow_up_choice_button(state: AppState, handles: AppHandles, index: usize) -> impl IntoView {
+    Button::new(Label::derived(move || {
+        let snap = state.tournament_snapshot.get();
+        let field = crate::app_core::tournament_results::follow_up_field(
+            snap.standings.len(),
+            snap.engine_names.len(),
+        );
+        crate::app_core::tournament_results::follow_up_choices(field)
+            .get(index)
+            .map(|choice| choice.label())
+            .unwrap_or_default()
+    }))
+    .action(move || {
+        let snap = state.tournament_snapshot.get_untracked();
+        let field = crate::app_core::tournament_results::follow_up_field(
+            snap.standings.len(),
+            snap.engine_names.len(),
+        );
+        if let Some(choice) =
+            crate::app_core::tournament_results::follow_up_choices(field).get(index)
+        {
+            actions::start_follow_up_tournament(state, &handles, choice.size);
+        }
+    })
+    .style(move |s| {
+        let pal = theme::palette(state.settings.get().board_theme);
+        let snap = state.tournament_snapshot.get();
+        let field = crate::app_core::tournament_results::follow_up_field(
+            snap.standings.len(),
+            snap.engine_names.len(),
+        );
+        let choices = crate::app_core::tournament_results::follow_up_choices(field);
+        let s = s
+            .min_width(0.0)
+            .padding_horiz(12.0)
+            .padding_vert(8.0)
+            .border_radius(10.0)
+            .border(1.0)
+            .border_color(theme::rgba(pal.border))
+            .font_size(12.0)
+            .background(Color::TRANSPARENT)
+            .color(theme::rgba(pal.text_primary))
+            .hover(|s| s.background(theme::rgba(pal.panel)));
+        if index < choices.len() {
+            s
+        } else {
+            s.display(Display::None)
+        }
+    })
 }
 
 fn results_rank_card(state: AppState, index: usize) -> impl IntoView {
@@ -965,6 +1043,10 @@ mod tests {
             "Eval-bar engine",
             "Simultaneous games",
             "tournament_results_modal",
+            "follow_up_actions",
+            "follow_up_choice_button",
+            "follow_up_field",
+            "start_follow_up_tournament",
             "results_rank_card",
             "losses_to_label",
             "EVENT_ELO_CAPTION",

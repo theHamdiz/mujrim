@@ -711,6 +711,110 @@ fn executable_extensions() -> Vec<String> {
     }
 }
 
+/// On-disk duel checkpoint recovered from a tournament jsonl sidecar.
+#[derive(Clone, Debug)]
+pub struct DuelCheckpoint {
+    pub candidate_path: PathBuf,
+    pub reference_path: PathBuf,
+    pub pairs: Vec<PairRecord>,
+    pub opening_fingerprint: String,
+}
+
+impl DuelCheckpoint {
+    pub fn candidate_stem(&self) -> String {
+        path_stem(&self.candidate_path)
+    }
+
+    pub fn reference_stem(&self) -> String {
+        path_stem(&self.reference_path)
+    }
+}
+
+fn path_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Parse a `mujrim-duel-checkpoint` jsonl without requiring the original binaries.
+pub fn read_duel_checkpoint(path: &Path) -> Result<DuelCheckpoint, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read checkpoint '{}': {error}", path.display()))?;
+    let mut lines = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    let Some(header_line) = lines.next() else {
+        return Err(format!("checkpoint '{}' is empty", path.display()));
+    };
+    let header: serde_json::Value = serde_json::from_str(header_line)
+        .map_err(|error| format!("invalid checkpoint header '{}': {error}", path.display()))?;
+    if header.get("type").and_then(serde_json::Value::as_str) != Some("mujrim-duel-checkpoint") {
+        return Err(format!(
+            "checkpoint '{}' is not a mujrim duel sidecar",
+            path.display()
+        ));
+    }
+    let candidate_path = header
+        .pointer("/candidate/path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("checkpoint '{}' is missing candidate.path", path.display()))?;
+    let reference_path = header
+        .pointer("/reference/path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("checkpoint '{}' is missing reference.path", path.display()))?;
+    let records: Vec<&str> = lines.collect();
+    let mut pairs = BTreeMap::new();
+    for (line_index, line) in records.iter().enumerate() {
+        match serde_json::from_str::<serde_json::Value>(line)
+            .map_err(|error| error.to_string())
+            .and_then(|value| pair_from_checkpoint(&value))
+        {
+            Ok(pair) => {
+                pairs.insert(pair.index, pair);
+            }
+            Err(_) if line_index + 1 == records.len() => break,
+            Err(error) => {
+                return Err(format!(
+                    "invalid checkpoint record {} in '{}': {error}",
+                    line_index + 2,
+                    path.display()
+                ));
+            }
+        }
+    }
+    let opening_fingerprint = header
+        .get("opening_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Ok(DuelCheckpoint {
+        candidate_path,
+        reference_path,
+        pairs: pairs.into_values().collect(),
+        opening_fingerprint,
+    })
+}
+
+/// Load every readable jsonl duel in `directory` (non-recursive).
+pub fn scan_duel_checkpoints(directory: &Path) -> Vec<(PathBuf, DuelCheckpoint)> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut loaded = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "jsonl")
+            && let Ok(checkpoint) = read_duel_checkpoint(&path)
+        {
+            loaded.push((path, checkpoint));
+        }
+    }
+    loaded
+}
+
 fn pair_from_checkpoint(value: &serde_json::Value) -> Result<PairRecord, String> {
     if value.get("type").and_then(serde_json::Value::as_str) != Some("pair") {
         return Err("record type is not 'pair'".to_string());
@@ -2515,5 +2619,44 @@ mod tests {
             started_at > new_game_at,
             "live boards must appear after engines finish ucinewgame, not during weight load"
         );
+    }
+
+    #[test]
+    fn read_duel_checkpoint_recovers_pairs_without_binaries() {
+        let path = checkpoint_test_path();
+        let header = serde_json::json!({
+            "type": "mujrim-duel-checkpoint",
+            "version": 1,
+            "candidate": { "path": "/opt/mujrim-elite" },
+            "reference": { "path": "/opt/akimbo" },
+        });
+        let pair = serde_json::json!({
+            "type": "pair",
+            "index": 0,
+            "candidate_white": {
+                "outcome": "win",
+                "termination": "checkmate",
+                "plies": 2,
+                "nodes": 8,
+                "elapsed_ms": 4,
+                "moves": ["e2e4", "e7e5"]
+            },
+            "candidate_black": {
+                "outcome": "draw",
+                "termination": "draw_rule",
+                "plies": 4,
+                "nodes": 8,
+                "elapsed_ms": 5,
+                "moves": ["d2d4", "d7d5"]
+            }
+        });
+        std::fs::write(&path, format!("{header}\n{pair}\n")).expect("write fixture");
+        let loaded = read_duel_checkpoint(&path).expect("parse fixture");
+        assert_eq!(loaded.candidate_stem(), "mujrim-elite");
+        assert_eq!(loaded.reference_stem(), "akimbo");
+        assert_eq!(loaded.pairs.len(), 1);
+        assert_eq!(loaded.pairs[0].candidate_white.outcome, GameOutcome::Win);
+        assert_eq!(loaded.pairs[0].candidate_white.moves, ["e2e4", "e7e5"]);
+        let _ = std::fs::remove_file(path);
     }
 }

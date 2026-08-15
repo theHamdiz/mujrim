@@ -8,7 +8,7 @@ use mujrim_study::tournament_store::{self, StoredTournament};
 
 use super::settings::AppSettings;
 use super::tournament_live::LiveTournamentSnapshot;
-use super::tournament_setup::TournamentSetup;
+use super::tournament_setup::{TimeControlPreset, TournamentSetup};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -23,6 +23,14 @@ pub struct ActiveTournamentCheckpoint {
     pub black: String,
     pub initial_fen: String,
     pub moves: Vec<String>,
+    pub games_per_encounter: u32,
+    pub concurrency: u32,
+    pub hash_mb: u32,
+    pub engine_threads: u32,
+    pub max_plies: u32,
+    pub time_control: String,
+    pub played_games: u32,
+    pub planned_games: u32,
 }
 
 impl Default for ActiveTournamentCheckpoint {
@@ -38,6 +46,14 @@ impl Default for ActiveTournamentCheckpoint {
             black: String::new(),
             initial_fen: mujrim_study::opening::START_FEN.to_owned(),
             moves: Vec::new(),
+            games_per_encounter: 0,
+            concurrency: 0,
+            hash_mb: 0,
+            engine_threads: 0,
+            max_plies: 0,
+            time_control: String::new(),
+            played_games: 0,
+            planned_games: 0,
         }
     }
 }
@@ -55,9 +71,38 @@ impl ActiveTournamentCheckpoint {
     }
 
     pub fn save(&self) {
-        if let Ok(encoded) = toml::to_string_pretty(self) {
+        let checkpoint = Self::load()
+            .map(|existing| existing.merge_richer(self))
+            .unwrap_or_else(|| self.clone());
+        if let Ok(encoded) = toml::to_string_pretty(&checkpoint) {
             let _ = durable::atomic_write_text(&Self::path(), &encoded);
         }
+    }
+
+    fn merge_richer(self, incoming: &Self) -> Self {
+        if !self.id.is_empty() && self.id != incoming.id {
+            return incoming.clone();
+        }
+        let mut merged = incoming.clone();
+        if self.selected_engine_paths.len() > merged.selected_engine_paths.len() {
+            merged.selected_engine_paths = self.selected_engine_paths;
+        }
+        if self.concurrency > merged.concurrency {
+            merged.concurrency = self.concurrency;
+        }
+        if self.games_per_encounter > merged.games_per_encounter {
+            merged.games_per_encounter = self.games_per_encounter;
+        }
+        if self.played_games > merged.played_games {
+            merged.played_games = self.played_games;
+        }
+        if self.planned_games > merged.planned_games {
+            merged.planned_games = self.planned_games;
+        }
+        if merged.id.is_empty() {
+            merged.id = self.id;
+        }
+        merged
     }
 
     pub fn clear() {
@@ -73,6 +118,14 @@ impl ActiveTournamentCheckpoint {
             format: format_key(setup.format).to_owned(),
             selected_engine_paths: setup.selected_engine_paths.clone(),
             paused: snap.paused || snap.running,
+            games_per_encounter: setup.games_per_encounter,
+            concurrency: setup.concurrency,
+            hash_mb: setup.hash_mb,
+            engine_threads: setup.engine_threads,
+            max_plies: setup.max_plies,
+            time_control: time_control_key(setup.time_control).to_owned(),
+            played_games: snap.played_games.len() as u32,
+            planned_games: snap.planned_games(setup.games_per_encounter) as u32,
             white: live
                 .map(|game| game.white.clone())
                 .filter(|name| !name.is_empty())
@@ -98,6 +151,17 @@ impl ActiveTournamentCheckpoint {
             format: format_key(tournament.format).to_owned(),
             selected_engine_paths: setup.selected_engine_paths.clone(),
             paused: tournament_store::is_resumable_status(&tournament.status),
+            games_per_encounter: setup.games_per_encounter,
+            concurrency: setup.concurrency,
+            hash_mb: setup.hash_mb,
+            engine_threads: setup.engine_threads,
+            max_plies: setup.max_plies,
+            time_control: time_control_key(setup.time_control).to_owned(),
+            played_games: tournament.games.len() as u32,
+            planned_games: crate::app_core::logic::planned_tournament_games_with(
+                tournament,
+                setup.games_per_encounter,
+            ) as u32,
             white: last
                 .map(|game| game.white.clone())
                 .or_else(|| {
@@ -123,6 +187,34 @@ impl ActiveTournamentCheckpoint {
         }
     }
 
+    pub fn apply_setup(&self, setup: &mut TournamentSetup) {
+        setup.event = self.event.clone();
+        setup.site = self.site.clone();
+        setup.format = self.parsed_format();
+        if !self.selected_engine_paths.is_empty() {
+            setup.selected_engine_paths = self.selected_engine_paths.clone();
+        }
+        if self.games_per_encounter > 0 {
+            setup.games_per_encounter = self.games_per_encounter;
+        }
+        if self.concurrency > 0 {
+            setup.concurrency = self.concurrency;
+        }
+        if self.hash_mb > 0 {
+            setup.hash_mb = self.hash_mb;
+        }
+        if self.engine_threads > 0 {
+            setup.engine_threads = self.engine_threads;
+        }
+        if self.max_plies > 0 {
+            setup.max_plies = self.max_plies;
+        }
+        if let Some(time_control) = parse_time_control(&self.time_control) {
+            setup.time_control = time_control;
+        }
+        setup.sanitize_for_gui();
+    }
+
     pub fn parsed_format(&self) -> TournamentFormat {
         match self.format.as_str() {
             "double_round_robin" => TournamentFormat::DoubleRoundRobin,
@@ -130,6 +222,21 @@ impl ActiveTournamentCheckpoint {
             "knockout" => TournamentFormat::Knockout,
             _ => TournamentFormat::RoundRobin,
         }
+    }
+}
+
+fn time_control_key(preset: TimeControlPreset) -> &'static str {
+    match preset {
+        TimeControlPreset::ThreePlusTwo => "three_plus_two",
+        TimeControlPreset::FivePlusThree => "five_plus_three",
+    }
+}
+
+fn parse_time_control(value: &str) -> Option<TimeControlPreset> {
+    match value {
+        "three_plus_two" => Some(TimeControlPreset::ThreePlusTwo),
+        "five_plus_three" => Some(TimeControlPreset::FivePlusThree),
+        _ => None,
     }
 }
 
@@ -182,5 +289,65 @@ mod tests {
         assert_eq!(checkpoint.moves, ["e2e4"]);
         assert!(checkpoint.paused);
         assert_eq!(checkpoint.parsed_format(), TournamentFormat::RoundRobin);
+    }
+
+    #[test]
+    fn apply_setup_restores_clock_and_games_per_encounter() {
+        let checkpoint = ActiveTournamentCheckpoint {
+            event: "V2".into(),
+            format: "double_round_robin".into(),
+            games_per_encounter: 2,
+            concurrency: 4,
+            hash_mb: 128,
+            engine_threads: 1,
+            max_plies: 400,
+            time_control: "five_plus_three".into(),
+            selected_engine_paths: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            ..ActiveTournamentCheckpoint::default()
+        };
+        let mut setup = TournamentSetup::default();
+        checkpoint.apply_setup(&mut setup);
+        assert_eq!(setup.event, "V2");
+        assert_eq!(setup.format, TournamentFormat::DoubleRoundRobin);
+        assert_eq!(setup.games_per_encounter, 2);
+        assert_eq!(setup.time_control, TimeControlPreset::FivePlusThree);
+        assert_eq!(setup.hash_mb, 128);
+        assert_eq!(setup.concurrency, 4);
+    }
+
+    #[test]
+    fn merge_richer_keeps_the_larger_roster_and_simul() {
+        let rich = ActiveTournamentCheckpoint {
+            id: "t-1".into(),
+            selected_engine_paths: vec![
+                PathBuf::from("/tmp/a"),
+                PathBuf::from("/tmp/b"),
+                PathBuf::from("/tmp/c"),
+            ],
+            concurrency: 15,
+            games_per_encounter: 2,
+            ..ActiveTournamentCheckpoint::default()
+        };
+        let thin = ActiveTournamentCheckpoint {
+            id: "t-1".into(),
+            selected_engine_paths: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            concurrency: 1,
+            games_per_encounter: 1,
+            paused: true,
+            ..ActiveTournamentCheckpoint::default()
+        };
+        let merged = rich.clone().merge_richer(&thin);
+        assert_eq!(merged.selected_engine_paths.len(), 3);
+        assert_eq!(merged.concurrency, 15);
+        assert_eq!(merged.games_per_encounter, 2);
+        assert!(merged.paused);
+        let richer_counts = ActiveTournamentCheckpoint {
+            played_games: 1278,
+            planned_games: 1368,
+            ..rich
+        };
+        let merged = richer_counts.merge_richer(&thin);
+        assert_eq!(merged.played_games, 1278);
+        assert_eq!(merged.planned_games, 1368);
     }
 }

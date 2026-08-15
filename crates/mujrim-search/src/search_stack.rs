@@ -31,6 +31,10 @@ impl EvalMode {
         matches!(self, Self::Nnue(NnueSearchProfile::Reckless))
     }
 
+    pub const fn is_stockfish_nnue(self) -> bool {
+        matches!(self, Self::Nnue(NnueSearchProfile::Stockfish))
+    }
+
     /// In-process Lc0 has no transformer net; search still uses Reckless
     /// check-extension / root-quiet gates.
     pub const fn is_lc0_nnue(self) -> bool {
@@ -451,6 +455,8 @@ mod tests {
             stack.eval_mode(),
             EvalMode::Nnue(NnueSearchProfile::Stockfish)
         );
+        assert!(stack.eval_mode().is_stockfish_nnue());
+        assert!(!stack.eval_mode().is_reckless_nnue());
         assert_eq!(stack.params.nmp_base, 5);
         assert!(matches!(stack.policies.lmr, LmrDispatch::StockLike));
         assert!(matches!(stack.policies.lmp, LmpDispatch::StockLike));

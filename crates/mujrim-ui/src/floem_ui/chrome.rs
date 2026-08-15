@@ -34,6 +34,9 @@ pub fn shell(
     });
     Stack::new((body, resize_edges()))
         .style(|s| s.size_full())
+        .on_event_cont(el::WindowClosed, move |_, _| {
+            actions::shutdown_ui_resources(state, &handles);
+        })
         .into_any()
 }
 
@@ -58,7 +61,7 @@ fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl 
     });
     Stack::new((
         drag_window_area(Empty::new()).style(|s| s.size_full().absolute()),
-        nav_pills(state, handles).style(|s| {
+        nav_pills(state, handles.clone()).style(|s| {
             s.absolute()
                 .inset_left(0.0)
                 .inset_right(0.0)
@@ -70,7 +73,7 @@ fn title_bar(window_id: WindowId, state: AppState, handles: AppHandles) -> impl 
                 .z_index(1)
         }),
         brand.style(|s| s.absolute().inset_left(0.0).height_full().z_index(2)),
-        window_controls(window_id, state).style(|s| {
+        window_controls(window_id, state, handles).style(|s| {
             s.absolute()
                 .inset_right(0.0)
                 .height_full()
@@ -286,11 +289,14 @@ fn pill(
     })
 }
 
-fn window_controls(window_id: WindowId, state: AppState) -> impl IntoView {
+fn window_controls(window_id: WindowId, state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::horizontal((
         icon_btn(state, icons::MINUS, minimize_window),
         icon_btn(state, icons::SQUARE, toggle_window_maximized),
-        icon_btn(state, icons::X, move || floem::close_window(window_id)),
+        icon_btn(state, icons::X, move || {
+            actions::shutdown_ui_resources(state, &handles);
+            floem::close_window(window_id);
+        }),
     ))
     .style(|s| s.col_gap(2.0).padding_right(8.0).items_center())
 }
@@ -363,6 +369,14 @@ mod tests {
         assert!(
             production.contains("open_tournaments_screen"),
             "Tournaments nav must resume a paused event or open setup"
+        );
+        assert!(
+            production.contains("shutdown_ui_resources"),
+            "closing the window must stop engines and persist a paused event"
+        );
+        assert!(
+            production.contains("el::WindowClosed"),
+            "Alt+F4 / compositor close must use the same shutdown path as the X button"
         );
         assert!(
             production.contains("ensure_study_board"),

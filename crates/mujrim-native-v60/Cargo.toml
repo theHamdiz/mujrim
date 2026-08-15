@@ -27,7 +27,7 @@ embedded-network = []
 cc = "1.2.19"
 
 [dependencies]
-libc = "0.2.175"
+libc = "0.2.189"
 sha2 = "0.10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

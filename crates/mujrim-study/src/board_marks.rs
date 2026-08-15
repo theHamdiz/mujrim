@@ -177,19 +177,34 @@ pub fn step_badge_svg(step: u8) -> String {
     )
 }
 
-fn digit_paths(digit: u8) -> &'static str {
-    match digit % 10 {
-        0 => r##"<path fill="#fff" d="M11 8h10v2.4H13.4v11.2H21V24H11z"/>"##,
-        1 => r##"<path fill="#fff" d="M14.2 8h3.4v13.6H21V24h-8.4v-2.4h1.6z"/>"##,
-        2 => r##"<path fill="#fff" d="M11 8h10v2.4h-6.6v3.2H21v10.4H11v-2.4h6.6v-3.2H11z"/>"##,
-        3 => r##"<path fill="#fff" d="M11 8h10v16H11v-2.4h6.6v-3.2H12.2v-2.4h5.4V10.4H11z"/>"##,
-        4 => r##"<path fill="#fff" d="M11 8h2.6v6.4H21V8h2.4v16h-2.4v-6.4h-7.4V8z"/>"##,
-        5 => r##"<path fill="#fff" d="M11 8h10v2.4h-7.4v3.2H21v10.4H11v-2.4h7.4v-3.2H11z"/>"##,
-        6 => r##"<path fill="#fff" d="M11 8h10v2.4h-7.4v3.2H21v10.4H11zm2.6 8.8v4.8h7.4v-4.8z"/>"##,
-        7 => r##"<path fill="#fff" d="M11 8h10v2.6l-5.2 13.4h-2.8L18.4 10.6H11z"/>"##,
-        8 => r##"<path fill="#fff" d="M11 8h10v16H11zm2.4 2.4v3.4h5.2V10.4zm0 6.2v5h5.2v-5z"/>"##,
-        _ => r##"<path fill="#fff" d="M11 8h10v16h-2.6V14.8H11V8zm2.4 2.4v2h5.2v-2z"/>"##,
-    }
+fn digit_paths(digit: u8) -> String {
+    // Seven-segment bars stay readable at badge size. Filled blobs were
+    // painting as unrelated shapes after the Inter font switch.
+    const A: &str = r##"<path fill="#fff" d="M11.1 7.5h9.8v2.3H11.1z"/>"##;
+    const B: &str = r##"<path fill="#fff" d="M19.6 8.2h2.3v6.6h-2.3z"/>"##;
+    const C: &str = r##"<path fill="#fff" d="M19.6 17.2h2.3v6.6h-2.3z"/>"##;
+    const D: &str = r##"<path fill="#fff" d="M11.1 22.2h9.8v2.3H11.1z"/>"##;
+    const E: &str = r##"<path fill="#fff" d="M10.1 17.2h2.3v6.6h-2.3z"/>"##;
+    const F: &str = r##"<path fill="#fff" d="M10.1 8.2h2.3v6.6h-2.3z"/>"##;
+    const G: &str = r##"<path fill="#fff" d="M11.1 14.85h9.8v2.3H11.1z"/>"##;
+    let mask = match digit % 10 {
+        0 => 0b1111110,
+        1 => 0b0110000,
+        2 => 0b1101101,
+        3 => 0b1111001,
+        4 => 0b0110011,
+        5 => 0b1011011,
+        6 => 0b1011111,
+        7 => 0b1110000,
+        8 => 0b1111111,
+        _ => 0b1111011,
+    };
+    [A, B, C, D, E, F, G]
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| mask & (1 << (6 - index)) != 0)
+        .map(|(_, segment)| segment)
+        .collect()
 }
 
 /// Last-move highlight as a solid arrow.
@@ -238,6 +253,12 @@ mod tests {
         assert!(badge.contains("<circle"));
         assert!(badge.contains("path"));
         assert!(!badge.contains("> <"));
+        assert!(!badge.contains("<text"));
+        let one = step_badge_svg(1);
+        let eight = step_badge_svg(8);
+        assert!(eight.matches("<path").count() > one.matches("<path").count());
+        assert_eq!(digit_paths(1).matches("<path").count(), 2);
+        assert_eq!(digit_paths(8).matches("<path").count(), 7);
     }
 
     #[test]

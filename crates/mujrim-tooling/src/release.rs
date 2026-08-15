@@ -45,6 +45,35 @@ const CROSS_EXCLUDE_OTHER: &[&str] = &["mujrim-ui"];
 #[allow(dead_code)]
 const DEV_ONLY: &[&str] = &["mujrim-tooling", "mujrim-tests"];
 
+/// Dist / release artifacts always use fat-LTO `[profile.release]`, never `desktop-release`.
+const DIST_BUILD_ENV: &[(&str, &str)] = &[
+    ("CARGO_BUILD_JOBS", "1"),
+    ("CARGO_PROFILE_RELEASE_LTO", "fat"),
+    ("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1"),
+    ("CARGO_PROFILE_RELEASE_OPT_LEVEL", "3"),
+    ("CARGO_PROFILE_RELEASE_PANIC", "abort"),
+    ("CARGO_PROFILE_RELEASE_STRIP", "true"),
+    ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
+    ("CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", "false"),
+    ("CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS", "false"),
+    ("CARGO_PROFILE_RELEASE_INCREMENTAL", "false"),
+];
+
+fn run_dist_cargo(args: &[&str], extra_env: &[(&str, &str)]) -> Result<(), String> {
+    if !args.contains(&"--release") {
+        return Err("dist artifacts must be built with cargo --release".into());
+    }
+    if args
+        .iter()
+        .any(|arg| *arg == "--profile" || arg.contains("desktop-release"))
+    {
+        return Err("dist artifacts must use the fat-LTO release profile".into());
+    }
+    let mut env = DIST_BUILD_ENV.to_vec();
+    env.extend_from_slice(extra_env);
+    run("cargo", args, &env)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WindowsMsvcTarget {
     triple: &'static str,
@@ -165,9 +194,7 @@ impl ToolAction for ReleaseAction {
 
 fn build_native() -> Result<(), String> {
     println!("🔨 Building all Mujrim crates (optimized release, runtime ISA dispatch)...");
-    let environment = [("CARGO_BUILD_JOBS", "1")];
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -177,10 +204,9 @@ fn build_native() -> Result<(), String> {
             "--exclude",
             "mujrim-installer",
         ],
-        &environment,
+        &[],
     )?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -189,14 +215,13 @@ fn build_native() -> Result<(), String> {
             "--features",
             "syzygy",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim-v60", "mujrim-v60-external")?;
     let arch = host_packaging_arch();
     // Product set: elite / external / v60 / ak / viri / obs
     // Never enable embedded-networks on top of default features — that embeds every net.
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -206,11 +231,10 @@ fn build_native() -> Result<(), String> {
             "--features",
             EXTERNAL_ENGINE_FEATURES,
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim", "mujrim-external")?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -220,12 +244,11 @@ fn build_native() -> Result<(), String> {
             "--features",
             "xboard,book,nnue,simd,stockfish-nnue,embedded-networks",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim", &adapter_binary_stem("mujrim-elite", &arch))?;
     snapshot_engine("mujrim", "mujrim-embedded")?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -235,11 +258,10 @@ fn build_native() -> Result<(), String> {
             "--features",
             "xboard,book,nnue,simd,akimbo-nnue,embedded-networks",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim", &adapter_binary_stem("mujrim-ak", &arch))?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -248,12 +270,11 @@ fn build_native() -> Result<(), String> {
             "--features",
             "syzygy,embedded-network",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim-v60", &adapter_binary_stem("mujrim-v60", &arch))?;
     snapshot_engine("mujrim-v60", "mujrim-v60-embedded")?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -263,11 +284,10 @@ fn build_native() -> Result<(), String> {
             "--features",
             "xboard,book,nnue,simd,viridithas-nnue",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim", "mujrim-viri")?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -277,11 +297,10 @@ fn build_native() -> Result<(), String> {
             "--features",
             "xboard,book,nnue,simd,obsidian-nnue",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim", "mujrim-obs")?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -291,11 +310,10 @@ fn build_native() -> Result<(), String> {
             "--features",
             "xboard,book,nnue,simd,plentychess-nnue",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim", "mujrim-plenty")?;
-    run(
-        "cargo",
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -305,18 +323,13 @@ fn build_native() -> Result<(), String> {
             "--features",
             "xboard,book,nnue,simd,ateed-nnue",
         ],
-        &environment,
+        &[],
     )?;
     snapshot_engine("mujrim", "mujrim-ateed")?;
     // Leave mujrim.exe as the lean external (no embedded net).
     snapshot_engine("mujrim-external", "mujrim")?;
-    run(
-        "cargo",
-        &["build", "--release", "-p", "mujrim-ui"],
-        &environment,
-    )?;
-    run(
-        "cargo",
+    run_dist_cargo(&["build", "--release", "-p", "mujrim-ui"], &[])?;
+    run_dist_cargo(
         &[
             "build",
             "--release",
@@ -325,7 +338,7 @@ fn build_native() -> Result<(), String> {
             "--features",
             "embed",
         ],
-        &environment,
+        &[],
     )?;
     publish_native_dist()?;
     println!(
@@ -478,8 +491,7 @@ fn build_darwin() -> Result<(), String> {
     if has_aarch64 {
         println!("  → aarch64 (Apple Silicon)...");
         let args = cross_cargo_args("aarch64-apple-darwin", CROSS_EXCLUDE_OTHER);
-        match run(
-            "cargo",
+        match run_dist_cargo(
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             &[("RUSTFLAGS", "")],
         ) {
@@ -499,8 +511,7 @@ fn build_darwin() -> Result<(), String> {
     if has_x86 {
         println!("  → x86_64 (Intel Mac)...");
         let args = cross_cargo_args("x86_64-apple-darwin", CROSS_EXCLUDE_OTHER);
-        match run(
-            "cargo",
+        match run_dist_cargo(
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             &[("RUSTFLAGS", "")],
         ) {
@@ -555,8 +566,7 @@ fn build_linux() -> Result<(), String> {
         } else {
             cross_cargo_args("x86_64-unknown-linux-gnu", CROSS_EXCLUDE_LINUX)
         };
-        match run(
-            "cargo",
+        match run_dist_cargo(
             &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             &[("RUSTFLAGS", "")],
         ) {
@@ -579,8 +589,7 @@ fn build_linux() -> Result<(), String> {
         } else {
             println!("  → aarch64 (ARM64)...");
             let args = cross_cargo_args("aarch64-unknown-linux-gnu", CROSS_EXCLUDE_LINUX);
-            match run(
-                "cargo",
+            match run_dist_cargo(
                 &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 &[("RUSTFLAGS", "")],
             ) {
@@ -633,8 +642,7 @@ fn build_windows() -> Result<(), String> {
 
     println!("  → x86_64 (Windows)...");
     let args = cross_cargo_args(target, CROSS_EXCLUDE_OTHER);
-    run(
-        "cargo",
+    run_dist_cargo(
         &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         &[("RUSTFLAGS", "")],
     )?;
@@ -670,10 +678,9 @@ fn build_windows_msvc() -> Result<(), String> {
 
         println!("  -> {}...", target.triple);
         let args = cross_cargo_args(target.triple, CROSS_EXCLUDE_OTHER);
-        run(
-            "cargo",
+        run_dist_cargo(
             &args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>(),
-            &[("CARGO_BUILD_JOBS", "1"), ("RUSTFLAGS", "")],
+            &[("RUSTFLAGS", "")],
         )?;
 
         let source = PathBuf::from(format!("target/{}/release", target.triple));
@@ -1060,6 +1067,32 @@ mod tests {
             snapshot.contains("if source == destination"),
             "copying mujrim-v60 onto itself truncates the file to 0 bytes"
         );
+    }
+
+    #[test]
+    fn dist_builds_always_use_the_fat_lto_release_profile() {
+        let src = include_str!("release.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("run_dist_cargo"));
+        assert!(production.contains("CARGO_PROFILE_RELEASE_LTO"));
+        assert!(production.contains("\"fat\""));
+        assert!(
+            !production.contains("--profile desktop-release"),
+            "dist artifacts must not select the thin-LTO desktop profile"
+        );
+        let cargo_calls = production.matches("run_dist_cargo(").count();
+        assert!(
+            cargo_calls >= 12,
+            "missing dist cargo wrappers: {cargo_calls}"
+        );
+        assert_eq!(
+            production.matches("run(\n        \"cargo\"").count()
+                + production.matches("run(\n            \"cargo\"").count(),
+            0
+        );
+        let args = cross_cargo_args("x86_64-unknown-linux-gnu", CROSS_EXCLUDE_LINUX);
+        assert!(args.iter().any(|arg| arg == "--release"));
+        assert!(!args.iter().any(|arg| arg == "--profile"));
     }
 
     #[test]

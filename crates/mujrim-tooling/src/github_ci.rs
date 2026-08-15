@@ -131,6 +131,26 @@ mod tests {
     }
 
     #[test]
+    fn release_artifacts_use_fat_lto_release_profile() {
+        let src = release();
+        assert!(src.contains("cargo build --release"));
+        assert!(src.contains("CARGO_PROFILE_RELEASE_LTO: fat"));
+        assert!(
+            !src.contains("--profile"),
+            "release.yml must not select a weaker Cargo profile for dist artifacts"
+        );
+        assert!(!src.contains("desktop-release"));
+        let justfile = read("justfile");
+        assert!(justfile.contains("CARGO_PROFILE_RELEASE_LTO=fat"));
+        assert!(justfile.contains("dist: release"));
+        assert!(justfile.contains("dist_cargo_env"));
+        let manifest = read("Cargo.toml");
+        assert!(manifest.contains("lto = \"fat\""));
+        assert!(manifest.contains("codegen-units = 1"));
+        assert!(manifest.contains("opt-level = 3"));
+    }
+
+    #[test]
     fn release_cross_matches_ci_install_strategy() {
         let src = release();
         assert!(src.contains("taiki-e/install-action@v2"));

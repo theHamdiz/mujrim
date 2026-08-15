@@ -219,6 +219,7 @@ pub struct LiveTournamentSnapshot {
     pub cancelled: bool,
     pub finished: bool,
     pub paused: bool,
+    pub games_per_encounter: u32,
     pub status_line: String,
     pub error: Option<String>,
     pub show_results_panel: bool,
@@ -231,6 +232,37 @@ pub fn games_per_match(games_per_encounter: u32) -> usize {
     (games_per_encounter.max(1) as usize).saturating_mul(GAMES_PER_ENCOUNTER_PAIR)
 }
 
+fn played_game_key(game: &PlayedGame) -> (String, String, String, String, u64) {
+    (
+        game.white.clone(),
+        game.black.clone(),
+        game.initial_fen.clone(),
+        game.moves.join(" "),
+        game.white_score.to_bits(),
+    )
+}
+
+fn unique_played_game_count(games: &[PlayedGame]) -> usize {
+    games
+        .iter()
+        .map(played_game_key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+fn pairings_from_engine_names(engine_names: &[String], format_label: &str) -> usize {
+    if engine_names.len() < 2 {
+        return 0;
+    }
+    let format = match format_label {
+        "Double round robin" => TournamentFormat::DoubleRoundRobin,
+        "Swiss" => TournamentFormat::Swiss,
+        "Knockout" => TournamentFormat::Knockout,
+        _ => TournamentFormat::RoundRobin,
+    };
+    mujrim_study::tournament::schedule(engine_names.len(), format).len()
+}
+
 impl LiveTournamentSnapshot {
     pub fn progress_fraction(&self) -> f32 {
         if self.total_matches == 0 {
@@ -239,9 +271,31 @@ impl LiveTournamentSnapshot {
         (self.completed_matches as f32 / self.total_matches as f32).clamp(0.0, 1.0)
     }
 
+    pub fn encounter_games(&self, fallback: u32) -> u32 {
+        self.games_per_encounter.max(fallback).max(1)
+    }
+
+    pub fn unique_played_count(&self) -> usize {
+        unique_played_game_count(&self.played_games)
+    }
+
     pub fn planned_games(&self, games_per_encounter: u32) -> usize {
-        self.total_matches
-            .saturating_mul(games_per_match(games_per_encounter))
+        let matches = if self.total_matches > 0 {
+            self.total_matches
+        } else {
+            pairings_from_engine_names(&self.engine_names, &self.format_label)
+        };
+        matches.saturating_mul(games_per_match(self.encounter_games(games_per_encounter)))
+    }
+
+    pub fn progress_summary(&self, games_per_encounter: u32, live: usize) -> String {
+        let planned = self.planned_games(games_per_encounter);
+        let played = self.unique_played_count();
+        let left = self.remaining_games(games_per_encounter);
+        if planned == 0 {
+            return "No games scheduled".to_owned();
+        }
+        format!("{played}/{planned} played · {left} left · {live} live")
     }
 
     pub fn remaining_matches(&self) -> usize {
@@ -249,11 +303,12 @@ impl LiveTournamentSnapshot {
     }
 
     pub fn remaining_games(&self, games_per_encounter: u32) -> usize {
-        if self.finished && !self.cancelled {
+        let planned = self.planned_games(games_per_encounter);
+        let played = self.unique_played_count();
+        if self.finished && !self.cancelled && played >= planned {
             return 0;
         }
-        self.planned_games(games_per_encounter)
-            .saturating_sub(self.played_games.len())
+        planned.saturating_sub(played)
     }
 
     pub fn game_progress_fraction(&self, games_per_encounter: u32) -> f32 {
@@ -261,7 +316,7 @@ impl LiveTournamentSnapshot {
         if total == 0 {
             return self.progress_fraction();
         }
-        (self.played_games.len() as f32 / total as f32).clamp(0.0, 1.0)
+        (self.unique_played_count() as f32 / total as f32).clamp(0.0, 1.0)
     }
 
     pub fn remaining_games_label(&self, games_per_encounter: u32) -> String {
@@ -308,8 +363,15 @@ impl LiveTournamentSnapshot {
 
     pub fn append_games(&mut self, games: Vec<TournamentGameSnapshot>) {
         for game in games {
-            let id = self.played_games.len();
-            self.played_games.push(PlayedGame::from_snapshot(id, game));
+            let played = PlayedGame::from_snapshot(self.played_games.len(), game);
+            if self
+                .played_games
+                .iter()
+                .any(|existing| played_game_key(existing) == played_game_key(&played))
+            {
+                continue;
+            }
+            self.played_games.push(played);
         }
     }
 
@@ -362,6 +424,7 @@ impl LiveTournamentSnapshot {
         self.current_black = src.current_black.clone();
         self.total_matches = src.total_matches;
         self.completed_matches = src.completed_matches;
+        self.games_per_encounter = src.games_per_encounter.max(self.games_per_encounter);
         self.engine_names.clone_from(&src.engine_names);
         self.standings.clone_from(&src.standings);
         self.finished_matches.clone_from(&src.finished_matches);
@@ -801,6 +864,23 @@ mod tests {
         snap.completed_matches = 4;
         assert!((snap.progress_fraction() - 1.0).abs() < f32::EPSILON);
         snap.finished = true;
+        assert_eq!(
+            snap.remaining_games(1),
+            7,
+            "a finished flag must not hide remaining work after a bad resume"
+        );
+        snap.played_games = (0..8)
+            .map(|id| PlayedGame {
+                id,
+                match_index: id,
+                round: 1,
+                white: "A".into(),
+                black: "B".into(),
+                white_score: 0.5,
+                initial_fen: format!("fen-{id}"),
+                moves: Vec::new(),
+            })
+            .collect();
         assert_eq!(snap.remaining_games(1), 0);
         assert_eq!(snap.remaining_games_label(1), "0 games remaining");
         assert_eq!(snap.phase_label(), "Finished");
@@ -911,6 +991,28 @@ mod tests {
             }
             .remaining_games_label(1),
             "1 game remaining"
+        );
+        let unnamed = LiveTournamentSnapshot {
+            format_label: "Double round robin".into(),
+            engine_names: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            played_games: vec![PlayedGame {
+                id: 0,
+                match_index: 1,
+                round: 1,
+                white: "A".into(),
+                black: "B".into(),
+                white_score: 1.0,
+                initial_fen: String::new(),
+                moves: Vec::new(),
+            }],
+            ..LiveTournamentSnapshot::default()
+        };
+        assert_eq!(unnamed.total_matches, 0);
+        assert_eq!(unnamed.planned_games(2), 48);
+        assert_eq!(unnamed.remaining_games(2), 47);
+        assert_eq!(
+            unnamed.progress_summary(2, 15),
+            "1/48 played · 47 left · 15 live"
         );
     }
 
@@ -1230,5 +1332,46 @@ mod tests {
         assert_eq!(snap.game(0).unwrap().result_label(), "1-0");
         assert!(snap.game(0).unwrap().title().contains("Alpha"));
         assert_eq!(snap.game(0).unwrap().moves.len(), 2);
+        snap.append_games(vec![TournamentGameSnapshot {
+            match_index: 1,
+            round: 1,
+            white: "Alpha".into(),
+            black: "Beta".into(),
+            white_score: 1.0,
+            initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+            moves: vec!["e2e4".into(), "e7e5".into()],
+        }]);
+        assert_eq!(snap.played_games.len(), 2);
+    }
+
+    #[test]
+    fn remaining_games_survive_resume_with_restored_encounter_size() {
+        let snap = LiveTournamentSnapshot {
+            format_label: "Double round robin".into(),
+            engine_names: (0..19).map(|index| format!("E{index}")).collect(),
+            total_matches: 342,
+            games_per_encounter: 2,
+            played_games: (0..1248)
+                .map(|id| PlayedGame {
+                    id,
+                    match_index: id,
+                    round: 1,
+                    white: format!("W{id}"),
+                    black: format!("B{id}"),
+                    white_score: 0.5,
+                    initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+                    moves: vec![format!("m{id}")],
+                })
+                .collect(),
+            paused: true,
+            running: false,
+            ..LiveTournamentSnapshot::default()
+        };
+        assert_eq!(snap.planned_games(1), 1368);
+        assert_eq!(snap.remaining_games(1), 120);
+        assert_eq!(
+            snap.progress_summary(1, 15),
+            "1248/1368 played · 120 left · 15 live"
+        );
     }
 }

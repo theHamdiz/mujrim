@@ -15,6 +15,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_RELEASE_LTO: fat
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: 3
+  CARGO_PROFILE_RELEASE_PANIC: abort
+  CARGO_PROFILE_RELEASE_STRIP: "true"
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+  CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && (inputs.tag != '' && inputs.tag || format('dryrun-{0}', github.sha)) || github.ref_name }}
 
 jobs:

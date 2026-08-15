@@ -7,28 +7,32 @@ default: build
 build:
     CARGO_BUILD_JOBS=1 cargo build --release -p mujrim
 
+# Fat-LTO [profile.release] for every recipe that writes dist/ artifacts.
+dist_cargo_env := "CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_PROFILE_RELEASE_PANIC=abort CARGO_PROFILE_RELEASE_STRIP=true CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_PROFILE_RELEASE_INCREMENTAL=false"
+
 # Build optimized release binaries for all crates with runtime ISA dispatch.
 release:
-    cargo run --release -p mujrim-tooling -- release native
+    {{dist_cargo_env}} cargo run --release -p mujrim-tooling -- release native
 
 # Native release plus product copies into dist/<os-arch>/.
+# Dist artifacts always use Cargo's fat-LTO [profile.release], never desktop-release.
 dist: release
 
 # Release build for macOS (aarch64 + x86_64)
 release-darwin:
-    cargo run --release -p mujrim-tooling -- release darwin
+    {{dist_cargo_env}} cargo run --release -p mujrim-tooling -- release darwin
 
 # Release build for Linux (x86_64 + aarch64)
 release-linux:
-    cargo run --release -p mujrim-tooling -- release linux
+    {{dist_cargo_env}} cargo run --release -p mujrim-tooling -- release linux
 
 # Release build for Windows (x86_64, requires cargo-xwin or cross)
 release-win:
-    cargo run --release -p mujrim-tooling -- release win
+    {{dist_cargo_env}} cargo run --release -p mujrim-tooling -- release win
 
 # Release build for ALL platforms
 release-full:
-    cargo run --release -p mujrim-tooling -- release full
+    {{dist_cargo_env}} cargo run --release -p mujrim-tooling -- release full
 
 # Run optimized tests with a memory-safe release-derived profile.
 test:

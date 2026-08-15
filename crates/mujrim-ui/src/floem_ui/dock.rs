@@ -10,6 +10,7 @@ use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
 
 use super::eval_graph;
+use super::icons;
 use super::state::{AppHandles, AppState};
 use super::theme;
 use super::widgets;
@@ -177,8 +178,10 @@ fn tab_bar(state: AppState) -> impl IntoView {
             }),
         ))
         .style(|s| s.col_gap(4.0).items_center()),
-        Button::new(Label::derived(move || {
-            if state.dock_open.get() { "▾" } else { "▴" }
+        Button::new(dyn_view(move || {
+            svg(icons::chevron(state.dock_open.get()))
+                .style(|s| s.size(12, 12))
+                .into_any()
         }))
         .action(move || {
             state.dock_open.update(|open| *open = !*open);
@@ -454,6 +457,14 @@ mod tests {
         assert!(
             production.contains("tab == DockTab::Results"),
             "arena dock must stay on rankings"
+        );
+        assert!(
+            production.contains("icons::chevron"),
+            "dock disclosure must use a bundled Lucide chevron"
+        );
+        assert!(
+            !production.contains('▴') && !production.contains('▾'),
+            "dock must not depend on geometric triangles missing from Inter"
         );
     }
 }

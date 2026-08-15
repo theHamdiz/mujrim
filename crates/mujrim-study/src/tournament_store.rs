@@ -251,9 +251,10 @@ pub fn list_tournaments(sqlite: &Connection) -> Result<Vec<StoredTournament>, St
     let mut tournaments = Vec::new();
     for row in rows {
         let id = row.map_err(|error| format!("invalid tournament row: {error}"))?;
-        let tournament = load_tournament(sqlite, &id)?
-            .ok_or_else(|| format!("tournament '{id}' listed but missing during load"))?;
-        tournaments.push(tournament);
+        match load_tournament(sqlite, &id) {
+            Ok(Some(tournament)) => tournaments.push(tournament),
+            Ok(None) | Err(_) => continue,
+        }
     }
     Ok(tournaments)
 }
@@ -455,5 +456,46 @@ mod tests {
         ));
         assert!(!is_resumable_status("cancelled"));
         assert_eq!(lifecycle_status(true, true, false, false), STATUS_PAUSED);
+    }
+
+    #[test]
+    fn list_tournaments_skips_corrupt_rows() {
+        let root = temporary_root();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        let tournament = StoredTournament {
+            id: "good".to_owned(),
+            name: "Keep Me".to_owned(),
+            format: TournamentFormat::RoundRobin,
+            created_at: 2,
+            status: STATUS_PAUSED.to_owned(),
+            entrants: vec![
+                Entrant {
+                    id: "a".into(),
+                    name: "Alpha".into(),
+                    seed_elo: None,
+                },
+                Entrant {
+                    id: "b".into(),
+                    name: "Beta".into(),
+                    seed_elo: None,
+                },
+            ],
+            results: Vec::new(),
+            games: Vec::new(),
+        };
+        database.save_tournament(&tournament).unwrap();
+        rusqlite::Connection::open(root.join("mujrim.sqlite3"))
+            .unwrap()
+            .execute(
+                "INSERT INTO tournaments(id,name,format,status,created_at)
+                 VALUES ('bad','Broken','not_a_format','finished',1)",
+                [],
+            )
+            .unwrap();
+        let listed = database.list_tournaments().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "good");
+        drop(database);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

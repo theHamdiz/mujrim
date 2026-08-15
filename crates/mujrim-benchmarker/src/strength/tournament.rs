@@ -10,7 +10,7 @@ use mujrim_study::tournament::{
     knockout_round, schedule, standings, swiss_round,
 };
 
-use super::runner::FailedEngine;
+use super::runner::{DuelCheckpoint, FailedEngine};
 use super::{
     EngineSpec, GameProgressEvent, MatchConfig, MatchSummary, ensure_scored_match,
     forfeit_match_summary, run_match,
@@ -202,6 +202,117 @@ pub fn games_from_match(
         });
     }
     games
+}
+
+/// Games, pairing results, and finished encounters recovered from jsonl sidecars.
+#[derive(Clone, Debug, Default)]
+pub struct ReconstructedTournament {
+    pub games: Vec<TournamentGameSnapshot>,
+    pub results: Vec<TournamentResult>,
+    pub completed_pairings: Vec<Pairing>,
+    pub games_per_encounter: usize,
+}
+
+/// Rebuild standings inputs from on-disk duel checkpoints.
+///
+/// A pairing is complete when its sidecar has at least `games_per_encounter`
+/// pair records. Incomplete encounters are omitted so resume replays them.
+pub fn reconstruct_tournament(
+    roster_names: &[String],
+    format: TournamentFormat,
+    checkpoints: &[DuelCheckpoint],
+    games_per_encounter: usize,
+) -> ReconstructedTournament {
+    let games_per_encounter = games_per_encounter.max(1);
+    let plan = schedule(roster_names.len(), format);
+    let mut reconstructed = ReconstructedTournament {
+        games_per_encounter,
+        ..ReconstructedTournament::default()
+    };
+    for (match_index, pairing) in plan.iter().copied().enumerate() {
+        let Some(white) = roster_names.get(pairing.white) else {
+            continue;
+        };
+        let Some(black) = roster_names.get(pairing.black) else {
+            continue;
+        };
+        let Some(checkpoint) = checkpoints.iter().find(|checkpoint| {
+            stems_match(&checkpoint.candidate_stem(), white)
+                && stems_match(&checkpoint.reference_stem(), black)
+        }) else {
+            continue;
+        };
+        if checkpoint.pairs.len() < games_per_encounter {
+            continue;
+        }
+        reconstructed.completed_pairings.push(pairing);
+        let summary = MatchSummary {
+            candidate: white.clone(),
+            reference: black.clone(),
+            pairs: checkpoint.pairs.clone(),
+            ..empty_match_summary()
+        };
+        reconstructed
+            .games
+            .extend(games_from_match(&summary, match_index + 1, pairing.round));
+        append_game_results(pairing, &summary, &mut reconstructed.results);
+    }
+    reconstructed
+}
+
+fn empty_match_summary() -> MatchSummary {
+    MatchSummary {
+        candidate: String::new(),
+        reference: String::new(),
+        pairs: Vec::new(),
+        scores: super::stats::ScoreCount::default(),
+        pair_counts: super::stats::PairCount::default(),
+        elo_delta: 0.0,
+        elo_low: 0.0,
+        elo_high: 0.0,
+        llr: 0.0,
+        sprt_decision: super::stats::SprtDecision::Continue,
+        total_nodes: 0,
+        elapsed: std::time::Duration::ZERO,
+        error: None,
+        reference_elo: None,
+        config: MatchConfig::default(),
+        opening_count: 0,
+        opening_fingerprint: String::new(),
+        resumed_pairs: 0,
+    }
+}
+
+fn stems_match(stem: &str, display_name: &str) -> bool {
+    sanitized_engine_stem(stem) == sanitized_engine_stem(display_name)
+}
+
+/// Infer simultaneous boards from unfinished pairings, capped at `max_slots`.
+pub fn infer_event_concurrency(checkpoints: &[DuelCheckpoint], games_per_encounter: usize) -> u32 {
+    let needed = games_per_encounter.max(1);
+    let incomplete = checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.pairs.len() < needed)
+        .count();
+    if incomplete > 1 {
+        return incomplete as u32;
+    }
+    0
+}
+
+/// Infer how many pair records a finished encounter stored.
+pub fn infer_games_per_encounter(checkpoints: &[DuelCheckpoint]) -> usize {
+    let mut counts = std::collections::BTreeMap::new();
+    for checkpoint in checkpoints {
+        if !checkpoint.pairs.is_empty() {
+            *counts.entry(checkpoint.pairs.len()).or_insert(0usize) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(pairs, seen)| (*seen, *pairs))
+        .map(|(pairs, _)| pairs)
+        .unwrap_or(1)
 }
 
 /// Flatten every game across a finished tournament summary.
@@ -934,6 +1045,10 @@ fn append_game_results(
     }
 }
 
+pub fn sanitized_engine_stem(name: &str) -> String {
+    safe_name(name)
+}
+
 fn safe_name(name: &str) -> String {
     let sanitized = name
         .chars()
@@ -950,6 +1065,8 @@ fn safe_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::runner::{EngineTelemetry, GameRecord, PairRecord, Termination};
+    use super::super::stats::GameOutcome;
     use super::*;
 
     #[test]
@@ -1163,5 +1280,73 @@ mod tests {
         );
         assert!(summary.cancelled);
         assert!(summary.matches.is_empty());
+    }
+
+    #[test]
+    fn reconstruct_skips_incomplete_pairings_and_maps_stems() {
+        let finished = DuelCheckpoint {
+            candidate_path: PathBuf::from("/engines/mujrim-elite"),
+            reference_path: PathBuf::from("/engines/akimbo"),
+            opening_fingerprint: String::new(),
+            pairs: vec![PairRecord {
+                index: 0,
+                candidate_white: GameRecord {
+                    candidate_white: true,
+                    outcome: GameOutcome::Win,
+                    termination: Termination::Checkmate,
+                    plies: 2,
+                    nodes: 8,
+                    elapsed: std::time::Duration::from_millis(4),
+                    candidate_telemetry: EngineTelemetry::default(),
+                    reference_telemetry: EngineTelemetry::default(),
+                    moves: vec!["e2e4".into(), "e7e5".into()],
+                },
+                candidate_black: GameRecord {
+                    candidate_white: false,
+                    outcome: GameOutcome::Draw,
+                    termination: Termination::DrawRule,
+                    plies: 4,
+                    nodes: 8,
+                    elapsed: std::time::Duration::from_millis(4),
+                    candidate_telemetry: EngineTelemetry::default(),
+                    reference_telemetry: EngineTelemetry::default(),
+                    moves: vec!["d2d4".into(), "d7d5".into()],
+                },
+            }],
+        };
+        let incomplete = DuelCheckpoint {
+            candidate_path: PathBuf::from("/engines/akimbo"),
+            reference_path: PathBuf::from("/engines/mujrim-elite"),
+            opening_fingerprint: String::new(),
+            pairs: Vec::new(),
+        };
+        let roster = vec!["Akimbo".into(), "Mujrim Elite".into()];
+        assert_eq!(
+            infer_games_per_encounter(std::slice::from_ref(&finished)),
+            1
+        );
+        let rebuilt = reconstruct_tournament(
+            &roster,
+            TournamentFormat::DoubleRoundRobin,
+            &[finished.clone(), incomplete.clone()],
+            1,
+        );
+        assert_eq!(rebuilt.completed_pairings.len(), 1);
+        assert_eq!(rebuilt.games.len(), 2);
+        assert_eq!(rebuilt.results.len(), 2);
+        assert_eq!(rebuilt.games[0].white, "Mujrim Elite");
+        assert_eq!(
+            infer_event_concurrency(&[finished, incomplete.clone()], 1),
+            0,
+            "a single unfinished pairing is not a simul"
+        );
+        let live = vec![
+            DuelCheckpoint {
+                pairs: Vec::new(),
+                ..incomplete
+            };
+            15
+        ];
+        assert_eq!(infer_event_concurrency(&live, 2), 15);
     }
 }
