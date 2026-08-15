@@ -56,4 +56,23 @@ mod tests {
         let info = crate::system_info();
         assert!(!info.os.is_empty());
     }
+
+    #[test]
+    fn cpu_matvec_stays_within_a_latency_budget() {
+        let rows = 64;
+        let cols = 256;
+        let matrix = vec![0.125f32; rows * cols];
+        let vector = vec![0.5f32; cols];
+        let mut out = vec![0.0f32; rows];
+        let start = std::time::Instant::now();
+        for _ in 0..64 {
+            CpuCompute.matvec_f32(&matrix, &vector, rows, cols, &mut out);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 500,
+            "CPU matvec budget exceeded: {elapsed:?}"
+        );
+        assert!(out.iter().all(|value| value.is_finite()));
+    }
 }

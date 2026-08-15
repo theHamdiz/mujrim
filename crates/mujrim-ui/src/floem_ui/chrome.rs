@@ -168,6 +168,13 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
                 }
             },
         ),
+        pill(
+            state,
+            icons::FLAME,
+            "Ateed",
+            move || matches!(state.screen.get(), Screen::Ateed),
+            move || state.screen.set(Screen::Ateed),
+        ),
     ))
     .style(|s| s.col_gap(3.0).items_center().min_width(0.0))
 }
@@ -389,6 +396,14 @@ mod tests {
         assert!(
             production.contains("GRADUATION_CAP"),
             "Learn nav must use the graduation-cap icon"
+        );
+        assert!(
+            production.contains("\"Ateed\""),
+            "Ateed studio must have a title-bar nav pill"
+        );
+        assert!(
+            production.contains("icons::FLAME"),
+            "Ateed nav must use the flame icon"
         );
         assert!(
             !production.contains("FlexWrap::Wrap"),

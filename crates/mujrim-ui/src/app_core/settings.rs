@@ -100,6 +100,7 @@ pub enum Screen {
     Library,
     Tournaments,
     Analysis,
+    Ateed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,6 +348,8 @@ mod tests {
             (settings.dock_height_px - crate::app_core::layout::DOCK_OPEN_PX).abs() < f64::EPSILON
         );
         assert_eq!(OptionsTab::ALL.len(), 6);
+        assert_ne!(Screen::Ateed, Screen::Menu);
+        assert_ne!(Screen::Ateed, Screen::Analysis);
     }
 
     #[test]

@@ -26,7 +26,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 types = { package = "mujrim-types", path = "../mujrim-types" }
 search = { package = "mujrim-search", path = "../mujrim-search" }
 # GUI loads nets from dist/nnue at runtime — do not unify embedded-networks into the workspace.
-eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, features = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue"] }
+eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, features = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "ateed-nnue"] }
+gpu = { package = "mujrim-gpu", path = "../mujrim-gpu" }
 rfd = "0.17"
 image = "0.25"
 rand = "0.9"

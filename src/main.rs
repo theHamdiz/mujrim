@@ -426,15 +426,34 @@ fn main() {
                         .arg(
                             Arg::new("scope")
                                 .long("scope")
-                                .value_name("heads|expert0")
+                                .value_name("heads|expert0|moe")
                                 .default_value("heads")
-                                .help("Train output biases or expert 0 + FT"),
+                                .help("Train output biases, expert 0 + FT, or routed MoE heads"),
                         )
                         .arg(
                             Arg::new("base")
                                 .long("base")
                                 .value_name("PATH")
                                 .help("Optional Ateed checkpoint to fine-tune"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("fetch")
+                        .about("Download a remote dataset with HTTP Range resume")
+                        .arg(
+                            Arg::new("url")
+                                .long("url")
+                                .value_name("URL")
+                                .required(true)
+                                .help("http(s) dataset URL"),
+                        )
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("PATH")
+                                .default_value("data.txt")
+                                .help("Destination path; resumes into a .part file"),
                         ),
                 ),
         )
@@ -620,8 +639,21 @@ fn main() {
                     }
                     println!("wrote Ateed checkpoint to {}", config.output_path);
                 }
+                Some(("fetch", fetch)) => {
+                    let url = fetch.get_one::<String>("url").map_or("", String::as_str);
+                    let output = fetch
+                        .get_one::<String>("output")
+                        .map_or("data.txt", String::as_str);
+                    if let Err(error) =
+                        trainer::dataset::fetch_dataset(url, std::path::Path::new(output))
+                    {
+                        eprintln!("dataset fetch failed: {error}");
+                        std::process::exit(1);
+                    }
+                    println!("wrote dataset to {output}");
+                }
                 _ => {
-                    eprintln!("usage: mujrim train <emit-ateed|datagen|ateed> [options]");
+                    eprintln!("usage: mujrim train <emit-ateed|datagen|ateed|fetch> [options]");
                     std::process::exit(2);
                 }
             }

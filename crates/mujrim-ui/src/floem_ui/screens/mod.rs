@@ -1,5 +1,6 @@
 //! Menu, playing, study, tournament, and analysis screens.
 
+mod ateed;
 mod home;
 mod study;
 mod workspace;
@@ -25,8 +26,10 @@ pub fn root_content(state: AppState, handles: AppHandles) -> impl IntoView {
             .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Library))),
         workspace::tournaments(state, handles.clone())
             .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Tournaments))),
-        workspace::analysis(state, handles)
+        workspace::analysis(state, handles.clone())
             .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Analysis))),
+        ateed::studio(state, handles)
+            .style(move |s| screen_host(s, matches!(state.screen.get(), Screen::Ateed))),
     ))
     .style(|s| {
         s.size_full()
@@ -64,6 +67,10 @@ mod tests {
         assert!(
             !production.contains("dyn_view(move || match state.screen.get()"),
             "swapping screens inside dyn_view creates widgets without a window root"
+        );
+        assert!(
+            production.contains("Screen::Ateed"),
+            "Ateed studio must stay mounted with the other screens"
         );
     }
 }

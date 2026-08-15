@@ -209,6 +209,38 @@ impl AteedNetwork {
         self.experts.get(index)
     }
 
+    pub fn gate_weights(&self) -> &[i8] {
+        &self.gate_weights
+    }
+
+    pub fn gate_biases(&self) -> &[i32; EXPERTS] {
+        &self.gate_biases
+    }
+
+    pub fn set_gate(&mut self, weights: &[i8], biases: &[i32]) -> Result<(), String> {
+        if weights.len() != self.gate_weights.len() || biases.len() != EXPERTS {
+            return Err("Ateed gate size mismatch".to_string());
+        }
+        self.gate_weights.copy_from_slice(weights);
+        self.gate_biases.copy_from_slice(biases);
+        Ok(())
+    }
+
+    pub fn set_expert_output_biases(
+        &mut self,
+        index: usize,
+        eval_bias: i32,
+        wdl_biases: [i32; WDL_OUTPUTS],
+    ) -> Result<(), String> {
+        let expert = self
+            .experts
+            .get_mut(index)
+            .ok_or_else(|| format!("Ateed expert {index} is out of range"))?;
+        expert.eval_bias = eval_bias;
+        expert.wdl_biases = wdl_biases;
+        Ok(())
+    }
+
     pub fn set_output_biases(&mut self, eval_bias: i32, wdl_biases: [i32; WDL_OUTPUTS]) {
         for expert in &mut self.experts {
             expert.eval_bias = eval_bias;
@@ -1048,6 +1080,17 @@ mod tests {
                 .contains("size mismatch")
         );
         assert!(
+            net.set_gate(&[0], &[])
+                .unwrap_err()
+                .contains("gate size mismatch")
+        );
+        net.set_gate(&vec![0; L1 * EXPERTS], &[0, 8, 0, 0])
+            .expect("set gate");
+        net.set_expert_output_biases(1, 8_160, [0, 0, 0])
+            .expect("set expert 1");
+        assert_eq!(net.evaluate_full(&Board::new()).expert, 1);
+        assert_eq!(net.evaluate(&Board::new()), 100);
+        assert!(
             net.set_expert(
                 9,
                 AteedExpertUpdate {
@@ -1162,5 +1205,24 @@ mod tests {
         let board = Board::new();
         let restored = AteedNetwork::from_bytes(&net.to_bytes()).expect("roundtrip");
         assert_eq!(restored.evaluate_full(&board), net.evaluate_full(&board));
+    }
+
+    #[test]
+    fn startpos_eval_stays_within_a_latency_budget() {
+        types::init();
+        let net = AteedNetwork::zero();
+        let board = Board::new();
+        let start = std::time::Instant::now();
+        let mut last = net.evaluate_full(&board);
+        for _ in 0..8 {
+            last = net.evaluate_full(&board);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1_000,
+            "Ateed startpos eval budget exceeded: {elapsed:?}"
+        );
+        assert_eq!(last.score, 0);
+        assert!(wdl_variance(last.wdl) >= 0);
     }
 }

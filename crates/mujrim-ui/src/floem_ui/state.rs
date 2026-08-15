@@ -14,6 +14,7 @@ use mujrim_study::tournament_store::StoredTournament;
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
 
 use crate::app_core::analysis::AnalysisSnapshot;
+use crate::app_core::ateed_studio::AteedDataSource;
 use crate::app_core::audio::{BgmTrack, SoundEngine};
 use crate::app_core::engine::{EngineConfig, GameMode, PlayerConfig};
 use crate::app_core::game::GameState;
@@ -100,6 +101,31 @@ pub struct AppState {
     pub announced_tournament_over: RwSignal<bool>,
     pub show_tournament_results: RwSignal<bool>,
     pub tournament_ui_fingerprint: RwSignal<u64>,
+    pub ateed: AteedStudioState,
+}
+
+#[derive(Clone, Copy)]
+pub struct AteedStudioState {
+    pub unlocked: RwSignal<bool>,
+    pub password: RwSignal<String>,
+    pub gate_error: RwSignal<String>,
+    pub source_kind: RwSignal<String>,
+    pub source_value: RwSignal<String>,
+    pub sources: RwSignal<Vec<AteedDataSource>>,
+    pub scope: RwSignal<String>,
+    pub epochs: RwSignal<String>,
+    pub lr: RwSignal<String>,
+    pub wdl_weight: RwSignal<String>,
+    pub running: RwSignal<bool>,
+    pub progress: RwSignal<f32>,
+    pub epoch: RwSignal<u32>,
+    pub loss: RwSignal<f32>,
+    pub expert: RwSignal<usize>,
+    pub score: RwSignal<i32>,
+    pub variance: RwSignal<i32>,
+    pub latency: RwSignal<String>,
+    pub strength: RwSignal<String>,
+    pub log: RwSignal<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -210,6 +236,28 @@ impl AppState {
             announced_tournament_over: RwSignal::new(false),
             show_tournament_results: RwSignal::new(false),
             tournament_ui_fingerprint: RwSignal::new(0),
+            ateed: AteedStudioState {
+                unlocked: RwSignal::new(false),
+                password: RwSignal::new(String::new()),
+                gate_error: RwSignal::new(String::new()),
+                source_kind: RwSignal::new("http".to_owned()),
+                source_value: RwSignal::new(String::new()),
+                sources: RwSignal::new(Vec::new()),
+                scope: RwSignal::new("heads".to_owned()),
+                epochs: RwSignal::new("8".to_owned()),
+                lr: RwSignal::new("1.0".to_owned()),
+                wdl_weight: RwSignal::new("0.25".to_owned()),
+                running: RwSignal::new(false),
+                progress: RwSignal::new(0.0),
+                epoch: RwSignal::new(0),
+                loss: RwSignal::new(0.0),
+                expert: RwSignal::new(0),
+                score: RwSignal::new(0),
+                variance: RwSignal::new(0),
+                latency: RwSignal::new("idle".to_owned()),
+                strength: RwSignal::new("Evaluate a net to populate strength.".to_owned()),
+                log: RwSignal::new(Vec::new()),
+            },
         };
         let study_path = crate::app_core::logic::study_database_path();
         let study = StudyDatabase::open(&study_path).ok();

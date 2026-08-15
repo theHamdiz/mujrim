@@ -37,6 +37,18 @@ pub fn parse_training_line(line: &str) -> Result<Option<TrainingPosition>, Strin
     }))
 }
 
+pub fn fetch_dataset(url: &str, dest: &Path) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("dataset URL must be http(s)".to_string());
+    }
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    updater::download::download_url(url, dest, None)
+}
+
 pub fn load_training_positions(path: &Path) -> io::Result<Vec<TrainingPosition>> {
     let file = std::fs::File::open(path)?;
     let reader = io::BufReader::new(file);
@@ -92,5 +104,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].score, 0);
+    }
+
+    #[test]
+    fn fetch_dataset_rejects_non_http_urls() {
+        let dest = std::env::temp_dir().join("mujrim-dataset-local.txt");
+        assert!(
+            fetch_dataset("file:///tmp/data.txt", &dest)
+                .unwrap_err()
+                .contains("http(s)")
+        );
     }
 }

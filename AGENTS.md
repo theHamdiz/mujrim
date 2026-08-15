@@ -15,6 +15,8 @@ Updated: 2026-08-15
 - Ateed is the Phase 2 MoE NNUE (`ATEED001`, disk `ateed_default.bin`, adapter id `ateed`, product binary `mujrim-ateed`). Default eval remains Reckless/`auto`.
 - Phase 3: Ateed WDL variance widens futility/RFP and relieves LMR; NNUE downloads resume via HTTP Range; `mujrim train emit-ateed` writes a zero net.
 - Phase 4: CPU `TrainCompute` matvec; `mujrim train datagen` / `mujrim train ateed` parse `FEN|score|wdl` and SGD Ateed heads (or expert 0 + FT).
+- Phase 5: `--scope moe` trains the routed expert’s heads; `mujrim train fetch` resumes remote datasets via HTTP Range.
+- Floem title-bar **Ateed** tab is password-gated (secret stored only as Base64 `SkFIQU5BTQ==`). The studio plans multi-source fetch, dry-runs train ticks, and evaluates an in-memory zero net — it does not download datasets or run a full train.
 - Product surfaces: `--backend universal` (selectable), `--backend mujrim-hce` (classical HCE), `--backend v60`/`v10`/`akimbo` (packaged adapters), `--backend ateed` (in-process MoE), external upstream passthrough.
 - Do not use “native” as an engine/backend product name (`RuntimeCompatibility::Native` is host-ISA packaging only).
 - A structured AI-agent tool surface is implemented in `mujrim-tooling`.
@@ -45,6 +47,7 @@ Updated: 2026-08-15
 
 ## Open UI Workstream
 - Additional piece sets live under `crates/mujrim-ui/assets/pieces/` and switch at runtime in Options.
+- Ateed studio lives behind the title-bar Ateed pill (`Screen::Ateed`); unlock compares against the decoded Base64 gate.
 
 ## CI/CD Baseline (Required)
 - CI must run: format, clippy (`-D warnings`), workspace tests, and an engine smoke test (`uciok` + `Mujrim 1.0.0`).

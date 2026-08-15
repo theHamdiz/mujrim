@@ -61,6 +61,9 @@ pub fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
                     actions::open_tournaments_screen(state, &handles);
                 }
             }),
+            widgets::ghost_button(state, "Ateed Studio", move || {
+                state.screen.set(Screen::Ateed);
+            }),
         ))
         .style(|s| s.col_gap(10.0).flex_wrap(FlexWrap::Wrap).justify_center()),
     ))

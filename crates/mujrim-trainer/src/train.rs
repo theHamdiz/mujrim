@@ -3,10 +3,10 @@
 use std::path::Path;
 
 use eval::nnue::ateed_format::{
-    FEATURES, KING_BUCKETS, L1, L2, L3, QA, QB, SCALE, WDL_OUTPUTS, stm_piece_features,
+    EXPERTS, FEATURES, KING_BUCKETS, L1, L2, L3, QA, QB, SCALE, WDL_OUTPUTS, stm_piece_features,
 };
 use eval::nnue::{AteedExpertUpdate, AteedNetwork};
-use gpu::{CpuCompute, TrainCompute};
+use gpu::{TrainCompute, training_compute};
 use types::{Board, Color};
 
 use crate::config::TrainingConfig;
@@ -21,6 +21,8 @@ pub enum AteedTrainScope {
     OutputBiases,
     /// Sparse FT + expert 0 dense layers.
     Expert0,
+    /// Top-1 MoE: train the routed expert's output heads and the gate.
+    Moe,
 }
 
 impl AteedTrainScope {
@@ -28,6 +30,7 @@ impl AteedTrainScope {
         match name {
             "heads" | "output-biases" => Ok(Self::OutputBiases),
             "expert0" => Ok(Self::Expert0),
+            "moe" => Ok(Self::Moe),
             other => Err(format!("unknown Ateed train scope `{other}`")),
         }
     }
@@ -44,6 +47,10 @@ struct AteedTrainState {
     eval_b: f32,
     wdl_w: [f32; L3 * WDL_OUTPUTS],
     wdl_b: [f32; WDL_OUTPUTS],
+    gate_w: Vec<f32>,
+    gate_b: [f32; EXPERTS],
+    moe_eval_b: [f32; EXPERTS],
+    moe_wdl_b: [[f32; WDL_OUTPUTS]; EXPERTS],
 }
 
 impl AteedTrainState {
@@ -65,6 +72,10 @@ impl AteedTrainState {
             eval_b: 0.0,
             wdl_w: [0.0; L3 * WDL_OUTPUTS],
             wdl_b: [0.0; WDL_OUTPUTS],
+            gate_w: vec![0.0; L1 * EXPERTS],
+            gate_b: [0.0; EXPERTS],
+            moe_eval_b: [0.0; EXPERTS],
+            moe_wdl_b: [[0.0; WDL_OUTPUTS]; EXPERTS],
         }
     }
 
@@ -97,6 +108,19 @@ impl AteedTrainState {
         }
         for (slot, &bias) in self.wdl_b.iter_mut().zip(expert.wdl_biases()) {
             *slot = bias as f32;
+        }
+        for (slot, &weight) in self.gate_w.iter_mut().zip(net.gate_weights()) {
+            *slot = f32::from(weight);
+        }
+        for (slot, &bias) in self.gate_b.iter_mut().zip(net.gate_biases()) {
+            *slot = bias as f32;
+        }
+        for (index, eval_b) in self.moe_eval_b.iter_mut().enumerate() {
+            let expert = net.expert(index).expect("Ateed expert is present");
+            *eval_b = expert.eval_bias() as f32;
+            for (slot, &bias) in self.moe_wdl_b[index].iter_mut().zip(expert.wdl_biases()) {
+                *slot = bias as f32;
+            }
         }
     }
 
@@ -139,14 +163,20 @@ impl AteedTrainState {
                 wdl_biases: &wdl_b,
             },
         )?;
-        net.set_output_biases(
-            quant_i32(self.eval_b),
-            [
-                quant_i32(self.wdl_b[0]),
-                quant_i32(self.wdl_b[1]),
-                quant_i32(self.wdl_b[2]),
-            ],
-        );
+        let gate_w: Vec<i8> = self.gate_w.iter().copied().map(quant_i8).collect();
+        let gate_b: Vec<i32> = self.gate_b.iter().copied().map(quant_i32).collect();
+        net.set_gate(&gate_w, &gate_b)?;
+        for expert in 0..EXPERTS {
+            net.set_expert_output_biases(
+                expert,
+                quant_i32(self.moe_eval_b[expert]),
+                [
+                    quant_i32(self.moe_wdl_b[expert][0]),
+                    quant_i32(self.moe_wdl_b[expert][1]),
+                    quant_i32(self.moe_wdl_b[expert][2]),
+                ],
+            )?;
+        }
         Ok(())
     }
 }
@@ -289,6 +319,37 @@ fn step_heads(
     }
 }
 
+fn route_gate(logits: [f32; EXPERTS]) -> usize {
+    let mut best = 0;
+    for (index, &logit) in logits.iter().enumerate().skip(1) {
+        if logit > logits[best] {
+            best = index;
+        }
+    }
+    best
+}
+
+fn step_moe(
+    state: &mut AteedTrainState,
+    target_score: f32,
+    target_wdl: f32,
+    lr: f32,
+    wdl_weight: f32,
+) {
+    let expert = route_gate(state.gate_b);
+    let pred = state.moe_eval_b[expert] * SCORE_SCALE;
+    let score_weight = 1.0 - wdl_weight;
+    state.moe_eval_b[expert] -= lr * score_weight * (pred - target_score) / SCORE_SCALE;
+    let probs = softmax(state.moe_wdl_b[expert]);
+    let target = wdl_target(target_wdl);
+    for (bias, (&prob, &tgt)) in state.moe_wdl_b[expert]
+        .iter_mut()
+        .zip(probs.iter().zip(&target))
+    {
+        *bias -= lr * wdl_weight * (prob - tgt) / 64.0;
+    }
+}
+
 fn step_expert0(
     state: &mut AteedTrainState,
     board: &Board,
@@ -402,7 +463,7 @@ pub fn train_ateed(
     {
         state.seed_expert0_signal();
     }
-    let compute = CpuCompute;
+    let compute = training_compute();
     let lr = config.learning_rate as f32;
     let wdl_weight = config.wdl_weight.clamp(0.0, 1.0) as f32;
     for _ in 0..config.epochs {
@@ -430,7 +491,24 @@ pub fn train_ateed(
                         &compute,
                     );
                 }
+                AteedTrainScope::Moe => {
+                    step_moe(
+                        &mut state,
+                        position.score as f32,
+                        target_wdl,
+                        lr,
+                        wdl_weight,
+                    );
+                }
             }
+        }
+    }
+    if scope != AteedTrainScope::Moe {
+        for eval_b in &mut state.moe_eval_b {
+            *eval_b = state.eval_b;
+        }
+        for wdl_b in &mut state.moe_wdl_b {
+            *wdl_b = state.wdl_b;
         }
     }
     state.apply_to_network(&mut net)?;
@@ -466,7 +544,8 @@ mod tests {
             AteedTrainScope::parse("expert0").unwrap(),
             AteedTrainScope::Expert0
         );
-        assert!(AteedTrainScope::parse("moe").is_err());
+        assert_eq!(AteedTrainScope::parse("moe").unwrap(), AteedTrainScope::Moe);
+        assert!(AteedTrainScope::parse("bullet").is_err());
     }
 
     #[test]
@@ -505,6 +584,59 @@ mod tests {
         let net = train_ateed(&[startpos_line(60, 0.5)], &config, AteedTrainScope::Expert0)
             .expect("train expert0");
         assert_ne!(net.evaluate(&Board::new()), before);
+    }
+
+    #[test]
+    fn moe_trainer_updates_only_the_routed_expert() {
+        types::init();
+        let mut base = AteedNetwork::zero();
+        base.set_gate(&vec![0; L1 * EXPERTS], &[0, 8, 0, 0])
+            .expect("seed gate toward expert 1");
+        let path = std::env::temp_dir().join("mujrim-ateed-moe-base.bin");
+        crate::ateed::emit_network(&path, &base).expect("write base");
+        let config = TrainingConfig {
+            epochs: 8,
+            learning_rate: 1.0,
+            wdl_weight: 0.0,
+            base_network: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let net = train_ateed(&[startpos_line(80, 0.5)], &config, AteedTrainScope::Moe)
+            .expect("train moe");
+        let _ = std::fs::remove_file(&path);
+        let eval = net.evaluate_full(&Board::new());
+        assert_eq!(eval.expert, 1);
+        assert!(
+            eval.score > 40,
+            "routed expert should approach +80, got {}",
+            eval.score
+        );
+        assert_eq!(net.expert(0).expect("expert 0").eval_bias(), 0);
+        assert_ne!(net.expert(1).expect("expert 1").eval_bias(), 0);
+    }
+
+    #[test]
+    fn heads_trainer_one_epoch_stays_within_a_latency_budget() {
+        types::init();
+        let config = TrainingConfig {
+            epochs: 1,
+            learning_rate: 1.0,
+            wdl_weight: 0.0,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let net = train_ateed(
+            &[startpos_line(40, 0.5)],
+            &config,
+            AteedTrainScope::OutputBiases,
+        )
+        .expect("train heads");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 2_000,
+            "one-epoch heads train budget exceeded: {elapsed:?}"
+        );
+        assert!(net.evaluate(&Board::new()).abs() < 10_000);
     }
 
     #[test]

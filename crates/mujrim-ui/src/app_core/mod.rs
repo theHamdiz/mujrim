@@ -7,6 +7,7 @@
 
 pub mod analysis;
 pub mod arrows;
+pub mod ateed_studio;
 pub mod audio;
 pub mod engine;
 pub mod game;

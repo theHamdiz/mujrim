@@ -26,6 +26,17 @@ pub fn validate_size(actual: u64, expected: Option<u64>) -> Result<(), String> {
     Ok(())
 }
 
+pub fn download_url(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<(), String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("mujrim-updater/1.0.0")
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(600))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    download_resumable(&client, url, dest, expected_size)
+}
+
 pub fn download_resumable(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -114,6 +125,13 @@ mod tests {
                 .contains("incomplete download")
         );
         assert!(validate_size(12, None).is_ok());
+    }
+
+    #[test]
+    fn download_url_fails_fast_when_the_host_refuses_the_connection() {
+        let dest = std::env::temp_dir().join("mujrim-dataset-refuse.txt");
+        let error = download_url("http://127.0.0.1:1/mujrim-dataset.txt", &dest, None).unwrap_err();
+        assert!(error.contains("Request failed") || error.contains("HTTP"));
     }
 
     #[test]

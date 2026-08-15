@@ -13,4 +13,5 @@ types = { package = "mujrim-types", path = "../mujrim-types" }
 search = { package = "mujrim-search", path = "../mujrim-search" }
 eval = { package = "mujrim-eval", path = "../mujrim-eval" }
 gpu = { package = "mujrim-gpu", path = "../mujrim-gpu" }
+updater = { package = "mujrim-updater", path = "../mujrim-updater" }
 rand = "0.9"
