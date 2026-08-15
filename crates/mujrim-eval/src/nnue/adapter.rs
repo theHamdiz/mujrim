@@ -668,6 +668,39 @@ pub fn discover_named_network(filename: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Bundled official Lc0 transformer (BT4-it332). Evaluated by official lc0, not in-process.
+pub const LC0_BUNDLED_WEIGHTS_NAME: &str = "lc0_bt4.pb.gz";
+
+/// Filenames searched for official lc0 `--weights`, strongest bundled net first.
+pub const LC0_WEIGHT_FILENAMES: &[&str] = &[
+    LC0_BUNDLED_WEIGHTS_NAME,
+    "weights.pb.gz",
+    "lc0_t1_512.pb.gz",
+    "lc0_default.pb.gz",
+    "192x15-2024.pb.gz",
+    "lc0.pb.gz",
+];
+
+fn is_usable_lc0_weights(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 1_000_000)
+}
+
+/// Locate the bundled or downloaded official Lc0 `.pb.gz` weights.
+pub fn discover_lc0_weights() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("MUJRIM_LC0_WEIGHTS") {
+        let path = PathBuf::from(explicit);
+        if is_usable_lc0_weights(&path) {
+            return Some(path);
+        }
+    }
+    LC0_WEIGHT_FILENAMES
+        .iter()
+        .find_map(|name| discover_named_network(name).filter(|path| is_usable_lc0_weights(path)))
+}
+
 /// Load the embedded net for a preset, or the matching file from `nnue/` / `dist/nnue`.
 pub fn load_network_for_preset(preset: &str) -> Result<ActiveNetwork, String> {
     if let Some(embedded) = embedded_network_for_preset(preset) {
@@ -1156,6 +1189,40 @@ mod tests {
             panic!("lc0 is not an in-process NNUE");
         };
         assert!(error.contains("official lc0"), "{error}");
+    }
+
+    #[test]
+    fn lc0_weight_discovery_prefers_bundled_bt4() {
+        assert_eq!(LC0_WEIGHT_FILENAMES[0], LC0_BUNDLED_WEIGHTS_NAME);
+        assert!(LC0_WEIGHT_FILENAMES.contains(&"lc0_default.pb.gz"));
+        if let Some(path) = discover_lc0_weights() {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("lc0 weights filename");
+            assert!(
+                LC0_WEIGHT_FILENAMES.contains(&name),
+                "unexpected lc0 weights {name}"
+            );
+            assert!(
+                path.metadata().expect("lc0 weights metadata").len() > 1_000_000,
+                "lc0 weights must be a real downloaded .pb.gz"
+            );
+        }
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(LC0_BUNDLED_WEIGHTS_NAME);
+        if bundled.is_file()
+            && bundled
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() > 1_000_000)
+        {
+            let discovered = discover_lc0_weights().expect("bundled BT4 must be discoverable");
+            assert_eq!(
+                discovered.file_name(),
+                Some(std::ffi::OsStr::new(LC0_BUNDLED_WEIGHTS_NAME))
+            );
+        }
     }
 
     #[cfg(feature = "reckless-nnue")]

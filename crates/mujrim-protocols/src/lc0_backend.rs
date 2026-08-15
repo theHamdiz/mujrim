@@ -119,34 +119,85 @@ fn with_exe(path: PathBuf) -> PathBuf {
     }
 }
 
-fn weights_args(binary: &Path) -> Vec<String> {
+/// Bundled official Lc0 transformer (BT4-it332 / TCEC+CCC).
+pub const LC0_BUNDLED_WEIGHTS_NAME: &str = "lc0_bt4.pb.gz";
+
+/// Filenames searched for official lc0 `--weights`, strongest bundled net first.
+pub const LC0_WEIGHT_NAMES: &[&str] = &[
+    LC0_BUNDLED_WEIGHTS_NAME,
+    "weights.pb.gz",
+    "lc0_t1_512.pb.gz",
+    "lc0_default.pb.gz",
+    "192x15-2024.pb.gz",
+    "lc0.pb.gz",
+];
+
+fn is_usable_lc0_weights(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 1_000_000)
+}
+
+fn weight_search_dirs(binary: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(dir) = binary.parent() {
+    if let Some(binary) = binary
+        && let Some(dir) = binary.parent()
+    {
         dirs.push(dir.to_path_buf());
+        dirs.push(dir.join("nnue"));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        dirs.push(dir.to_path_buf());
+        dirs.push(dir.join("nnue"));
     }
     if let Ok(cwd) = std::env::current_dir() {
         dirs.push(cwd.join("nnue"));
         dirs.push(cwd.join("dist").join("nnue"));
+        dirs.push(
+            cwd.join("dist")
+                .join(format!(
+                    "{}-{}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ))
+                .join("nnue"),
+        );
+        dirs.push(cwd.join("crates").join("mujrim-eval").join("resources"));
     }
-    const NAMES: &[&str] = &[
-        "weights.pb.gz",
-        "lc0_default.pb.gz",
-        "lc0_t1_512.pb.gz",
-        "192x15-2024.pb.gz",
-        "lc0.pb.gz",
-    ];
-    for dir in dirs {
-        for name in NAMES {
+    dirs
+}
+
+/// Locate bundled or downloaded official Lc0 `.pb.gz` weights.
+pub fn discover_lc0_weights(binary: Option<&Path>) -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("MUJRIM_LC0_WEIGHTS") {
+        let path = PathBuf::from(explicit);
+        if is_usable_lc0_weights(&path) {
+            return Some(path);
+        }
+    }
+    for dir in weight_search_dirs(binary) {
+        for name in LC0_WEIGHT_NAMES {
             let weights = dir.join(name);
-            if weights.is_file() {
-                return vec![
-                    "--weights".to_string(),
-                    weights.to_string_lossy().into_owned(),
-                ];
+            if is_usable_lc0_weights(&weights) {
+                return Some(weights);
             }
         }
     }
-    Vec::new()
+    None
+}
+
+fn weights_args(binary: &Path) -> Vec<String> {
+    discover_lc0_weights(Some(binary))
+        .map(|weights| {
+            vec![
+                "--weights".to_string(),
+                weights.to_string_lossy().into_owned(),
+            ]
+        })
+        .unwrap_or_default()
 }
 
 fn first_supported_backend(binary: &Path, wanted: &[&'static str]) -> &'static str {
@@ -230,13 +281,17 @@ mod tests {
         );
     }
 
+    fn write_usable_weights(path: &Path) {
+        std::fs::write(path, vec![0u8; 1_000_001]).unwrap();
+    }
+
     #[test]
     fn launch_picks_up_sibling_weights() {
         let dir = std::env::temp_dir().join(format!("mujrim-lc0-weights-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let weights = dir.join("weights.pb.gz");
         let binary = dir.join("lc0");
-        std::fs::write(&weights, b"net").unwrap();
+        write_usable_weights(&weights);
         std::fs::write(&binary, b"").unwrap();
         let launch = plan_launch(&binary, Lc0DeviceKind::Cpu);
         assert_eq!(
@@ -247,6 +302,27 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_file(&weights);
+        let _ = std::fs::remove_file(&binary);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn launch_prefers_bundled_bt4_over_smaller_fallback() {
+        let dir = std::env::temp_dir().join(format!("mujrim-lc0-bt4-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let bt4 = dir.join(LC0_BUNDLED_WEIGHTS_NAME);
+        let fallback = dir.join("lc0_default.pb.gz");
+        let binary = dir.join("lc0");
+        write_usable_weights(&bt4);
+        write_usable_weights(&fallback);
+        std::fs::write(&binary, b"").unwrap();
+        let launch = plan_launch(&binary, Lc0DeviceKind::Cpu);
+        assert_eq!(
+            launch.extra_args,
+            vec!["--weights".to_string(), bt4.to_string_lossy().into_owned()]
+        );
+        let _ = std::fs::remove_file(&bt4);
+        let _ = std::fs::remove_file(&fallback);
         let _ = std::fs::remove_file(&binary);
         let _ = std::fs::remove_dir(&dir);
     }

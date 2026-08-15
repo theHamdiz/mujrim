@@ -35,6 +35,9 @@ syzygy/
 /nnue/
 
 # External NNUE networks in resources (only the embedded net.bin is tracked)
+*.pb.gz
+*.pb.gz.part
+crates/mujrim-eval/resources/*.pb.gz
 crates/mujrim-eval/resources/*.nnue
 crates/mujrim-eval/resources/*.bin
 crates/mujrim-eval/resources/*.net

@@ -158,6 +158,8 @@ impl EvalSearchAdapter for Lc0Adapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(Lc0SearchProfile.compose());
+        // Official lc0 evaluates the sidecar BT4 `.pb.gz`; in-process search
+        // must not fall back to Reckless/Stockfish/Akimbo NNUE.
         engine.set_use_nnue(false);
     }
 }
@@ -365,6 +367,16 @@ mod tests {
             !lc0.use_nnue(),
             "in-process Lc0 has no transformer net and must not evaluate Reckless/Stockfish"
         );
+        if let Some(weights) = eval::nnue::discover_lc0_weights() {
+            let name = weights
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            assert!(
+                eval::nnue::LC0_WEIGHT_FILENAMES.contains(&name),
+                "Lc0 adapter must discover its own transformer weights, got {name}"
+            );
+        }
         assert_eq!(
             lc0.search_stack.policies.move_ordering,
             MoveOrderingProfile::Reckless

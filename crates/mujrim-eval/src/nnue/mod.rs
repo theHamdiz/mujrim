@@ -56,9 +56,10 @@ pub mod plentychess_format;
 
 pub use accumulator::NNUEState;
 pub use adapter::{
-    ActiveNetwork, NetworkFormat, NnueNetworkInfo, NnueNetworkParameters, NnueNetworkSource,
-    NnueSearchProfile, auto_detect_from_search_roots, auto_detect_network,
-    default_embedded_network, discover_named_network, embedded_network_for_preset,
-    enabled_network_formats, load_network, load_network_for_preset, nnue_search_directories,
+    ActiveNetwork, LC0_BUNDLED_WEIGHTS_NAME, LC0_WEIGHT_FILENAMES, NetworkFormat, NnueNetworkInfo,
+    NnueNetworkParameters, NnueNetworkSource, NnueSearchProfile, auto_detect_from_search_roots,
+    auto_detect_network, default_embedded_network, discover_lc0_weights, discover_named_network,
+    embedded_network_for_preset, enabled_network_formats, load_network, load_network_for_preset,
+    nnue_search_directories,
 };
 pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, forward_with_network, net};

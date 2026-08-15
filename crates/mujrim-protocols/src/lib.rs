@@ -13,7 +13,10 @@ pub mod catalog;
 pub mod lc0_backend;
 
 pub use binary_arch::{BinaryArch, detect_binary_arch, is_host_native_binary};
-pub use lc0_backend::{Lc0DeviceKind, Lc0Launch, detect_device_kind, plan_launch};
+pub use lc0_backend::{
+    LC0_BUNDLED_WEIGHTS_NAME, LC0_WEIGHT_NAMES, Lc0DeviceKind, Lc0Launch, detect_device_kind,
+    discover_lc0_weights, plan_launch,
+};
 
 /// Run a protocol engine directly on the caller's standard streams while
 /// retaining the same kill-on-close and memory protections as managed sessions.

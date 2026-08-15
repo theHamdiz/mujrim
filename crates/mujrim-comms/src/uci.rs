@@ -9,7 +9,8 @@
 
 use crate::aesthetic::{AestheticConfig, MAX_AESTHETIC_DELTA_CP, RootCandidate, select_root_move};
 use eval::nnue::{
-    ActiveNetwork, NnueNetworkSource, enabled_network_formats, load_network, load_network_for_preset,
+    ActiveNetwork, NnueNetworkSource, enabled_network_formats, load_network,
+    load_network_for_preset,
 };
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
@@ -1518,6 +1519,14 @@ impl UciHandler {
     }
 
     fn advertised_eval_file(&self) -> String {
+        if matches!(self.eval_preset.as_str(), "lc0") {
+            return eval::nnue::discover_lc0_weights()
+                .and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| eval::nnue::LC0_BUNDLED_WEIGHTS_NAME.to_string());
+        }
         if matches!(self.eval_preset.as_str(), "mujrim-hce" | "hce") || !self.use_nnue {
             return "mujrim-hce".to_string();
         }
@@ -2080,6 +2089,14 @@ mod tests {
         assert!(
             !lc0.engine.as_ref().unwrap().use_nnue(),
             "in-process Lc0 must not evaluate a foreign NNUE"
+        );
+        assert_eq!(
+            lc0.advertised_eval_file(),
+            eval::nnue::discover_lc0_weights()
+                .and_then(|path| path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| eval::nnue::LC0_BUNDLED_WEIGHTS_NAME.to_string())
         );
     }
 

@@ -409,7 +409,8 @@ fn publish_native_dist() -> Result<(), String> {
 fn publish_nnue_into(dist: &Path) -> Result<(), String> {
     let dest = dist.join("nnue");
     let legacy = Path::new("dist").join("nnue");
-    for source in [Path::new("nnue"), legacy.as_path()] {
+    let resources = Path::new("crates/mujrim-eval/resources");
+    for source in [Path::new("nnue"), legacy.as_path(), resources] {
         if !source.is_dir() || source == dest.as_path() {
             continue;
         }
@@ -423,6 +424,13 @@ fn publish_nnue_into(dist: &Path) -> Result<(), String> {
             let from = entry.path();
             if !from.is_file() {
                 continue;
+            }
+            if source == resources {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.starts_with("lc0_") || !name.ends_with(".pb.gz") {
+                    continue;
+                }
             }
             let to = dest.join(entry.file_name());
             fs::copy(&from, &to).map_err(|error| {
@@ -1059,6 +1067,15 @@ mod tests {
         assert!(
             publish.contains("publish_nnue_into"),
             "platform tree must receive the NNUE payload"
+        );
+        let publish_nnue = src
+            .split("fn publish_nnue_into(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn snapshot_engine(").next())
+            .expect("publish_nnue_into");
+        assert!(
+            publish_nnue.contains("lc0_") && publish_nnue.contains(".pb.gz"),
+            "dist nnue/ must receive the official Lc0 BT4 sidecar"
         );
         assert!(
             publish.contains("metadata.len() == 0"),

@@ -17,7 +17,7 @@ pub enum NnueCommand {
     },
     /// Download all networks for one engine family.
     Engine {
-        #[arg(value_parser = ["akimbo", "reckless", "stockfish", "viridithas", "obsidian", "alexandria"])]
+        #[arg(value_parser = ["akimbo", "reckless", "stockfish", "viridithas", "obsidian", "alexandria", "lc0"])]
         engine: String,
         #[arg(long, default_value = "crates/mujrim-eval/resources")]
         dir: PathBuf,
@@ -194,6 +194,7 @@ mod tests {
             "viridithas",
             "obsidian",
             "alexandria",
+            "lc0",
         ] {
             assert!(matches!(
                 engine.parse::<String>(),
