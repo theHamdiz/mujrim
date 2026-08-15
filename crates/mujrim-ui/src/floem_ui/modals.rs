@@ -896,7 +896,7 @@ fn results_rank_card(state: AppState, index: usize) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tournament_setup_exposes_iced_event_fields() {
+    fn tournament_setup_exposes_event_fields() {
         let src = include_str!("modals.rs");
         let production = src.split("#[cfg(test)]").next().expect("source");
         for needle in [

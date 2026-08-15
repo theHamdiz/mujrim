@@ -246,8 +246,8 @@ impl AppSettings {
         }
     }
 
-    /// Merge a subset TOML document (Iced settings) into the on-disk Floem schema
-    /// so unknown/Floem-only fields are never dropped.
+    /// Merge a subset TOML document into the on-disk schema so unknown fields
+    /// are never dropped.
     pub fn merge_and_save_toml(overlay: &str) {
         let mut base = Self::load();
         let Ok(mut base_val) = toml::Value::try_from(&base) else {

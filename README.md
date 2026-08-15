@@ -26,8 +26,6 @@ cd mujrim
 cargo build --release -p mujrim
 ./target/release/mujrim uci
 cargo run --release -p mujrim-ui
-# Iced fallback:
-cargo run --release -p mujrim-ui --no-default-features --features iced-ui,book,nnue
 ```
 
 ## Workspace
@@ -40,7 +38,6 @@ cargo run --release -p mujrim-ui --no-default-features --features iced-ui,book,n
 - `mujrim-benchmarker`: tactical suites, paired matches, and tournaments.
 - `mujrim-study`: PGN, local game database, openings, ratings, and training.
 - `mujrim-ui`: native desktop game, analysis, coaching, and study interface.
-- `mujrim-game`: animated standalone game client.
 - `mujrim-updater`, `mujrim-tooling`, `mujrim-installer`: release operations.
 
 ## Desktop Features

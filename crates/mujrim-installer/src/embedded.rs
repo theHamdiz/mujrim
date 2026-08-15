@@ -46,13 +46,6 @@ pub const BINARIES: &[EmbeddedBinary] = &[
         description: "Mujrim Chess GUI",
     },
     EmbeddedBinary {
-        name: "Mujrim Game",
-        filename: "mujrim-game",
-        data: &[],
-        create_shortcut: true,
-        description: "Mujrim 3D Chess Game",
-    },
-    EmbeddedBinary {
         name: "Mujrim Updater",
         filename: "mujrim-updater",
         data: &[],
@@ -80,7 +73,7 @@ mod tests {
 
     #[test]
     fn binary_list_is_populated() {
-        assert_eq!(BINARIES.len(), 5);
+        assert_eq!(BINARIES.len(), 4);
     }
 
     #[test]

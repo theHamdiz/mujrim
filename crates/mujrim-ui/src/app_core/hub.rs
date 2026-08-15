@@ -1,4 +1,4 @@
-//! Home-hub helpers shared by Floem (and Iced) without GUI types.
+//! Home-hub helpers shared by the Floem UI without GUI types.
 
 use super::engine::{GameMode, PlayerConfig};
 
@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_setting_clamps_match_iced_home_ranges() {
+    fn engine_setting_clamps_match_home_ranges() {
         assert_eq!(clamp_cfg_time(0), 1);
         assert_eq!(clamp_cfg_time(99), 30);
         assert_eq!(clamp_cfg_depth(0), 1);

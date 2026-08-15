@@ -354,11 +354,21 @@ impl LiveTournamentSnapshot {
     pub fn copy_arena_from(&mut self, src: &Self) {
         self.running = src.running;
         self.paused = src.paused;
+        self.finished = src.finished;
+        self.cancelled = src.cancelled;
         self.status_line = src.status_line.clone();
         self.current_round = src.current_round;
         self.current_white = src.current_white.clone();
         self.current_black = src.current_black.clone();
-        self.live_games = src.live_games.clone();
+        self.total_matches = src.total_matches;
+        self.completed_matches = src.completed_matches;
+        self.engine_names.clone_from(&src.engine_names);
+        self.standings.clone_from(&src.standings);
+        self.finished_matches.clone_from(&src.finished_matches);
+        self.live_games.clone_from(&src.live_games);
+        if self.played_games.len() != src.played_games.len() {
+            self.played_games.clone_from(&src.played_games);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -556,6 +566,10 @@ pub fn arena_fingerprint(snap: &LiveTournamentSnapshot) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     snap.running.hash(&mut hasher);
     snap.paused.hash(&mut hasher);
+    snap.total_matches.hash(&mut hasher);
+    snap.completed_matches.hash(&mut hasher);
+    snap.played_games.len().hash(&mut hasher);
+    snap.standings.len().hash(&mut hasher);
     snap.status_line.hash(&mut hasher);
     snap.current_round.hash(&mut hasher);
     snap.current_white.hash(&mut hasher);
@@ -1099,6 +1113,50 @@ mod tests {
             ..LiveGameBoard::default()
         };
         assert!(thinking.clocks_should_tick());
+    }
+
+    #[test]
+    fn copy_arena_from_keeps_live_progress_and_standings() {
+        let mut src = LiveTournamentSnapshot {
+            total_matches: 6,
+            completed_matches: 1,
+            finished: false,
+            cancelled: false,
+            engine_names: vec!["Alpha".into(), "Beta".into()],
+            standings: vec![StandingRow {
+                rank: 1,
+                name: "Alpha".into(),
+                played: 2,
+                wins: 1,
+                draws: 1,
+                losses: 0,
+                points: 1.5,
+                performance: Some(2800.0),
+            }],
+            ..LiveTournamentSnapshot::default()
+        };
+        src.append_games(vec![TournamentGameSnapshot {
+            match_index: 1,
+            round: 1,
+            white: "Alpha".into(),
+            black: "Beta".into(),
+            white_score: 1.0,
+            initial_fen: mujrim_study::opening::START_FEN.to_owned(),
+            moves: vec!["e2e4".into()],
+        }]);
+        let mut light = LiveTournamentSnapshot::default();
+        light.copy_arena_from(&src);
+        assert_eq!(light.total_matches, 6);
+        assert_eq!(light.completed_matches, 1);
+        assert_eq!(light.played_games.len(), 1);
+        assert_eq!(light.standings[0].name, "Alpha");
+        assert_eq!(light.engine_names, src.engine_names);
+        assert_eq!(light.remaining_games(1), 11);
+        assert_eq!(light.remaining_games_label(1), "11 games remaining");
+        assert_ne!(
+            arena_fingerprint(&src),
+            arena_fingerprint(&LiveTournamentSnapshot::default())
+        );
     }
 
     #[test]

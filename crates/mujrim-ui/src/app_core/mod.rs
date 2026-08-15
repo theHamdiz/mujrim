@@ -1,7 +1,7 @@
 //! Shared GUI domain: chess/engine/settings with no GUI-framework types.
 //!
-//! Helpers stay public so both Floem and Iced backends can share them; a given
-//! backend may not call every entry point.
+//! Helpers stay public so the Floem UI can share them; not every entry point
+//! is called from every screen.
 
 #![allow(dead_code)]
 

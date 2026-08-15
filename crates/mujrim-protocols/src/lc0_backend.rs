@@ -22,7 +22,9 @@ pub struct Lc0Launch {
 
 impl Lc0Launch {
     pub fn argv(&self) -> Vec<String> {
-        let mut args = vec!["--backend".to_string(), self.backend.to_string()];
+        // Official lc0 gflags accept `--flag=value` only. `--flag value` treats
+        // the value as a leftover and then rejects the empty `--backend`.
+        let mut args = vec![format!("--backend={}", self.backend)];
         args.extend(self.extra_args.iter().cloned());
         args
     }
@@ -77,37 +79,63 @@ fn command_succeeds(bin: &str, args: &[&str]) -> bool {
 /// otherwise the discovered `lc0` binary with the matching `--backend`.
 pub fn plan_launch(discovered: &Path, device: Lc0DeviceKind) -> Lc0Launch {
     let dir = discovered.parent().unwrap_or(discovered);
-    let (preferred_names, backend) = match device {
+    let (preferred_names, wanted) = match device {
         Lc0DeviceKind::Nvidia => (
             &["lc0-cuda", "lc0-cudnn", "lc0-onnx-cuda"][..],
-            first_supported_backend(discovered, &["cuda", "cudnn", "onnx-cuda", "eigen"]),
+            &["cuda", "cudnn", "onnx-cuda", "eigen"][..],
         ),
         Lc0DeviceKind::Amd => (
             &["lc0-rocm", "lc0-opencl", "lc0-onnx-rocm", "lc0-hip"][..],
-            first_supported_backend(discovered, &["onnx-rocm", "opencl", "sycl", "hip", "eigen"]),
+            &["onnx-rocm", "opencl", "sycl", "hip", "eigen"][..],
         ),
         Lc0DeviceKind::Cpu => (
             &["lc0-cpu", "lc0-eigen", "lc0-blas"][..],
-            first_supported_backend(discovered, &["eigen", "blas", "onnx-cpu", "dnnl"]),
+            &["eigen", "blas", "onnx-cpu", "dnnl"][..],
         ),
     };
 
     for name in preferred_names {
         let candidate = with_exe(dir.join(name));
         if candidate.is_file() {
-            let extra_args = weights_args(&candidate, device);
-            return Lc0Launch {
-                binary: candidate,
-                backend,
-                extra_args,
-            };
+            return launch_for(candidate, device, wanted);
         }
     }
 
-    Lc0Launch {
-        binary: discovered.to_path_buf(),
+    launch_for(discovered.to_path_buf(), device, wanted)
+}
+
+/// Weights that match the backend `plan_launch` will actually use.
+pub fn planned_lc0_weights(binary: &Path) -> Option<PathBuf> {
+    let launch = plan_launch(binary, detect_device_kind());
+    for (index, arg) in launch.extra_args.iter().enumerate() {
+        if let Some(path) = arg.strip_prefix("--weights=") {
+            return Some(PathBuf::from(path));
+        }
+        if arg == "--weights" {
+            return launch.extra_args.get(index + 1).map(PathBuf::from);
+        }
+    }
+    None
+}
+
+fn is_cpu_backend(backend: &str) -> bool {
+    matches!(
         backend,
-        extra_args: weights_args(discovered, device),
+        "eigen" | "blas" | "dnnl" | "onnx-cpu" | "trivial" | "random" | "check"
+    )
+}
+
+fn launch_for(binary: PathBuf, device: Lc0DeviceKind, wanted: &[&'static str]) -> Lc0Launch {
+    let backend = first_supported_backend(&binary, wanted);
+    let weight_device = if is_cpu_backend(backend) {
+        Lc0DeviceKind::Cpu
+    } else {
+        device
+    };
+    Lc0Launch {
+        extra_args: weights_args(&binary, weight_device),
+        binary,
+        backend,
     }
 }
 
@@ -209,22 +237,20 @@ fn find_named_weights(binary: Option<&Path>, names: &[&str]) -> Option<PathBuf> 
 
 fn weights_args(binary: &Path, device: Lc0DeviceKind) -> Vec<String> {
     discover_lc0_weights_for_device(Some(binary), device)
-        .map(|weights| {
-            vec![
-                "--weights".to_string(),
-                weights.to_string_lossy().into_owned(),
-            ]
-        })
+        .map(|weights| vec![format!("--weights={}", weights.display())])
         .unwrap_or_default()
 }
 
 fn first_supported_backend(binary: &Path, wanted: &[&'static str]) -> &'static str {
     let listed = advertised_backends(binary);
+    if listed.is_empty() {
+        return "eigen";
+    }
     wanted
         .iter()
         .copied()
         .find(|name| listed.iter().any(|listed| listed == name))
-        .unwrap_or(wanted.last().copied().unwrap_or("eigen"))
+        .unwrap_or("eigen")
 }
 
 fn advertised_backends(binary: &Path) -> Vec<String> {
@@ -277,11 +303,10 @@ mod tests {
         let path = PathBuf::from("/tmp/missing-lc0");
         let launch = plan_launch(&path, Lc0DeviceKind::Cpu);
         assert_eq!(launch.binary, path);
-        assert_eq!(launch.backend, "dnnl");
-        assert!(
-            launch
-                .argv()
-                .starts_with(&["--backend".to_string(), "dnnl".to_string()])
+        assert_eq!(launch.backend, "eigen");
+        assert_eq!(
+            launch.argv().first().map(String::as_str),
+            Some("--backend=eigen")
         );
     }
 
@@ -314,10 +339,7 @@ mod tests {
         let launch = plan_launch(&binary, Lc0DeviceKind::Cpu);
         assert_eq!(
             launch.extra_args,
-            vec![
-                "--weights".to_string(),
-                weights.to_string_lossy().into_owned()
-            ]
+            vec![format!("--weights={}", weights.display())]
         );
         let _ = std::fs::remove_file(&weights);
         let _ = std::fs::remove_file(&binary);
@@ -335,17 +357,22 @@ mod tests {
         write_usable_weights(&fallback);
         std::fs::write(&binary, b"").unwrap();
         let launch = plan_launch(&binary, Lc0DeviceKind::Nvidia);
+        // Dummy binaries advertise no GPU backend, so Eigen must not load BT4.
+        assert_eq!(launch.backend, "eigen");
         assert_eq!(
             launch.extra_args,
-            vec!["--weights".to_string(), bt4.to_string_lossy().into_owned()]
+            vec![format!("--weights={}", fallback.display())]
         );
         let cpu = plan_launch(&binary, Lc0DeviceKind::Cpu);
         assert_eq!(
             cpu.extra_args,
-            vec![
-                "--weights".to_string(),
-                fallback.to_string_lossy().into_owned()
-            ]
+            vec![format!("--weights={}", fallback.display())]
+        );
+        let amd = plan_launch(&binary, Lc0DeviceKind::Amd);
+        assert_eq!(amd.backend, "eigen");
+        assert_eq!(
+            amd.extra_args,
+            vec![format!("--weights={}", fallback.display())]
         );
         let _ = std::fs::remove_file(&bt4);
         let _ = std::fs::remove_file(&fallback);
@@ -354,19 +381,43 @@ mod tests {
     }
 
     #[test]
+    fn packaged_eigen_lc0_never_gets_an_unsupported_backend() {
+        let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../dist/linux-x86_64/engines/lc0/bin/linux-x86_64/lc0");
+        if !binary.is_file() {
+            return;
+        }
+        let listed = advertised_backends(&binary);
+        assert!(
+            listed.contains(&"eigen".to_owned()),
+            "help parse missed eigen: {listed:?}"
+        );
+        for device in [
+            Lc0DeviceKind::Nvidia,
+            Lc0DeviceKind::Amd,
+            Lc0DeviceKind::Cpu,
+        ] {
+            let launch = plan_launch(&binary, device);
+            assert!(
+                listed.iter().any(|name| name == launch.backend),
+                "{device:?} selected unsupported backend {} from {listed:?}",
+                launch.backend
+            );
+        }
+    }
+
+    #[test]
     fn argv_includes_backend_flag() {
         let launch = Lc0Launch {
             binary: PathBuf::from("lc0"),
             backend: "cuda",
-            extra_args: vec!["--weights".into(), "net.pb.gz".into()],
+            extra_args: vec!["--weights=net.pb.gz".into()],
         };
         assert_eq!(
             launch.argv(),
             vec![
-                "--backend".to_string(),
-                "cuda".to_string(),
-                "--weights".to_string(),
-                "net.pb.gz".to_string()
+                "--backend=cuda".to_string(),
+                "--weights=net.pb.gz".to_string()
             ]
         );
     }

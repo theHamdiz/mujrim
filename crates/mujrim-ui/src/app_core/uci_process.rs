@@ -1,6 +1,6 @@
 //! External engine process helpers for GUI play.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -257,9 +257,6 @@ pub fn uci_resource_options(
     use_nnue: bool,
     eval_file: Option<&str>,
 ) -> Vec<(String, String)> {
-    const STOCKFISH_SHA256: &str =
-        "ab28990d4ea3d5c97f7d3918bc5dd5061609330369fe00c2d93a34d4777b5552";
-
     let file_name = engine
         .file_stem()
         .and_then(|name| name.to_str())
@@ -281,12 +278,7 @@ pub fn uci_resource_options(
         "MoveOverhead"
     };
     options.push((overhead_name.to_owned(), "150".to_owned()));
-    if is_lc0
-        && let Some(weights) = mujrim_protocols::discover_lc0_weights_for_device(
-            Some(engine),
-            mujrim_protocols::detect_device_kind(),
-        )
-    {
+    if is_lc0 && let Some(weights) = mujrim_protocols::planned_lc0_weights(engine) {
         options.push((
             "WeightsFile".to_owned(),
             weights.to_string_lossy().into_owned(),
@@ -303,29 +295,9 @@ pub fn uci_resource_options(
         ));
     }
 
-    // Only auto-inject Stockfish EvalFile for actual Stockfish binaries.
-    // Forcing it onto mujrim previously overrode the embedded Reckless net and
-    // made GUI play diverge from CuteChess (which leaves EvalFile alone).
-    let is_stockfish =
-        file_name.contains("stockfish") || file_name.contains("elite") || file_name.contains("v10");
-    static STOCKFISH_NETWORK: OnceLock<Option<PathBuf>> = OnceLock::new();
-    if eval_file.is_none()
-        && is_stockfish
-        && let Some(network) = STOCKFISH_NETWORK
-            .get_or_init(|| {
-                resource_directories(engine, "nnue")
-                    .into_iter()
-                    .find_map(|directory| {
-                        updater::nnue::find_by_fingerprint(&directory, STOCKFISH_SHA256)
-                    })
-            })
-            .as_ref()
-    {
-        options.push((
-            "EvalFile".to_owned(),
-            network.to_string_lossy().into_owned(),
-        ));
-    } else if let Some(path) = eval_file {
+    // Official Stockfish embeds its default net. Setting EvalFile to an older
+    // fingerprint (nn-ab28990d4ea3) makes Stockfish 18 refuse to load and exit.
+    if let Some(path) = eval_file {
         options.push(("EvalFile".to_owned(), path.to_owned()));
     }
     options
@@ -699,6 +671,25 @@ mod tests {
         assert!(
             options.iter().any(|(n, _)| n == "Move Overhead"),
             "{options:?}"
+        );
+    }
+
+    #[test]
+    fn stockfish_keeps_its_embedded_evalfile_unless_the_user_sets_one() {
+        let options =
+            uci_resource_options(Path::new("C:/engines/stockfish.exe"), false, true, None);
+        assert!(
+            options
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("EvalFile")),
+            "Stockfish 18 terminates if EvalFile is an older net: {options:?}"
+        );
+        let elite = uci_resource_options(Path::new("/engines/mujrim-elite"), false, true, None);
+        assert!(
+            elite
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("EvalFile")),
+            "{elite:?}"
         );
     }
 

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::action::ToolAction;
 use crate::process::run;
 
-const BINS: &[&str] = &["mujrim", "mujrim-ui", "mujrim-game", "mujrim-updater"];
+const BINS: &[&str] = &["mujrim", "mujrim-ui", "mujrim-updater"];
 
 #[derive(Debug)]
 pub struct InstallAction;
@@ -22,8 +22,6 @@ impl ToolAction for InstallAction {
                 "--exclude",
                 "mujrim-ui",
                 "--exclude",
-                "mujrim-game",
-                "--exclude",
                 "mujrim-installer",
             ],
             &environment,
@@ -31,11 +29,6 @@ impl ToolAction for InstallAction {
         run(
             "cargo",
             &["build", "--release", "-p", "mujrim-ui"],
-            &environment,
-        )?;
-        run(
-            "cargo",
-            &["build", "--release", "-p", "mujrim-game"],
             &environment,
         )?;
 

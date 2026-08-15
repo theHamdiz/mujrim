@@ -91,13 +91,6 @@ ui:
     @echo "Launching Mujrim Chess GUI..."
     cargo run --release -p mujrim-ui
 
-# Build and run the Iced GUI fallback
-ui-iced:
-    @echo "Building Mujrim GUI (Iced)..."
-    CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-ui --no-default-features --features iced-ui,book,nnue
-    @echo "Launching Mujrim Chess GUI (Iced)..."
-    cargo run --release -p mujrim-ui --no-default-features --features iced-ui,book,nnue
-
 # Package dual-arch Windows dist trees (windows-aarch64 + windows-x86_64)
 # Build + assemble dist/windows-aarch64 and dist/windows-x86_64 replicas.
 # On Arm64 hosts, x86_64 uses llvm-mingw + x86_64-pc-windows-gnullvm when available.
@@ -107,11 +100,6 @@ ui-iced:
 #   just package-dist-windows -PackageOnly
 package-dist-windows *args:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-dist-windows.ps1 {{args}}
-
-# Build and run the Bevy chess game (always release)
-game:
-    @echo "Building Mujrim Bevy Game..."
-    CARGO_BUILD_JOBS=1 cargo run --release -p mujrim-game
 
 # Build the updater
 updater:
@@ -221,10 +209,9 @@ uninstall:
 # Build the installer (builds workspace first, then embeds binaries)
 installer:
     @echo "Building engine and updater in maximal release mode..."
-    CARGO_BUILD_JOBS=1 cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer
+    CARGO_BUILD_JOBS=1 cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-installer
     @echo "Building desktop clients with maximal fat LTO..."
     CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-ui
-    CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-game
     @echo "Building installer with embedded binaries..."
     CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-installer --features embed
 

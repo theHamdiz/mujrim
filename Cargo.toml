@@ -25,7 +25,6 @@ members = [
     "crates/mujrim-trainer",
     "crates/mujrim-benchmarker",
     "crates/mujrim-tooling",
-    "crates/mujrim-game",
     "crates/mujrim-installer",
     "crates/mujrim-study",
 ]
@@ -84,6 +83,6 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 
-# Optimize dependencies in dev mode so Bevy/GPU runs at usable speed
+# Optimize dependencies in dev mode so GPU crates run at usable speed
 [profile.dev.package."*"]
 opt-level = 2

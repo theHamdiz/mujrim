@@ -16,7 +16,7 @@ pub mod uci_options;
 pub use binary_arch::{BinaryArch, detect_binary_arch, is_host_native_binary};
 pub use lc0_backend::{
     LC0_BUNDLED_WEIGHTS_NAME, LC0_WEIGHT_NAMES, Lc0DeviceKind, Lc0Launch, detect_device_kind,
-    discover_lc0_weights, discover_lc0_weights_for_device, plan_launch,
+    discover_lc0_weights, discover_lc0_weights_for_device, plan_launch, planned_lc0_weights,
 };
 pub use uci_options::{AdvertisedUciOption, parse_uci_option_line, routed_setoption_commands};
 

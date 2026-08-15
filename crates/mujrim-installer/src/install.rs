@@ -107,7 +107,6 @@ fn create_macos_bundles(bin_dir: &Path) -> Result<usize, String> {
     for bin in embedded::BINARIES.iter().filter(|b| b.create_shortcut) {
         let app_name = match bin.filename {
             "mujrim-ui" => "Mujrim Chess",
-            "mujrim-game" => "Mujrim Game",
             _ => bin.name,
         };
 
@@ -170,7 +169,6 @@ fn create_linux_desktop_entries(bin_dir: &Path) -> Result<usize, String> {
     for bin in embedded::BINARIES.iter().filter(|b| b.create_shortcut) {
         let app_name = match bin.filename {
             "mujrim-ui" => "Mujrim Chess",
-            "mujrim-game" => "Mujrim Game",
             _ => bin.name,
         };
 
@@ -210,7 +208,6 @@ fn create_windows_shortcuts(bin_dir: &Path) -> Result<usize, String> {
     for bin in embedded::BINARIES.iter().filter(|b| b.create_shortcut) {
         let app_name = match bin.filename {
             "mujrim-ui" => "Mujrim Chess",
-            "mujrim-game" => "Mujrim Game",
             _ => bin.name,
         };
 

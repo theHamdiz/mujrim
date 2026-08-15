@@ -1,4 +1,4 @@
-//! Iced-parity home hub: setup + engine settings + start.
+//! Home hub: setup + engine settings + start.
 
 use floem::prelude::*;
 use floem::taffy::style::{Display, FlexWrap, Overflow};

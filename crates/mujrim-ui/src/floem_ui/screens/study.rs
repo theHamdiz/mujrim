@@ -768,7 +768,7 @@ fn gambit_card(state: AppState) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn study_hub_covers_iced_workspace_panels() {
+    fn study_hub_covers_workspace_panels() {
         let src = include_str!("study.rs");
         let production = src.split("#[cfg(test)]").next().expect("source");
         for needle in [

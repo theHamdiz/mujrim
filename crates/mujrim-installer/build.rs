@@ -44,13 +44,6 @@ const PAYLOADS: &[(&str, &str, &str, bool, &str)] = &[
         "Mujrim Chess GUI",
     ),
     (
-        "Mujrim Game",
-        "mujrim-game",
-        "release/mujrim-game",
-        true,
-        "Mujrim 3D Chess Game",
-    ),
-    (
         "Mujrim Updater",
         "mujrim-updater",
         "release/mujrim-updater",

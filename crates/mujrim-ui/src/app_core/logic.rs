@@ -771,23 +771,37 @@ pub fn resolve_tournament_engine_launch_from(
 pub fn build_tournament_roster(
     engines: Vec<QuickTournamentEngine>,
 ) -> Result<Vec<mujrim_benchmarker::strength::TournamentEngine>, String> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    build_tournament_roster_from(engines, &exe, &cwd)
+}
+
+pub fn build_tournament_roster_from(
+    engines: Vec<QuickTournamentEngine>,
+    executable: &Path,
+    current_dir: &Path,
+) -> Result<Vec<mujrim_benchmarker::strength::TournamentEngine>, String> {
     use mujrim_benchmarker::strength::{EngineSpec, TournamentEngine};
 
     let mut roster = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut notes = Vec::new();
     for engine in engines {
-        let (path, args) = match resolve_tournament_engine_launch(&engine.path) {
-            Ok(launch) => launch,
-            Err(error) => {
-                notes.push(format!("{}: {error}", engine.name));
-                continue;
-            }
-        };
-        let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let (path, args) =
+            match resolve_tournament_engine_launch_from(&engine.path, executable, current_dir) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    notes.push(format!("{}: {error}", engine.name));
+                    continue;
+                }
+            };
+        let identity = engine
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| engine.path.clone());
         if !seen.insert(identity) {
             notes.push(format!(
-                "{} skipped; it launches the same binary as another selected engine",
+                "{} skipped; the same selected binary is already on the roster",
                 engine.name
             ));
             continue;
@@ -2061,6 +2075,63 @@ mod tests {
         ])
         .expect_err("two missing lc0s");
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn tournament_roster_keeps_official_lc0_and_mujrim_lc0() {
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-lc0-roster-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let platform = mujrim_protocols::catalog::RuntimePlatform::current().directory_name();
+        let lc0_dir = root.join("engines").join("lc0").join("bin").join(&platform);
+        let wrapper_dir = root
+            .join("engines")
+            .join("mujrim")
+            .join("bin")
+            .join(&platform);
+        std::fs::create_dir_all(&lc0_dir).unwrap();
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+        let fixture = std::env::current_exe().expect("test exe");
+        let official = lc0_dir.join(if cfg!(windows) { "lc0.exe" } else { "lc0" });
+        let wrapper = wrapper_dir.join(if cfg!(windows) {
+            "mujrim-lc0.exe"
+        } else {
+            "mujrim-lc0"
+        });
+        let ui = root.join(if cfg!(windows) {
+            "mujrim-ui.exe"
+        } else {
+            "mujrim-ui"
+        });
+        std::fs::copy(&fixture, &official).unwrap();
+        std::fs::write(&wrapper, b"wrapper").unwrap();
+        std::fs::write(&ui, b"ui").unwrap();
+        let roster = build_tournament_roster_from(
+            vec![
+                QuickTournamentEngine {
+                    name: "Lc0".into(),
+                    path: official.clone(),
+                    search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+                },
+                QuickTournamentEngine {
+                    name: "Mujrim Lc0".into(),
+                    path: wrapper.clone(),
+                    search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+                },
+            ],
+            &ui,
+            &root,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let roster = roster.expect("both lc0 entries must stay on the roster");
+        assert_eq!(roster.len(), 2, "{roster:?}");
+        assert_eq!(roster[0].engine.name, "Lc0");
+        assert_eq!(roster[1].engine.name, "Mujrim Lc0");
     }
 
     #[test]

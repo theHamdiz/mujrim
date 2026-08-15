@@ -31,7 +31,7 @@ Updated: 2026-08-15
   - `gui.*`
   - `tooling.*`
   - `updater.*`
-- Default desktop GUI is Floem (`cargo run --release -p mujrim-ui`); Iced is `--no-default-features --features iced-ui,book,nnue`.
+- Default desktop GUI is Floem (`cargo run --release -p mujrim-ui`).
 - Title-bar icons are embedded Lucide SVGs on the Floem path.
 - `mujrim-tooling agent list [--pretty]`
 - `mujrim-tooling agent describe <tool> [--pretty]`

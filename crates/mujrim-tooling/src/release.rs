@@ -176,8 +176,6 @@ fn build_native() -> Result<(), String> {
             "--exclude",
             "mujrim-ui",
             "--exclude",
-            "mujrim-game",
-            "--exclude",
             "mujrim-installer",
         ],
         &environment,
@@ -330,11 +328,6 @@ fn build_native() -> Result<(), String> {
     run(
         "cargo",
         &["build", "--release", "-p", "mujrim-ui"],
-        &environment,
-    )?;
-    run(
-        "cargo",
-        &["build", "--release", "-p", "mujrim-game"],
         &environment,
     )?;
     run(

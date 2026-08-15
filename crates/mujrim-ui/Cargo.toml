@@ -3,25 +3,22 @@ name = "mujrim-ui"
 version = "1.0.0"
 edition = "2024"
 authors = ["Ahmad Hamdi Emara"]
-description = "GUI for the Mujrim chess engine (Floem default, Iced behind iced-ui)"
+description = "Floem GUI for the Mujrim chess engine"
 license = "MIT"
 
 [features]
 default = ["floem-ui", "book", "nnue"]
 book = ["search/book"]
 nnue = ["search/nnue"]
-floem-ui = ["dep:floem", "dep:usvg"]
-iced-ui = ["dep:iced", "dep:iced_fonts"]
+floem-ui = []
 
 [[bin]]
 name = "mujrim-ui"
 path = "src/main.rs"
 
 [dependencies]
-floem = { git = "https://github.com/lapce/floem", rev = "778bb5f2aa08429e579ee2e6ac97e84fbf18b618", features = ["tokio", "default-image-formats", "vger", "editor"], optional = true }
-usvg = { version = "0.46", optional = true }
-iced = { version = "0.14", features = ["canvas", "image", "svg", "tokio"], optional = true }
-iced_fonts = { version = "0.3", features = ["lucide"], optional = true }
+floem = { git = "https://github.com/lapce/floem", rev = "778bb5f2aa08429e579ee2e6ac97e84fbf18b618", features = ["tokio", "default-image-formats", "vger", "editor"] }
+usvg = "0.46"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 types = { package = "mujrim-types", path = "../mujrim-types" }
 search = { package = "mujrim-search", path = "../mujrim-search" }

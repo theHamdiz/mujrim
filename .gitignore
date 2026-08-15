@@ -49,7 +49,6 @@ crates/mujrim-eval/resources/viridithas-*
 !crates/mujrim-eval/resources/reckless_v60.nnue
 
 crates/mujrim-ui/target/*
-crates/mujrim-game/target/*
 crates/mujrim-installer/target/*
 
 # SPRT test results

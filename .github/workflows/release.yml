@@ -90,7 +90,7 @@ jobs:
       - name: Build optimized release
         run: |
           # Workspace tools first, then product engines last (so defaults don't overwrite).
-          cargo build --release --workspace --exclude mujrim --exclude mujrim-ui --exclude mujrim-game --exclude mujrim-installer --target ${{ matrix.target }}
+          cargo build --release --workspace --exclude mujrim --exclude mujrim-ui --exclude mujrim-installer --target ${{ matrix.target }}
           # Product engines: never enable embedded-networks on top of default features.
           cargo build --release -p mujrim --no-default-features --features xboard,book,nnue,simd,akimbo-nnue,stockfish-nnue,reckless-nnue --target ${{ matrix.target }}
           cp "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}"
@@ -102,7 +102,6 @@ jobs:
           cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-external${{ matrix.suffix }}" "target/${{ matrix.target }}/release/mujrim${{ matrix.suffix }}"
           cargo build --release -p mujrim-ui --target ${{ matrix.target }}
-          cargo build --release -p mujrim-game --target ${{ matrix.target }}
           cargo build --release -p mujrim-installer --features embed --target ${{ matrix.target }}
 
       - name: Prepare standalone fallback alias
@@ -171,7 +170,6 @@ jobs:
           cp "target/${{ matrix.target }}/release/mujrim-v60${{ matrix.suffix }}" "$DIR/mujrim-v60${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}" "$DIR/mujrim-v60-${{ matrix.arch }}${{ matrix.suffix }}"
           cp "target/${{ matrix.target }}/release/mujrim-ui${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
-          cp "target/${{ matrix.target }}/release/mujrim-game${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
           cp "target/${{ matrix.target }}/release/mujrim-installer${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
           cp "target/${{ matrix.target }}/release/mujrim-updater${{ matrix.suffix }}" "$DIR/" 2>/dev/null || true
 
@@ -336,7 +334,6 @@ jobs:
             mujrim-ak
             mujrim-v60
             mujrim-ui
-            mujrim-game
             mujrim-updater
             mujrim-installer
           )
