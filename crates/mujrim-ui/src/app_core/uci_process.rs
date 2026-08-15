@@ -253,24 +253,33 @@ pub fn uci_resource_options(
     const STOCKFISH_SHA256: &str =
         "ab28990d4ea3d5c97f7d3918bc5dd5061609330369fe00c2d93a34d4777b5552";
 
-    let mut options = vec![
-        ("Ponder".to_owned(), ponder.to_string()),
-        ("UseNNUE".to_owned(), use_nnue.to_string()),
-    ];
     let file_name = engine
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let is_lc0 = file_name.contains("lc0") || file_name.contains("leela");
+    let mut options = vec![("Ponder".to_owned(), ponder.to_string())];
+    if !is_lc0 {
+        options.push(("UseNNUE".to_owned(), use_nnue.to_string()));
+    }
     let overhead_name = if file_name.contains("v60") || file_name.contains("reckless") {
         "MoveOverhead"
-    } else if file_name.contains("stockfish") {
+    } else if file_name.contains("stockfish")
+        || file_name.contains("elite")
+        || file_name.contains("v10")
+    {
         "Move Overhead"
     } else {
-        // Mujrim and most UCI engines use the compact spelling.
         "MoveOverhead"
     };
     options.push((overhead_name.to_owned(), "150".to_owned()));
+    if is_lc0 && let Some(weights) = mujrim_protocols::discover_lc0_weights(Some(engine)) {
+        options.push((
+            "WeightsFile".to_owned(),
+            weights.to_string_lossy().into_owned(),
+        ));
+    }
 
     if let Some(directory) = resource_directories(engine, "syzygy")
         .into_iter()
@@ -285,7 +294,8 @@ pub fn uci_resource_options(
     // Only auto-inject Stockfish EvalFile for actual Stockfish binaries.
     // Forcing it onto mujrim previously overrode the embedded Reckless net and
     // made GUI play diverge from CuteChess (which leaves EvalFile alone).
-    let is_stockfish = file_name.contains("stockfish");
+    let is_stockfish =
+        file_name.contains("stockfish") || file_name.contains("elite") || file_name.contains("v10");
     static STOCKFISH_NETWORK: OnceLock<Option<PathBuf>> = OnceLock::new();
     if eval_file.is_none()
         && is_stockfish
@@ -677,6 +687,18 @@ mod tests {
         assert!(
             options.iter().any(|(n, _)| n == "Move Overhead"),
             "{options:?}"
+        );
+    }
+
+    #[test]
+    fn lc0_skips_usennue_and_elite_uses_stockfish_overhead() {
+        let lc0 = uci_resource_options(Path::new("/engines/lc0"), false, true, None);
+        assert!(lc0.iter().all(|(name, _)| name != "UseNNUE"), "{lc0:?}");
+        assert!(lc0.iter().any(|(name, _)| name == "Ponder"));
+        let elite = uci_resource_options(Path::new("/engines/mujrim-elite"), false, true, None);
+        assert!(
+            elite.iter().any(|(name, _)| name == "Move Overhead"),
+            "{elite:?}"
         );
     }
 

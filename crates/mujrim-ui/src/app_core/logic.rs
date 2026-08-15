@@ -708,12 +708,43 @@ pub fn default_tournament_engine_paths(roster: &[QuickTournamentEngine]) -> Vec<
 }
 
 pub fn gui_safe_engine_args(path: &Path) -> Vec<String> {
+    resolved_engine_launch(path).1
+}
+
+/// Mujrim product wrappers already pick a backend. Only raw `lc0` gets launch argv.
+pub fn resolved_engine_launch(path: &Path) -> (PathBuf, Vec<String>) {
     let key = engine_identity_key(path);
-    if key == "lc0" || key.contains("lc0") || key.contains("leela") {
-        vec!["--backend=eigen".to_owned(), "--nncache=20000".to_owned()]
-    } else {
-        Vec::new()
+    if is_official_lc0_identity(&key) {
+        let launch = mujrim_protocols::plan_launch(path, mujrim_protocols::detect_device_kind());
+        let args = launch.argv();
+        return (launch.binary, args);
     }
+    if is_mujrim_lc0_identity(&key) {
+        if let Some(official) = official_lc0_for_wrapper(path) {
+            let launch =
+                mujrim_protocols::plan_launch(&official, mujrim_protocols::detect_device_kind());
+            let args = launch.argv();
+            return (launch.binary, args);
+        }
+        return (path.to_path_buf(), Vec::new());
+    }
+    (path.to_path_buf(), Vec::new())
+}
+
+fn is_official_lc0_identity(key: &str) -> bool {
+    !key.contains("mujrim") && (key == "lc0" || key.contains("lc0") || key.contains("leela"))
+}
+
+fn is_mujrim_lc0_identity(key: &str) -> bool {
+    key.contains("mujrim") && (key.contains("lc0") || key.contains("leela"))
+}
+
+fn official_lc0_for_wrapper(wrapper: &Path) -> Option<PathBuf> {
+    let parent = wrapper.parent()?;
+    ["lc0", "lc0.exe"].into_iter().find_map(|name| {
+        let candidate = parent.join(name);
+        candidate.is_file().then_some(candidate)
+    })
 }
 
 pub fn run_quick_tournament(
@@ -788,11 +819,12 @@ fn run_quick_tournament_body(
     let roster: Vec<TournamentEngine> = engines
         .into_iter()
         .map(|engine| {
-            let mut spec = EngineSpec::new(engine.path.clone());
+            let (path, args) = resolved_engine_launch(&engine.path);
+            let mut spec = EngineSpec::new(path.clone());
             spec.name = engine.name;
-            spec.args = gui_safe_engine_args(&engine.path);
-            spec.uci_options = uci_process::uci_resource_options(&engine.path, false, true, None);
-            let established_elo = mujrim_study::rating::published_reference_elo(&spec.name);
+            spec.args = args;
+            spec.uci_options = uci_process::uci_resource_options(&path, false, true, None);
+            let established_elo = mujrim_study::rating::seed_elo_for_engine(&spec.name);
             TournamentEngine {
                 engine: spec,
                 established_elo,
@@ -1434,7 +1466,7 @@ pub fn snapshot_to_stored(
             .map(|(index, name)| Entrant {
                 id: format!("engine-{index}"),
                 name: name.clone(),
-                seed_elo: mujrim_study::rating::published_reference_elo(name),
+                seed_elo: mujrim_study::rating::seed_elo_for_engine(name),
             })
             .collect(),
         results: snap.game_results.clone(),
@@ -1798,17 +1830,19 @@ mod tests {
     }
 
     #[test]
-    fn lc0_gui_args_force_cpu_backend() {
+    fn lc0_gui_args_select_a_backend_but_mujrim_wrappers_stay_clean() {
         let args = gui_safe_engine_args(Path::new("/engines/lc0"));
-        assert!(args.iter().any(|arg| arg == "--backend=eigen"));
-        assert!(args.iter().any(|arg| arg.contains("nncache")));
         assert!(
-            gui_safe_engine_args(Path::new("/engines/lc0-cuda"))
-                .iter()
-                .any(|arg| arg == "--backend=eigen")
+            args.windows(2).any(|pair| pair == ["--backend", "eigen"])
+                || args.iter().any(|arg| arg.contains("backend"))
         );
         assert!(gui_safe_engine_args(Path::new("/engines/stockfish")).is_empty());
         assert!(gui_safe_engine_args(Path::new("/engines/mujrim")).is_empty());
+        assert!(gui_safe_engine_args(Path::new("/engines/mujrim-lc0")).is_empty());
+        assert!(gui_safe_engine_args(Path::new("/engines/mujrim-v60")).is_empty());
+        let (path, args) = resolved_engine_launch(Path::new("/engines/mujrim-akimbo"));
+        assert_eq!(path, PathBuf::from("/engines/mujrim-akimbo"));
+        assert!(args.is_empty());
     }
 
     #[test]

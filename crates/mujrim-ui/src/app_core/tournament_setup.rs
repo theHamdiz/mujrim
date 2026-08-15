@@ -30,10 +30,10 @@ pub struct TournamentSetup {
     pub pgn_output: String,
 }
 
-pub const GUI_TOURNAMENT_MAX_HASH_MB: u32 = 64;
-pub const GUI_TOURNAMENT_MAX_THREADS: u32 = 1;
-pub const GUI_TOURNAMENT_ENGINE_MEMORY_MB: u32 = 256;
-pub const GUI_TOURNAMENT_MATCH_MEMORY_MB: u32 = 512;
+pub const GUI_TOURNAMENT_MAX_HASH_MB: u32 = 256;
+pub const GUI_TOURNAMENT_MAX_THREADS: u32 = 2;
+pub const GUI_TOURNAMENT_ENGINE_MEMORY_MB: u32 = 1024;
+pub const GUI_TOURNAMENT_MATCH_MEMORY_MB: u32 = 2048;
 
 pub fn detected_safe_games() -> u32 {
     let cores = std::thread::available_parallelism()
@@ -97,7 +97,7 @@ impl Default for TournamentSetup {
             concurrency: 1,
             swap_sides: true,
             time_control: TimeControlPreset::ThreePlusTwo,
-            hash_mb: 32,
+            hash_mb: 128,
             engine_threads: 1,
             max_plies: 400,
             selected_engine_paths: Vec::new(),
@@ -125,7 +125,7 @@ impl TournamentSetup {
         let max_games = detected_safe_games();
         self.concurrency = self.concurrency.clamp(1, max_games);
         self.hash_mb = self.hash_mb.clamp(16, GUI_TOURNAMENT_MAX_HASH_MB);
-        self.engine_threads = 1;
+        self.engine_threads = self.engine_threads.clamp(1, GUI_TOURNAMENT_MAX_THREADS);
         self.games_per_encounter = self.games_per_encounter.clamp(1, 4);
         self.max_plies = self.max_plies.clamp(1, 400);
     }
@@ -143,7 +143,7 @@ impl TournamentSetup {
             pairs: setup.games_per_encounter as usize,
             concurrency: setup.concurrency.max(1) as usize,
             hash_mb,
-            engine_threads: 1,
+            engine_threads: setup.engine_threads.max(1) as usize,
             max_engine_memory_mb: GUI_TOURNAMENT_ENGINE_MEMORY_MB as usize,
             max_match_memory_mb: GUI_TOURNAMENT_MATCH_MEMORY_MB as usize
                 * setup.concurrency.max(1) as usize,
@@ -213,7 +213,7 @@ mod tests {
         };
         let config = setup.to_match_config();
         assert_eq!(config.concurrency, 1);
-        assert_eq!(config.engine_threads, 1);
+        assert_eq!(config.engine_threads, GUI_TOURNAMENT_MAX_THREADS as usize);
         assert!(config.hash_mb <= GUI_TOURNAMENT_MAX_HASH_MB as usize);
         assert_eq!(
             config.max_engine_memory_mb,
@@ -246,7 +246,7 @@ mod tests {
         setup.sanitize_for_gui();
         assert!(setup.concurrency >= 1);
         assert!(setup.concurrency <= detected_safe_games());
-        assert_eq!(setup.engine_threads, 1);
+        assert_eq!(setup.engine_threads, GUI_TOURNAMENT_MAX_THREADS);
         assert_eq!(setup.hash_mb, GUI_TOURNAMENT_MAX_HASH_MB);
         assert_eq!(setup.games_per_encounter, 4);
         assert_eq!(setup.max_plies, 400);

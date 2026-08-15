@@ -37,37 +37,59 @@ impl DatasetFormat {
 }
 
 pub fn load_positions_from_path(path: &Path) -> Result<Vec<TrainingPosition>, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    decode_bytes(&bytes)
+    let file = std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    decode_read(file)
 }
 
 pub fn decode_bytes(bytes: &[u8]) -> Result<Vec<TrainingPosition>, String> {
-    if bytes.starts_with(&GZIP_MAGIC) {
-        let mut plain = Vec::new();
-        GzDecoder::new(bytes)
-            .read_to_end(&mut plain)
-            .map_err(|error| format!("gzip decompress failed: {error}"))?;
-        return decode_bytes(&plain);
+    decode_read(bytes)
+}
+
+pub fn decode_read(reader: impl Read) -> Result<Vec<TrainingPosition>, String> {
+    decode_boxed(Box::new(reader))
+}
+
+fn decode_boxed(mut reader: Box<dyn Read + '_>) -> Result<Vec<TrainingPosition>, String> {
+    loop {
+        let mut magic = [0u8; 4];
+        let n = reader
+            .read(&mut magic)
+            .map_err(|error| format!("failed to read dataset header: {error}"))?;
+        if n >= 2 && magic.starts_with(&GZIP_MAGIC) {
+            reader = Box::new(GzDecoder::new(
+                std::io::Cursor::new(magic[..n].to_vec()).chain(reader),
+            ));
+            continue;
+        }
+        if n == 4 && magic == ZSTD_MAGIC {
+            let decoder = zstd::stream::Decoder::new(std::io::Cursor::new(magic).chain(reader))
+                .map_err(|error| format!("zstd decoder failed: {error}"))?;
+            reader = Box::new(decoder);
+            continue;
+        }
+        if n == 4 && crate::lc0::record_size(u32::from_le_bytes(magic)).is_some() {
+            return crate::lc0::decode_stream(magic, reader);
+        }
+        let mut rest = magic[..n].to_vec();
+        reader
+            .read_to_end(&mut rest)
+            .map_err(|error| format!("failed to read dataset: {error}"))?;
+        return decode_uncompressed(&rest);
     }
-    if bytes.starts_with(&ZSTD_MAGIC) {
-        let mut decoder = zstd::stream::Decoder::new(bytes)
-            .map_err(|error| format!("zstd decoder failed: {error}"))?;
-        let mut plain = Vec::new();
-        decoder
-            .read_to_end(&mut plain)
-            .map_err(|error| format!("zstd decompress failed: {error}"))?;
-        return decode_bytes(&plain);
-    }
+}
+
+fn decode_uncompressed(bytes: &[u8]) -> Result<Vec<TrainingPosition>, String> {
     if bytes.starts_with(STOCKFISH_BINP) {
-        return Err(
-            "official chained Stockfish BINP must be converted to .plain before training".into(),
-        );
+        return Err("Stockfish training uses .plain or .plain.gz, not chained BINP".into());
     }
     if bytes.starts_with(game_export::BINPACK_MAGIC) {
         return decode_mujrim_binpack(bytes);
     }
+    if crate::lc0::looks_like_lc0(bytes) {
+        return crate::lc0::decode_records(bytes);
+    }
     let text = std::str::from_utf8(bytes).map_err(|_| {
-        "dataset is not utf-8 after decompress (Lc0 v6 chunks and chained Stockfish BINP need conversion to .plain or PGN)".to_string()
+        "dataset is not a known training dump after decompress (need text, .plain, MJBP, PGN, or Lc0 v3–v6)".to_string()
     })?;
     decode_text(text)
 }
@@ -309,7 +331,19 @@ mod tests {
         let gz = gzip_bytes(text.as_bytes()).expect("gzip");
         let decoded = decode_bytes(&gz).expect("decode gzip");
         assert_eq!(decoded[0].score, 3);
-        assert!(decode_bytes(b"BINPxxxx").unwrap_err().contains("BINP"));
+        assert!(decode_bytes(b"BINPxxxx").unwrap_err().contains(".plain"));
+    }
+
+    #[test]
+    fn gzip_lc0_v6_chunk_decodes_without_a_separate_step() {
+        let record = crate::lc0::encode_v6_startpos(0.0, 0.5);
+        let gz = gzip_bytes(&record).expect("gzip lc0");
+        let decoded = decode_bytes(&gz).expect("decode lc0 gzip");
+        assert_eq!(
+            decoded[0].fen,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        );
+        assert_eq!(decoded[0].wdl, 0.75);
     }
 
     #[test]

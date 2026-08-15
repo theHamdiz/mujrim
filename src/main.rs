@@ -459,7 +459,7 @@ fn main() {
                 )
                 .subcommand(
                     Command::new("fetch")
-                        .about("Download a catalog or remote dataset with HTTP Range resume")
+                        .about("Download, decompress, and decode a dataset into train-ready text")
                         .arg(
                             Arg::new("id")
                                 .long("id")
@@ -757,13 +757,20 @@ fn main() {
                         .get_one::<String>("output")
                         .cloned()
                         .unwrap_or(filename);
-                    if let Err(error) =
-                        trainer::dataset::fetch_dataset(&resolved, std::path::Path::new(&output))
+                    match trainer::dataset::fetch_dataset(&resolved, std::path::Path::new(&output))
                     {
-                        eprintln!("dataset fetch failed: {error}");
-                        std::process::exit(1);
+                        Ok(report) => {
+                            println!(
+                                "ingested {} positions to {}",
+                                report.positions,
+                                report.ready_path.display()
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("dataset fetch failed: {error}");
+                            std::process::exit(1);
+                        }
                     }
-                    println!("wrote dataset to {output}");
                 }
                 Some(("catalog", _)) => {
                     for offer in trainer::catalog::DATASETS {

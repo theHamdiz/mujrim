@@ -397,8 +397,10 @@ where
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::horizontal((
         Label::new(label).style(move |s| {
-            s.width(150.0)
+            s.width(148.0)
+                .min_width(0.0)
                 .font_size(13.0)
+                .text_wrap()
                 .color(theme::rgba(pal().text_secondary))
         }),
         picker(state, active, items, on_accept).style(|s| s.flex_grow(1.0f32).min_width(0.0)),
@@ -420,8 +422,10 @@ pub fn stepper_row(
     let on_plus = on_change;
     Stack::horizontal((
         Label::new(label).style(move |s| {
-            s.width(110.0)
+            s.width(148.0)
+                .min_width(0.0)
                 .font_size(13.0)
+                .text_wrap()
                 .color(theme::rgba(pal().text_secondary))
         }),
         Button::new("−").action(move || on_minus((value() - 1).clamp(min, max))),
@@ -520,6 +524,15 @@ pub fn overlay_frame(
     on_close: impl Fn() + 'static,
     child: impl IntoView + 'static,
 ) -> impl IntoView {
+    overlay_frame_sized(state, on_close, child, layout::OVERLAY_MAX_WIDTH)
+}
+
+pub fn overlay_frame_sized(
+    state: AppState,
+    on_close: impl Fn() + 'static,
+    child: impl IntoView + 'static,
+    width: f64,
+) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::new((
         Empty::new()
@@ -528,7 +541,7 @@ pub fn overlay_frame(
         child
             .style(move |s| {
                 let pal = pal();
-                s.width(layout::OVERLAY_MAX_WIDTH)
+                s.width(width)
                     .max_width_pct(92.0)
                     .min_width(280.0)
                     .padding(layout::OVERLAY_PAD)

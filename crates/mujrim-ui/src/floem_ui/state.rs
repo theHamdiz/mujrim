@@ -25,6 +25,7 @@ use crate::app_core::motion::{AnimPace, MoveSlide};
 use crate::app_core::pieces::PieceAssets;
 use crate::app_core::recording::RecordingEngine;
 use crate::app_core::settings::{AppSettings, OptionsTab, Screen};
+use crate::app_core::tournament_arena::ArenaSlot;
 use crate::app_core::tournament_live::{LiveTournamentHandle, LiveTournamentSnapshot};
 use crate::app_core::tournament_setup::TournamentSetup;
 
@@ -101,6 +102,8 @@ pub struct AppState {
     pub announced_tournament_over: RwSignal<bool>,
     pub show_tournament_results: RwSignal<bool>,
     pub tournament_ui_fingerprint: RwSignal<u64>,
+    pub tournament_heavy_fingerprint: RwSignal<u64>,
+    pub arena_slots: RwSignal<Vec<ArenaSlot>>,
     pub ateed: AteedStudioState,
 }
 
@@ -241,6 +244,8 @@ impl AppState {
             announced_tournament_over: RwSignal::new(false),
             show_tournament_results: RwSignal::new(false),
             tournament_ui_fingerprint: RwSignal::new(0),
+            tournament_heavy_fingerprint: RwSignal::new(0),
+            arena_slots: RwSignal::new(Vec::new()),
             ateed: AteedStudioState {
                 unlocked: RwSignal::new(false),
                 password: RwSignal::new(String::new()),

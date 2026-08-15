@@ -4968,7 +4968,7 @@ impl App {
                 setup.hash_mb as i32,
                 "MiB",
                 16,
-                512,
+                crate::app_core::tournament_setup::GUI_TOURNAMENT_MAX_HASH_MB as i32,
                 Msg::TournamentHashChanged,
             ),
             config_slider(
@@ -4976,7 +4976,7 @@ impl App {
                 setup.engine_threads as i32,
                 "",
                 1,
-                8,
+                crate::app_core::tournament_setup::GUI_TOURNAMENT_MAX_THREADS as i32,
                 Msg::TournamentThreadsChanged,
             ),
             text("Games use one board at a time with live clocks (not instant).")
@@ -6471,11 +6471,12 @@ fn run_quick_tournament_body(
     let roster: Vec<TournamentEngine> = engines
         .into_iter()
         .map(|engine| {
-            let mut spec = EngineSpec::new(engine.path.clone());
+            let (path, args) = crate::app_core::logic::resolved_engine_launch(&engine.path);
+            let mut spec = EngineSpec::new(path.clone());
             spec.name = engine.name;
-            spec.args = crate::app_core::logic::gui_safe_engine_args(&engine.path);
-            spec.uci_options = uci_process::uci_resource_options(&engine.path, false, true, None);
-            let established_elo = mujrim_study::rating::published_reference_elo(&spec.name);
+            spec.args = args;
+            spec.uci_options = uci_process::uci_resource_options(&path, false, true, None);
+            let established_elo = mujrim_study::rating::seed_elo_for_engine(&spec.name);
             TournamentEngine {
                 engine: spec,
                 established_elo,
