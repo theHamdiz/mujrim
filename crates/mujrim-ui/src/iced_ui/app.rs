@@ -356,6 +356,10 @@ struct App {
     active_gambit: Option<&'static GambitLesson>,
     gambit_ply: usize,
     hub_opened_at: Instant,
+    game_resume_prompt: Option<crate::app_core::game_resume::ActiveGameCheckpoint>,
+    tournament_resume_prompt:
+        Option<crate::app_core::tournament_resume::ActiveTournamentCheckpoint>,
+    current_tournament_id: Option<String>,
 }
 
 /// State of an in-progress piece move animation.
@@ -501,6 +505,74 @@ fn selected_bundled_engine(
         })
 }
 
+struct PlayCheckpointArgs<'a> {
+    screen: Screen,
+    mode: GameMode,
+    white: &'a PlayerConfig,
+    black: &'a PlayerConfig,
+    initial_fen: &'a str,
+    move_log: &'a [String],
+    flipped: bool,
+    game_over: bool,
+}
+
+fn save_play_checkpoint(args: PlayCheckpointArgs<'_>) {
+    if !matches!(args.screen, Screen::Playing) {
+        return;
+    }
+    crate::app_core::game_resume::ActiveGameCheckpoint::capture(
+        iced_mode_to_core(args.mode),
+        &iced_player_to_core(args.white),
+        &iced_player_to_core(args.black),
+        args.initial_fen,
+        args.move_log,
+        args.flipped,
+        args.game_over,
+    )
+    .save();
+}
+
+fn iced_mode_to_core(mode: GameMode) -> crate::app_core::engine::GameMode {
+    match mode {
+        GameMode::HumanVsHuman => crate::app_core::engine::GameMode::HumanVsHuman,
+        GameMode::HumanVsEngine => crate::app_core::engine::GameMode::HumanVsEngine,
+        GameMode::EngineVsEngine => crate::app_core::engine::GameMode::EngineVsEngine,
+    }
+}
+
+fn core_mode_to_iced(mode: crate::app_core::engine::GameMode) -> GameMode {
+    match mode {
+        crate::app_core::engine::GameMode::HumanVsHuman => GameMode::HumanVsHuman,
+        crate::app_core::engine::GameMode::HumanVsEngine => GameMode::HumanVsEngine,
+        crate::app_core::engine::GameMode::EngineVsEngine => GameMode::EngineVsEngine,
+    }
+}
+
+fn iced_player_to_core(player: &PlayerConfig) -> crate::app_core::engine::PlayerConfig {
+    match player {
+        PlayerConfig::Human => crate::app_core::engine::PlayerConfig::Human,
+        PlayerConfig::BuiltIn { depth } => {
+            crate::app_core::engine::PlayerConfig::BuiltIn { depth: *depth }
+        }
+        PlayerConfig::External { path, protocol } => {
+            crate::app_core::engine::PlayerConfig::External {
+                path: path.clone(),
+                protocol: *protocol,
+            }
+        }
+    }
+}
+
+fn core_player_to_iced(player: crate::app_core::engine::PlayerConfig) -> PlayerConfig {
+    match player {
+        crate::app_core::engine::PlayerConfig::Human => PlayerConfig::Human,
+        crate::app_core::engine::PlayerConfig::BuiltIn { depth } => PlayerConfig::BuiltIn { depth },
+        crate::app_core::engine::PlayerConfig::External { path, protocol } => {
+            PlayerConfig::External { path, protocol }
+        }
+    }
+}
+
 impl std::fmt::Display for PlayerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -523,6 +595,9 @@ type EngineMoveOk = (types::Move, String, Option<(types::Square, types::Square)>
 pub(super) enum Msg {
     SelectMode(GameMode),
     StartGame,
+    ResumeInterruptedGame,
+    DiscardInterruptedGame,
+    ResumeInterruptedTournament,
     OpenHome,
     OpenStudy,
     OpenTournaments,
@@ -746,6 +821,11 @@ impl Default for App {
             nnue_installed_count: 0,
             tuning_params: None,
             tuning_status: String::new(),
+            game_resume_prompt: crate::app_core::game_resume::ActiveGameCheckpoint::load()
+                .filter(|checkpoint| checkpoint.is_resumable()),
+            tournament_resume_prompt:
+                crate::app_core::tournament_resume::ActiveTournamentCheckpoint::load(),
+            current_tournament_id: None,
             tournament_format: TournamentFormat::RoundRobin,
             tournament_status: String::new(),
             stored_tournaments,
@@ -1025,6 +1105,88 @@ impl App {
             .import_pgn(metadata, &pgn)
     }
 
+    fn persist_active_play_game(&self) {
+        let Some(game) = self.game.as_ref() else {
+            return;
+        };
+        save_play_checkpoint(PlayCheckpointArgs {
+            screen: self.screen,
+            mode: self.selected_mode,
+            white: &self.white_player,
+            black: &self.black_player,
+            initial_fen: &self.initial_fen,
+            move_log: &self.move_log,
+            flipped: game.flipped,
+            game_over: game.game_over,
+        });
+    }
+
+    fn persist_active_tournament(&mut self) {
+        let Some(id) = self.current_tournament_id.clone() else {
+            return;
+        };
+        crate::app_core::tournament_resume::ActiveTournamentCheckpoint::from_live(
+            id.clone(),
+            &self.tournament_setup,
+            &self.live_tournament_view,
+        )
+        .save();
+        if let Some(database) = self.study_database.as_mut() {
+            let created_at = id
+                .strip_prefix("t-")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            let _ = crate::app_core::logic::persist_live_tournament(
+                database,
+                &id,
+                &self.tournament_setup.event,
+                self.tournament_setup.format,
+                created_at,
+                &self.live_tournament_view,
+            );
+        }
+    }
+
+    fn restore_interrupted_game(&mut self) -> Task<Msg> {
+        let Some(checkpoint) = self
+            .game_resume_prompt
+            .clone()
+            .or_else(crate::app_core::game_resume::ActiveGameCheckpoint::load)
+        else {
+            return Task::none();
+        };
+        self.game_resume_prompt = None;
+        self.selected_mode = core_mode_to_iced(checkpoint.parsed_mode());
+        self.white_player = core_player_to_iced(checkpoint.parsed_white());
+        self.black_player = core_player_to_iced(checkpoint.parsed_black());
+        match crate::app_core::logic::replay_study_game(&checkpoint.initial_fen, &checkpoint.moves)
+        {
+            Ok(mut game) => {
+                game.flipped = checkpoint.flipped;
+                game.game_over = checkpoint.game_over;
+                self.game = Some(game);
+                self.move_log = checkpoint.moves;
+                self.initial_fen = checkpoint.initial_fen;
+                self.screen = Screen::Playing;
+                self.status =
+                    "Restored the interrupted game. The current turn will be played again."
+                        .to_owned();
+                self.persist_active_play_game();
+                if !checkpoint.game_over && !matches!(self.white_player, PlayerConfig::Human)
+                    || self
+                        .game
+                        .as_ref()
+                        .is_some_and(|game| game.board.side_to_move == types::Color::Black)
+                        && !matches!(self.black_player, PlayerConfig::Human)
+                {
+                    return self.trigger_engine_move();
+                }
+            }
+            Err(error) => self.status = error,
+        }
+        Task::none()
+    }
+
     fn refresh_study_results(&mut self) {
         let text = self.study_query.trim();
         self.study_results = self
@@ -1277,8 +1439,19 @@ impl App {
                     Ok(id) => format!("{} · Autosaved as {id}.", self.status),
                     Err(error) => format!("{} · Autosave failed: {error}", self.status),
                 };
+                crate::app_core::game_resume::ActiveGameCheckpoint::clear();
                 return Task::none();
             }
+            save_play_checkpoint(PlayCheckpointArgs {
+                screen: self.screen,
+                mode: self.selected_mode,
+                white: &self.white_player,
+                black: &self.black_player,
+                initial_fen: &self.initial_fen,
+                move_log: &self.move_log,
+                flipped: gs.flipped,
+                game_over: gs.game_over,
+            });
 
             let stm = if gs.board.side_to_move == types::Color::White {
                 "White"
@@ -1612,10 +1785,20 @@ impl App {
                 crate::app_core::uci_process::shutdown_external_engines();
                 self.tournament_setup.selected_engine_paths =
                     engines.iter().map(|engine| engine.path.clone()).collect();
+                if self.current_tournament_id.is_none() {
+                    self.current_tournament_id = Some(format!(
+                        "t-{}",
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|value| value.as_secs())
+                            .unwrap_or(0)
+                    ));
+                }
                 let handle =
                     tournament_live::LiveTournamentHandle::new(self.tournament_setup.format);
                 self.live_tournament_view = handle.clone_snapshot();
                 self.live_tournament = Some(handle.clone());
+                self.persist_active_tournament();
                 self.selected_tournament_game_id = None;
                 self.tournament_review_active = false;
                 self.show_tournament_results = false;
@@ -1676,6 +1859,7 @@ impl App {
                         self.tournament_status = self.live_tournament_view.status_line.clone();
                     }
                     if self.live_tournament_view.running {
+                        self.persist_active_tournament();
                         return self.sync_tournament_arena_board();
                     }
                 }
@@ -1691,6 +1875,8 @@ impl App {
                     self.live_tournament_view.running = false;
                     self.live_tournament_view.finished = true;
                     self.persist_tournament_summary(&summary);
+                    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+                    self.current_tournament_id = None;
                     self.tournament_status = if summary.cancelled {
                         "Tournament stopped.".to_owned()
                     } else if let Some(error) = &summary.error {
@@ -1920,8 +2106,37 @@ impl App {
                     s.play_bgm(audio::BgmTrack::Game);
                 }
 
+                self.persist_active_play_game();
                 if !matches!(self.white_player, PlayerConfig::Human) {
                     return self.trigger_engine_move();
+                }
+                Task::none()
+            }
+            Msg::ResumeInterruptedGame => self.restore_interrupted_game(),
+            Msg::DiscardInterruptedGame => {
+                self.game_resume_prompt = None;
+                crate::app_core::game_resume::ActiveGameCheckpoint::clear();
+                self.status = "Interrupted game discarded.".to_owned();
+                Task::none()
+            }
+            Msg::ResumeInterruptedTournament => {
+                if let Some(checkpoint) = self.tournament_resume_prompt.clone() {
+                    self.tournament_setup.event = checkpoint.event.clone();
+                    self.tournament_setup.site = checkpoint.site.clone();
+                    self.tournament_setup.format = checkpoint.parsed_format();
+                    if !checkpoint.selected_engine_paths.is_empty() {
+                        self.tournament_setup.selected_engine_paths =
+                            checkpoint.selected_engine_paths.clone();
+                    }
+                    self.current_tournament_id = Some(checkpoint.id.clone());
+                    if let Some(stored) = self.study_database.as_ref().and_then(|database| {
+                        database.load_tournament(&checkpoint.id).ok().flatten()
+                    }) {
+                        self.tournament_setup.completed_pairings =
+                            stored.results.iter().map(|result| result.pairing).collect();
+                    }
+                    self.tournament_resume_prompt = None;
+                    return self.update(Msg::RunQuickTournament);
                 }
                 Task::none()
             }
@@ -2074,6 +2289,8 @@ impl App {
             }
             Msg::NewGame => {
                 self.invalidate_engine_tasks();
+                crate::app_core::game_resume::ActiveGameCheckpoint::clear();
+                self.game_resume_prompt = None;
                 self.screen = Screen::Menu;
                 self.game = None;
                 self.move_log.clear();
@@ -2120,6 +2337,7 @@ impl App {
                         Ok(id) => format!("{} · Autosaved as {id}.", self.status),
                         Err(error) => format!("{} · Autosave failed: {error}", self.status),
                     };
+                    crate::app_core::game_resume::ActiveGameCheckpoint::clear();
                 }
                 // Return to menu
                 self.screen = Screen::Menu;
@@ -3386,9 +3604,37 @@ impl App {
             .into()
     }
 
-    // ══════════════════════════════════════════════════════════
-    // Menu screen — two-column layout with blurred chess bg
-    // ══════════════════════════════════════════════════════════
+    fn resume_banner(&self) -> Element<'_, Msg> {
+        if let Some(checkpoint) = &self.game_resume_prompt {
+            return row![
+                styled_button("Resume game", Msg::ResumeInterruptedGame),
+                styled_button("Discard game", Msg::DiscardInterruptedGame),
+                text(format!(
+                    "Interrupted play game · {} ply",
+                    checkpoint.moves.len()
+                ))
+                .size(13)
+                .color(ACCENT_TEAL),
+            ]
+            .spacing(8)
+            .into();
+        }
+        if let Some(checkpoint) = &self.tournament_resume_prompt {
+            return row![
+                styled_button("Resume tournament", Msg::ResumeInterruptedTournament),
+                text(format!(
+                    "Interrupted event {} · {} vs {}",
+                    checkpoint.event, checkpoint.white, checkpoint.black
+                ))
+                .size(13)
+                .color(ACCENT_GOLD),
+            ]
+            .spacing(8)
+            .into();
+        }
+        Space::new().height(0).into()
+    }
+
     fn view_menu(&self) -> Element<'_, Msg> {
         let pal = self.settings.board_theme.gui_palette();
         let entrance = if self.settings.system_motion {
@@ -3795,6 +4041,8 @@ impl App {
             tagline,
             Space::new().height(12),
             quick_actions,
+            Space::new().height(8),
+            self.resume_banner(),
             Space::new().height(16),
             two_cols,
             Space::new().height(motion::hub_slide_y(start_in, 14.0) + 12.0),
@@ -6463,27 +6711,33 @@ fn run_quick_tournament_body(
     snapshot: Arc<std::sync::Mutex<tournament_live::LiveTournamentSnapshot>>,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     use mujrim_benchmarker::strength::{
-        EngineSpec, TournamentConfig, TournamentEngine, TournamentEvent, TournamentProgress,
-        run_tournament_with_control,
+        TournamentConfig, TournamentEvent, TournamentProgress, run_tournament_with_control,
     };
 
     let format = setup.format;
-    let roster: Vec<TournamentEngine> = engines
-        .into_iter()
-        .map(|engine| {
-            let (path, args) = crate::app_core::logic::resolved_engine_launch(&engine.path);
-            let mut spec = EngineSpec::new(path.clone());
-            spec.name = engine.name;
-            spec.args = args;
-            spec.uci_options = uci_process::uci_resource_options(&path, false, true, None);
-            let established_elo = mujrim_study::rating::seed_elo_for_engine(&spec.name);
-            TournamentEngine {
-                engine: spec,
-                established_elo,
+    let roster = match crate::app_core::logic::build_tournament_roster(
+        engines
+            .into_iter()
+            .map(|engine| crate::app_core::engine::QuickTournamentEngine {
+                name: engine.name,
+                path: engine.path,
                 search_limits: engine.search_limits,
-            }
-        })
-        .collect();
+            })
+            .collect(),
+    ) {
+        Ok(roster) => roster,
+        Err(error) => {
+            return mujrim_benchmarker::strength::TournamentSummary {
+                format,
+                engines: Vec::new(),
+                matches: Vec::new(),
+                standings: Vec::new(),
+                game_results: Vec::new(),
+                cancelled: false,
+                error: Some(error),
+            };
+        }
+    };
     let initial_clock_ms = setup.time_control.match_clock().initial.as_millis() as u64;
     let progress: TournamentProgress = Arc::new({
         let snapshot = Arc::clone(&snapshot);

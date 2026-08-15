@@ -66,6 +66,22 @@ impl GameMode {
         Self::HumanVsEngine,
         Self::EngineVsEngine,
     ];
+
+    pub fn encode(self) -> &'static str {
+        match self {
+            Self::HumanVsHuman => "human_vs_human",
+            Self::HumanVsEngine => "human_vs_engine",
+            Self::EngineVsEngine => "engine_vs_engine",
+        }
+    }
+
+    pub fn decode(value: &str) -> Self {
+        match value {
+            "human_vs_human" => Self::HumanVsHuman,
+            "engine_vs_engine" => Self::EngineVsEngine,
+            _ => Self::HumanVsEngine,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +94,42 @@ pub enum PlayerConfig {
         path: String,
         protocol: ExternalEngineProtocol,
     },
+}
+
+impl PlayerConfig {
+    pub fn encode(&self) -> String {
+        match self {
+            Self::Human => "human".to_owned(),
+            Self::BuiltIn { depth } => format!("builtin:{depth}"),
+            Self::External { path, protocol } => {
+                format!("{}:{path}", protocol.key())
+            }
+        }
+    }
+
+    pub fn decode(value: &str) -> Self {
+        if value == "human" || value.is_empty() {
+            return Self::Human;
+        }
+        if let Some(depth) = value.strip_prefix("builtin:") {
+            return Self::BuiltIn {
+                depth: depth.parse().unwrap_or(16),
+            };
+        }
+        if let Some(path) = value.strip_prefix("uci:") {
+            return Self::External {
+                path: path.to_owned(),
+                protocol: ExternalEngineProtocol::Uci,
+            };
+        }
+        if let Some(path) = value.strip_prefix("xboard:") {
+            return Self::External {
+                path: path.to_owned(),
+                protocol: ExternalEngineProtocol::Xboard,
+            };
+        }
+        Self::Human
+    }
 }
 
 impl std::fmt::Display for PlayerConfig {
@@ -378,6 +430,27 @@ pub fn stop_builtin_search() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_and_mode_encode_round_trip() {
+        assert_eq!(
+            PlayerConfig::decode(&PlayerConfig::Human.encode()),
+            PlayerConfig::Human
+        );
+        assert_eq!(
+            PlayerConfig::decode(&PlayerConfig::BuiltIn { depth: 18 }.encode()),
+            PlayerConfig::BuiltIn { depth: 18 }
+        );
+        let external = PlayerConfig::External {
+            path: "/opt/lc0".to_owned(),
+            protocol: ExternalEngineProtocol::Xboard,
+        };
+        assert_eq!(PlayerConfig::decode(&external.encode()), external);
+        assert_eq!(
+            GameMode::decode(GameMode::EngineVsEngine.encode()),
+            GameMode::EngineVsEngine
+        );
+    }
 
     #[test]
     fn test_engine_config_defaults_to_embedded_eval() {

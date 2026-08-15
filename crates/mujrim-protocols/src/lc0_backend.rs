@@ -95,7 +95,7 @@ pub fn plan_launch(discovered: &Path, device: Lc0DeviceKind) -> Lc0Launch {
     for name in preferred_names {
         let candidate = with_exe(dir.join(name));
         if candidate.is_file() {
-            let extra_args = weights_args(&candidate);
+            let extra_args = weights_args(&candidate, device);
             return Lc0Launch {
                 binary: candidate,
                 backend,
@@ -107,7 +107,7 @@ pub fn plan_launch(discovered: &Path, device: Lc0DeviceKind) -> Lc0Launch {
     Lc0Launch {
         binary: discovered.to_path_buf(),
         backend,
-        extra_args: weights_args(discovered),
+        extra_args: weights_args(discovered, device),
     }
 }
 
@@ -172,14 +172,32 @@ fn weight_search_dirs(binary: Option<&Path>) -> Vec<PathBuf> {
 
 /// Locate bundled or downloaded official Lc0 `.pb.gz` weights.
 pub fn discover_lc0_weights(binary: Option<&Path>) -> Option<PathBuf> {
+    discover_lc0_weights_for_device(binary, detect_device_kind())
+}
+
+/// CPU Eigen/BT4 first moves routinely exceed a 3+2 clock. Prefer a smaller
+/// net on CPU; GPU keeps BT4. Fall back to the full list if nothing smaller
+/// is installed.
+pub fn discover_lc0_weights_for_device(
+    binary: Option<&Path>,
+    device: Lc0DeviceKind,
+) -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var("MUJRIM_LC0_WEIGHTS") {
         let path = PathBuf::from(explicit);
         if is_usable_lc0_weights(&path) {
             return Some(path);
         }
     }
+    let preferred: &[&str] = match device {
+        Lc0DeviceKind::Cpu => &LC0_WEIGHT_NAMES[1..],
+        Lc0DeviceKind::Nvidia | Lc0DeviceKind::Amd => LC0_WEIGHT_NAMES,
+    };
+    find_named_weights(binary, preferred).or_else(|| find_named_weights(binary, LC0_WEIGHT_NAMES))
+}
+
+fn find_named_weights(binary: Option<&Path>, names: &[&str]) -> Option<PathBuf> {
     for dir in weight_search_dirs(binary) {
-        for name in LC0_WEIGHT_NAMES {
+        for name in names {
             let weights = dir.join(name);
             if is_usable_lc0_weights(&weights) {
                 return Some(weights);
@@ -189,8 +207,8 @@ pub fn discover_lc0_weights(binary: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-fn weights_args(binary: &Path) -> Vec<String> {
-    discover_lc0_weights(Some(binary))
+fn weights_args(binary: &Path, device: Lc0DeviceKind) -> Vec<String> {
+    discover_lc0_weights_for_device(Some(binary), device)
         .map(|weights| {
             vec![
                 "--weights".to_string(),
@@ -316,10 +334,18 @@ mod tests {
         write_usable_weights(&bt4);
         write_usable_weights(&fallback);
         std::fs::write(&binary, b"").unwrap();
-        let launch = plan_launch(&binary, Lc0DeviceKind::Cpu);
+        let launch = plan_launch(&binary, Lc0DeviceKind::Nvidia);
         assert_eq!(
             launch.extra_args,
             vec!["--weights".to_string(), bt4.to_string_lossy().into_owned()]
+        );
+        let cpu = plan_launch(&binary, Lc0DeviceKind::Cpu);
+        assert_eq!(
+            cpu.extra_args,
+            vec![
+                "--weights".to_string(),
+                fallback.to_string_lossy().into_owned()
+            ]
         );
         let _ = std::fs::remove_file(&bt4);
         let _ = std::fs::remove_file(&fallback);

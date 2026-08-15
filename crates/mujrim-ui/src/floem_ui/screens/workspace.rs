@@ -444,8 +444,7 @@ fn live_board_row(state: AppState, handles: AppHandles, row: usize) -> impl Into
         .map(|col| live_board_slot(state, handles.clone(), row, col))
         .collect::<Vec<_>>();
     cells.into_view().style(move |s| {
-        let count = tournament_arena::arena_slot_count(state.tournament_setup.get().concurrency);
-        let rows = tournament_arena::grid_rows(count);
+        let concurrency = state.tournament_setup.get().concurrency;
         let s = s
             .width_full()
             .flex_row()
@@ -454,7 +453,7 @@ fn live_board_row(state: AppState, handles: AppHandles, row: usize) -> impl Into
             .flex_basis(0.0)
             .min_width(0.0)
             .min_height(0.0);
-        if row >= rows {
+        if !tournament_arena::arena_cell_visible(row, 0, concurrency) {
             s.display(Display::None).flex_grow(0.0f32).height(0.0)
         } else {
             s
@@ -475,11 +474,7 @@ fn arena_slot_text(
 
 fn live_board_slot(state: AppState, handles: AppHandles, row: usize, col: usize) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    let slot_index = move || {
-        let count = tournament_arena::arena_slot_count(state.tournament_setup.get().concurrency);
-        let columns = tournament_arena::grid_columns(count);
-        row * columns + col
-    };
+    let slot_index = move || tournament_arena::arena_cell_index(row, col);
     Stack::vertical((
         Stack::horizontal((
             Label::derived(move || {
@@ -592,9 +587,8 @@ fn live_board_slot(state: AppState, handles: AppHandles, row: usize, col: usize)
         }),
     ))
     .style(move |s| {
-        let count = tournament_arena::arena_slot_count(state.tournament_setup.get().concurrency);
-        let columns = tournament_arena::grid_columns(count);
-        if col >= columns || slot_index() >= count {
+        if !tournament_arena::arena_cell_visible(row, col, state.tournament_setup.get().concurrency)
+        {
             return s.display(Display::None);
         }
         let focused = state.arena_slots.with(|slots| {
@@ -1176,7 +1170,7 @@ fn resume_banner(state: AppState, handles: AppHandles) -> impl IntoView {
                     theme::palette(state.settings.get().board_theme).accent_alt,
                 ))
         }),
-        Label::new("Pick up the last event, or discard it and start a new tournament.").style(
+        Label::new("Finished games are kept. The pairing that was in progress will be replayed from the start.").style(
             move |s| {
                 s.font_size(11.0)
                     .min_width(0.0)
@@ -1699,6 +1693,8 @@ mod tests {
             "tournament_arena_layout",
             "arena_slots",
             "grid_columns",
+            "arena_cell_index",
+            "arena_cell_visible",
             "ArenaSlotPhase",
             "arena_slot_text",
             "show_tournament_move_list",

@@ -195,6 +195,10 @@ mod tests {
         assert!(config.move_time.is_none());
         assert_eq!(config.nodes_per_move, 0);
         assert_eq!(config.concurrency, 1);
+        assert!(
+            config.read_timeout >= Duration::from_secs(6 * 60),
+            "handshake/search timeout must outlast NNUE and Lc0 weight load"
+        );
 
         let three = TimeControlPreset::ThreePlusTwo.match_clock();
         assert_eq!(three.initial, Duration::from_secs(3 * 60));

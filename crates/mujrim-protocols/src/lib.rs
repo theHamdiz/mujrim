@@ -16,7 +16,7 @@ pub mod uci_options;
 pub use binary_arch::{BinaryArch, detect_binary_arch, is_host_native_binary};
 pub use lc0_backend::{
     LC0_BUNDLED_WEIGHTS_NAME, LC0_WEIGHT_NAMES, Lc0DeviceKind, Lc0Launch, detect_device_kind,
-    discover_lc0_weights, plan_launch,
+    discover_lc0_weights, discover_lc0_weights_for_device, plan_launch,
 };
 pub use uci_options::{AdvertisedUciOption, parse_uci_option_line, routed_setoption_commands};
 
@@ -915,7 +915,20 @@ impl EngineSession {
         protocol: ProtocolKind,
         memory_limit_bytes: Option<u64>,
     ) -> Result<Self, String> {
+        Self::spawn_configured(path, args, protocol, memory_limit_bytes, None)
+    }
+
+    pub fn spawn_configured(
+        path: &Path,
+        args: &[String],
+        protocol: ProtocolKind,
+        memory_limit_bytes: Option<u64>,
+        read_timeout: Option<Duration>,
+    ) -> Result<Self, String> {
         let mut io = EngineIo::spawn_bounded(path, args, memory_limit_bytes)?;
+        if let Some(timeout) = read_timeout {
+            io.set_read_timeout(timeout);
+        }
         let mut driver: Box<dyn ProtocolDriver + Send> = match protocol {
             ProtocolKind::Uci => Box::new(UciDriver::default()),
             ProtocolKind::Xboard => Box::new(XboardDriver),

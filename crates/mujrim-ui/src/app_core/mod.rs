@@ -7,10 +7,12 @@
 
 pub mod analysis;
 pub mod arrows;
+pub mod ateed_resume;
 pub mod ateed_studio;
 pub mod audio;
 pub mod engine;
 pub mod game;
+pub mod game_resume;
 pub mod gif_export;
 pub mod hub;
 pub mod layout;

@@ -30,11 +30,18 @@ pub fn live_mini_board(
     canvas({
         let handles = handles.clone();
         move |cx, size| {
-            let index = arena_cell_index(state, row, col);
-            let game = state
-                .arena_slots
-                .with(|slots| slots.get(index).and_then(|slot| slot.game.clone()));
-            match game {
+            let visible = crate::app_core::tournament_arena::arena_cell_visible(
+                row,
+                col,
+                state.tournament_setup.get().concurrency,
+            );
+            let index = crate::app_core::tournament_arena::arena_cell_index(row, col);
+            let game = visible.then(|| {
+                state
+                    .arena_slots
+                    .with(|slots| slots.get(index).and_then(|slot| slot.game.clone()))
+            });
+            match game.flatten() {
                 Some(game) => paint_live_position(cx, size, state, &handles, &game),
                 None => paint_empty_board(cx, size, state),
             }
@@ -42,24 +49,17 @@ pub fn live_mini_board(
     })
     .style(move |s| {
         let token = state.arena_slots.with(|slots| {
-            let index = arena_cell_index(state, row, col);
+            let index = crate::app_core::tournament_arena::arena_cell_index(row, col);
             slots.get(index).map(|slot| slot.paint_token()).unwrap_or(0)
         });
         let _ = token;
+        let _ = state.tournament_ui_fingerprint.get();
         let _ = state.settings.get();
         s.size_full()
             .min_width(0.0)
             .min_height(0.0)
             .flex_grow(1.0f32)
     })
-}
-
-fn arena_cell_index(state: AppState, row: usize, col: usize) -> usize {
-    let count = crate::app_core::tournament_arena::arena_slot_count(
-        state.tournament_setup.get().concurrency,
-    );
-    let columns = crate::app_core::tournament_arena::grid_columns(count);
-    row * columns + col
 }
 
 fn paint_empty_board(
@@ -900,6 +900,9 @@ mod tests {
             "paint_board_squares",
             "paint_fen",
             "arena_slots",
+            "arena_cell_index",
+            "arena_cell_visible",
+            "tournament_ui_fingerprint",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

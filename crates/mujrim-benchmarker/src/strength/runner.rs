@@ -1186,18 +1186,20 @@ fn spawn_sessions(
     config: &MatchConfig,
 ) -> Result<(EngineSession, EngineSession), (FailedEngine, String)> {
     let memory_limit = Some((config.max_engine_memory_mb as u64).saturating_mul(1024 * 1024));
-    let mut candidate_session = EngineSession::spawn_with_args_and_memory_limit(
+    let mut candidate_session = EngineSession::spawn_configured(
         &candidate.path,
         &candidate.args,
         ProtocolKind::Uci,
         memory_limit,
+        Some(config.read_timeout),
     )
     .map_err(|error| (FailedEngine::Candidate, error))?;
-    let mut reference_session = EngineSession::spawn_with_args_and_memory_limit(
+    let mut reference_session = EngineSession::spawn_configured(
         &reference.path,
         &reference.args,
         ProtocolKind::Uci,
         memory_limit,
+        Some(config.read_timeout),
     )
     .map_err(|error| (FailedEngine::Reference, error))?;
     let common_options = EngineOptions {
@@ -1442,12 +1444,6 @@ fn play_game(
     let mut candidate_telemetry = EngineTelemetry::default();
     let mut reference_telemetry = EngineTelemetry::default();
     let mut adjudicator = Adjudicator::new(config);
-    emit(GameProgressEvent::Started {
-        game_key: game_key.to_owned(),
-        white: white_name.to_owned(),
-        black: black_name.to_owned(),
-        initial_fen: opening.initial_fen.clone(),
-    });
     let emit_done = |record: GameRecord| -> GameRecord {
         let white_score = if candidate_white {
             record.outcome.score()
@@ -1484,6 +1480,13 @@ fn play_game(
             &moves,
         ));
     }
+
+    emit(GameProgressEvent::Started {
+        game_key: game_key.to_owned(),
+        white: white_name.to_owned(),
+        black: black_name.to_owned(),
+        initial_fen: opening.initial_fen.clone(),
+    });
 
     let mut white_clock = config.clock.map(|clock| clock.initial);
     let mut black_clock = white_clock;
@@ -2463,5 +2466,32 @@ mod tests {
         config.pause_flag = None;
         config.abort_game_flag = None;
         assert_eq!(match_search_control(&config), SearchControl::Run);
+    }
+
+    #[test]
+    fn handshake_uses_match_timeout_and_starts_after_new_game() {
+        let src = include_str!("runner.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        let spawn = production
+            .split("fn spawn_sessions(")
+            .nth(1)
+            .expect("spawn_sessions")
+            .split("fn classify_engine_failure(")
+            .next()
+            .expect("classify");
+        assert!(
+            spawn.contains("spawn_configured"),
+            "uci/isready must use the match read timeout, not the 20s EngineIo default"
+        );
+        assert!(spawn.contains("Some(config.read_timeout)"));
+        let play = production.split("fn play_game(").nth(1).expect("play_game");
+        let new_game_at = play.find("candidate.new_game()").expect("new_game");
+        let started_at = play
+            .find("GameProgressEvent::Started")
+            .expect("GameStarted");
+        assert!(
+            started_at > new_game_at,
+            "live boards must appear after engines finish ucinewgame, not during weight load"
+        );
     }
 }

@@ -448,15 +448,41 @@ pub fn train_ateed(
     if positions.is_empty() {
         return Err("Ateed trainer needs at least one position".to_string());
     }
-    let mut net = if let Some(base) = &config.base_network {
-        let loaded = eval::nnue::load_network(Path::new(base)).map_err(|e| e.to_string())?;
-        match loaded {
-            eval::nnue::ActiveNetwork::ExternalAteed { network, .. } => *network,
-            _ => return Err("base network is not Ateed".to_string()),
-        }
+    let net = if let Some(base) = &config.base_network {
+        load_ateed_network(Path::new(base))?
     } else {
         AteedNetwork::zero()
     };
+    train_ateed_from(positions, config, scope, net, 1, |_, _| Ok(()))
+}
+
+fn snapshot_network(
+    state: &mut AteedTrainState,
+    scope: AteedTrainScope,
+    net: &mut AteedNetwork,
+) -> Result<(), String> {
+    if scope != AteedTrainScope::Moe {
+        for eval_b in &mut state.moe_eval_b {
+            *eval_b = state.eval_b;
+        }
+        for wdl_b in &mut state.moe_wdl_b {
+            *wdl_b = state.wdl_b;
+        }
+    }
+    state.apply_to_network(net)
+}
+
+pub fn train_ateed_from(
+    positions: &[TrainingPosition],
+    config: &TrainingConfig,
+    scope: AteedTrainScope,
+    mut net: AteedNetwork,
+    start_epoch: u32,
+    mut on_epoch: impl FnMut(u32, &AteedNetwork) -> Result<(), String>,
+) -> Result<AteedNetwork, String> {
+    if positions.is_empty() {
+        return Err("Ateed trainer needs at least one position".to_string());
+    }
     let mut state = AteedTrainState::from_network(&net);
     if scope == AteedTrainScope::Expert0
         && state.l1_w.iter().all(|w| *w == 0.0)
@@ -467,7 +493,8 @@ pub fn train_ateed(
     let compute = training_compute();
     let lr = config.learning_rate as f32;
     let wdl_weight = config.wdl_weight.clamp(0.0, 1.0) as f32;
-    for epoch in 1..=config.epochs {
+    let start_epoch = start_epoch.max(1);
+    for epoch in start_epoch..=config.epochs {
         let mut abs_err = 0.0f32;
         for position in positions {
             let board = Board::from_fen(&position.fen)?;
@@ -512,23 +539,56 @@ pub fn train_ateed(
             loss,
             0,
         ));
+        snapshot_network(&mut state, scope, &mut net)?;
+        on_epoch(epoch, &net)?;
     }
-    if scope != AteedTrainScope::Moe {
-        for eval_b in &mut state.moe_eval_b {
-            *eval_b = state.eval_b;
-        }
-        for wdl_b in &mut state.moe_wdl_b {
-            *wdl_b = state.wdl_b;
-        }
-    }
-    state.apply_to_network(&mut net)?;
     Ok(net)
+}
+
+fn load_ateed_network(path: &Path) -> Result<AteedNetwork, String> {
+    match eval::nnue::load_network(path).map_err(|error| error.to_string())? {
+        eval::nnue::ActiveNetwork::ExternalAteed { network, .. } => Ok(*network),
+        _ => Err("checkpoint is not Ateed".to_string()),
+    }
 }
 
 pub fn train_ateed_to_file(config: &TrainingConfig, scope: AteedTrainScope) -> Result<(), String> {
     let positions = load_mixed_positions(&config.data_path, &config.mix_weights, config.mix_seed)?;
-    let net = train_ateed(&positions, config, scope)?;
-    crate::ateed::emit_network(Path::new(&config.output_path), &net).map_err(|e| e.to_string())
+    let output = Path::new(&config.output_path);
+    let partial = crate::job::JobCheckpoint::partial_path(output);
+    let completed = crate::job::resume_train(config, scope);
+    let net = if completed > 0 {
+        if partial.exists() {
+            load_ateed_network(&partial)?
+        } else if output.exists() {
+            load_ateed_network(output)?
+        } else {
+            return Err("train sidecar exists but the partial network is missing".to_string());
+        }
+    } else if let Some(base) = &config.base_network {
+        load_ateed_network(Path::new(base))?
+    } else {
+        AteedNetwork::zero()
+    };
+    if completed >= config.epochs {
+        crate::ateed::emit_network(output, &net).map_err(|error| error.to_string())?;
+        crate::job::JobCheckpoint::clear(output);
+        return Ok(());
+    }
+    let net = train_ateed_from(
+        &positions,
+        config,
+        scope,
+        net,
+        completed + 1,
+        |epoch, snapshot| {
+            crate::ateed::emit_network(&partial, snapshot).map_err(|error| error.to_string())?;
+            crate::job::train_checkpoint(config, scope, epoch).save()
+        },
+    )?;
+    crate::ateed::emit_network(output, &net).map_err(|error| error.to_string())?;
+    crate::job::JobCheckpoint::clear(output);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -593,6 +653,48 @@ mod tests {
         let net = train_ateed(&[startpos_line(60, 0.5)], &config, AteedTrainScope::Expert0)
             .expect("train expert0");
         assert_ne!(net.evaluate(&Board::new()), before);
+    }
+
+    #[test]
+    fn train_to_file_resumes_from_a_sidecar_epoch() {
+        types::init();
+        let dir = std::env::temp_dir().join(format!(
+            "mujrim-train-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let data = dir.join("data.txt");
+        let output = dir.join("net.bin");
+        std::fs::write(
+            &data,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|80|0.5\n",
+        )
+        .expect("data");
+        let config = TrainingConfig {
+            data_path: data.display().to_string(),
+            output_path: output.display().to_string(),
+            epochs: 2,
+            learning_rate: 1.0,
+            wdl_weight: 0.0,
+            ..Default::default()
+        };
+        train_ateed_to_file(&config, AteedTrainScope::OutputBiases).expect("first run");
+        crate::job::train_checkpoint(&config, AteedTrainScope::OutputBiases, 1)
+            .save()
+            .expect("sidecar");
+        crate::ateed::emit_network(
+            &crate::job::JobCheckpoint::partial_path(&output),
+            &AteedNetwork::zero(),
+        )
+        .expect("partial");
+        train_ateed_to_file(&config, AteedTrainScope::OutputBiases).expect("resume");
+        assert!(!crate::job::JobCheckpoint::path_for(&output).exists());
+        assert!(output.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

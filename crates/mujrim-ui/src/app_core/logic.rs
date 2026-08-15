@@ -712,6 +712,8 @@ pub fn gui_safe_engine_args(path: &Path) -> Vec<String> {
 }
 
 /// Mujrim product wrappers already pick a backend. Only raw `lc0` gets launch argv.
+/// `mujrim-lc0` only receives official-lc0 argv when a sibling `lc0` exists —
+/// catalog search belongs in [`resolve_tournament_engine_launch`].
 pub fn resolved_engine_launch(path: &Path) -> (PathBuf, Vec<String>) {
     let key = engine_identity_key(path);
     if is_official_lc0_identity(&key) {
@@ -720,7 +722,7 @@ pub fn resolved_engine_launch(path: &Path) -> (PathBuf, Vec<String>) {
         return (launch.binary, args);
     }
     if is_mujrim_lc0_identity(&key) {
-        if let Some(official) = official_lc0_for_wrapper(path) {
+        if let Some(official) = sibling_official_lc0(path) {
             let launch =
                 mujrim_protocols::plan_launch(&official, mujrim_protocols::detect_device_kind());
             let args = launch.argv();
@@ -731,6 +733,87 @@ pub fn resolved_engine_launch(path: &Path) -> (PathBuf, Vec<String>) {
     (path.to_path_buf(), Vec::new())
 }
 
+/// Tournament launch: resolve official Lc0 from the packaged `engines/lc0`
+/// tree, never the in-process dummy adapter behind `mujrim-lc0`.
+pub fn resolve_tournament_engine_launch(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| path.to_path_buf());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| path.to_path_buf());
+    resolve_tournament_engine_launch_from(path, &exe, &cwd)
+}
+
+pub fn resolve_tournament_engine_launch_from(
+    path: &Path,
+    executable: &Path,
+    current_dir: &Path,
+) -> Result<(PathBuf, Vec<String>), String> {
+    let key = engine_identity_key(path);
+    if is_official_lc0_identity(&key) {
+        let launch = mujrim_protocols::plan_launch(path, mujrim_protocols::detect_device_kind());
+        let args = launch.argv();
+        return Ok((launch.binary, args));
+    }
+    if is_mujrim_lc0_identity(&key) {
+        let official =
+            official_lc0_from_catalog(path, executable, current_dir).ok_or_else(|| {
+                format!(
+                    "Mujrim Lc0 needs the official lc0 binary under engines/lc0 (searched from {})",
+                    path.display()
+                )
+            })?;
+        let launch =
+            mujrim_protocols::plan_launch(&official, mujrim_protocols::detect_device_kind());
+        let args = launch.argv();
+        return Ok((launch.binary, args));
+    }
+    Ok((path.to_path_buf(), Vec::new()))
+}
+
+pub fn build_tournament_roster(
+    engines: Vec<QuickTournamentEngine>,
+) -> Result<Vec<mujrim_benchmarker::strength::TournamentEngine>, String> {
+    use mujrim_benchmarker::strength::{EngineSpec, TournamentEngine};
+
+    let mut roster = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut notes = Vec::new();
+    for engine in engines {
+        let (path, args) = match resolve_tournament_engine_launch(&engine.path) {
+            Ok(launch) => launch,
+            Err(error) => {
+                notes.push(format!("{}: {error}", engine.name));
+                continue;
+            }
+        };
+        let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !seen.insert(identity) {
+            notes.push(format!(
+                "{} skipped; it launches the same binary as another selected engine",
+                engine.name
+            ));
+            continue;
+        }
+        let mut spec = EngineSpec::new(path.clone());
+        spec.name = engine.name;
+        spec.args = args;
+        spec.uci_options = uci_process::uci_resource_options(&path, false, true, None);
+        let established_elo = mujrim_study::rating::seed_elo_for_engine(&spec.name);
+        roster.push(TournamentEngine {
+            engine: spec,
+            established_elo,
+            search_limits: engine.search_limits,
+        });
+    }
+    if roster.len() < 2 {
+        let detail = if notes.is_empty() {
+            "Need at least two distinct engines.".to_owned()
+        } else {
+            notes.join("; ")
+        };
+        return Err(detail);
+    }
+    Ok(roster)
+}
+
 fn is_official_lc0_identity(key: &str) -> bool {
     !key.contains("mujrim") && (key == "lc0" || key.contains("lc0") || key.contains("leela"))
 }
@@ -739,12 +822,26 @@ fn is_mujrim_lc0_identity(key: &str) -> bool {
     key.contains("mujrim") && (key.contains("lc0") || key.contains("leela"))
 }
 
-fn official_lc0_for_wrapper(wrapper: &Path) -> Option<PathBuf> {
+fn sibling_official_lc0(wrapper: &Path) -> Option<PathBuf> {
     let parent = wrapper.parent()?;
     ["lc0", "lc0.exe"].into_iter().find_map(|name| {
         let candidate = parent.join(name);
         candidate.is_file().then_some(candidate)
     })
+}
+
+fn official_lc0_from_catalog(
+    wrapper: &Path,
+    executable: &Path,
+    current_dir: &Path,
+) -> Option<PathBuf> {
+    sibling_official_lc0(wrapper)
+        .or_else(|| {
+            mujrim_protocols::catalog::discover_engine("lc0", executable, current_dir, None).ok()
+        })
+        .or_else(|| {
+            mujrim_protocols::catalog::discover_engine("lc0", wrapper, current_dir, None).ok()
+        })
 }
 
 pub fn run_quick_tournament(
@@ -811,27 +908,24 @@ fn run_quick_tournament_body(
     snapshot: Arc<std::sync::Mutex<tournament_live::LiveTournamentSnapshot>>,
 ) -> mujrim_benchmarker::strength::TournamentSummary {
     use mujrim_benchmarker::strength::{
-        EngineSpec, TournamentConfig, TournamentEngine, TournamentEvent, TournamentProgress,
-        run_tournament_with_control,
+        TournamentConfig, TournamentEvent, TournamentProgress, run_tournament_with_control,
     };
 
     let format = setup.format;
-    let roster: Vec<TournamentEngine> = engines
-        .into_iter()
-        .map(|engine| {
-            let (path, args) = resolved_engine_launch(&engine.path);
-            let mut spec = EngineSpec::new(path.clone());
-            spec.name = engine.name;
-            spec.args = args;
-            spec.uci_options = uci_process::uci_resource_options(&path, false, true, None);
-            let established_elo = mujrim_study::rating::seed_elo_for_engine(&spec.name);
-            TournamentEngine {
-                engine: spec,
-                established_elo,
-                search_limits: engine.search_limits,
-            }
-        })
-        .collect();
+    let roster = match build_tournament_roster(engines) {
+        Ok(roster) => roster,
+        Err(error) => {
+            return mujrim_benchmarker::strength::TournamentSummary {
+                format,
+                engines: Vec::new(),
+                matches: Vec::new(),
+                standings: Vec::new(),
+                game_results: Vec::new(),
+                cancelled: false,
+                error: Some(error),
+            };
+        }
+    };
     let initial_clock_ms = setup.time_control.match_clock().initial.as_millis() as u64;
     let progress: TournamentProgress = Arc::new({
         let snapshot = Arc::clone(&snapshot);
@@ -1502,6 +1596,27 @@ pub fn stored_to_played(games: &[StoredTournamentGame]) -> Vec<tournament_live::
         .collect()
 }
 
+pub fn persist_play_result(
+    database: &mut StudyDatabase,
+    white: &str,
+    black: &str,
+    moves: &[String],
+    result: &str,
+) -> Result<String, String> {
+    let pgn = build_pgn(white, black, moves, result);
+    database.import_pgn(
+        mujrim_study::database::GameMetadata {
+            event: "Mujrim Game".to_owned(),
+            site: "Local".to_owned(),
+            white: white.to_owned(),
+            black: black.to_owned(),
+            result: result.to_owned(),
+            ..Default::default()
+        },
+        &pgn,
+    )
+}
+
 pub fn persist_live_tournament(
     database: &mut StudyDatabase,
     id: &str,
@@ -1530,6 +1645,31 @@ mod tests {
     use crate::app_core::engine::{GameMode, PlayerConfig, QuickTournamentEngine};
     use mujrim_study::annotation::MoveAnnotation;
     use mujrim_study::database::{GameMetadata, GameSummary};
+
+    #[test]
+    fn persist_play_result_imports_a_finished_game() {
+        types::init();
+        let dir = std::env::temp_dir().join(format!(
+            "mujrim-play-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut database = StudyDatabase::open(dir.join("study")).expect("open study");
+        let id = persist_play_result(
+            &mut database,
+            "White",
+            "Black",
+            &["e2e4".to_owned(), "e7e5".to_owned()],
+            "1-0",
+        )
+        .expect("persist");
+        assert!(!id.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn next_incremental_uci_accepts_a_single_new_ply() {
@@ -1843,6 +1983,84 @@ mod tests {
         let (path, args) = resolved_engine_launch(Path::new("/engines/mujrim-akimbo"));
         assert_eq!(path, PathBuf::from("/engines/mujrim-akimbo"));
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn tournament_launch_finds_packaged_lc0_for_mujrim_wrapper() {
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-lc0-catalog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let platform = mujrim_protocols::catalog::RuntimePlatform::current().directory_name();
+        let lc0_dir = root.join("engines").join("lc0").join("bin").join(&platform);
+        let wrapper_dir = root
+            .join("engines")
+            .join("mujrim")
+            .join("bin")
+            .join(&platform);
+        std::fs::create_dir_all(&lc0_dir).unwrap();
+        std::fs::create_dir_all(&wrapper_dir).unwrap();
+        let fixture = std::env::current_exe().expect("test exe");
+        let official = lc0_dir.join(if cfg!(windows) { "lc0.exe" } else { "lc0" });
+        let wrapper = wrapper_dir.join(if cfg!(windows) {
+            "mujrim-lc0.exe"
+        } else {
+            "mujrim-lc0"
+        });
+        let ui = root.join(if cfg!(windows) {
+            "mujrim-ui.exe"
+        } else {
+            "mujrim-ui"
+        });
+        std::fs::copy(&fixture, &official).unwrap();
+        std::fs::write(&wrapper, b"").unwrap();
+        std::fs::write(&ui, b"").unwrap();
+
+        let (path, args) =
+            resolve_tournament_engine_launch_from(&wrapper, &ui, &root).expect("official lc0");
+        assert_eq!(path, official);
+        assert!(
+            args.windows(2).any(|pair| pair == ["--backend", "eigen"])
+                || args.iter().any(|arg| arg.contains("backend"))
+        );
+        assert!(
+            resolve_tournament_engine_launch_from(
+                Path::new("/missing/mujrim-lc0"),
+                Path::new("/missing/mujrim-ui"),
+                Path::new("/missing"),
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tournament_roster_rejects_dummy_or_duplicate_lc0() {
+        let err = build_tournament_roster(vec![QuickTournamentEngine {
+            name: "Mujrim Lc0".into(),
+            path: PathBuf::from("/missing/mujrim-lc0"),
+            search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+        }])
+        .expect_err("single missing lc0");
+        assert!(err.contains("lc0") || err.contains("Need at least two"));
+        let err = build_tournament_roster(vec![
+            QuickTournamentEngine {
+                name: "Mujrim Lc0".into(),
+                path: PathBuf::from("/missing/mujrim-lc0"),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            },
+            QuickTournamentEngine {
+                name: "Lc0".into(),
+                path: PathBuf::from("/missing/lc0"),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            },
+        ])
+        .expect_err("two missing lc0s");
+        assert!(!err.is_empty());
     }
 
     #[test]

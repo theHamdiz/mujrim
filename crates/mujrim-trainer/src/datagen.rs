@@ -66,8 +66,13 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
         None
     };
     let mut buffered = Vec::new();
+    let completed = crate::job::resume_datagen(config);
+    games_completed.store(completed, Ordering::Relaxed);
+    crate::job::datagen_checkpoint(config, completed)
+        .save()
+        .map_err(io::Error::other)?;
 
-    for _game_idx in 0..config.num_games {
+    for _game_idx in completed..config.num_games {
         if stopped.load(Ordering::Relaxed) {
             break;
         }
@@ -86,6 +91,12 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
         }
 
         let completed = games_completed.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(writer) = writer.as_mut() {
+            writer.flush()?;
+        }
+        crate::job::datagen_checkpoint(config, completed)
+            .save()
+            .map_err(io::Error::other)?;
         let pos_count = total_positions.load(Ordering::Relaxed);
         if updater::progress::should_report_step(completed, config.num_games) {
             updater::progress::emit_progress(&updater::progress::JobProgress::datagen(
@@ -121,6 +132,7 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
         elapsed.as_secs_f64()
     );
     println!("Output: {}", config.output_path);
+    crate::job::JobCheckpoint::clear(std::path::Path::new(&config.output_path));
 
     Ok(total)
 }

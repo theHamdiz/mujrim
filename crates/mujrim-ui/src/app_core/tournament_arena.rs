@@ -72,6 +72,21 @@ pub fn grid_rows(slot_count: usize) -> usize {
     count.div_ceil(grid_columns(count))
 }
 
+/// Columns in the Floem 4×4 scaffold. Indexing must use this, not
+/// `grid_columns(concurrency)`, or an 8-game 3-col logical grid paints
+/// two games onto the same tile of the 4-col layout.
+pub fn arena_scaffold_columns() -> usize {
+    grid_columns(LIVE_BOARD_SLOTS)
+}
+
+pub fn arena_cell_index(row: usize, col: usize) -> usize {
+    row * arena_scaffold_columns() + col
+}
+
+pub fn arena_cell_visible(row: usize, col: usize, concurrency: u32) -> bool {
+    arena_cell_index(row, col) < arena_slot_count(concurrency)
+}
+
 /// Keep each in-progress game on a fixed tile so the grid never remounts
 /// or collapses when pairings finish and the next ones start.
 pub fn stable_arena_slots(
@@ -196,6 +211,31 @@ mod tests {
         assert_eq!((grid_columns(16), grid_rows(16)), (4, 4));
         assert_eq!(arena_slot_count(0), 1);
         assert_eq!(arena_slot_count(32), LIVE_BOARD_SLOTS);
+    }
+
+    #[test]
+    fn scaffold_index_does_not_collide_on_eight_game_arena() {
+        assert_eq!(arena_scaffold_columns(), 4);
+        assert_eq!(arena_cell_index(0, 0), 0);
+        assert_eq!(arena_cell_index(0, 3), 3);
+        assert_eq!(arena_cell_index(1, 0), 4);
+        assert_ne!(
+            arena_cell_index(0, 3),
+            arena_cell_index(1, 0),
+            "4-col scaffold (0,3) and (1,0) must be distinct; 3-col math maps both to 3"
+        );
+        assert!(arena_cell_visible(0, 3, 8));
+        assert!(arena_cell_visible(1, 0, 8));
+        assert!(arena_cell_visible(1, 3, 8));
+        assert!(!arena_cell_visible(2, 0, 8));
+        assert!(!arena_cell_visible(0, 3, 3));
+        assert_eq!(
+            (0..4)
+                .flat_map(|row| (0..4).map(move |col| (row, col)))
+                .filter(|&(row, col)| arena_cell_visible(row, col, 8))
+                .count(),
+            8
+        );
     }
 
     #[test]

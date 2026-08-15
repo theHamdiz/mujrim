@@ -51,9 +51,14 @@ pub fn ingest_file(raw: &Path, ready: &Path) -> Result<IngestReport, String> {
 }
 
 pub fn fetch_and_ingest(url: &str, dest: &Path) -> Result<IngestReport, String> {
-    crate::dataset::download_dataset(url, dest)?;
+    crate::job::fetch_checkpoint(url, dest).save()?;
+    if !dest.exists() {
+        crate::dataset::download_dataset(url, dest)?;
+    }
     let ready = ready_path_for(dest);
-    ingest_file(dest, &ready)
+    let report = ingest_file(dest, &ready)?;
+    crate::job::JobCheckpoint::clear(dest);
+    Ok(report)
 }
 
 pub fn ingest_bytes(bytes: &[u8]) -> Result<Vec<TrainingPosition>, String> {
@@ -114,5 +119,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(!report.converted);
         assert_eq!(report.positions, 1);
+    }
+
+    #[test]
+    fn fetch_and_ingest_resumes_from_an_already_downloaded_file() {
+        let dest =
+            std::env::temp_dir().join(format!("mujrim-fetch-resume-{}.txt", std::process::id()));
+        std::fs::write(&dest, start_line()).unwrap();
+        let report = fetch_and_ingest("https://example.invalid/missing", &dest).unwrap();
+        let _ = std::fs::remove_file(&dest);
+        crate::job::JobCheckpoint::clear(&dest);
+        assert_eq!(report.positions, 1);
+        assert!(!crate::job::JobCheckpoint::path_for(&dest).exists());
     }
 }

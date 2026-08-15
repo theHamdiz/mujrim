@@ -85,10 +85,111 @@ pub fn new_game(state: AppState, handles: &AppHandles) {
     if let Some(sound) = handles.sound.borrow_mut().as_mut() {
         sound.play_bgm_gated(state.settings.get_untracked().bgm_on, BgmTrack::Game);
     }
+    persist_active_game(state);
     let handles = handles.clone();
     floem::action::exec_after(Duration::from_millis(0), move |_| {
         engine::maybe_start_engine_turn(state, &handles);
     });
+}
+
+pub fn persist_active_game(state: AppState) {
+    if !matches!(state.screen.get_untracked(), Screen::Playing) {
+        return;
+    }
+    let Some(game) = state.game.get_untracked() else {
+        return;
+    };
+    crate::app_core::game_resume::ActiveGameCheckpoint::capture(
+        state.selected_mode.get_untracked(),
+        &state.white_player.get_untracked(),
+        &state.black_player.get_untracked(),
+        &state.initial_fen.get_untracked(),
+        &state.move_log.get_untracked(),
+        game.flipped,
+        game.game_over,
+    )
+    .save();
+}
+
+fn persist_finished_play_game(state: AppState, handles: &AppHandles, result: &str) {
+    persist_active_game(state);
+    let mut study = handles.study.borrow_mut();
+    let Some(database) = study.as_mut() else {
+        return;
+    };
+    if let Ok(id) = logic::persist_play_result(
+        database,
+        &state.white_player.get_untracked().to_string(),
+        &state.black_player.get_untracked().to_string(),
+        &state.move_log.get_untracked(),
+        result,
+    ) {
+        state
+            .status
+            .set(format!("{} · Saved as {id}.", state.status.get_untracked()));
+    }
+}
+
+pub fn offer_crash_resume(state: AppState, handles: &AppHandles) {
+    if let Some(checkpoint) = crate::app_core::game_resume::ActiveGameCheckpoint::load() {
+        if checkpoint.is_resumable() {
+            state.game_resume_prompt.set(Some(checkpoint));
+            state
+                .status
+                .set("A play game was interrupted. Resume it from the home screen.".to_owned());
+        } else {
+            crate::app_core::game_resume::ActiveGameCheckpoint::clear();
+        }
+    }
+    if state.tournament_snapshot.get_untracked().running {
+        return;
+    }
+    if let Some(checkpoint) = crate::app_core::tournament_resume::ActiveTournamentCheckpoint::load()
+    {
+        offer_resume(state, checkpoint);
+    }
+    if let Some(job) = crate::app_core::ateed_resume::ActiveAteedJob::load() {
+        state.ateed.resume_prompt.set(Some(job));
+    }
+    let _ = handles;
+}
+
+pub fn resume_paused_game(state: AppState, handles: &AppHandles) {
+    let Some(checkpoint) = state
+        .game_resume_prompt
+        .get_untracked()
+        .or_else(crate::app_core::game_resume::ActiveGameCheckpoint::load)
+    else {
+        return;
+    };
+    state.game_resume_prompt.set(None);
+    state.selected_mode.set(checkpoint.parsed_mode());
+    state.white_player.set(checkpoint.parsed_white());
+    state.black_player.set(checkpoint.parsed_black());
+    if let Ok(mut game) = logic::replay_study_game(&checkpoint.initial_fen, &checkpoint.moves) {
+        game.flipped = checkpoint.flipped;
+        game.game_over = checkpoint.game_over;
+        state.game.set(Some(game));
+        state.move_log.set(checkpoint.moves.clone());
+        state.initial_fen.set(checkpoint.initial_fen.clone());
+        state.screen.set(Screen::Playing);
+        state.status.set(
+            "Restored the interrupted game. The current turn will be played again.".to_owned(),
+        );
+        persist_active_game(state);
+        if !checkpoint.game_over {
+            let handles = handles.clone();
+            floem::action::exec_after(Duration::from_millis(0), move |_| {
+                engine::maybe_start_engine_turn(state, &handles);
+            });
+        }
+    }
+}
+
+pub fn discard_paused_game(state: AppState) {
+    state.game_resume_prompt.set(None);
+    crate::app_core::game_resume::ActiveGameCheckpoint::clear();
+    state.status.set("Interrupted game discarded.".to_owned());
 }
 
 pub fn start_coin_flip(state: AppState) {
@@ -114,6 +215,16 @@ pub fn resign(state: AppState, handles: &AppHandles) {
     state.searching.set(false);
     state.status.set("Resigned.".to_owned());
     play_sfx_kind(state, handles, SfxKind::Resign);
+    let result = state.game.with_untracked(|game| {
+        game.as_ref().map_or("0-1", |game| {
+            if game.board.side_to_move == Color::White {
+                "0-1"
+            } else {
+                "1-0"
+            }
+        })
+    });
+    persist_finished_play_game(state, handles, result);
     if let Some(sound) = handles.sound.borrow_mut().as_mut() {
         sound.stop_bgm();
     }
@@ -191,6 +302,7 @@ pub fn on_board_release(state: AppState, handles: &AppHandles, square: Square) {
 
 pub fn apply_engine_move(
     state: AppState,
+    handles: &AppHandles,
     mv: Move,
     ponder: Option<(Square, Square)>,
     captured: bool,
@@ -218,7 +330,34 @@ pub fn apply_engine_move(
     state.move_annotations.update(|items| items.push(None));
     follow_live_tail(state);
     engine::begin_slide(state, slide);
+    persist_active_game(state);
+    if state
+        .game
+        .with_untracked(|game| game.as_ref().is_some_and(|game| game.game_over))
+    {
+        persist_finished_play_game(state, handles, play_result(state));
+    }
     try_flush_premoves(state);
+}
+
+fn play_result(state: AppState) -> &'static str {
+    state.game.with_untracked(|game| {
+        let Some(game) = game.as_ref() else {
+            return "*";
+        };
+        let mut board = game.board.clone();
+        if board.is_checkmate() {
+            if game.board.side_to_move == Color::White {
+                "0-1"
+            } else {
+                "1-0"
+            }
+        } else if game.game_over {
+            "1/2-1/2"
+        } else {
+            "*"
+        }
+    })
 }
 
 fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: bool) {
@@ -248,11 +387,13 @@ fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: 
     });
     engine::begin_slide(state, slide);
     overlay_last_move(state);
+    persist_active_game(state);
     if state
         .game
         .with_untracked(|g| g.as_ref().is_some_and(|g| g.game_over))
     {
         state.status.set("Game over.".to_owned());
+        persist_finished_play_game(state, handles, play_result(state));
         return;
     }
     engine::maybe_start_engine_turn(state, handles);
@@ -1248,6 +1389,7 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
         &handle.clone_snapshot(),
     )
     .save();
+    persist_tournament_progress(state, handles, &handle.clone_snapshot());
     *handles.tournament.borrow_mut() = Some(handle.clone());
     state.show_tournament_setup.set(false);
     state.screen.set(Screen::Tournaments);
@@ -1459,7 +1601,7 @@ fn apply_live_tournament_uci(state: AppState, handles: &AppHandles, uci: &str) {
     } else {
         play_move_sfx(state, handles, mv, captured, gives_check);
     }
-    apply_engine_move(state, mv, None, captured);
+    apply_engine_move(state, handles, mv, None, captured);
 }
 
 fn apply_live_thinking_overlays(
@@ -1589,7 +1731,7 @@ fn offer_resume(
         state.initial_fen.set(checkpoint.initial_fen.clone());
     }
     state.tournament_status.set(format!(
-        "Paused event “{}” · {} vs {}. Resume or start a new tournament.",
+        "Interrupted event “{}” · {} vs {}. Resume to keep finished games and replay the current pairing.",
         checkpoint.event, checkpoint.white, checkpoint.black
     ));
 }
@@ -1611,11 +1753,6 @@ pub fn resume_paused_tournament(state: AppState, handles: &AppHandles) {
     state.tournament_event.set(checkpoint.event.clone());
     state.tournament_site.set(checkpoint.site.clone());
     start_tournament(state, handles);
-    if let Ok(game) = logic::replay_study_game(&checkpoint.initial_fen, &checkpoint.moves) {
-        state.game.set(Some(game));
-        state.move_log.set(checkpoint.moves);
-        state.initial_fen.set(checkpoint.initial_fen);
-    }
 }
 
 pub fn discard_paused_tournament(state: AppState, handles: &AppHandles) {
@@ -1691,10 +1828,14 @@ fn persist_tournament_progress(
         return;
     };
     let count = snap.played_games.len();
-    if count == 0 && !snap.finished && !snap.paused && snap.live_games.is_empty() {
+    if count == 0 && !snap.finished && !snap.paused && !snap.running && snap.live_games.is_empty() {
         return;
     }
-    if count <= state.persisted_tournament_games.get_untracked() && snap.running && !snap.paused {
+    if count <= state.persisted_tournament_games.get_untracked()
+        && snap.running
+        && !snap.paused
+        && count > 0
+    {
         return;
     }
     let created_at = id
@@ -2288,6 +2429,10 @@ mod tests {
             "fn stop_engine_search",
             "fn resume_paused_tournament",
             "fn discard_paused_tournament",
+            "fn persist_active_game",
+            "fn resume_paused_game",
+            "fn discard_paused_game",
+            "fn offer_crash_resume",
             "fn open_tournaments_screen",
             "apply_live_settings",
             "follow_live_tail",

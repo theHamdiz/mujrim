@@ -93,6 +93,7 @@ pub struct AppState {
     pub persisted_tournament_games: RwSignal<usize>,
     pub resume_prompt:
         RwSignal<Option<crate::app_core::tournament_resume::ActiveTournamentCheckpoint>>,
+    pub game_resume_prompt: RwSignal<Option<crate::app_core::game_resume::ActiveGameCheckpoint>>,
     pub clock_now_ms: RwSignal<u64>,
     pub eval_bar_cp: RwSignal<i32>,
     pub eval_bar_fen: RwSignal<String>,
@@ -134,6 +135,7 @@ pub struct AteedStudioState {
     pub cli_path: RwSignal<String>,
     pub data_path: RwSignal<String>,
     pub output_path: RwSignal<String>,
+    pub resume_prompt: RwSignal<Option<crate::app_core::ateed_resume::ActiveAteedJob>>,
 }
 
 #[derive(Clone)]
@@ -235,6 +237,7 @@ impl AppState {
             current_tournament_id: RwSignal::new(None),
             persisted_tournament_games: RwSignal::new(0),
             resume_prompt: RwSignal::new(None),
+            game_resume_prompt: RwSignal::new(None),
             clock_now_ms: RwSignal::new(0),
             eval_bar_cp: RwSignal::new(0),
             eval_bar_fen: RwSignal::new(String::new()),
@@ -272,6 +275,7 @@ impl AppState {
                 cli_path: RwSignal::new(String::new()),
                 data_path: RwSignal::new("data.txt".to_owned()),
                 output_path: RwSignal::new("ateed_default.bin".to_owned()),
+                resume_prompt: RwSignal::new(None),
             },
         };
         let study_path = crate::app_core::logic::study_database_path();

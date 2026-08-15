@@ -5,6 +5,7 @@
 pub mod annotation;
 pub mod board_marks;
 pub mod database;
+pub mod durable;
 pub mod engine_opinion;
 pub mod explain;
 pub mod gambit;

@@ -273,7 +273,7 @@ pub fn live_clock_faces_at(
     let black_stored = live.and_then(|game| game.black_clock_ms).or(white_stored);
     let synced = live.and_then(|game| game.clock_synced_ms);
     let now = now_ms.unwrap_or(synced.unwrap_or(0));
-    let countdown = paused || live.is_some_and(LiveGameBoard::is_placeholder);
+    let countdown = paused || live.is_none_or(|game| !game.clocks_should_tick());
     let white_ms = remaining_clock_ms(white_stored, synced, now, white_to_move, countdown);
     let black_ms = remaining_clock_ms(black_stored, synced, now, !white_to_move, countdown);
     (
@@ -602,6 +602,36 @@ mod tests {
             white.display, "3:00",
             "placeholder clocks must not drain between games"
         );
+        let mut waiting = board("pair0-cw", Some(180_000), Some(180_000));
+        waiting.depth = 0;
+        waiting.nodes = 0;
+        waiting.last_uci.clear();
+        waiting.moves.clear();
+        waiting.pv.clear();
+        waiting.clock_synced_ms = Some(1_000);
+        let (white, black) = live_clock_faces_at(
+            Some(&waiting),
+            None,
+            Some(180_000),
+            true,
+            Some(90_000),
+            false,
+        );
+        assert_eq!(
+            white.display, "3:00",
+            "White must not drain before the first search or ply"
+        );
+        assert_eq!(black.display, "3:00");
+        waiting.depth = 6;
+        let (white, _) = live_clock_faces_at(
+            Some(&waiting),
+            None,
+            Some(180_000),
+            true,
+            Some(2_000),
+            false,
+        );
+        assert_eq!(white.display, "2:59");
     }
 
     #[test]

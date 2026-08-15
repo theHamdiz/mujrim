@@ -60,7 +60,7 @@ pub enum AteedJobKind {
     Bench,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AteedCliCommand {
     Fetch {
         id: Option<String>,

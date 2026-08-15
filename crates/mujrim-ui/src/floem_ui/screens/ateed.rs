@@ -39,6 +39,84 @@ pub fn studio(state: AppState, handles: AppHandles) -> impl IntoView {
     .style(|s| s.size_full().min_width(0.0).min_height(0.0))
 }
 
+fn ateed_resume_banner(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::vertical((
+        Label::derived(move || {
+            state
+                .ateed
+                .resume_prompt
+                .get()
+                .map_or_else(String::new, |job| job.summary)
+        })
+        .style(move |s| {
+            s.font_size(13.0)
+                .font_bold()
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(
+                    theme::palette(state.settings.get().board_theme).accent_alt,
+                ))
+        }),
+        Label::new(
+            "The last fetch, train, datagen, decode, or merge job can continue from its sidecar.",
+        )
+        .style(move |s| {
+            s.font_size(11.0)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(
+                    theme::palette(state.settings.get().board_theme).text_secondary,
+                ))
+        }),
+        Stack::horizontal((
+            widgets::primary_button(state, "Resume job", {
+                let handles = handles.clone();
+                move || resume_ateed_job(state, &handles)
+            }),
+            widgets::ghost_button(state, "Discard", move || discard_ateed_job(state)),
+        ))
+        .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
+    ))
+    .style(move |s| {
+        let pal = theme::palette(state.settings.get().board_theme);
+        let s = s
+            .width_full()
+            .row_gap(8.0)
+            .padding(12.0)
+            .border_radius(12.0)
+            .border(1.0)
+            .border_color(theme::rgba(pal.accent))
+            .background(theme::rgba(pal.panel));
+        if state.ateed.resume_prompt.get().is_some() && !state.ateed.running.get() {
+            s
+        } else {
+            s.display(Display::None)
+        }
+    })
+}
+
+fn resume_ateed_job(state: AppState, handles: &AppHandles) {
+    let Some(job) = state.ateed.resume_prompt.get_untracked() else {
+        return;
+    };
+    if state.ateed.running.get_untracked() {
+        push_log(state, "a job is already running");
+        return;
+    }
+    state.ateed.running.set(true);
+    state.ateed.progress.set(0.0);
+    push_log(state, &job.summary);
+    spawn_cli(state, handles, job.command, "resumed job complete");
+}
+
+fn discard_ateed_job(state: AppState) {
+    state.ateed.resume_prompt.set(None);
+    crate::app_core::ateed_resume::ActiveAteedJob::clear();
+    push_log(state, "interrupted Ateed job discarded");
+}
+
 fn lock_gate(state: AppState) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let card = widgets::glass_card(
@@ -85,7 +163,7 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
     let sources = widgets::card(state, sources_panel(state, handles.clone()));
     let train = widgets::card(state, train_panel(state, handles.clone()));
     let monitor = widgets::card(state, monitor_panel(state));
-    let strength = widgets::card(state, strength_panel(state, handles));
+    let strength = widgets::card(state, strength_panel(state, handles.clone()));
     Stack::vertical((
         Stack::horizontal((
             widgets::curious_title("Ateed Control", 28.0)
@@ -102,6 +180,7 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
                 .items_center()
                 .flex_wrap(FlexWrap::Wrap)
         }),
+        ateed_resume_banner(state, handles.clone()),
         Label::derived(move || {
             if state.ateed.cli_available.get() {
                 format!("CLI ready · {}", state.ateed.cli_path.get())
@@ -683,6 +762,9 @@ fn start_datagen(state: AppState, handles: &AppHandles) {
 }
 
 fn spawn_cli(state: AppState, _handles: &AppHandles, command: AteedCliCommand, done: &'static str) {
+    let job = crate::app_core::ateed_resume::ActiveAteedJob::from_command(command.clone());
+    job.save();
+    state.ateed.resume_prompt.set(Some(job));
     let cli = PathBuf::from(state.ateed.cli_path.get_untracked());
     let args = cli_args(&command);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -719,6 +801,8 @@ fn pump_cli_events(
             Ok(StudioEvent::Done(Ok(()))) => {
                 state.ateed.running.set(false);
                 state.ateed.progress.set(1.0);
+                state.ateed.resume_prompt.set(None);
+                crate::app_core::ateed_resume::ActiveAteedJob::clear();
                 push_log(state, done);
                 finished = true;
             }
@@ -856,6 +940,7 @@ mod tests {
         let production = src.split("#[cfg(test)]").next().expect("source");
         assert!(production.contains("lock_gate"));
         assert!(production.contains("dashboard"));
+        assert!(production.contains("ateed_resume_banner"));
         assert!(production.contains("Display::None"));
         assert!(!production.contains("JAHANAM"));
         assert!(production.contains("ateed_studio"));

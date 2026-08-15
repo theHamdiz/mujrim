@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use mujrim_study::durable;
 use mujrim_study::tournament::TournamentFormat;
 use mujrim_study::tournament_store::{self, StoredTournament};
 
@@ -49,22 +50,18 @@ impl ActiveTournamentCheckpoint {
     }
 
     pub fn load() -> Option<Self> {
-        let contents = std::fs::read_to_string(Self::path()).ok()?;
+        let contents = durable::read_text(&Self::path())?;
         toml::from_str(&contents).ok()
     }
 
     pub fn save(&self) {
-        let path = Self::path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(encoded) = toml::to_string_pretty(self) {
-            let _ = std::fs::write(path, encoded);
+            let _ = durable::atomic_write_text(&Self::path(), &encoded);
         }
     }
 
     pub fn clear() {
-        let _ = std::fs::remove_file(Self::path());
+        durable::remove_file(&Self::path());
     }
 
     pub fn from_live(id: String, setup: &TournamentSetup, snap: &LiveTournamentSnapshot) -> Self {

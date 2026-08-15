@@ -146,6 +146,17 @@ impl LiveGameBoard {
             mujrim_study::opening::START_FEN
         }
     }
+
+    /// Clocks stay frozen until an engine is actually thinking or a ply exists.
+    /// `GameStarted` used to start White's countdown during NNUE/weights load.
+    pub fn clocks_should_tick(&self) -> bool {
+        !self.is_placeholder()
+            && (self.nodes > 0
+                || self.depth > 0
+                || !self.last_uci.is_empty()
+                || !self.moves.is_empty()
+                || !self.pv.is_empty())
+    }
 }
 
 /// Replayable tournament game for the hub board viewer.
@@ -1079,6 +1090,15 @@ mod tests {
             LiveGameBoard::default().paint_fen(),
             mujrim_study::opening::START_FEN
         );
+        assert!(
+            !LiveGameBoard::default().clocks_should_tick(),
+            "fresh GameStarted boards must not run White's clock"
+        );
+        let thinking = LiveGameBoard {
+            depth: 4,
+            ..LiveGameBoard::default()
+        };
+        assert!(thinking.clocks_should_tick());
     }
 
     #[test]

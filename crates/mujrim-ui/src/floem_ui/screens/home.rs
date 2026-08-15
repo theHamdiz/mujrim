@@ -1,7 +1,7 @@
 //! Iced-parity home hub: setup + engine settings + start.
 
 use floem::prelude::*;
-use floem::taffy::style::{FlexWrap, Overflow};
+use floem::taffy::style::{Display, FlexWrap, Overflow};
 
 use crate::app_core::engine::{BundledEngineChoice, GameMode, MAX_GUI_HASH_MB, PlayerConfig};
 use crate::app_core::hub::{self, CoinFlipState};
@@ -100,6 +100,7 @@ pub fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
                 .items_stretch()
                 .justify_center()
         }),
+        game_resume_banner(state, handles.clone()),
         start,
         Label::new("Studio · multi-engine ready")
             .style(move |s| s.font_size(11.0).color(theme::rgba(pal().text_secondary))),
@@ -126,6 +127,72 @@ pub fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
             .color(theme::rgba(pal().text_primary))
             .overflow_x(Overflow::Clip)
             .overflow_y(Overflow::Clip)
+    })
+}
+
+fn game_resume_banner(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::vertical((
+        Label::derived(move || {
+            state
+                .game_resume_prompt
+                .get()
+                .map_or_else(String::new, |checkpoint| {
+                    format!(
+                        "Interrupted game · {} vs {} · {} ply",
+                        checkpoint.parsed_white(),
+                        checkpoint.parsed_black(),
+                        checkpoint.moves.len()
+                    )
+                })
+        })
+        .style(move |s| {
+            s.font_size(13.0)
+                .font_bold()
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(
+                    theme::palette(state.settings.get().board_theme).accent_alt,
+                ))
+        }),
+        Label::new("Restore the saved position. The side to move will think again.").style(
+            move |s| {
+                s.font_size(11.0)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .color(theme::rgba(
+                        theme::palette(state.settings.get().board_theme).text_secondary,
+                    ))
+            },
+        ),
+        Stack::horizontal((
+            widgets::primary_button(state, "Resume game", {
+                let handles = handles.clone();
+                move || actions::resume_paused_game(state, &handles)
+            }),
+            widgets::ghost_button(state, "Discard", move || {
+                actions::discard_paused_game(state)
+            }),
+        ))
+        .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
+    ))
+    .style(move |s| {
+        let pal = theme::palette(state.settings.get().board_theme);
+        let s = s
+            .width_full()
+            .max_width(520.0)
+            .row_gap(8.0)
+            .padding(12.0)
+            .border_radius(12.0)
+            .border(1.0)
+            .border_color(theme::rgba(pal.accent))
+            .background(theme::rgba(pal.panel));
+        if state.game_resume_prompt.get().is_some() {
+            s
+        } else {
+            s.display(Display::None)
+        }
     })
 }
 

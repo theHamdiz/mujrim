@@ -204,7 +204,7 @@ fn finish_move(state: AppState, handles: AppHandles, generation: u64, result: En
                 };
                 sound.play_sfx(state.settings.get_untracked().sfx_on, kind);
             }
-            actions::apply_engine_move(state, mv, ponder, captured);
+            actions::apply_engine_move(state, &handles, mv, ponder, captured);
             if match_controller::should_cancel_ponder(state.engine_cfg.get_untracked().ponder, hit)
             {
                 uci_process::cancel_all_pondering();

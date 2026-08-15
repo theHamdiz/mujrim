@@ -32,6 +32,13 @@ pub enum ExternalEngineProtocol {
 }
 
 impl ExternalEngineProtocol {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Uci => "uci",
+            Self::Xboard => "xboard",
+        }
+    }
+
     pub fn as_protocol_kind(self) -> ProtocolKind {
         match self {
             Self::Uci => ProtocolKind::Uci,
@@ -274,7 +281,12 @@ pub fn uci_resource_options(
         "MoveOverhead"
     };
     options.push((overhead_name.to_owned(), "150".to_owned()));
-    if is_lc0 && let Some(weights) = mujrim_protocols::discover_lc0_weights(Some(engine)) {
+    if is_lc0
+        && let Some(weights) = mujrim_protocols::discover_lc0_weights_for_device(
+            Some(engine),
+            mujrim_protocols::detect_device_kind(),
+        )
+    {
         options.push((
             "WeightsFile".to_owned(),
             weights.to_string_lossy().into_owned(),

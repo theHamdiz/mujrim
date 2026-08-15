@@ -65,6 +65,7 @@ fn load_window_icon() -> Option<floem::window::Icon> {
 
 fn app_view(window_id: WindowId) -> impl IntoView {
     let (state, handles) = AppState::boot();
+    actions::offer_crash_resume(state, &handles);
     tick_hub(state);
     tick_clocks(state, handles.clone());
     tick_eval_bar(state, handles.clone());
