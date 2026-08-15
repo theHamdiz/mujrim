@@ -8,7 +8,8 @@
 
 use std::path::Path;
 
-use types::{Board, Color, Piece};
+use types::chess_move::MoveFlag;
+use types::{Board, Color, Move, Piece, Square};
 
 use super::stockfish_format::{
     PAIR_FEATURES, THREAT_FEATURES, visit_pawn_pair_features, visit_threat_features,
@@ -115,74 +116,160 @@ impl PlentyChessNetwork {
 
     #[inline(always)]
     pub fn evaluate(&self, board: &Board) -> i32 {
-        let mut acc_white = [0i16; L1];
-        let mut acc_black = [0i16; L1];
-        acc_white.copy_from_slice(&self.feature_biases);
-        acc_black.copy_from_slice(&self.feature_biases);
-        refresh_perspective(self, board, Color::White, &mut acc_white);
-        refresh_perspective(self, board, Color::Black, &mut acc_black);
-
-        let pieces = board.all_occupancy().count_ones() as i32;
-        let divisor = (32 + OUTPUT_BUCKETS as i32 - 1) / OUTPUT_BUCKETS as i32;
-        let bucket = ((pieces - 2) / divisor).clamp(0, OUTPUT_BUCKETS as i32 - 1) as usize;
-        if board.side_to_move == Color::White {
-            propagate(self, &acc_white, &acc_black, bucket)
-        } else {
-            propagate(self, &acc_black, &acc_white, bucket)
-        }
+        let [mut acc_white, mut acc_black] = scratch_piece_accumulators(self, board);
+        add_aux(self, board, Color::White, &mut acc_white);
+        add_aux(self, board, Color::Black, &mut acc_black);
+        finish_eval(self, board, &acc_white, &acc_black)
     }
 }
 
-fn refresh_perspective(net: &PlentyChessNetwork, board: &Board, pov: Color, acc: &mut [i16; L1]) {
-    let king = board.king_square(pov).index();
+#[inline(always)]
+fn psq_feature(king: usize, pov: Color, piece: Piece, piece_color: Color, sq: usize) -> usize {
     let bucket = KING_BUCKET_LAYOUT[king ^ (56 * pov.index())];
     let mirror = king & 7 >= 4;
-    for piece in Piece::ALL {
-        for piece_color in [Color::White, Color::Black] {
-            let mut bb = board.piece_bb(piece, piece_color);
+    let oriented = sq ^ (7 * usize::from(mirror)) ^ (56 * pov.index());
+    let them = usize::from(piece_color != pov);
+    bucket * FEATURES + them * 384 + piece.index() * 64 + oriented
+}
+
+#[inline(always)]
+fn king_bucket(king: usize, pov: Color) -> usize {
+    KING_BUCKET_LAYOUT[king ^ (56 * pov.index())]
+}
+
+#[inline(always)]
+fn king_mirrored(king: usize) -> bool {
+    king & 7 >= 4
+}
+
+#[inline(always)]
+fn king_needs_refresh(old: usize, new: usize, pov: Color) -> bool {
+    king_bucket(old, pov) != king_bucket(new, pov) || king_mirrored(old) != king_mirrored(new)
+}
+
+#[inline(always)]
+fn finny_index(pov: Color, king: usize) -> usize {
+    pov.index() * 2 * KING_BUCKETS
+        + usize::from(king_mirrored(king)) * KING_BUCKETS
+        + king_bucket(king, pov)
+}
+
+#[inline(always)]
+fn snapshot_occupancy(board: &Board) -> [u64; 12] {
+    [
+        board.pieces[0][0],
+        board.pieces[0][1],
+        board.pieces[0][2],
+        board.pieces[0][3],
+        board.pieces[0][4],
+        board.pieces[0][5],
+        board.pieces[1][0],
+        board.pieces[1][1],
+        board.pieces[1][2],
+        board.pieces[1][3],
+        board.pieces[1][4],
+        board.pieces[1][5],
+    ]
+}
+
+fn scratch_piece_accumulators(net: &PlentyChessNetwork, board: &Board) -> [[i16; L1]; 2] {
+    let occupancy = snapshot_occupancy(board);
+    let mut acc = [[0i16; L1]; 2];
+    for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+        acc[pov].copy_from_slice(&net.feature_biases);
+        add_all_pieces(
+            &mut acc[pov],
+            &net.psq_weights,
+            board.king_square(side).index(),
+            side,
+            &occupancy,
+        );
+    }
+    acc
+}
+
+fn add_all_pieces(
+    acc: &mut [i16; L1],
+    weights: &[i16],
+    king: usize,
+    pov: Color,
+    occupancy: &[u64; 12],
+) {
+    for color in 0..2 {
+        for piece in 0..Piece::COUNT {
+            let mut bb = occupancy[color * Piece::COUNT + piece];
             while bb != 0 {
                 let sq = bb.trailing_zeros() as usize;
                 bb &= bb - 1;
-                let oriented = sq ^ (7 * usize::from(mirror)) ^ (56 * pov.index());
-                let them = usize::from(piece_color != pov);
-                let feature = bucket * FEATURES + them * 384 + piece.index() * 64 + oriented;
-                add_i16_row(acc, &net.psq_weights, feature);
+                apply_psq(
+                    acc,
+                    weights,
+                    king,
+                    pov,
+                    Piece::from_index(piece).expect("piece index is valid"),
+                    if color == 0 {
+                        Color::White
+                    } else {
+                        Color::Black
+                    },
+                    sq,
+                    1,
+                );
             }
         }
     }
-
-    let perspective = pov.index();
-    visit_pawn_pair_features(board, perspective, |feature| {
-        add_i8_row(acc, &net.pawn_pair_weights, feature - THREAT_FEATURES);
-    });
-    visit_threat_features(board, perspective, |feature| {
-        add_i8_row(acc, &net.threat_weights, feature);
-    });
 }
 
-#[inline(always)]
-fn add_i16_row(acc: &mut [i16; L1], weights: &[i16], feature: usize) {
-    let base = feature * L1;
-    debug_assert!(base + L1 <= weights.len());
-    let acc_ptr = acc.as_mut_ptr();
-    let weight_ptr = unsafe { weights.as_ptr().add(base) };
-    for i in 0..L1 {
-        unsafe {
-            *acc_ptr.add(i) = (*acc_ptr.add(i)).wrapping_add(*weight_ptr.add(i));
-        }
+#[allow(clippy::too_many_arguments)]
+fn apply_psq(
+    acc: &mut [i16; L1],
+    weights: &[i16],
+    king: usize,
+    pov: Color,
+    piece: Piece,
+    piece_color: Color,
+    sq: usize,
+    sign: i16,
+) {
+    super::stockfish_simd::apply_i16_feature_width(
+        acc,
+        weights,
+        psq_feature(king, pov, piece, piece_color, sq),
+        sign,
+    );
+}
+
+fn add_aux(net: &PlentyChessNetwork, board: &Board, pov: Color, acc: &mut [i16; L1]) {
+    if !net.pawn_pair_weights.is_empty() {
+        visit_pawn_pair_features(board, pov.index(), |feature| {
+            super::stockfish_simd::apply_i8_feature_width(
+                acc,
+                &net.pawn_pair_weights,
+                feature - THREAT_FEATURES,
+                1,
+            );
+        });
+    }
+    if !net.threat_weights.is_empty() {
+        visit_threat_features(board, pov.index(), |feature| {
+            super::stockfish_simd::apply_i8_feature_width(acc, &net.threat_weights, feature, 1);
+        });
     }
 }
 
-#[inline(always)]
-fn add_i8_row(acc: &mut [i16; L1], weights: &[i8], feature: usize) {
-    let base = feature * L1;
-    debug_assert!(base + L1 <= weights.len());
-    let acc_ptr = acc.as_mut_ptr();
-    let weight_ptr = unsafe { weights.as_ptr().add(base) };
-    for i in 0..L1 {
-        unsafe {
-            *acc_ptr.add(i) = (*acc_ptr.add(i)).wrapping_add(i16::from(*weight_ptr.add(i)));
-        }
+fn finish_eval(
+    net: &PlentyChessNetwork,
+    board: &Board,
+    acc_white: &[i16; L1],
+    acc_black: &[i16; L1],
+) -> i32 {
+    let pieces = board.all_occupancy().count_ones() as i32;
+    let divisor = (32 + OUTPUT_BUCKETS as i32 - 1) / OUTPUT_BUCKETS as i32;
+    let bucket = ((pieces - 2) / divisor).clamp(0, OUTPUT_BUCKETS as i32 - 1) as usize;
+    if board.side_to_move == Color::White {
+        propagate(net, acc_white, acc_black, bucket)
+    } else {
+        propagate(net, acc_black, acc_white, bucket)
     }
 }
 
@@ -249,6 +336,383 @@ fn activate_ft(acc: &[i16], out: &mut [u8]) {
         let shifted = c0 << (16 - FT_SHIFT);
         let prod = ((shifted * c1) >> 16).clamp(0, 255);
         out[i] = prod as u8;
+    }
+}
+
+const MAX_PLY: usize = 256;
+const FINNY_ENTRIES: usize = 2 * 2 * KING_BUCKETS;
+
+struct PlentyChessFrame {
+    values: [[i16; L1]; 2],
+    kings: [u8; 2],
+    pending_has_move: bool,
+    pending_move: Move,
+    pending_mover: u8,
+    pending_captured: u8,
+    hash: u64,
+    accurate: bool,
+    pending_null: bool,
+}
+
+impl Default for PlentyChessFrame {
+    fn default() -> Self {
+        Self {
+            values: [[0; L1]; 2],
+            kings: [u8::MAX; 2],
+            pending_has_move: false,
+            pending_move: Move::quiet(Square::A1, Square::A1),
+            pending_mover: u8::MAX,
+            pending_captured: u8::MAX,
+            hash: 0,
+            accurate: false,
+            pending_null: false,
+        }
+    }
+}
+
+impl Clone for PlentyChessFrame {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for PlentyChessFrame {}
+
+struct FinnyEntry {
+    values: [i16; L1],
+    occupancy: [u64; 12],
+    initialized: bool,
+}
+
+impl Default for FinnyEntry {
+    fn default() -> Self {
+        Self {
+            values: [0; L1],
+            occupancy: [0; 12],
+            initialized: false,
+        }
+    }
+}
+
+pub(crate) struct PlentyChessAccumulatorState {
+    frames: Box<[PlentyChessFrame]>,
+    finny: Box<[FinnyEntry]>,
+    index: usize,
+}
+
+impl PlentyChessAccumulatorState {
+    pub(crate) fn new() -> Self {
+        Self {
+            frames: vec![PlentyChessFrame::default(); MAX_PLY].into_boxed_slice(),
+            finny: (0..FINNY_ENTRIES)
+                .map(|_| FinnyEntry::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            index: 0,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.index = 0;
+        self.frames[0].accurate = false;
+        self.frames[0].pending_null = false;
+        for entry in self.finny.iter_mut() {
+            entry.initialized = false;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn push_move(&mut self, board: &Board, mv: Move) {
+        assert!(
+            self.index + 1 < self.frames.len(),
+            "PlentyChess NNUE stack exhausted"
+        );
+        self.index += 1;
+        let frame = &mut self.frames[self.index];
+        frame.accurate = false;
+        frame.pending_null = false;
+        frame.pending_has_move = true;
+        frame.pending_move = mv;
+        frame.pending_mover = board.piece_ids()[mv.from.index()];
+        frame.pending_captured = board.piece_ids()[mv.to.index()];
+        frame.hash = 0;
+    }
+
+    #[inline]
+    pub(crate) fn push_null(&mut self) {
+        assert!(
+            self.index + 1 < self.frames.len(),
+            "PlentyChess NNUE stack exhausted"
+        );
+        let next = self.index + 1;
+        self.frames[next] = self.frames[self.index];
+        self.frames[next].pending_has_move = false;
+        self.frames[next].pending_null = true;
+        self.index = next;
+    }
+
+    #[inline]
+    pub(crate) fn pop(&mut self) {
+        assert!(
+            self.index != 0,
+            "cannot pop the root PlentyChess NNUE frame"
+        );
+        self.index -= 1;
+    }
+
+    pub(crate) fn evaluate(&mut self, board: &Board, network: &PlentyChessNetwork) -> i32 {
+        if self.frames[self.index].accurate && self.frames[self.index].pending_null {
+            self.frames[self.index].hash = board.hash;
+            self.frames[self.index].pending_null = false;
+        }
+        if !self.frames[self.index].accurate || self.frames[self.index].hash != board.hash {
+            if self.index != 0 && self.frames[self.index - 1].accurate {
+                self.update_from_parent(board, network);
+            } else {
+                self.refresh(board, network);
+            }
+        }
+        let frame = &self.frames[self.index];
+        let mut acc_white = frame.values[0];
+        let mut acc_black = frame.values[1];
+        add_aux(network, board, Color::White, &mut acc_white);
+        add_aux(network, board, Color::Black, &mut acc_black);
+        finish_eval(network, board, &acc_white, &acc_black)
+    }
+
+    fn refresh(&mut self, board: &Board, network: &PlentyChessNetwork) {
+        let occupancy = snapshot_occupancy(board);
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            self.finny_refresh(side, kings[pov], &occupancy, network);
+            self.frames[self.index].values[pov] = self.finny[finny_index(side, kings[pov])].values;
+        }
+        let frame = &mut self.frames[self.index];
+        frame.kings = [kings[0] as u8, kings[1] as u8];
+        frame.hash = board.hash;
+        frame.accurate = true;
+        frame.pending_has_move = false;
+        frame.pending_null = false;
+    }
+
+    fn update_from_parent(&mut self, board: &Board, network: &PlentyChessNetwork) {
+        let current = self.index;
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        let parent_kings = [
+            usize::from(self.frames[current - 1].kings[0]),
+            usize::from(self.frames[current - 1].kings[1]),
+        ];
+        let needs_refresh = [
+            king_needs_refresh(parent_kings[0], kings[0], Color::White),
+            king_needs_refresh(parent_kings[1], kings[1], Color::Black),
+        ];
+        if needs_refresh.iter().any(|&refresh| refresh) {
+            let occupancy = snapshot_occupancy(board);
+            for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+                if !needs_refresh[pov] {
+                    continue;
+                }
+                self.finny_refresh(side, kings[pov], &occupancy, network);
+                self.frames[current].values[pov] = self.finny[finny_index(side, kings[pov])].values;
+            }
+        }
+        let pending_has_move = self.frames[current].pending_has_move;
+        let pending_move = self.frames[current].pending_move;
+        let pending_mover = self.frames[current].pending_mover;
+        let pending_captured = self.frames[current].pending_captured;
+        let parent_values = self.frames[current - 1].values;
+        let frame = &mut self.frames[current];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            if needs_refresh[pov] {
+                continue;
+            }
+            frame.values[pov] = parent_values[pov];
+            if pending_has_move {
+                apply_move_delta(
+                    &mut frame.values[pov],
+                    &network.psq_weights,
+                    kings[pov],
+                    side,
+                    pending_move,
+                    pending_mover,
+                    pending_captured,
+                );
+            }
+        }
+        frame.kings = [kings[0] as u8, kings[1] as u8];
+        frame.hash = board.hash;
+        frame.accurate = true;
+        frame.pending_has_move = false;
+        frame.pending_null = false;
+    }
+
+    fn finny_refresh(
+        &mut self,
+        side: Color,
+        king: usize,
+        occupancy: &[u64; 12],
+        network: &PlentyChessNetwork,
+    ) {
+        let entry = &mut self.finny[finny_index(side, king)];
+        if !entry.initialized {
+            entry.values.copy_from_slice(&network.feature_biases);
+            add_all_pieces(
+                &mut entry.values,
+                &network.psq_weights,
+                king,
+                side,
+                occupancy,
+            );
+            entry.occupancy = *occupancy;
+            entry.initialized = true;
+            return;
+        }
+        if entry.occupancy == *occupancy {
+            return;
+        }
+        for color in 0..2 {
+            for piece in 0..Piece::COUNT {
+                let index = color * Piece::COUNT + piece;
+                let piece = Piece::from_index(piece).expect("piece index is valid");
+                let piece_color = if color == 0 {
+                    Color::White
+                } else {
+                    Color::Black
+                };
+                let mut added = occupancy[index] & !entry.occupancy[index];
+                while added != 0 {
+                    let sq = added.trailing_zeros() as usize;
+                    added &= added - 1;
+                    apply_psq(
+                        &mut entry.values,
+                        &network.psq_weights,
+                        king,
+                        side,
+                        piece,
+                        piece_color,
+                        sq,
+                        1,
+                    );
+                }
+                let mut removed = entry.occupancy[index] & !occupancy[index];
+                while removed != 0 {
+                    let sq = removed.trailing_zeros() as usize;
+                    removed &= removed - 1;
+                    apply_psq(
+                        &mut entry.values,
+                        &network.psq_weights,
+                        king,
+                        side,
+                        piece,
+                        piece_color,
+                        sq,
+                        -1,
+                    );
+                }
+            }
+        }
+        entry.occupancy = *occupancy;
+    }
+}
+
+fn apply_move_delta(
+    acc: &mut [i16; L1],
+    weights: &[i16],
+    king: usize,
+    side: Color,
+    mv: Move,
+    mover: u8,
+    captured: u8,
+) {
+    debug_assert_ne!(mover, u8::MAX);
+    let mover_piece = Piece::from_index(usize::from(mover) / 2).expect("mover piece is valid");
+    let mover_color = if mover & 1 == 0 {
+        Color::White
+    } else {
+        Color::Black
+    };
+    let resulting = mv.promotion.unwrap_or(mover_piece);
+    apply_psq(
+        acc,
+        weights,
+        king,
+        side,
+        mover_piece,
+        mover_color,
+        mv.from.index(),
+        -1,
+    );
+    apply_psq(
+        acc,
+        weights,
+        king,
+        side,
+        resulting,
+        mover_color,
+        mv.to.index(),
+        1,
+    );
+    if mv.is_capture() && mv.flag != MoveFlag::EnPassant {
+        debug_assert_ne!(captured, u8::MAX);
+        apply_psq(
+            acc,
+            weights,
+            king,
+            side,
+            Piece::from_index(usize::from(captured) / 2).expect("captured piece is valid"),
+            if captured & 1 == 0 {
+                Color::White
+            } else {
+                Color::Black
+            },
+            mv.to.index(),
+            -1,
+        );
+    } else if mv.flag == MoveFlag::EnPassant {
+        apply_psq(
+            acc,
+            weights,
+            king,
+            side,
+            Piece::Pawn,
+            mover_color.opponent(),
+            Square::from_file_rank(mv.to.file(), mv.from.rank()).index(),
+            -1,
+        );
+    } else if mv.is_castling() {
+        let (rook_from, rook_to) = match (mover_color, mv.flag) {
+            (Color::White, MoveFlag::KingCastle) => (Square::H1.index(), Square::F1.index()),
+            (Color::White, MoveFlag::QueenCastle) => (Square::A1.index(), Square::D1.index()),
+            (Color::Black, MoveFlag::KingCastle) => (Square::H8.index(), Square::F8.index()),
+            (Color::Black, MoveFlag::QueenCastle) => (Square::A8.index(), Square::D8.index()),
+            _ => unreachable!(),
+        };
+        apply_psq(
+            acc,
+            weights,
+            king,
+            side,
+            Piece::Rook,
+            mover_color,
+            rook_from,
+            -1,
+        );
+        apply_psq(
+            acc,
+            weights,
+            king,
+            side,
+            Piece::Rook,
+            mover_color,
+            rook_to,
+            1,
+        );
     }
 }
 
@@ -372,5 +836,84 @@ mod tests {
         }
         assert!(seen.iter().all(|used| *used));
         assert!(KING_BUCKET_LAYOUT[32..].iter().all(|bucket| *bucket == 11));
+    }
+
+    fn patterned_net() -> PlentyChessNetwork {
+        let mut psq = vec![0i16; FEATURES * KING_BUCKETS * L1];
+        for (index, weight) in psq.iter_mut().enumerate() {
+            *weight = ((index % 251) as i16).wrapping_sub(125);
+        }
+        PlentyChessNetwork {
+            psq_weights: psq.into_boxed_slice(),
+            pawn_pair_weights: Box::new([]),
+            threat_weights: Box::new([]),
+            feature_biases: vec![0i16; L1].into_boxed_slice(),
+            l1_weights: vec![0i8; OUTPUT_BUCKETS * L1 * L2].into_boxed_slice(),
+            l1_biases: vec![0.0; OUTPUT_BUCKETS * L2].into_boxed_slice(),
+            l2_weights: vec![0.0; OUTPUT_BUCKETS * (L2 * 2) * L3].into_boxed_slice(),
+            l2_biases: vec![0.0; OUTPUT_BUCKETS * L3].into_boxed_slice(),
+            l3_weights: vec![0.0; OUTPUT_BUCKETS * (L3 + 2 * L2)].into_boxed_slice(),
+            l3_biases: vec![0.0; OUTPUT_BUCKETS].into_boxed_slice(),
+        }
+    }
+
+    fn assert_incremental_matches(
+        state: &mut PlentyChessAccumulatorState,
+        net: &PlentyChessNetwork,
+        board: &Board,
+    ) {
+        let expected = scratch_piece_accumulators(net, board);
+        assert_eq!(state.evaluate(board, net), net.evaluate(board));
+        assert_eq!(state.frames[state.index].values, expected);
+    }
+
+    #[test]
+    fn incremental_state_matches_scratch_after_moves_and_pop() {
+        types::init();
+        let net = patterned_net();
+        let mut state = PlentyChessAccumulatorState::new();
+        let mut board = Board::new();
+        assert_incremental_matches(&mut state, &net, &board);
+        let mut last_move = None;
+        for uci in ["e2e4", "e7e5", "g1f3", "b8c6"] {
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|mv| mv.to_uci() == uci)
+                .copied()
+                .expect("test move is legal");
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            last_move = Some(mv);
+            assert_incremental_matches(&mut state, &net, &board);
+        }
+        state.pop();
+        board.unmake_move(last_move.expect("at least one move was made"));
+        assert_incremental_matches(&mut state, &net, &board);
+    }
+
+    #[test]
+    fn incremental_state_matches_scratch_for_king_and_special_moves() {
+        types::init();
+        let net = patterned_net();
+        let cases = [
+            ("4k3/8/8/8/8/8/8/4K3 w - - 0 1", "e1e2"),
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+            ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"),
+        ];
+        for (fen, uci) in cases {
+            let mut state = PlentyChessAccumulatorState::new();
+            let mut board = Board::from_fen(fen).expect("test FEN is valid");
+            assert_incremental_matches(&mut state, &net, &board);
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|mv| mv.to_uci() == uci)
+                .copied()
+                .expect("test move is legal");
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            assert_incremental_matches(&mut state, &net, &board);
+        }
     }
 }

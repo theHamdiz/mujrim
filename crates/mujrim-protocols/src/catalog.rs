@@ -276,6 +276,13 @@ pub fn engine_search_roots(executable: &Path, current_dir: &Path) -> Vec<PathBuf
         }
     }
     push_unique_root(&mut roots, current_dir.join("engines"));
+    push_unique_root(
+        &mut roots,
+        current_dir
+            .join("dist")
+            .join(RuntimePlatform::current().directory_name())
+            .join("engines"),
+    );
     roots
 }
 
@@ -725,13 +732,16 @@ mod tests {
             vec![
                 PathBuf::from("C:/Mujrim/windows-aarch64/engines"),
                 PathBuf::from("D:/src/mujrim/engines"),
+                PathBuf::from("D:/src/mujrim/dist")
+                    .join(RuntimePlatform::current().directory_name())
+                    .join("engines"),
             ]
         );
         assert!(
             !roots.iter().any(
                 |root| root.ends_with("dist/engines") || root == Path::new("C:/Mujrim/engines")
             ),
-            "must not search parent/dist engine trees: {roots:?}"
+            "must not search parent or unscoped dist/engines trees: {roots:?}"
         );
     }
 

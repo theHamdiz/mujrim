@@ -1,5 +1,12 @@
-//! Runtime-dispatched kernels for the current Stockfish NNUE adapter.
+//! Runtime-dispatched i16/i8 feature kernels.
+//!
+//! Stockfish uses the fixed-width helpers; Obsidian (and other i16 FTs) call
+//! the width-generic `apply_*_feature_width` entry points without enabling
+//! the Stockfish network format.
 
+#![cfg_attr(not(feature = "stockfish-nnue"), allow(dead_code))]
+
+#[cfg(feature = "stockfish-nnue")]
 use super::stockfish_format::L1;
 use std::sync::OnceLock;
 
@@ -8,6 +15,10 @@ pub(crate) enum StockfishSimdBackend {
     Scalar,
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     X86Avx2,
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    X86Avx512,
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    X86Avx512Vnni,
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     ArmNeon,
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -20,6 +31,10 @@ impl StockfishSimdBackend {
             Self::Scalar => "scalar",
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             Self::X86Avx2 => "AVX2",
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            Self::X86Avx512 => "AVX-512",
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            Self::X86Avx512Vnni => "AVX-512+VNNI",
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             Self::ArmNeon => "NEON",
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -51,6 +66,26 @@ fn kernels() -> &'static KernelDispatch {
 fn detect_kernels() -> KernelDispatch {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            let vnni = std::arch::is_x86_feature_detected!("avx512vnni");
+            return KernelDispatch {
+                affine: if vnni {
+                    avx512_affine_vnni
+                } else {
+                    avx512_affine
+                },
+                apply_i16: avx512_apply_i16,
+                apply_i8: avx512_apply_i8,
+                transform_pair: avx512_transform_pair,
+                backend: if vnni {
+                    StockfishSimdBackend::X86Avx512Vnni
+                } else {
+                    StockfishSimdBackend::X86Avx512
+                },
+            };
+        }
         if std::arch::is_x86_feature_detected!("avx2") {
             return KernelDispatch {
                 affine: avx2_affine,
@@ -97,23 +132,45 @@ pub(crate) fn affine(input: &[u8], weights: &[i8], output: &mut [i32]) {
     (kernels().affine)(input, weights, output);
 }
 
+#[cfg(feature = "stockfish-nnue")]
 pub(crate) fn apply_i16_feature(
     accumulator: &mut [i16; L1],
     weights: &[i16],
     feature: usize,
     sign: i16,
 ) {
-    let row = &weights[feature * L1..(feature + 1) * L1];
+    apply_i16_feature_width(accumulator, weights, feature, sign);
+}
+
+pub(crate) fn apply_i16_feature_width(
+    accumulator: &mut [i16],
+    weights: &[i16],
+    feature: usize,
+    sign: i16,
+) {
+    let width = accumulator.len();
+    let row = &weights[feature * width..(feature + 1) * width];
     (kernels().apply_i16)(accumulator, row, sign);
 }
 
+#[cfg(feature = "stockfish-nnue")]
 pub(crate) fn apply_i8_feature(
     accumulator: &mut [i16; L1],
     weights: &[i8],
     feature: usize,
     sign: i16,
 ) {
-    let row = &weights[feature * L1..(feature + 1) * L1];
+    apply_i8_feature_width(accumulator, weights, feature, sign);
+}
+
+pub(crate) fn apply_i8_feature_width(
+    accumulator: &mut [i16],
+    weights: &[i8],
+    feature: usize,
+    sign: i16,
+) {
+    let width = accumulator.len();
+    let row = &weights[feature * width..(feature + 1) * width];
     (kernels().apply_i8)(accumulator, row, sign);
 }
 
@@ -183,6 +240,36 @@ fn avx2_apply_i8(accumulator: &mut [i16], row: &[i8], sign: i16) {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn avx2_transform_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
     // SAFETY: installed only after runtime AVX2 detection.
+    unsafe { avx2::transform_pair(first, second, output) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_affine(input: &[u8], weights: &[i8], output: &mut [i32]) {
+    // SAFETY: installed only after runtime AVX-512F+BW detection.
+    unsafe { avx512::affine(input, weights, output) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_affine_vnni(input: &[u8], weights: &[i8], output: &mut [i32]) {
+    // SAFETY: installed only after runtime AVX-512F+BW+VNNI detection.
+    unsafe { avx512::affine_vnni(input, weights, output) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_apply_i16(accumulator: &mut [i16], row: &[i16], sign: i16) {
+    // SAFETY: installed only after runtime AVX-512F+BW detection.
+    unsafe { avx512::apply_i16(accumulator, row, sign) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_apply_i8(accumulator: &mut [i16], row: &[i8], sign: i16) {
+    // SAFETY: installed only after runtime AVX-512F+BW detection.
+    unsafe { avx512::apply_i8(accumulator, row, sign) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_transform_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
+    // SAFETY: AVX-512 implies AVX2; reuse the bit-exact 16-lane pack.
     unsafe { avx2::transform_pair(first, second, output) }
 }
 
@@ -323,6 +410,121 @@ mod avx2 {
     }
 }
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+mod avx512 {
+    #![allow(clippy::undocumented_unsafe_blocks)]
+
+    use std::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn load_i16(ptr: *const i16) -> __m512i {
+        unsafe { _mm512_loadu_si512(ptr.cast()) }
+    }
+
+    #[inline(always)]
+    unsafe fn store_i16(ptr: *mut i16, value: __m512i) {
+        unsafe { _mm512_storeu_si512(ptr.cast(), value) }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i16(accumulator: &mut [i16], row: &[i16], sign: i16) {
+        unsafe {
+            debug_assert_eq!(accumulator.len() % 32, 0);
+            debug_assert_eq!(row.len(), accumulator.len());
+            for index in (0..accumulator.len()).step_by(32) {
+                let current = load_i16(accumulator.as_ptr().add(index));
+                let delta = load_i16(row.as_ptr().add(index));
+                let updated = if sign > 0 {
+                    _mm512_add_epi16(current, delta)
+                } else {
+                    _mm512_sub_epi16(current, delta)
+                };
+                store_i16(accumulator.as_mut_ptr().add(index), updated);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i8(accumulator: &mut [i16], row: &[i8], sign: i16) {
+        unsafe {
+            debug_assert_eq!(accumulator.len() % 32, 0);
+            debug_assert_eq!(row.len(), accumulator.len());
+            for index in (0..accumulator.len()).step_by(32) {
+                let current = load_i16(accumulator.as_ptr().add(index));
+                let delta =
+                    _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.as_ptr().add(index).cast()));
+                let updated = if sign > 0 {
+                    _mm512_add_epi16(current, delta)
+                } else {
+                    _mm512_sub_epi16(current, delta)
+                };
+                store_i16(accumulator.as_mut_ptr().add(index), updated);
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn dpbusd_maddubs(sum: __m512i, activations: __m512i, weights: __m512i) -> __m512i {
+        unsafe {
+            let pairwise = _mm512_maddubs_epi16(activations, weights);
+            _mm512_add_epi32(sum, _mm512_madd_epi16(pairwise, _mm512_set1_epi16(1)))
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn horizontal_sum_i32(sum: __m512i) -> i32 {
+        unsafe {
+            let high = _mm512_extracti64x4_epi64::<1>(sum);
+            let low = _mm512_castsi512_si256(sum);
+            let reduced = _mm256_add_epi32(low, high);
+            let high = _mm256_extracti128_si256::<1>(reduced);
+            let low = _mm256_castsi256_si128(reduced);
+            let reduced = _mm_add_epi32(low, high);
+            let shuffled = _mm_shuffle_epi32::<0b01_00_11_10>(reduced);
+            let reduced = _mm_add_epi32(reduced, shuffled);
+            let shuffled = _mm_shuffle_epi32::<0b10_11_00_01>(reduced);
+            let reduced = _mm_add_epi32(reduced, shuffled);
+            _mm_cvtsi128_si32(reduced)
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn affine(input: &[u8], weights: &[i8], output: &mut [i32]) {
+        unsafe {
+            debug_assert_eq!(input.len() % 64, 0);
+            let input_len = input.len();
+            for (row_index, value) in output.iter_mut().enumerate() {
+                let row = weights.as_ptr().add(row_index * input_len);
+                let mut sum = _mm512_setzero_si512();
+                for index in (0..input_len).step_by(64) {
+                    let activations = _mm512_loadu_si512(input.as_ptr().add(index).cast());
+                    let row_weights = _mm512_loadu_si512(row.add(index).cast());
+                    sum = dpbusd_maddubs(sum, activations, row_weights);
+                }
+                *value = value.wrapping_add(horizontal_sum_i32(sum));
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    pub(super) unsafe fn affine_vnni(input: &[u8], weights: &[i8], output: &mut [i32]) {
+        unsafe {
+            debug_assert_eq!(input.len() % 64, 0);
+            let input_len = input.len();
+            for (row_index, value) in output.iter_mut().enumerate() {
+                let row = weights.as_ptr().add(row_index * input_len);
+                let mut sum = _mm512_setzero_si512();
+                for index in (0..input_len).step_by(64) {
+                    let activations = _mm512_loadu_si512(input.as_ptr().add(index).cast());
+                    let row_weights = _mm512_loadu_si512(row.add(index).cast());
+                    sum = _mm512_dpbusd_epi32(sum, activations, row_weights);
+                }
+                *value = value.wrapping_add(horizontal_sum_i32(sum));
+            }
+        }
+    }
+}
+
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 mod neon {
     use std::arch::aarch64::*;
@@ -431,8 +633,11 @@ mod tests {
 
     #[test]
     fn dispatched_affine_matches_scalar_for_stockfish_l1_width() {
-        let input = (0..L1).map(|index| (index % 127) as u8).collect::<Vec<_>>();
-        let weights = (0..L1 * 8)
+        const WIDTH: usize = 1024;
+        let input = (0..WIDTH)
+            .map(|index| (index % 127) as u8)
+            .collect::<Vec<_>>();
+        let weights = (0..WIDTH * 8)
             .map(|index| (index as i8).wrapping_mul(3).wrapping_sub(40))
             .collect::<Vec<_>>();
         let mut expected = [5_i32; 8];
@@ -444,30 +649,32 @@ mod tests {
 
     #[test]
     fn dispatched_feature_updates_match_scalar() {
-        let i16_weights = (0..L1 * 2)
+        const WIDTH: usize = 1536;
+        let i16_weights = (0..WIDTH * 2)
             .map(|index| (index as i16).wrapping_mul(29))
             .collect::<Vec<_>>();
-        let i8_weights = (0..L1 * 2)
+        let i8_weights = (0..WIDTH * 2)
             .map(|index| (index as i8).wrapping_mul(13))
             .collect::<Vec<_>>();
-        let mut expected = [7_i16; L1];
+        let mut expected = [7_i16; WIDTH];
         let mut actual = expected;
-        scalar::apply_i16(&mut expected, &i16_weights[L1..], -1);
-        apply_i16_feature(&mut actual, &i16_weights, 1, -1);
-        scalar::apply_i8(&mut expected, &i8_weights[..L1], 1);
-        apply_i8_feature(&mut actual, &i8_weights, 0, 1);
+        scalar::apply_i16(&mut expected, &i16_weights[WIDTH..], -1);
+        apply_i16_feature_width(&mut actual, &i16_weights, 1, -1);
+        scalar::apply_i8(&mut expected, &i8_weights[..WIDTH], 1);
+        apply_i8_feature_width(&mut actual, &i8_weights, 0, 1);
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn dispatched_transform_pair_matches_scalar() {
-        let first = (0..L1 / 2)
+        const WIDTH: usize = 1024;
+        let first = (0..WIDTH / 2)
             .map(|index| index as i16 - 127)
             .collect::<Vec<_>>();
-        let second = (0..L1 / 2)
+        let second = (0..WIDTH / 2)
             .map(|index| 383 - index as i16)
             .collect::<Vec<_>>();
-        let mut expected = [0_u8; L1 / 2];
+        let mut expected = [0_u8; WIDTH / 2];
         let mut actual = expected;
         scalar::transform_pair(&first, &second, &mut expected);
         transform_pair(&first, &second, &mut actual);
@@ -479,7 +686,17 @@ mod tests {
         let name = selected_backend();
         let kind = selected_backend_kind();
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            if std::arch::is_x86_feature_detected!("avx512vnni") {
+                assert_eq!(name, "AVX-512+VNNI");
+                assert_eq!(kind, StockfishSimdBackend::X86Avx512Vnni);
+            } else {
+                assert_eq!(name, "AVX-512");
+                assert_eq!(kind, StockfishSimdBackend::X86Avx512);
+            }
+        } else if std::arch::is_x86_feature_detected!("avx2") {
             assert_eq!(name, "AVX2");
             assert_eq!(kind, StockfishSimdBackend::X86Avx2);
         }

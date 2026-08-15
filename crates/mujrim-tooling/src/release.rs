@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::action::ToolAction;
 use crate::process::{output, run};
-use mujrim_protocols::catalog::{adapter_binary_stem, host_packaging_arch};
+use mujrim_protocols::catalog::{RuntimePlatform, adapter_binary_stem, host_packaging_arch};
 
 /// All distributable binaries produced by the workspace.
 const BINS: &[&str] = &[
@@ -13,7 +13,7 @@ const BINS: &[&str] = &[
     "mujrim-updater",
 ];
 
-/// Dedicated product engines copied into `dist/` and `dist/engines/mujrim/bin/<os-arch>/`.
+/// Dedicated product engines copied into `dist/<os-arch>/engines/mujrim/bin/<os-arch>/`.
 const PRODUCT_ENGINE_STEMS: &[&str] = &[
     "mujrim-ak",
     "mujrim-elite",
@@ -282,7 +282,33 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     snapshot_engine("mujrim", "mujrim-obs")?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd,plentychess-nnue",
+        ],
+        &environment,
+    )?;
     snapshot_engine("mujrim", "mujrim-plenty")?;
+    run(
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd",
+        ],
+        &environment,
+    )?;
     snapshot_engine("mujrim", "mujrim-lc0")?;
     // Leave mujrim.exe as the lean external (no embedded net).
     snapshot_engine("mujrim-external", "mujrim")?;
@@ -309,15 +335,24 @@ fn build_native() -> Result<(), String> {
         &environment,
     )?;
     publish_native_dist()?;
-    println!("✅ Release binaries built in target/release/ and copied to dist/");
+    println!(
+        "✅ Release binaries built in target/release/ and copied to {}",
+        native_dist_root().display()
+    );
     Ok(())
+}
+
+fn native_dist_root() -> PathBuf {
+    Path::new("dist").join(RuntimePlatform::current().directory_name())
 }
 
 fn publish_native_dist() -> Result<(), String> {
     let suffix = std::env::consts::EXE_SUFFIX;
     let release = Path::new("target/release");
-    let dist = Path::new("dist");
-    fs::create_dir_all(dist).map_err(|error| format!("failed to create dist/: {error}"))?;
+    let platform = RuntimePlatform::current();
+    let dist = native_dist_root();
+    fs::create_dir_all(&dist)
+        .map_err(|error| format!("failed to create {}: {error}", dist.display()))?;
 
     let extras = [
         "mujrim",
@@ -326,11 +361,15 @@ fn publish_native_dist() -> Result<(), String> {
         "mujrim-ui",
         "mujrim-updater",
     ];
-    for stem in PRODUCT_ENGINE_STEMS.iter().chain(extras.iter()) {
+    for stem in extras {
         let source = release.join(format!("{stem}{suffix}"));
         if source.is_file() {
             fs::copy(&source, dist.join(format!("{stem}{suffix}"))).map_err(|error| {
-                format!("failed to copy {} into dist/: {error}", source.display())
+                format!(
+                    "failed to copy {} into {}: {error}",
+                    source.display(),
+                    dist.display()
+                )
             })?;
         }
     }
@@ -339,17 +378,58 @@ fn publish_native_dist() -> Result<(), String> {
         .join("engines")
         .join("mujrim")
         .join("bin")
-        .join(mujrim_protocols::catalog::RuntimePlatform::current().directory_name());
+        .join(platform.directory_name());
     fs::create_dir_all(&packaged)
         .map_err(|error| format!("failed to create {}: {error}", packaged.display()))?;
     for stem in PRODUCT_ENGINE_STEMS {
         let source = release.join(format!("{stem}{suffix}"));
-        if source.is_file() {
-            fs::copy(&source, packaged.join(format!("{stem}{suffix}"))).map_err(|error| {
+        if !source.is_file() {
+            continue;
+        }
+        let metadata = fs::metadata(&source)
+            .map_err(|error| format!("failed to stat {}: {error}", source.display()))?;
+        if metadata.len() == 0 {
+            return Err(format!(
+                "refusing to publish empty product binary {}",
+                source.display()
+            ));
+        }
+        fs::copy(&source, packaged.join(format!("{stem}{suffix}"))).map_err(|error| {
+            format!(
+                "failed to copy {} into {}: {error}",
+                source.display(),
+                packaged.display()
+            )
+        })?;
+    }
+    publish_nnue_into(&dist)?;
+    Ok(())
+}
+
+fn publish_nnue_into(dist: &Path) -> Result<(), String> {
+    let dest = dist.join("nnue");
+    let legacy = Path::new("dist").join("nnue");
+    for source in [Path::new("nnue"), legacy.as_path()] {
+        if !source.is_dir() || source == dest.as_path() {
+            continue;
+        }
+        fs::create_dir_all(&dest)
+            .map_err(|error| format!("failed to create {}: {error}", dest.display()))?;
+        for entry in fs::read_dir(source)
+            .map_err(|error| format!("failed to read {}: {error}", source.display()))?
+        {
+            let entry =
+                entry.map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+            let from = entry.path();
+            if !from.is_file() {
+                continue;
+            }
+            let to = dest.join(entry.file_name());
+            fs::copy(&from, &to).map_err(|error| {
                 format!(
                     "failed to copy {} into {}: {error}",
-                    source.display(),
-                    packaged.display()
+                    from.display(),
+                    to.display()
                 )
             })?;
         }
@@ -965,6 +1045,38 @@ mod tests {
     }
 
     #[test]
+    fn native_dist_publishes_under_the_host_platform_directory() {
+        let src = include_str!("release.rs");
+        let publish = src
+            .split("fn publish_native_dist()")
+            .nth(1)
+            .and_then(|rest| rest.split("fn snapshot_engine(").next())
+            .expect("publish_native_dist");
+        assert!(
+            publish.contains("native_dist_root()"),
+            "native publish must target dist/<os-arch>"
+        );
+        assert!(
+            publish.contains("publish_nnue_into"),
+            "platform tree must receive the NNUE payload"
+        );
+        assert!(
+            publish.contains("metadata.len() == 0"),
+            "empty product binaries must not replace a good v60"
+        );
+        assert!(
+            !publish.contains("PRODUCT_ENGINE_STEMS.iter().chain(extras"),
+            "product engines must not be copied to the dist root"
+        );
+        let root = native_dist_root();
+        assert_eq!(
+            root,
+            PathBuf::from("dist").join(RuntimePlatform::current().directory_name())
+        );
+        assert_ne!(root, PathBuf::from("dist"));
+    }
+
+    #[test]
     fn product_engine_stems_cover_the_dist_set() {
         assert_eq!(
             PRODUCT_ENGINE_STEMS,
@@ -982,5 +1094,22 @@ mod tests {
         assert!(EXTERNAL_ENGINE_FEATURES.contains("viridithas-nnue"));
         assert!(EXTERNAL_ENGINE_FEATURES.contains("obsidian-nnue"));
         assert!(!EXTERNAL_ENGINE_FEATURES.contains("embedded-networks"));
+        let src = include_str!("release.rs");
+        let obs_features = src
+            .lines()
+            .find(|line| {
+                line.contains("xboard,book,nnue,simd,obsidian-nnue") && !line.contains("//")
+            })
+            .expect("mujrim-obs feature list");
+        assert!(
+            !obs_features.contains("stockfish-nnue"),
+            "mujrim-obs must not compile Stockfish NNUE: {obs_features}"
+        );
+        assert!(src.contains("\"xboard,book,nnue,simd,plentychess-nnue\""));
+        assert!(
+            src.contains("snapshot_engine(\"mujrim\", \"mujrim-plenty\")")
+                && src.contains("\"xboard,book,nnue,simd,plentychess-nnue\""),
+            "mujrim-plenty must be built from plentychess-nnue, not copied from another adapter"
+        );
     }
 }

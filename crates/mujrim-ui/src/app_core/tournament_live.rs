@@ -120,6 +120,12 @@ pub struct LiveGameBoard {
     pub multipv_lines: Vec<ThinkingLine>,
 }
 
+impl LiveGameBoard {
+    pub fn is_placeholder(&self) -> bool {
+        self.game_key.starts_with("pending-")
+    }
+}
+
 /// Replayable tournament game for the hub board viewer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayedGame {
@@ -283,6 +289,9 @@ impl LiveTournamentSnapshot {
     }
 
     pub fn upsert_live_game(&mut self, board: LiveGameBoard) {
+        if !board.is_placeholder() {
+            self.drop_placeholder_games();
+        }
         if let Some(existing) = self
             .live_games
             .iter_mut()
@@ -292,6 +301,10 @@ impl LiveTournamentSnapshot {
         } else {
             self.live_games.push(board);
         }
+    }
+
+    pub fn drop_placeholder_games(&mut self) {
+        self.live_games.retain(|game| !game.is_placeholder());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -383,6 +396,7 @@ impl LiveTournamentSnapshot {
                 moves,
             });
         }
+        self.drop_placeholder_games();
     }
 }
 
@@ -733,6 +747,36 @@ mod tests {
         assert!(snap.live_games.is_empty());
         assert_eq!(snap.played_games.len(), 1);
         assert_eq!(snap.played_games[0].white_score, 1.0);
+    }
+
+    #[test]
+    fn real_games_replace_the_optimistic_placeholder() {
+        let mut snap = LiveTournamentSnapshot::default();
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "pending-0".into(),
+            white_clock_ms: Some(0),
+            black_clock_ms: Some(180_000),
+            clock_synced_ms: Some(1),
+            ..LiveGameBoard::default()
+        });
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "g-43".into(),
+            white: "A".into(),
+            black: "B".into(),
+            white_clock_ms: Some(180_000),
+            black_clock_ms: Some(180_000),
+            clock_synced_ms: Some(now_unix_ms()),
+            ..LiveGameBoard::default()
+        });
+        assert_eq!(snap.live_games.len(), 1);
+        assert_eq!(snap.live_games[0].game_key, "g-43");
+        assert_eq!(snap.live_games[0].white_clock_ms, Some(180_000));
+        snap.upsert_live_game(LiveGameBoard {
+            game_key: "pending-0".into(),
+            ..LiveGameBoard::default()
+        });
+        snap.finish_live_game("g-43", 0.0, Vec::new());
+        assert!(snap.live_games.is_empty());
     }
 
     #[test]

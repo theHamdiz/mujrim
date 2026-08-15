@@ -27,6 +27,13 @@ pub fn king_bucket_changed(perspective: usize, from_sq: usize, to_sq: usize) -> 
     BUCKETS[from] != BUCKETS[to]
 }
 
+/// King move invalidates this perspective's HalfKP bases (bucket or file-mirror).
+#[inline(always)]
+pub fn king_needs_refresh(perspective: usize, from_sq: usize, to_sq: usize) -> bool {
+    king_bucket_changed(perspective, from_sq, to_sq)
+        || king_needs_mirror(from_sq) != king_needs_mirror(to_sq)
+}
+
 /// Mirror a square horizontally (flip file): a↔h, b↔g, c↔f, d↔e.
 #[inline(always)]
 pub const fn mirror_horizontal(sq: usize) -> usize {
@@ -69,5 +76,12 @@ mod tests {
         assert!(!king_bucket_changed(0, 0, 1));
         // Square 0 (bucket 0) and 16 (bucket 3) should change
         assert!(king_bucket_changed(0, 0, 16));
+    }
+
+    #[test]
+    fn king_needs_refresh_tracks_mirror_and_bucket() {
+        assert!(!king_needs_refresh(0, 0, 1));
+        assert!(king_needs_refresh(0, 4, 6));
+        assert!(king_needs_refresh(0, 3, 4));
     }
 }

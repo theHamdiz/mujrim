@@ -39,16 +39,14 @@ if [[ -d "${ROOT}/engines" ]]; then
   printf '  engines/\n'
 fi
 
-if [[ -d "${ROOT}/dist/nnue" ]]; then
-  cp -a "${ROOT}/dist/nnue" "${DIST}/nnue"
-elif [[ -d "${ROOT}/nnue" ]]; then
-  cp -a "${ROOT}/nnue" "${DIST}/nnue"
+if [[ -d "${ROOT}/nnue" ]]; then
+  mkdir -p "${DIST}/nnue"
+  cp -a "${ROOT}/nnue/." "${DIST}/nnue/"
 fi
 
-if [[ -d "${ROOT}/dist/books" ]]; then
-  cp -a "${ROOT}/dist/books" "${DIST}/books"
-elif [[ -d "${ROOT}/books" ]]; then
-  cp -a "${ROOT}/books" "${DIST}/books"
+if [[ -d "${ROOT}/books" ]]; then
+  mkdir -p "${DIST}/books"
+  cp -a "${ROOT}/books/." "${DIST}/books/"
 fi
 
 # Product adapters when already built beside the release dir.

@@ -608,7 +608,7 @@ fn auto_detect_networks(dirs: &[PathBuf]) -> (Option<ActiveNetwork>, String) {
     (None, message)
 }
 
-/// Directories searched for on-disk nets: `MUJRIM_NNUE`, `nnue/`, `dist/nnue`.
+/// Directories searched for on-disk nets: `MUJRIM_NNUE`, `nnue/`, `dist/<os-arch>/nnue`.
 pub fn nnue_search_directories() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(explicit) = std::env::var_os("MUJRIM_NNUE") {
@@ -628,11 +628,31 @@ pub fn nnue_search_directories() -> Vec<PathBuf> {
         {
             dirs.push(ancestor.join("nnue"));
             dirs.push(ancestor.join("dist").join("nnue"));
+            dirs.push(
+                ancestor
+                    .join("dist")
+                    .join(format!(
+                        "{}-{}",
+                        std::env::consts::OS,
+                        std::env::consts::ARCH
+                    ))
+                    .join("nnue"),
+            );
         }
     }
     if let Ok(current) = std::env::current_dir() {
         dirs.push(current.join("nnue"));
         dirs.push(current.join("dist").join("nnue"));
+        dirs.push(
+            current
+                .join("dist")
+                .join(format!(
+                    "{}-{}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ))
+                .join("nnue"),
+        );
     }
     dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"));
     dirs.sort();
@@ -848,7 +868,6 @@ mod tests {
         let info = active.info();
         assert_eq!(info.hidden_size, HIDDEN);
         assert_eq!(info.file_size as usize, std::mem::size_of::<Network>());
-        #[cfg(any(feature = "reckless-nnue", feature = "stockfish-nnue"))]
         let network = match active.parameters() {
             NnueNetworkParameters::Akimbo(network) => network,
             #[cfg(feature = "reckless-nnue")]
@@ -872,8 +891,6 @@ mod tests {
                 panic!("embedded network must use the Akimbo evaluator")
             }
         };
-        #[cfg(not(any(feature = "reckless-nnue", feature = "stockfish-nnue")))]
-        let NnueNetworkParameters::Akimbo(network) = active.parameters();
         assert!(std::ptr::eq(network, net()));
     }
 
@@ -987,6 +1004,38 @@ mod tests {
         assert_eq!(active.search_profile(), NnueSearchProfile::Viridithas);
     }
 
+    #[test]
+    fn obsidian_nnue_feature_does_not_enable_stockfish() {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        let line = manifest
+            .lines()
+            .find(|line| line.starts_with("obsidian-nnue"))
+            .expect("obsidian-nnue feature");
+        assert_eq!(line, "obsidian-nnue = [\"nnue\"]");
+        assert!(!line.contains("stockfish-nnue"));
+    }
+
+    #[cfg(feature = "obsidian-nnue")]
+    #[test]
+    fn obsidian_nnue_reuses_i16_feature_simd() {
+        assert!(!super::super::stockfish_simd::selected_backend().is_empty());
+    }
+
+    #[cfg(all(feature = "obsidian-nnue", not(feature = "stockfish-nnue")))]
+    #[test]
+    fn obsidian_only_build_excludes_stockfish_format() {
+        assert!(!enabled_network_formats().contains(&NetworkFormat::Stockfish));
+        assert!(enabled_network_formats().contains(&NetworkFormat::Obsidian));
+        let path = std::env::temp_dir().join("mujrim-obs-only.nnue");
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        let error = load_network(&path).err().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            error.contains("Stockfish") && error.contains("not compatible"),
+            "{error}"
+        );
+    }
+
     #[cfg(feature = "obsidian-nnue")]
     #[test]
     fn load_network_identifies_obsidian_by_filename() {
@@ -1012,11 +1061,26 @@ mod tests {
     #[test]
     fn search_roots_include_dist_nnue_when_present() {
         let cwd = std::env::current_dir().expect("cwd");
-        let dist = cwd.join("dist").join("nnue");
-        if dist.is_dir() {
+        let platform = cwd
+            .join("dist")
+            .join(format!(
+                "{}-{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ))
+            .join("nnue");
+        let legacy = cwd.join("dist").join("nnue");
+        let roots = nnue_search_directories();
+        if platform.is_dir() {
             assert!(
-                nnue_search_directories().iter().any(|dir| dir == &dist),
-                "dist/nnue must be a discovery root"
+                roots.iter().any(|dir| dir == &platform),
+                "dist/<os-arch>/nnue must be a discovery root"
+            );
+        }
+        if legacy.is_dir() {
+            assert!(
+                roots.iter().any(|dir| dir == &legacy),
+                "legacy dist/nnue must stay a discovery root"
             );
         }
     }
@@ -1056,6 +1120,13 @@ mod tests {
         }
         let net = load_network_for_preset("obsidian").expect("obs net");
         assert_eq!(net.search_profile(), NnueSearchProfile::Obsidian);
+        assert_eq!(net.info().format, NetworkFormat::Obsidian);
+        assert_ne!(net.info().format, NetworkFormat::Stockfish);
+        assert!(
+            !net.info().architecture.contains("HalfKA"),
+            "obsidian preset must not load a Stockfish net, got {}",
+            net.info().architecture
+        );
     }
 
     #[cfg(feature = "plentychess-nnue")]

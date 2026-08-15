@@ -113,6 +113,7 @@ pub fn resign(state: AppState, handles: &AppHandles) {
     });
     state.searching.set(false);
     state.status.set("Resigned.".to_owned());
+    play_sfx_kind(state, handles, SfxKind::Resign);
     if let Some(sound) = handles.sound.borrow_mut().as_mut() {
         sound.stop_bgm();
     }
@@ -222,11 +223,22 @@ pub fn apply_engine_move(
 
 fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: bool) {
     let captured = captured || mv.is_capture();
-    let gives_check = state.game.with_untracked(|game| {
+    let (gives_check, is_mate) = state.game.with_untracked(|game| {
         game.as_ref()
-            .is_some_and(|gs| gs.board.is_in_check(gs.board.side_to_move))
+            .map(|gs| {
+                let mut board = gs.board.clone();
+                (
+                    gs.board.is_in_check(gs.board.side_to_move),
+                    board.is_checkmate(),
+                )
+            })
+            .unwrap_or((false, false))
     });
-    play_move_sfx(state, handles, mv, captured, gives_check);
+    if is_mate {
+        play_sfx_kind(state, handles, SfxKind::Checkmate);
+    } else {
+        play_move_sfx(state, handles, mv, captured, gives_check);
+    }
     state.move_log.update(|log| log.push(mv.to_uci()));
     state.move_annotations.update(|items| items.push(None));
     follow_live_tail(state);
@@ -259,9 +271,17 @@ fn play_move_sfx(
     captured: bool,
     gives_check: bool,
 ) {
+    play_sfx_kind(
+        state,
+        handles,
+        SfxKind::from_move(mv, captured, gives_check),
+    );
+}
+
+fn play_sfx_kind(state: AppState, handles: &AppHandles, kind: SfxKind) {
     let sfx_on = state.settings.get_untracked().sfx_on;
     if let Some(sound) = handles.sound.borrow().as_ref() {
-        sound.play_sfx(sfx_on, SfxKind::from_move(mv, captured, gives_check));
+        sound.play_sfx(sfx_on, kind);
     }
 }
 
@@ -1164,6 +1184,8 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     state.current_tournament_id.set(Some(tournament_id.clone()));
     state.persisted_tournament_games.set(0);
     state.focused_live_key.set(None);
+    state.announced_played_games.set(0);
+    state.announced_tournament_over.set(false);
     state.eval_bar_fen.set(String::new());
     let resumed = resume_id.as_ref().and_then(|id| {
         handles
@@ -1238,6 +1260,7 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
             if let Ok(guard) = snapshot.snapshot.lock() {
                 state.tournament_snapshot.set(guard.clone());
                 persist_tournament_progress(state, &persist_handles, &guard);
+                announce_tournament_outcomes(state, &persist_handles, &guard);
             }
         }));
     });
@@ -1292,6 +1315,7 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
                 sync_tournament_board(state, &handles, &guard);
             }
             persist_tournament_progress(state, &handles, &guard);
+            announce_tournament_outcomes(state, &handles, &guard);
             if running {
                 let id = state
                     .current_tournament_id
@@ -1365,7 +1389,7 @@ fn sync_tournament_board(
 }
 
 fn apply_live_tournament_uci(state: AppState, handles: &AppHandles, uci: &str) {
-    let Some((mv, captured, gives_check)) = state.game.with_untracked(|game| {
+    let Some((mv, captured, gives_check, is_mate)) = state.game.with_untracked(|game| {
         let gs = game.as_ref()?;
         let mut board = gs.board.clone();
         let mv = board
@@ -1376,11 +1400,16 @@ fn apply_live_tournament_uci(state: AppState, handles: &AppHandles, uci: &str) {
         let captured = gs.board.piece_on(mv.to).is_some() || mv.is_capture();
         board.make_move(mv);
         let gives_check = board.is_in_check(board.side_to_move);
-        Some((mv, captured, gives_check))
+        let is_mate = board.is_checkmate();
+        Some((mv, captured, gives_check, is_mate))
     }) else {
         return;
     };
-    play_move_sfx(state, handles, mv, captured, gives_check);
+    if is_mate {
+        play_sfx_kind(state, handles, SfxKind::Checkmate);
+    } else {
+        play_move_sfx(state, handles, mv, captured, gives_check);
+    }
     apply_engine_move(state, mv, None, captured);
 }
 
@@ -1637,6 +1666,62 @@ fn persist_tournament_progress(
         drop(study);
         refresh_tournament_history(state, handles);
     }
+}
+
+fn announce_tournament_outcomes(
+    state: AppState,
+    handles: &AppHandles,
+    snap: &crate::app_core::tournament_live::LiveTournamentSnapshot,
+) {
+    let heard = state.announced_played_games.get_untracked();
+    if snap.played_games.len() > heard {
+        for game in snap.played_games.iter().skip(heard) {
+            if let Ok(mut board) = logic::replay_study_game(&game.initial_fen, &game.moves)
+                && let Some(kind) =
+                    crate::app_core::audio::game_end_sfx(&mut board.board, game.white_score)
+                && kind != SfxKind::Checkmate
+            {
+                play_sfx_kind(state, handles, kind);
+            }
+        }
+        state.announced_played_games.set(snap.played_games.len());
+    }
+    if (snap.finished || !snap.running)
+        && snap.played_games.len() + snap.finished_matches.len() > 0
+        && !state.announced_tournament_over.get_untracked()
+        && !snap.running
+    {
+        state.announced_tournament_over.set(true);
+        if snap.finished {
+            play_sfx_kind(state, handles, SfxKind::TournamentOver);
+        }
+    }
+}
+
+pub fn delete_historical_tournament(state: AppState, handles: &AppHandles, id: String) {
+    if state.current_tournament_id.get_untracked().as_deref() == Some(id.as_str())
+        && state.tournament_snapshot.get_untracked().running
+    {
+        state
+            .tournament_status
+            .set("Stop the live tournament before deleting it.".to_owned());
+        return;
+    }
+    if let Some(database) = handles.study.borrow_mut().as_mut()
+        && let Err(error) = database.delete_tournament(&id)
+    {
+        state.status.set(error);
+        return;
+    }
+    if state.current_tournament_id.get_untracked().as_deref() == Some(id.as_str()) {
+        state.current_tournament_id.set(None);
+        state.tournament_snapshot.set(Default::default());
+        state.selected_tournament_game_id.set(None);
+    }
+    refresh_tournament_history(state, handles);
+    state
+        .tournament_status
+        .set("Event removed from history.".to_owned());
 }
 
 pub fn refresh_tournament_history(state: AppState, handles: &AppHandles) {
@@ -2145,6 +2230,12 @@ mod tests {
             "open_library",
             "set_analysis_engine",
             "play_move_sfx",
+            "play_sfx_kind",
+            "SfxKind::Checkmate",
+            "SfxKind::Resign",
+            "SfxKind::TournamentOver",
+            "delete_historical_tournament",
+            "announce_tournament_outcomes",
             "optimistic_live_board",
             "request_pause",
             "request_abort_game",

@@ -37,7 +37,18 @@ static X86_KERNEL_DISPATCH: OnceLock<X86KernelDispatch> = OnceLock::new();
 #[inline(always)]
 fn x86_kernels() -> &'static X86KernelDispatch {
     X86_KERNEL_DISPATCH.get_or_init(|| {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            X86KernelDispatch {
+                flatten_pair: flatten_pair_avx512,
+                flatten: flatten_avx512,
+                vector_update: vector_update_avx512,
+                vector_add: vector_add_avx512,
+                vector_sub: vector_sub_avx512,
+                accum_apply_deltas: accum_apply_deltas_avx512,
+            }
+        } else if std::arch::is_x86_feature_detected!("avx2") {
             X86KernelDispatch {
                 flatten_pair: flatten_pair_avx2,
                 flatten: flatten_avx2,
@@ -120,15 +131,66 @@ fn accum_apply_deltas_avx2(
     unsafe { avx2::accum_apply_deltas(acc, all_weights, adds, subs) }
 }
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn flatten_pair_avx512(
+    acc0: &[i16; HIDDEN],
+    w0: &[i16; HIDDEN],
+    acc1: &[i16; HIDDEN],
+    w1: &[i16; HIDDEN],
+) -> i32 {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::flatten_pair(acc0, w0, acc1, w1) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn flatten_avx512(acc: &[i16; HIDDEN], weights: &[i16; HIDDEN]) -> i32 {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::flatten(acc, weights) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn vector_update_avx512(
+    acc: &mut [i16; HIDDEN],
+    all_weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::vector_update(acc, all_weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn vector_add_avx512(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::vector_add(dst, src) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn vector_sub_avx512(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::vector_sub(dst, src) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn accum_apply_deltas_avx512(
+    acc: &mut [i16; HIDDEN],
+    all_weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::accum_apply_deltas(acc, all_weights, adds, subs) }
+}
+
 #[inline(always)]
 fn assert_weight_rows_cover(all_weights: &[i16], adds: &[usize], subs: &[usize]) {
-    assert_eq!(
+    debug_assert_eq!(
         all_weights.len() % HIDDEN,
         0,
         "NNUE weight storage must contain complete rows"
     );
     let rows = all_weights.len() / HIDDEN;
-    assert!(
+    debug_assert!(
         adds.iter().chain(subs).all(|&index| index < rows),
         "NNUE feature index exceeds the weight table"
     );
@@ -405,6 +467,18 @@ mod avx2 {
         }
     }
 
+    /// Aligned load when the pointer is 32-byte aligned; otherwise `loadu`.
+    #[inline(always)]
+    unsafe fn load_i16x16(ptr: *const i16) -> __m256i {
+        unsafe {
+            if (ptr as usize) & 31 == 0 {
+                _mm256_load_si256(ptr.cast())
+            } else {
+                _mm256_loadu_si256(ptr.cast())
+            }
+        }
+    }
+
     /// AVX2 SCReLU flatten: processes 16 i16 values at a time.
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -420,9 +494,9 @@ mod avx2 {
                     prefetch_i8(acc.as_ptr().add(ip).cast());
                     prefetch_i8(weights.as_ptr().add(ip).cast());
                 }
-                let mut v = _mm256_loadu_si256(acc.as_ptr().add(i).cast());
+                let mut v = load_i16x16(acc.as_ptr().add(i));
                 v = _mm256_min_epi16(_mm256_max_epi16(v, min), max);
-                let w = _mm256_loadu_si256(weights.as_ptr().add(i).cast());
+                let w = load_i16x16(weights.as_ptr().add(i));
                 let vw = _mm256_mullo_epi16(v, w);
                 let product = _mm256_madd_epi16(v, vw);
                 sum = _mm256_add_epi32(sum, product);
@@ -595,6 +669,160 @@ mod avx2 {
         let upper_32 = _mm_shuffle_epi32::<0b00_00_00_01>(sum_64);
         let sum_32 = _mm_add_epi32(upper_32, sum_64);
         _mm_cvtsi128_si32(sum_32)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AVX-512 implementation (selected at runtime on x86_64)
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+mod avx512 {
+    #![allow(clippy::undocumented_unsafe_blocks)]
+    use super::*;
+    use std::arch::x86_64::*;
+
+    const CHUNK: usize = 32;
+
+    #[inline(always)]
+    unsafe fn load_i16x32(ptr: *const i16) -> __m512i {
+        unsafe {
+            if (ptr as usize) & 63 == 0 {
+                _mm512_load_si512(ptr.cast())
+            } else {
+                _mm512_loadu_si512(ptr.cast())
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn store_i16x32(ptr: *mut i16, value: __m512i) {
+        unsafe {
+            if (ptr as usize) & 63 == 0 {
+                _mm512_store_si512(ptr.cast(), value);
+            } else {
+                _mm512_storeu_si512(ptr.cast(), value);
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub unsafe fn flatten(acc: &[i16; HIDDEN], weights: &[i16; HIDDEN]) -> i32 {
+        unsafe {
+            let mut sum = _mm512_setzero_si512();
+            let min = _mm512_setzero_si512();
+            let max = _mm512_set1_epi16(QA);
+
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let mut v = load_i16x32(acc.as_ptr().add(i));
+                v = _mm512_min_epi16(_mm512_max_epi16(v, min), max);
+                let w = load_i16x32(weights.as_ptr().add(i));
+                let vw = _mm512_mullo_epi16(v, w);
+                let product = _mm512_madd_epi16(v, vw);
+                sum = _mm512_add_epi32(sum, product);
+            }
+
+            _mm512_reduce_add_epi32(sum)
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub unsafe fn flatten_pair(
+        acc0: &[i16; HIDDEN],
+        w0: &[i16; HIDDEN],
+        acc1: &[i16; HIDDEN],
+        w1: &[i16; HIDDEN],
+    ) -> i32 {
+        unsafe {
+            let mut sum = _mm512_setzero_si512();
+            let min = _mm512_setzero_si512();
+            let max = _mm512_set1_epi16(QA);
+
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let mut v0 = load_i16x32(acc0.as_ptr().add(i));
+                v0 = _mm512_min_epi16(_mm512_max_epi16(v0, min), max);
+                let w0v = load_i16x32(w0.as_ptr().add(i));
+                sum = _mm512_add_epi32(sum, _mm512_madd_epi16(v0, _mm512_mullo_epi16(v0, w0v)));
+
+                let mut v1 = load_i16x32(acc1.as_ptr().add(i));
+                v1 = _mm512_min_epi16(_mm512_max_epi16(v1, min), max);
+                let w1v = load_i16x32(w1.as_ptr().add(i));
+                sum = _mm512_add_epi32(sum, _mm512_madd_epi16(v1, _mm512_mullo_epi16(v1, w1v)));
+            }
+
+            _mm512_reduce_add_epi32(sum)
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub unsafe fn vector_add(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let d = load_i16x32(dst.as_ptr().add(i));
+                let s = load_i16x32(src.as_ptr().add(i));
+                store_i16x32(dst.as_mut_ptr().add(i), _mm512_add_epi16(d, s));
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub unsafe fn vector_sub(dst: &mut [i16; HIDDEN], src: &[i16; HIDDEN]) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let d = load_i16x32(dst.as_ptr().add(i));
+                let s = load_i16x32(src.as_ptr().add(i));
+                store_i16x32(dst.as_mut_ptr().add(i), _mm512_sub_epi16(d, s));
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub unsafe fn vector_update(
+        acc: &mut [i16; HIDDEN],
+        all_weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let mut v = load_i16x32(acc.as_ptr().add(i));
+                for &add_idx in adds {
+                    let w = load_i16x32(all_weights.as_ptr().add(add_idx * HIDDEN + i));
+                    v = _mm512_adds_epi16(v, w);
+                }
+                for &sub_idx in subs {
+                    let w = load_i16x32(all_weights.as_ptr().add(sub_idx * HIDDEN + i));
+                    v = _mm512_subs_epi16(v, w);
+                }
+                store_i16x32(acc.as_mut_ptr().add(i), v);
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub unsafe fn accum_apply_deltas(
+        acc: &mut [i16; HIDDEN],
+        all_weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            for i in (0..HIDDEN).step_by(CHUNK) {
+                let mut v = load_i16x32(acc.as_ptr().add(i));
+                for &add_idx in adds {
+                    let w = load_i16x32(all_weights.as_ptr().add(add_idx * HIDDEN + i));
+                    v = _mm512_add_epi16(v, w);
+                }
+                for &sub_idx in subs {
+                    let w = load_i16x32(all_weights.as_ptr().add(sub_idx * HIDDEN + i));
+                    v = _mm512_sub_epi16(v, w);
+                }
+                store_i16x32(acc.as_mut_ptr().add(i), v);
+            }
+        }
     }
 }
 
@@ -895,10 +1123,54 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "NNUE feature index exceeds the weight table")]
     fn accum_apply_deltas_rejects_out_of_bounds_feature_rows() {
         let mut accumulator = [0i16; HIDDEN];
         let weights = [0i16; HIDDEN];
         accum_apply_deltas(&mut accumulator, &weights, &[1], &[]);
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[test]
+    fn avx512_kernels_match_scalar_when_detected() {
+        if !(std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw"))
+        {
+            return;
+        }
+
+        let mut acc = [0i16; HIDDEN];
+        let mut weights = [0i16; HIDDEN];
+        for i in 0..HIDDEN {
+            acc[i] = (i % 300) as i16;
+            weights[i] = ((i % 50) as i16).wrapping_sub(25);
+        }
+        let dispatched = flatten(&acc, &weights);
+        let expected = scalar::flatten(&acc, &weights);
+        assert_eq!(dispatched, expected);
+
+        let mut wflat = vec![0i16; HIDDEN * 12];
+        for row in 0..12 {
+            for j in 0..HIDDEN {
+                wflat[row * HIDDEN + j] = ((row * 17 + j) % 41) as i16 - 20;
+            }
+        }
+        let adds = [2usize, 5, 7];
+        let subs = [3usize, 4];
+        let mut batch = [0i16; HIDDEN];
+        accum_apply_deltas(&mut batch, &wflat, &adds, &subs);
+        let mut seq = [0i16; HIDDEN];
+        for &i in &adds {
+            for j in 0..HIDDEN {
+                seq[j] = seq[j].wrapping_add(wflat[i * HIDDEN + j]);
+            }
+        }
+        for &i in &subs {
+            for j in 0..HIDDEN {
+                seq[j] = seq[j].wrapping_sub(wflat[i * HIDDEN + j]);
+            }
+        }
+        assert_eq!(batch, seq);
     }
 }

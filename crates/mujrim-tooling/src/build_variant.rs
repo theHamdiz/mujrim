@@ -116,14 +116,23 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "--features",
             "xboard,book,nnue,simd,obsidian-nnue",
         ],
-        BuildVariant::PlentyChess | BuildVariant::Lc0 => vec![
+        BuildVariant::PlentyChess => vec![
             "build",
             "--release",
             "-p",
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,reckless-nnue",
+            "xboard,book,nnue,simd,plentychess-nnue",
+        ],
+        BuildVariant::Lc0 => vec![
+            "build",
+            "--release",
+            "-p",
+            "mujrim",
+            "--no-default-features",
+            "--features",
+            "xboard,book,nnue,simd",
         ],
         BuildVariant::Benchmark => vec![
             "build",
@@ -321,6 +330,39 @@ mod tests {
                 "syzygy,embedded-network"
             ]
         );
+    }
+
+    #[test]
+    fn obsidian_variant_enables_only_obsidian_nnue() {
+        let features = variant_args(&BuildVariant::Obsidian)
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
+            .unwrap();
+        assert_eq!(features, "xboard,book,nnue,simd,obsidian-nnue");
+        assert!(!features.contains("stockfish-nnue"));
+        assert!(!features.contains("reckless-nnue"));
+        assert!(!features.contains("akimbo-nnue"));
+    }
+
+    #[test]
+    fn plentychess_and_lc0_variants_do_not_share_a_foreign_net() {
+        let plenty = variant_args(&BuildVariant::PlentyChess)
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
+            .unwrap();
+        assert_eq!(plenty, "xboard,book,nnue,simd,plentychess-nnue");
+        assert!(!plenty.contains("reckless-nnue"));
+        assert!(!plenty.contains("obsidian-nnue"));
+
+        let lc0 = variant_args(&BuildVariant::Lc0)
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
+            .unwrap();
+        assert_eq!(lc0, "xboard,book,nnue,simd");
+        assert!(!lc0.contains("reckless-nnue"));
+        assert!(!lc0.contains("stockfish-nnue"));
+        assert!(!lc0.contains("obsidian-nnue"));
+        assert!(!lc0.contains("plentychess-nnue"));
     }
 
     #[test]

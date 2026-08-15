@@ -185,22 +185,24 @@ fn finish_move(state: AppState, handles: AppHandles, generation: u64, result: En
                     .is_some()
                     || mv.is_capture()
             });
-            let gives_check = {
+            let (gives_check, is_mate) = {
                 let mut predicted = state
                     .game
                     .with_untracked(|game| game.as_ref().map(|gs| gs.board.clone()));
                 if let Some(board) = predicted.as_mut() {
                     board.make_move(mv);
-                    board.is_in_check(board.side_to_move)
+                    (board.is_in_check(board.side_to_move), board.is_checkmate())
                 } else {
-                    false
+                    (false, false)
                 }
             };
             if let Some(sound) = handles.sound.borrow().as_ref() {
-                sound.play_sfx(
-                    state.settings.get_untracked().sfx_on,
-                    crate::app_core::audio::SfxKind::from_move(mv, captured, gives_check),
-                );
+                let kind = if is_mate {
+                    crate::app_core::audio::SfxKind::Checkmate
+                } else {
+                    crate::app_core::audio::SfxKind::from_move(mv, captured, gives_check)
+                };
+                sound.play_sfx(state.settings.get_untracked().sfx_on, kind);
             }
             actions::apply_engine_move(state, mv, ponder, captured);
             if match_controller::should_cancel_ponder(state.engine_cfg.get_untracked().ponder, hit)

@@ -9,7 +9,6 @@ use floem::taffy::style::{Display, Overflow};
 use crate::app_core::layout::{self, DockTab};
 use crate::app_core::logic;
 
-use super::actions;
 use super::eval_graph;
 use super::state::{AppHandles, AppState};
 use super::theme;
@@ -39,17 +38,22 @@ pub fn bottom_dock(state: AppState, handles: AppHandles) -> impl IntoView {
             state.dock_open.get(),
             layout::clamp_dock_height(state.settings.get().dock_height_px, pane_height.get()),
         );
-        s.width_full()
+        let s = s
+            .width_full()
             .height(height)
             .overflow_x(Overflow::Clip)
             .overflow_y(Overflow::Clip)
             .background(theme::rgba(pal.sidebar))
             .border_top(1.0)
-            .border_color(theme::rgba(pal.border))
-            .transition(
+            .border_color(theme::rgba(pal.border));
+        if dragging.get() {
+            s
+        } else {
+            s.transition(
                 floem::style::Height,
                 Transition::ease_in_out(Duration::from_millis(220)),
             )
+        }
     })
 }
 
@@ -84,11 +88,10 @@ fn dock_split_handle(
                 if let Some(pointer_id) = event.pointer.pointer_id {
                     cx.request_pointer_capture(pointer_id);
                 }
-                if let Some(size) = cx.target.owning_id().parent_size()
-                    && size.height > 1.0
-                {
-                    pane_height.set(size.height);
-                }
+                pane_height.set(dock_window_height(
+                    cx,
+                    state.settings.get_untracked().dock_height_px,
+                ));
                 dragging.set(true);
                 drag_origin_y.set(event.state.logical_point().y);
                 drag_origin_height.set(state.settings.get_untracked().dock_height_px);
@@ -96,25 +99,54 @@ fn dock_split_handle(
         )
         .on_event_cont(
             el::PointerMove,
-            move |_, event: &floem::ui_events::pointer::PointerUpdate| {
+            move |cx, event: &floem::ui_events::pointer::PointerUpdate| {
                 if !dragging.get_untracked() {
                     return;
                 }
+                let window = dock_window_height(cx, drag_origin_height.get_untracked())
+                    .max(pane_height.get_untracked());
+                pane_height.set(window);
                 let dy = event.current.logical_point().y - drag_origin_y.get_untracked();
-                let next = layout::apply_dock_drag(
-                    drag_origin_height.get_untracked(),
-                    dy,
-                    pane_height.get_untracked(),
-                );
-                actions::update_settings(state, |settings| settings.dock_height_px = next);
+                let next = layout::apply_dock_drag(drag_origin_height.get_untracked(), dy, window);
+                state
+                    .settings
+                    .update(|settings| settings.dock_height_px = next);
             },
         )
         .on_event_stop(
             el::PointerUp,
             move |_, _: &floem::ui_events::pointer::PointerButtonEvent| {
-                dragging.set(false);
+                finish_dock_drag(state, dragging);
             },
         )
+        .on_event_stop(el::LostPointerCapture, move |_, _| {
+            finish_dock_drag(state, dragging);
+        })
+}
+
+fn dock_window_height(cx: &floem::event::EventCx, current_dock: f64) -> f64 {
+    let mut id = cx.target.owning_id();
+    let mut observed = 0.0;
+    for _ in 0..12 {
+        if let Some(size) = id.parent_size()
+            && size.height > observed
+        {
+            observed = size.height;
+        }
+        match id.parent() {
+            Some(parent) => id = parent,
+            None => break,
+        }
+    }
+    layout::dock_resize_window_height(observed, current_dock)
+}
+
+fn finish_dock_drag(state: AppState, dragging: RwSignal<bool>) {
+    if !dragging.get_untracked() {
+        return;
+    }
+    dragging.set(false);
+    state.persist_settings();
 }
 
 fn tab_bar(state: AppState) -> impl IntoView {
@@ -370,6 +402,8 @@ mod tests {
         assert!(production.contains("RowResize"));
         assert!(production.contains("apply_dock_drag"));
         assert!(production.contains("dock_height_px"));
+        assert!(production.contains("dock_resize_window_height"));
+        assert!(production.contains("LostPointerCapture"));
         assert!(production.contains("#{}"));
     }
 }

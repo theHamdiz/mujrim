@@ -13,8 +13,8 @@
 //!
 //! Modules:
 //! - `network`: Network struct, forward pass, feature indexing
-//! - `accumulator`: Incremental accumulator state with cache table
-//! - `simd`: AVX2/scalar SIMD operations for SCReLU
+//! - `accumulator`: Incremental accumulator state with ply stack + Finny cache
+//! - `simd`: AVX2/AVX-512/scalar SIMD operations for SCReLU
 //! - `feature`: Utility functions for feature manipulation
 //! - `adapter`: Trait-based multi-format network abstraction
 //! - `akimbo_format`: Akimbo-family network loader
@@ -22,6 +22,7 @@
 
 pub mod accumulator;
 pub mod adapter;
+mod akimbo_state;
 pub mod feature;
 pub mod network;
 pub mod simd;
@@ -35,7 +36,7 @@ pub mod akimbo_format;
 #[cfg(feature = "stockfish-nnue")]
 pub mod stockfish_format;
 
-#[cfg(feature = "stockfish-nnue")]
+#[cfg(any(feature = "stockfish-nnue", feature = "obsidian-nnue"))]
 mod stockfish_simd;
 
 #[cfg(feature = "reckless-nnue")]

@@ -16,7 +16,11 @@ pub(crate) struct ForwardWeights<'a> {
 }
 
 type ApplyI16Kernel = fn(&mut [i16; HIDDEN_SIZE], &[i16], &[usize], &[usize]);
+type ApplyI16FromKernel =
+    fn(&mut [i16; HIDDEN_SIZE], &[i16; HIDDEN_SIZE], &[i16], &[usize], &[usize]);
 type ApplyI8Kernel = fn(&mut [i16; HIDDEN_SIZE], &[u8], &[usize], &[usize]);
+type ApplyI8FromKernel =
+    fn(&mut [i16; HIDDEN_SIZE], &[i16; HIDDEN_SIZE], &[u8], &[usize], &[usize]);
 type ForwardKernel = for<'a> fn(
     [&'a [i16; HIDDEN_SIZE]; 2],
     [&'a [i16; HIDDEN_SIZE]; 2],
@@ -29,6 +33,10 @@ pub(crate) enum RecklessSimdBackend {
     Scalar,
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     X86Avx2Fma,
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    X86Avx512,
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    X86Avx512Vnni,
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     ArmNeon,
     #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -41,6 +49,10 @@ impl RecklessSimdBackend {
             Self::Scalar => "scalar",
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             Self::X86Avx2Fma => "AVX2+FMA",
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            Self::X86Avx512 => "AVX-512",
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            Self::X86Avx512Vnni => "AVX-512+VNNI",
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             Self::ArmNeon => "NEON",
             #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -51,7 +63,9 @@ impl RecklessSimdBackend {
 
 struct KernelDispatch {
     apply_i16: ApplyI16Kernel,
+    apply_i16_from: ApplyI16FromKernel,
     apply_i8: ApplyI8Kernel,
+    apply_i8_from: ApplyI8FromKernel,
     forward: ForwardKernel,
     backend: RecklessSimdBackend,
 }
@@ -70,11 +84,35 @@ pub(crate) fn selected_backend() -> RecklessSimdBackend {
 fn detect_kernels() -> KernelDispatch {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            let vnni = std::arch::is_x86_feature_detected!("avx512vnni");
+            return KernelDispatch {
+                apply_i16: apply_i16_avx512,
+                apply_i16_from: apply_i16_from_avx512,
+                apply_i8: apply_i8_avx512,
+                apply_i8_from: apply_i8_from_avx512,
+                forward: if vnni {
+                    forward_avx512_vnni
+                } else {
+                    forward_avx512
+                },
+                backend: if vnni {
+                    RecklessSimdBackend::X86Avx512Vnni
+                } else {
+                    RecklessSimdBackend::X86Avx512
+                },
+            };
+        }
         if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
         {
             return KernelDispatch {
                 apply_i16: apply_i16_avx2,
+                apply_i16_from: apply_i16_from_avx2,
                 apply_i8: apply_i8_avx2,
+                apply_i8_from: apply_i8_from_avx2,
                 forward: forward_avx2,
                 backend: RecklessSimdBackend::X86Avx2Fma,
             };
@@ -86,14 +124,18 @@ fn detect_kernels() -> KernelDispatch {
         if std::arch::is_aarch64_feature_detected!("dotprod") {
             return KernelDispatch {
                 apply_i16: apply_i16_neon,
+                apply_i16_from: apply_i16_from_neon,
                 apply_i8: apply_i8_neon,
+                apply_i8_from: apply_i8_from_neon,
                 forward: forward_neon_dotprod,
                 backend: RecklessSimdBackend::ArmNeonDotprod,
             };
         }
         return KernelDispatch {
             apply_i16: apply_i16_neon,
+            apply_i16_from: apply_i16_from_neon,
             apply_i8: apply_i8_neon,
+            apply_i8_from: apply_i8_from_neon,
             forward: forward_neon,
             backend: RecklessSimdBackend::ArmNeon,
         };
@@ -102,7 +144,9 @@ fn detect_kernels() -> KernelDispatch {
     #[allow(unreachable_code)]
     KernelDispatch {
         apply_i16: scalar::apply_i16_rows,
+        apply_i16_from: scalar::apply_i16_rows_from,
         apply_i8: scalar::apply_i8_rows,
+        apply_i8_from: scalar::apply_i8_rows_from,
         forward: scalar::forward,
         backend: RecklessSimdBackend::Scalar,
     }
@@ -115,19 +159,6 @@ pub(crate) fn apply_i16_rows(
     adds: &[usize],
     subs: &[usize],
 ) {
-    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
-    {
-        // SAFETY: NEON is enabled for this compilation target.
-        unsafe { neon::apply_i16_rows(accumulator, weights, adds, subs) }
-        return;
-    }
-    #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        // SAFETY: AVX2 is enabled for this compilation target.
-        unsafe { avx2::apply_i16_rows(accumulator, weights, adds, subs) }
-        return;
-    }
-    #[allow(unreachable_code)]
     (kernels().apply_i16)(accumulator, weights, adds, subs);
 }
 
@@ -140,20 +171,7 @@ pub(crate) fn apply_i16_rows_from(
     adds: &[usize],
     subs: &[usize],
 ) {
-    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
-    {
-        // SAFETY: NEON is enabled for this compilation target.
-        unsafe { neon::apply_i16_rows_from(dst, src, weights, adds, subs) }
-        return;
-    }
-    #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        // SAFETY: AVX2 is enabled for this compilation target.
-        unsafe { avx2::apply_i16_rows_from(dst, src, weights, adds, subs) }
-        return;
-    }
-    #[allow(unreachable_code)]
-    scalar::apply_i16_rows_from(dst, src, weights, adds, subs);
+    (kernels().apply_i16_from)(dst, src, weights, adds, subs);
 }
 
 #[inline]
@@ -163,19 +181,6 @@ pub(crate) fn apply_i8_rows(
     adds: &[usize],
     subs: &[usize],
 ) {
-    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
-    {
-        // SAFETY: NEON is enabled for this compilation target.
-        unsafe { neon::apply_i8_rows(accumulator, weights, adds, subs) }
-        return;
-    }
-    #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        // SAFETY: AVX2 is enabled for this compilation target.
-        unsafe { avx2::apply_i8_rows(accumulator, weights, adds, subs) }
-        return;
-    }
-    #[allow(unreachable_code)]
     (kernels().apply_i8)(accumulator, weights, adds, subs);
 }
 
@@ -188,20 +193,7 @@ pub(crate) fn apply_i8_rows_from(
     adds: &[usize],
     subs: &[usize],
 ) {
-    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
-    {
-        // SAFETY: NEON is enabled for this compilation target.
-        unsafe { neon::apply_i8_rows_from(dst, src, weights, adds, subs) }
-        return;
-    }
-    #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        // SAFETY: AVX2 is enabled for this compilation target.
-        unsafe { avx2::apply_i8_rows_from(dst, src, weights, adds, subs) }
-        return;
-    }
-    #[allow(unreachable_code)]
-    scalar::apply_i8_rows_from(dst, src, weights, adds, subs);
+    (kernels().apply_i8_from)(dst, src, weights, adds, subs);
 }
 
 #[inline]
@@ -211,22 +203,6 @@ pub(crate) fn forward(
     stm: usize,
     weights: ForwardWeights<'_>,
 ) -> f32 {
-    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "dotprod"))]
-    {
-        // SAFETY: DotProd is enabled for this compilation target.
-        return unsafe { neon::forward_dotprod(piece, threat, stm, weights) };
-    }
-    #[cfg(all(
-        feature = "simd",
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
-    {
-        // SAFETY: AVX2 and FMA are enabled for this compilation target.
-        return unsafe { avx2::forward(piece, threat, stm, weights) };
-    }
-    #[allow(unreachable_code)]
     (kernels().forward)(piece, threat, stm, weights)
 }
 
@@ -242,6 +218,18 @@ fn apply_i16_avx2(
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_i16_from_avx2(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: this wrapper is installed only after AVX2 runtime detection.
+    unsafe { avx2::apply_i16_rows_from(dst, src, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn apply_i8_avx2(
     accumulator: &mut [i16; HIDDEN_SIZE],
     weights: &[u8],
@@ -253,6 +241,18 @@ fn apply_i8_avx2(
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_i8_from_avx2(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[u8],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: this wrapper is installed only after AVX2 runtime detection.
+    unsafe { avx2::apply_i8_rows_from(dst, src, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn forward_avx2(
     piece: [&[i16; HIDDEN_SIZE]; 2],
     threat: [&[i16; HIDDEN_SIZE]; 2],
@@ -261,6 +261,74 @@ fn forward_avx2(
 ) -> f32 {
     // SAFETY: this wrapper is installed only after AVX2 and FMA detection.
     unsafe { avx2::forward(piece, threat, stm, weights) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_i16_avx512(
+    accumulator: &mut [i16; HIDDEN_SIZE],
+    weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::apply_i16_rows(accumulator, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_i16_from_avx512(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::apply_i16_rows_from(dst, src, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_i8_avx512(
+    accumulator: &mut [i16; HIDDEN_SIZE],
+    weights: &[u8],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::apply_i8_rows(accumulator, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_i8_from_avx512(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[u8],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::apply_i8_rows_from(dst, src, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn forward_avx512(
+    piece: [&[i16; HIDDEN_SIZE]; 2],
+    threat: [&[i16; HIDDEN_SIZE]; 2],
+    stm: usize,
+    weights: ForwardWeights<'_>,
+) -> f32 {
+    // SAFETY: installed only after AVX-512F+BW runtime detection.
+    unsafe { avx512::forward(piece, threat, stm, weights) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn forward_avx512_vnni(
+    piece: [&[i16; HIDDEN_SIZE]; 2],
+    threat: [&[i16; HIDDEN_SIZE]; 2],
+    stm: usize,
+    weights: ForwardWeights<'_>,
+) -> f32 {
+    // SAFETY: installed only after AVX-512F+BW+VNNI runtime detection.
+    unsafe { avx512::forward_vnni(piece, threat, stm, weights) }
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -275,6 +343,18 @@ fn apply_i16_neon(
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+fn apply_i16_from_neon(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: NEON is part of the AArch64 baseline ISA.
+    unsafe { neon::apply_i16_rows_from(dst, src, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
 fn apply_i8_neon(
     accumulator: &mut [i16; HIDDEN_SIZE],
     weights: &[u8],
@@ -283,6 +363,18 @@ fn apply_i8_neon(
 ) {
     // SAFETY: NEON is part of the AArch64 baseline ISA.
     unsafe { neon::apply_i8_rows(accumulator, weights, adds, subs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+fn apply_i8_from_neon(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    weights: &[u8],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    // SAFETY: NEON is part of the AArch64 baseline ISA.
+    unsafe { neon::apply_i8_rows_from(dst, src, weights, adds, subs) }
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -702,7 +794,7 @@ mod avx2 {
 
     #[inline]
     #[target_feature(enable = "avx2")]
-    unsafe fn activate(
+    pub(super) unsafe fn activate(
         piece: [&[i16; HIDDEN_SIZE]; 2],
         threat: [&[i16; HIDDEN_SIZE]; 2],
         stm: usize,
@@ -808,7 +900,7 @@ mod avx2 {
     static SPARSE_TABLE: [SparseEntry; 256] = build_sparse_table();
 
     #[inline(always)]
-    unsafe fn nonzero_mask(values: __m256i) -> usize {
+    pub(super) unsafe fn nonzero_mask(values: __m256i) -> usize {
         unsafe {
             let zero = _mm256_setzero_si256();
             let eq = _mm256_cmpeq_epi32(values, zero);
@@ -819,7 +911,7 @@ mod avx2 {
     }
 
     #[inline(always)]
-    unsafe fn collect_nonzero_groups(
+    pub(super) unsafe fn collect_nonzero_groups(
         transformed: &[u8; HIDDEN_SIZE],
         indexes: &mut [u16; HIDDEN_SIZE / 4],
     ) -> usize {
@@ -842,7 +934,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    unsafe fn horizontal_sum(value: __m256) -> f32 {
+    pub(super) unsafe fn horizontal_sum(value: __m256) -> f32 {
         let high = _mm256_extractf128_ps::<1>(value);
         let low = _mm256_castps256_ps128(value);
         let sum = _mm_add_ps(low, high);
@@ -932,6 +1024,333 @@ mod avx2 {
                 );
             }
             horizontal_sum(total) + weights.l3_bias
+        }
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+mod avx512 {
+    #![allow(clippy::undocumented_unsafe_blocks)]
+
+    use std::arch::x86_64::*;
+
+    use super::*;
+
+    #[inline(always)]
+    unsafe fn load_i16(ptr: *const i16) -> __m512i {
+        unsafe { _mm512_loadu_si512(ptr.cast()) }
+    }
+
+    #[inline(always)]
+    unsafe fn store_i16(ptr: *mut i16, value: __m512i) {
+        unsafe { _mm512_storeu_si512(ptr.cast(), value) }
+    }
+
+    #[inline(always)]
+    unsafe fn load_i8_row(ptr: *const u8) -> __m512i {
+        unsafe { _mm512_cvtepi8_epi16(_mm256_loadu_si256(ptr.cast())) }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i16_rows(
+        accumulator: &mut [i16; HIDDEN_SIZE],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 6;
+            const BLOCK: usize = REGISTERS * 32;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [_mm512_setzero_si512(); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = load_i16(accumulator.as_ptr().add(index + register * 32));
+                }
+                apply_i16_deltas(&mut values, weights, adds, subs, index);
+                for (register, value) in values.iter().enumerate() {
+                    store_i16(accumulator.as_mut_ptr().add(index + register * 32), *value);
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i16_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 6;
+            const BLOCK: usize = REGISTERS * 32;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [_mm512_setzero_si512(); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = load_i16(src.as_ptr().add(index + register * 32));
+                }
+                apply_i16_deltas(&mut values, weights, adds, subs, index);
+                for (register, value) in values.iter().enumerate() {
+                    store_i16(dst.as_mut_ptr().add(index + register * 32), *value);
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn apply_i16_deltas(
+        values: &mut [__m512i],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+        index: usize,
+    ) {
+        unsafe {
+            let paired = adds.len().min(subs.len());
+            for pair in 0..paired {
+                let add = weights.as_ptr().add(adds[pair] * HIDDEN_SIZE + index);
+                let sub = weights.as_ptr().add(subs[pair] * HIDDEN_SIZE + index);
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm512_add_epi16(
+                        *value,
+                        _mm512_sub_epi16(
+                            load_i16(add.add(register * 32)),
+                            load_i16(sub.add(register * 32)),
+                        ),
+                    );
+                }
+            }
+            for &row in &adds[paired..] {
+                let add = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm512_add_epi16(*value, load_i16(add.add(register * 32)));
+                }
+            }
+            for &row in &subs[paired..] {
+                let sub = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm512_sub_epi16(*value, load_i16(sub.add(register * 32)));
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i8_rows(
+        accumulator: &mut [i16; HIDDEN_SIZE],
+        weights: &[u8],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 6;
+            const BLOCK: usize = REGISTERS * 32;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [_mm512_setzero_si512(); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = load_i16(accumulator.as_ptr().add(index + register * 32));
+                }
+                apply_i8_deltas(&mut values, weights, adds, subs, index);
+                for (register, value) in values.iter().enumerate() {
+                    store_i16(accumulator.as_mut_ptr().add(index + register * 32), *value);
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i8_rows_from(
+        dst: &mut [i16; HIDDEN_SIZE],
+        src: &[i16; HIDDEN_SIZE],
+        weights: &[u8],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            const REGISTERS: usize = 6;
+            const BLOCK: usize = REGISTERS * 32;
+            for index in (0..HIDDEN_SIZE).step_by(BLOCK) {
+                let mut values = [_mm512_setzero_si512(); REGISTERS];
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = load_i16(src.as_ptr().add(index + register * 32));
+                }
+                apply_i8_deltas(&mut values, weights, adds, subs, index);
+                for (register, value) in values.iter().enumerate() {
+                    store_i16(dst.as_mut_ptr().add(index + register * 32), *value);
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn apply_i8_deltas(
+        values: &mut [__m512i],
+        weights: &[u8],
+        adds: &[usize],
+        subs: &[usize],
+        index: usize,
+    ) {
+        unsafe {
+            let paired = adds.len().min(subs.len());
+            for pair in 0..paired {
+                let add = weights.as_ptr().add(adds[pair] * HIDDEN_SIZE + index);
+                let sub = weights.as_ptr().add(subs[pair] * HIDDEN_SIZE + index);
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm512_add_epi16(
+                        *value,
+                        _mm512_sub_epi16(
+                            load_i8_row(add.add(register * 32)),
+                            load_i8_row(sub.add(register * 32)),
+                        ),
+                    );
+                }
+            }
+            for &row in &adds[paired..] {
+                let add = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm512_add_epi16(*value, load_i8_row(add.add(register * 32)));
+                }
+            }
+            for &row in &subs[paired..] {
+                let sub = weights.as_ptr().add(row * HIDDEN_SIZE + index);
+                for (register, value) in values.iter_mut().enumerate() {
+                    *value = _mm512_sub_epi16(*value, load_i8_row(sub.add(register * 32)));
+                }
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn activate(
+        piece: [&[i16; HIDDEN_SIZE]; 2],
+        threat: [&[i16; HIDDEN_SIZE]; 2],
+        stm: usize,
+    ) -> [u8; HIDDEN_SIZE] {
+        // Same 16-lane packus+permute as AVX2 so the sparse L1 groups stay bit-exact.
+        unsafe { avx2::activate(piece, threat, stm) }
+    }
+
+    #[inline(always)]
+    unsafe fn dpbusd_maddubs(sum: __m512i, input: __m512i, weights: __m512i) -> __m512i {
+        unsafe {
+            let pairwise = _mm512_maddubs_epi16(input, weights);
+            _mm512_add_epi32(sum, _mm512_madd_epi16(pairwise, _mm512_set1_epi16(1)))
+        }
+    }
+
+    #[target_feature(enable = "avx512vnni")]
+    unsafe fn dpbusd_vnni(sum: __m512i, input: __m512i, weights: __m512i) -> __m512i {
+        _mm512_dpbusd_epi32(sum, input, weights)
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,fma")]
+    pub(super) unsafe fn forward(
+        piece: [&[i16; HIDDEN_SIZE]; 2],
+        threat: [&[i16; HIDDEN_SIZE]; 2],
+        stm: usize,
+        weights: ForwardWeights<'_>,
+    ) -> f32 {
+        unsafe {
+            let (packed, indexes, count) = prepare_l1(piece, threat, stm);
+            let mut sums = _mm512_setzero_si512();
+            for &group in &indexes[..count] {
+                let group = group as usize;
+                let input = _mm512_set1_epi32(packed[group]);
+                let row = _mm512_loadu_si512(weights.l1.as_ptr().add(group * L2_SIZE * 4).cast());
+                sums = dpbusd_maddubs(sums, input, row);
+            }
+            finish_forward(sums, weights)
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,fma,avx512vnni")]
+    pub(super) unsafe fn forward_vnni(
+        piece: [&[i16; HIDDEN_SIZE]; 2],
+        threat: [&[i16; HIDDEN_SIZE]; 2],
+        stm: usize,
+        weights: ForwardWeights<'_>,
+    ) -> f32 {
+        unsafe {
+            let (packed, indexes, count) = prepare_l1(piece, threat, stm);
+            let mut sums = _mm512_setzero_si512();
+            for &group in &indexes[..count] {
+                let group = group as usize;
+                let input = _mm512_set1_epi32(packed[group]);
+                let row = _mm512_loadu_si512(weights.l1.as_ptr().add(group * L2_SIZE * 4).cast());
+                sums = dpbusd_vnni(sums, input, row);
+            }
+            finish_forward(sums, weights)
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn prepare_l1(
+        piece: [&[i16; HIDDEN_SIZE]; 2],
+        threat: [&[i16; HIDDEN_SIZE]; 2],
+        stm: usize,
+    ) -> ([i32; HIDDEN_SIZE / 4], [u16; HIDDEN_SIZE / 4], usize) {
+        unsafe {
+            let transformed = activate(piece, threat, stm);
+            let packed =
+                std::slice::from_raw_parts(transformed.as_ptr().cast::<i32>(), HIDDEN_SIZE / 4);
+            let mut indexes = [0u16; HIDDEN_SIZE / 4];
+            let count = avx2::collect_nonzero_groups(&transformed, &mut indexes);
+            let mut packed_arr = [0i32; HIDDEN_SIZE / 4];
+            packed_arr.copy_from_slice(packed);
+            (packed_arr, indexes, count)
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx512f,avx512bw,fma")]
+    unsafe fn finish_forward(sums: __m512i, weights: ForwardWeights<'_>) -> f32 {
+        unsafe {
+            const DEQUANT: f32 = (1u32 << FT_SHIFT) as f32 / (255 * 255 * 64) as f32;
+            let zero = _mm512_setzero_ps();
+            let one = _mm512_set1_ps(1.0);
+            let dequant = _mm512_set1_ps(DEQUANT);
+            let bias = _mm512_loadu_ps(weights.l1_biases.as_ptr());
+            let l1 = _mm512_max_ps(
+                _mm512_min_ps(
+                    _mm512_fmadd_ps(_mm512_cvtepi32_ps(sums), dequant, bias),
+                    one,
+                ),
+                zero,
+            );
+            let mut l1_arr = [0.0f32; L2_SIZE];
+            _mm512_storeu_ps(l1_arr.as_mut_ptr(), l1);
+
+            let one256 = _mm256_set1_ps(1.0);
+            let zero256 = _mm256_setzero_ps();
+            let mut l2 = [_mm256_setzero_ps(); L3_SIZE / 8];
+            for (input, &activation) in l1_arr.iter().enumerate() {
+                let value = _mm256_set1_ps(activation);
+                let row = weights.l2.as_ptr().add(input * L3_SIZE);
+                for output in (0..L3_SIZE).step_by(8) {
+                    let weight = _mm256_loadu_ps(row.add(output));
+                    l2[output / 8] = _mm256_fmadd_ps(weight, value, l2[output / 8]);
+                }
+            }
+            for index in (0..L3_SIZE).step_by(8) {
+                let value = _mm256_add_ps(
+                    l2[index / 8],
+                    _mm256_loadu_ps(weights.l2_biases.as_ptr().add(index)),
+                );
+                l2[index / 8] = _mm256_max_ps(_mm256_min_ps(value, one256), zero256);
+            }
+
+            let mut total = _mm256_setzero_ps();
+            for index in (0..L3_SIZE).step_by(8) {
+                total = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(weights.l3.as_ptr().add(index)),
+                    l2[index / 8],
+                    total,
+                );
+            }
+            avx2::horizontal_sum(total) + weights.l3_bias
         }
     }
 }
@@ -1410,7 +1829,17 @@ mod tests {
         }
 
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            if std::arch::is_x86_feature_detected!("avx512vnni") {
+                assert_eq!(selected_backend(), RecklessSimdBackend::X86Avx512Vnni);
+            } else {
+                assert_eq!(selected_backend(), RecklessSimdBackend::X86Avx512);
+            }
+        } else if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
         {
             assert_eq!(selected_backend(), RecklessSimdBackend::X86Avx2Fma);
         } else {

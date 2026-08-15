@@ -1087,48 +1087,86 @@ fn tournament_history(state: AppState, handles: AppHandles) -> impl IntoView {
     const HISTORY_SLOTS: usize = 16;
     let rows = (0..HISTORY_SLOTS)
         .map(|idx| {
-            Button::new(Label::derived(move || {
-                state
-                    .tournament_history
-                    .get()
-                    .get(idx)
-                    .map(|tournament| {
-                        if tournament.games.is_empty() {
-                            tournament.name.clone()
-                        } else {
-                            format!("{} · {} games", tournament.name, tournament.games.len())
-                        }
-                    })
-                    .unwrap_or_default()
-            }))
-            .action({
-                let handles = handles.clone();
-                move || {
-                    let Some(id) = state
+            let pal = move || theme::palette(state.settings.get().board_theme);
+            Stack::horizontal((
+                Button::new(Label::derived(move || {
+                    state
                         .tournament_history
-                        .get_untracked()
+                        .get()
                         .get(idx)
-                        .map(|tournament| tournament.id.clone())
-                    else {
-                        return;
-                    };
-                    actions::load_historical_tournament(state, &handles, id);
-                }
-            })
+                        .map(|tournament| {
+                            if tournament.games.is_empty() {
+                                tournament.name.clone()
+                            } else {
+                                format!("{} · {} games", tournament.name, tournament.games.len())
+                            }
+                        })
+                        .unwrap_or_default()
+                }))
+                .action({
+                    let handles = handles.clone();
+                    move || {
+                        let Some(id) = state
+                            .tournament_history
+                            .get_untracked()
+                            .get(idx)
+                            .map(|tournament| tournament.id.clone())
+                        else {
+                            return;
+                        };
+                        actions::load_historical_tournament(state, &handles, id);
+                    }
+                })
+                .style(move |s| {
+                    let pal = pal();
+                    s.min_width(0.0)
+                        .flex_grow(1.0f32)
+                        .padding_horiz(10.0)
+                        .padding_vert(5.0)
+                        .border_radius(999.0)
+                        .border(1.0)
+                        .border_color(theme::rgba(pal.border))
+                        .font_size(12.0)
+                        .text_ellipsis()
+                        .background(theme::rgba(pal.panel))
+                        .color(theme::rgba(pal.text_primary))
+                        .hover(|s| s.background(theme::rgba(pal.accent)))
+                }),
+                Button::new(
+                    svg(icons::TRASH)
+                        .style(move |s| s.size(13, 13).color(theme::rgba(pal().text_secondary))),
+                )
+                .action({
+                    let handles = handles.clone();
+                    move || {
+                        let Some(id) = state
+                            .tournament_history
+                            .get_untracked()
+                            .get(idx)
+                            .map(|tournament| tournament.id.clone())
+                        else {
+                            return;
+                        };
+                        actions::delete_historical_tournament(state, &handles, id);
+                    }
+                })
+                .style(move |s| {
+                    let pal = pal();
+                    s.size(28, 28)
+                        .items_center()
+                        .justify_center()
+                        .border_radius(999.0)
+                        .border(0.0)
+                        .background(Color::TRANSPARENT)
+                        .color(theme::rgba(pal.text_secondary))
+                        .hover(|s| {
+                            s.background(theme::rgba(pal.panel))
+                                .color(Color::from_rgb8(220, 72, 72))
+                        })
+                }),
+            ))
             .style(move |s| {
-                let pal = theme::palette(state.settings.get().board_theme);
-                let s = s
-                    .width_full()
-                    .min_width(0.0)
-                    .padding_horiz(8.0)
-                    .padding_vert(4.0)
-                    .border_radius(6.0)
-                    .border(0.0)
-                    .font_size(12.0)
-                    .text_ellipsis()
-                    .background(Color::TRANSPARENT)
-                    .color(theme::rgba(pal.text_primary))
-                    .hover(|s| s.background(theme::rgba(pal.panel)));
+                let s = s.width_full().col_gap(6.0).items_center().min_width(0.0);
                 if state.tournament_history.get().get(idx).is_some() {
                     s
                 } else {
@@ -1204,7 +1242,7 @@ pub(super) fn ply_nav(state: AppState, handles: AppHandles) -> impl IntoView {
             move || actions::view_ply(state, &handles, state.move_log.get_untracked().len())
         }),
     ))
-    .style(|s| s.col_gap(4.0).flex_wrap(FlexWrap::Wrap))
+    .style(|s| s.width_full().col_gap(4.0).items_center().justify_center())
 }
 
 pub(super) fn move_list(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -1436,6 +1474,10 @@ mod tests {
             "Stop game",
             "Stop tournament",
             "tournament_history",
+            "delete_historical_tournament",
+            "icons::TRASH",
+            "border_radius(999.0)",
+            "justify_center()",
             "results_export_bar",
             "stop_engine_search",
             "Resume search",

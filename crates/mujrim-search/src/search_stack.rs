@@ -31,8 +31,8 @@ impl EvalMode {
         matches!(self, Self::Nnue(NnueSearchProfile::Reckless))
     }
 
-    /// In-process Lc0 uses the embedded Reckless net; keep the same
-    /// check-extension / root-quiet gates as Reckless.
+    /// In-process Lc0 has no transformer net; search still uses Reckless
+    /// check-extension / root-quiet gates.
     pub const fn is_lc0_nnue(self) -> bool {
         matches!(self, Self::Nnue(NnueSearchProfile::Lc0))
     }
@@ -391,9 +391,8 @@ impl SearchStackProfile for Lc0SearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        // Official Lc0 is passthrough. The in-process adapter evaluates the
-        // embedded Reckless net, so Reckless reductions/ordering are the
-        // matching search half.
+        // Official Lc0 is passthrough. The in-process fallback has no Lc0
+        // net, so Reckless reductions/ordering stay as the search half.
         SearchPolicies::reckless()
     }
 }

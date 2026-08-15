@@ -96,6 +96,8 @@ pub struct AppState {
     pub eval_bar_fen: RwSignal<String>,
     pub eval_bar_gen: RwSignal<u64>,
     pub focused_live_key: RwSignal<Option<String>>,
+    pub announced_played_games: RwSignal<usize>,
+    pub announced_tournament_over: RwSignal<bool>,
 }
 
 #[derive(Clone)]
@@ -202,6 +204,8 @@ impl AppState {
             eval_bar_fen: RwSignal::new(String::new()),
             eval_bar_gen: RwSignal::new(0),
             focused_live_key: RwSignal::new(None),
+            announced_played_games: RwSignal::new(0),
+            announced_tournament_over: RwSignal::new(false),
         };
         let study_path = crate::app_core::logic::study_database_path();
         let study = StudyDatabase::open(&study_path).ok();

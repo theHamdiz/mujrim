@@ -103,6 +103,10 @@ pub enum SfxKind {
     Check,
     Castle,
     Promote,
+    Checkmate,
+    Resign,
+    Forfeit,
+    TournamentOver,
 }
 
 impl SfxKind {
@@ -137,6 +141,10 @@ pub struct SoundEngine {
     check_sound: Arc<[u8]>,
     castle_sound: Arc<[u8]>,
     promote_sound: Arc<[u8]>,
+    checkmate_sound: Arc<[u8]>,
+    resign_sound: Arc<[u8]>,
+    forfeit_sound: Arc<[u8]>,
+    tournament_over_sound: Arc<[u8]>,
     bgm_sink: Option<rodio::Sink>,
     current_track: Option<BgmTrack>,
     current_mood: GameMood,
@@ -159,9 +167,19 @@ impl SoundEngine {
             game_bgm_focus: generate_game_focus().into(),
             game_bgm_march: generate_game_march().into(),
             game_bgm_nocturne: generate_game_nocturne().into(),
-            check_sound: generate_tone_wav(880.0, 1_320.0, 140, 0.42).into(),
+            check_sound: generate_check_wav().into(),
             castle_sound: generate_tone_wav(330.0, 495.0, 160, 0.38).into(),
             promote_sound: generate_tone_wav(523.0, 784.0, 180, 0.48).into(),
+            checkmate_sound: generate_motif_wav(&[(392.0, 140), (311.1, 160), (246.9, 280)], 0.48)
+                .into(),
+            resign_sound: generate_motif_wav(&[(196.0, 180), (146.8, 320)], 0.42).into(),
+            forfeit_sound: generate_motif_wav(&[(164.8, 160), (130.8, 140), (98.0, 340)], 0.46)
+                .into(),
+            tournament_over_sound: generate_motif_wav(
+                &[(523.3, 90), (659.3, 90), (783.9, 110), (1046.5, 280)],
+                0.44,
+            )
+            .into(),
             bgm_sink: None,
             current_track: None,
             current_mood: GameMood::Mystique,
@@ -187,6 +205,10 @@ impl SoundEngine {
             SfxKind::Check => self.play_buffer(&self.check_sound),
             SfxKind::Castle => self.play_buffer(&self.castle_sound),
             SfxKind::Promote => self.play_buffer(&self.promote_sound),
+            SfxKind::Checkmate => self.play_buffer(&self.checkmate_sound),
+            SfxKind::Resign => self.play_buffer(&self.resign_sound),
+            SfxKind::Forfeit => self.play_buffer(&self.forfeit_sound),
+            SfxKind::TournamentOver => self.play_buffer(&self.tournament_over_sound),
         }
     }
 
@@ -350,6 +372,44 @@ fn generate_sound_theme(theme: SoundTheme) -> (Arc<[u8]>, Arc<[u8]>) {
         ),
     };
     (move_sound.into(), capture_sound.into())
+}
+
+fn generate_check_wav() -> Vec<u8> {
+    generate_motif_wav(&[(880.0, 70), (1_174.7, 110)], 0.46)
+}
+
+fn generate_motif_wav(notes: &[(f64, usize)], gain: f64) -> Vec<u8> {
+    let sample_rate = 44_100u32;
+    let total_ms: usize = notes.iter().map(|(_, ms)| *ms).sum();
+    let sample_count = sample_rate as usize * total_ms.max(1) / 1_000;
+    let mut samples = vec![0i16; sample_count];
+    let mut cursor = 0usize;
+    for &(hz, duration_ms) in notes {
+        let count = sample_rate as usize * duration_ms / 1_000;
+        for index in 0..count {
+            let time = index as f64 / f64::from(sample_rate);
+            let envelope = (-time / (duration_ms as f64 / 3_200.0)).exp();
+            let sample = (std::f64::consts::TAU * hz * time).sin()
+                + 0.22 * (std::f64::consts::TAU * hz * 2.0 * time).sin();
+            if let Some(slot) = samples.get_mut(cursor + index) {
+                *slot = (sample * envelope * gain * 32_767.0) as i16;
+            }
+        }
+        cursor = cursor.saturating_add(count);
+    }
+    encode_wav(&samples, sample_rate)
+}
+
+pub fn game_end_sfx(board: &mut types::Board, white_score: f64) -> Option<SfxKind> {
+    if board.is_checkmate() {
+        Some(SfxKind::Checkmate)
+    } else if board.is_stalemate() || board.is_draw() {
+        None
+    } else if (white_score - 0.0).abs() < f64::EPSILON || (white_score - 1.0).abs() < f64::EPSILON {
+        Some(SfxKind::Forfeit)
+    } else {
+        None
+    }
 }
 
 fn generate_tone_wav(base_hz: f64, overtone_hz: f64, duration_ms: usize, gain: f64) -> Vec<u8> {
@@ -720,6 +780,40 @@ mod tests {
         assert_eq!(SfxKind::from_move(capture, true, false), SfxKind::Capture);
         let quiet = types::Move::quiet(types::Square::E2, types::Square::E4);
         assert_eq!(SfxKind::from_move(quiet, false, false), SfxKind::Move);
+    }
+
+    #[test]
+    fn outcome_motifs_are_distinct_wavs() {
+        let check = generate_check_wav();
+        let mate = generate_motif_wav(&[(392.0, 140), (311.1, 160), (246.9, 280)], 0.48);
+        let resign = generate_motif_wav(&[(196.0, 180), (146.8, 320)], 0.42);
+        let forfeit = generate_motif_wav(&[(164.8, 160), (130.8, 140), (98.0, 340)], 0.46);
+        let over = generate_motif_wav(
+            &[(523.3, 90), (659.3, 90), (783.9, 110), (1046.5, 280)],
+            0.44,
+        );
+        for wav in [&check, &mate, &resign, &forfeit, &over] {
+            assert!(wav.starts_with(b"RIFF"));
+            assert!(wav.len() > 44);
+        }
+        assert_ne!(check, mate);
+        assert_ne!(mate, resign);
+        assert_ne!(resign, forfeit);
+        assert_ne!(forfeit, over);
+    }
+
+    #[test]
+    fn game_end_sfx_classifies_mate_and_forfeit() {
+        types::init();
+        let mut mate = types::Board::from_fen(
+            "r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4",
+        )
+        .expect("fen");
+        assert!(mate.is_checkmate());
+        assert_eq!(game_end_sfx(&mut mate, 1.0), Some(SfxKind::Checkmate));
+        let mut start = types::Board::new();
+        assert_eq!(game_end_sfx(&mut start, 1.0), Some(SfxKind::Forfeit));
+        assert_eq!(game_end_sfx(&mut start, 0.5), None);
     }
 
     #[test]

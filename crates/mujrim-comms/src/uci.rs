@@ -9,8 +9,7 @@
 
 use crate::aesthetic::{AestheticConfig, MAX_AESTHETIC_DELTA_CP, RootCandidate, select_root_move};
 use eval::nnue::{
-    ActiveNetwork, NnueNetworkSource, enabled_network_formats, load_network,
-    load_network_for_preset,
+    ActiveNetwork, NnueNetworkSource, enabled_network_formats, load_network, load_network_for_preset,
 };
 #[cfg(feature = "book")]
 use search::book::OpeningBook;
@@ -342,8 +341,9 @@ impl UciHandler {
             | "lc0" => {
                 handler.eval_preset = adapter_id.to_string();
                 handler.use_nnue = true;
-                if matches!(adapter_id, "viridithas" | "obsidian")
+                if matches!(adapter_id, "viridithas" | "obsidian" | "plentychess")
                     && let Ok(network) = load_network_for_preset(adapter_id)
+                    && network.search_profile().as_str() == adapter_id
                 {
                     handler.eval_network = Arc::new(network);
                 }
@@ -994,11 +994,16 @@ impl UciHandler {
                         eprintln!("info string EvalPreset error: {error}");
                         return;
                     }
-                    if matches!(preset.as_str(), "viridithas" | "obsidian") {
+                    if matches!(preset.as_str(), "viridithas" | "obsidian" | "plentychess") {
                         match load_network_for_preset(&preset) {
-                            Ok(network) => {
+                            Ok(network) if network.search_profile().as_str() == preset => {
                                 self.eval_network = Arc::new(network);
                                 self.eval_file = Some(format!("disk:{preset}"));
+                            }
+                            Ok(_) => {
+                                eprintln!(
+                                    "info string EvalPreset {preset}: refused a foreign network"
+                                );
                             }
                             Err(error) => {
                                 eprintln!("info string EvalPreset {preset}: {error}");
@@ -1528,15 +1533,20 @@ impl UciHandler {
         let apply = |engine: &mut SearchEngine| {
             if use_hce {
                 let _ = install_adapter(engine, "mujrim-hce");
+            } else if matches!(preset, "viridithas" | "obsidian" | "plentychess") {
+                if network.search_profile().as_str() == preset {
+                    engine.set_nnue_network_source(network);
+                    engine.set_use_nnue(true);
+                } else {
+                    let _ = install_adapter(engine, preset);
+                    engine.set_use_nnue(engine.nnue_preset_hint() == preset);
+                }
+            } else if preset == "lc0" {
+                let _ = install_adapter(engine, "lc0");
             } else {
                 if matches!(preset, "stockfish" | "reckless" | "akimbo") {
                     if !install_adapter(engine, preset) {
                         engine.set_nnue_network_source(network);
-                    }
-                } else if matches!(preset, "viridithas" | "obsidian" | "plentychess" | "lc0") {
-                    engine.set_nnue_network_source(network);
-                    if engine.nnue_preset_hint() != preset {
-                        let _ = install_adapter(engine, preset);
                     }
                 } else {
                     engine.set_nnue_network_source(network);
@@ -1842,6 +1852,7 @@ mod tests {
         assert_eq!(go.perft, Some(5));
     }
 
+    #[cfg(feature = "stockfish-nnue")]
     #[test]
     fn test_setoption_evalpreset_switches_search_params() {
         let mut handler = UciHandler::new();
@@ -1854,6 +1865,7 @@ mod tests {
         assert_eq!(handler.engine.as_ref().unwrap().params().nmp_base, 5);
     }
 
+    #[cfg(all(feature = "reckless-nnue", feature = "stockfish-nnue"))]
     #[test]
     fn evalpreset_selects_a_compatible_eval_and_search_stack() {
         let mut handler = UciHandler::new();
@@ -1874,12 +1886,13 @@ mod tests {
     fn search_experiment_preserves_the_active_network_parameters() {
         let mut handler = UciHandler::new();
         let nmp_base = handler.engine.as_ref().unwrap().params().nmp_base;
+        let preset = handler.active_preset_name();
 
         handler.handle_setoption(&["name", "SearchExperiment", "value", "reckless-lmp"]);
 
         assert_eq!(handler.search_experiment, SearchExperiment::RecklessLmp);
         assert_eq!(handler.engine.as_ref().unwrap().params().nmp_base, nmp_base);
-        assert_eq!(handler.active_preset_name(), "reckless");
+        assert_eq!(handler.active_preset_name(), preset);
     }
 
     #[test]
@@ -1908,6 +1921,7 @@ mod tests {
         assert!(handler.eval_file.is_none());
     }
 
+    #[cfg(feature = "reckless-nnue")]
     #[test]
     fn test_setoption_selects_embedded_threat_network_without_disk_io() {
         let mut handler = UciHandler::new();
@@ -1932,6 +1946,7 @@ mod tests {
         assert_eq!(handler.active_preset_name(), "akimbo");
     }
 
+    #[cfg(feature = "stockfish-nnue")]
     #[test]
     fn eval_file_selects_embedded_current_stockfish_adapter() {
         let mut handler = UciHandler::new();
@@ -1963,6 +1978,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "stockfish-nnue")]
     #[test]
     fn test_reconfigure_keeps_evalpreset_on_hash_and_threads_change() {
         let mut handler = UciHandler::new();
@@ -2028,15 +2044,61 @@ mod tests {
             obs.engine.as_ref().unwrap().eval_mode(),
             EvalMode::Nnue(eval::nnue::NnueSearchProfile::Obsidian)
         );
+        assert_ne!(
+            obs.engine.as_ref().unwrap().nnue_info().format.to_string(),
+            "Stockfish"
+        );
+        if eval::nnue::discover_named_network("obs_default.bin").is_some()
+            || eval::nnue::discover_named_network("net89perm.bin").is_some()
+        {
+            assert_eq!(
+                obs.engine.as_ref().unwrap().nnue_info().format.to_string(),
+                "Obsidian"
+            );
+            assert_eq!(
+                obs.eval_network.search_profile(),
+                eval::nnue::NnueSearchProfile::Obsidian
+            );
+            assert!(obs.engine.as_ref().unwrap().use_nnue());
+        }
         let plenty = UciHandler::with_adapter("plentychess");
         assert_eq!(
             plenty.engine.as_ref().unwrap().eval_mode(),
             EvalMode::Nnue(eval::nnue::NnueSearchProfile::PlentyChess)
         );
+        if plenty.engine.as_ref().unwrap().use_nnue() {
+            assert_eq!(
+                plenty.engine.as_ref().unwrap().nnue_preset_hint(),
+                "plentychess"
+            );
+        }
         let lc0 = UciHandler::with_adapter("lc0");
         assert_eq!(
             lc0.engine.as_ref().unwrap().eval_mode(),
             EvalMode::Nnue(eval::nnue::NnueSearchProfile::Lc0)
+        );
+        assert!(
+            !lc0.engine.as_ref().unwrap().use_nnue(),
+            "in-process Lc0 must not evaluate a foreign NNUE"
+        );
+    }
+
+    #[cfg(all(feature = "obsidian-nnue", not(feature = "stockfish-nnue")))]
+    #[test]
+    fn obsidian_only_build_rejects_stockfish_evalfile() {
+        let mut handler = UciHandler::with_adapter("obsidian");
+        let before = handler.eval_network.search_profile();
+        handler.handle_setoption(&["name", "EvalFile", "value", "embedded:stockfish"]);
+        assert_eq!(handler.eval_network.search_profile(), before);
+        assert_ne!(
+            handler
+                .engine
+                .as_ref()
+                .unwrap()
+                .nnue_info()
+                .format
+                .to_string(),
+            "Stockfish"
         );
     }
 

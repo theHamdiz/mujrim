@@ -238,4 +238,19 @@ mod tests {
         assert!(result.suite_evals_per_second().is_finite());
         assert_eq!(result.to_json_value()["type"], "mujrim-nnue-benchmark");
     }
+
+    #[test]
+    fn akimbo_embedded_incremental_workload_completes() {
+        let result = run_with_network(
+            NnueBenchConfig {
+                iterations: 8,
+                warmup: 1,
+            },
+            ActiveNetwork::Embedded,
+        )
+        .unwrap();
+        assert_eq!(result.network, "Embedded Akimbo 1024");
+        assert!(result.incremental_elapsed > Duration::ZERO);
+        assert!(result.incremental_ns_per_eval().is_finite());
+    }
 }

@@ -13,7 +13,8 @@
 use std::io::Read;
 use std::path::Path;
 
-use types::{Board, Color, Piece};
+use types::chess_move::MoveFlag;
+use types::{Board, Color, Move, Piece, Square};
 
 use super::stockfish_format::{
     PAIR_FEATURES, THREAT_FEATURES, visit_pawn_pair_features, visit_threat_features,
@@ -652,6 +653,512 @@ fn maybe_decompress(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
+const MAX_PLY: usize = 256;
+const SIMPLE_BUCKETS: usize = 16;
+const SIMPLE_FINNY: usize = 2 * SIMPLE_BUCKETS;
+
+#[inline(always)]
+fn simple_bucket(king: usize, pov: Color) -> usize {
+    relative_square(pov, king) / 4
+}
+
+#[inline(always)]
+fn simple_feature(
+    net: &SimpleNetwork,
+    king: usize,
+    pov: Color,
+    piece: Piece,
+    piece_color: Color,
+    sq: usize,
+) -> usize {
+    let local =
+        (usize::from(piece_color != pov) * 6 + piece.index()) * 64 + relative_square(pov, sq);
+    simple_bucket(king, pov) * net.features_per_bucket + local
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn apply_simple_feature(
+    acc: &mut [i16],
+    net: &SimpleNetwork,
+    king: usize,
+    pov: Color,
+    piece: Piece,
+    piece_color: Color,
+    sq: usize,
+    sign: i16,
+) {
+    super::stockfish_simd::apply_i16_feature_width(
+        acc,
+        &net.feature_weights,
+        simple_feature(net, king, pov, piece, piece_color, sq),
+        sign,
+    );
+}
+
+#[inline(always)]
+fn snapshot_occupancy(board: &Board) -> [u64; 12] {
+    [
+        board.pieces[0][0],
+        board.pieces[0][1],
+        board.pieces[0][2],
+        board.pieces[0][3],
+        board.pieces[0][4],
+        board.pieces[0][5],
+        board.pieces[1][0],
+        board.pieces[1][1],
+        board.pieces[1][2],
+        board.pieces[1][3],
+        board.pieces[1][4],
+        board.pieces[1][5],
+    ]
+}
+
+struct SimpleFrame {
+    values: [[i16; HIDDEN]; 2],
+    kings: [u8; 2],
+    pending_has_move: bool,
+    pending_move: Move,
+    pending_mover: u8,
+    pending_captured: u8,
+    hash: u64,
+    accurate: bool,
+    pending_null: bool,
+}
+
+impl Default for SimpleFrame {
+    fn default() -> Self {
+        Self {
+            values: [[0; HIDDEN]; 2],
+            kings: [u8::MAX; 2],
+            pending_has_move: false,
+            pending_move: Move::quiet(Square::A1, Square::A1),
+            pending_mover: u8::MAX,
+            pending_captured: u8::MAX,
+            hash: 0,
+            accurate: false,
+            pending_null: false,
+        }
+    }
+}
+
+impl Clone for SimpleFrame {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for SimpleFrame {}
+
+struct SimpleFinny {
+    values: [i16; HIDDEN],
+    occupancy: [u64; 12],
+    initialized: bool,
+}
+
+impl Default for SimpleFinny {
+    fn default() -> Self {
+        Self {
+            values: [0; HIDDEN],
+            occupancy: [0; 12],
+            initialized: false,
+        }
+    }
+}
+
+struct SimpleAccumulatorState {
+    frames: Box<[SimpleFrame]>,
+    finny: Box<[SimpleFinny]>,
+    hidden: usize,
+    index: usize,
+}
+
+impl SimpleAccumulatorState {
+    fn new(hidden: usize) -> Self {
+        debug_assert!(hidden <= HIDDEN && hidden.is_multiple_of(32));
+        Self {
+            frames: vec![SimpleFrame::default(); MAX_PLY].into_boxed_slice(),
+            finny: (0..SIMPLE_FINNY)
+                .map(|_| SimpleFinny::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            hidden,
+            index: 0,
+        }
+    }
+
+    fn acc_mut(values: &mut [i16; HIDDEN], hidden: usize) -> &mut [i16] {
+        &mut values[..hidden]
+    }
+
+    fn push_move(&mut self, board: &Board, mv: Move) {
+        assert!(
+            self.index + 1 < self.frames.len(),
+            "Viridithas NNUE stack exhausted"
+        );
+        self.index += 1;
+        let frame = &mut self.frames[self.index];
+        frame.accurate = false;
+        frame.pending_null = false;
+        frame.pending_has_move = true;
+        frame.pending_move = mv;
+        frame.pending_mover = board.piece_ids()[mv.from.index()];
+        frame.pending_captured = board.piece_ids()[mv.to.index()];
+        frame.hash = 0;
+    }
+
+    fn push_null(&mut self) {
+        assert!(
+            self.index + 1 < self.frames.len(),
+            "Viridithas NNUE stack exhausted"
+        );
+        let next = self.index + 1;
+        self.frames[next] = self.frames[self.index];
+        self.frames[next].pending_has_move = false;
+        self.frames[next].pending_null = true;
+        self.index = next;
+    }
+
+    fn pop(&mut self) {
+        assert!(self.index != 0, "cannot pop the root Viridithas NNUE frame");
+        self.index -= 1;
+    }
+
+    fn clear(&mut self) {
+        self.index = 0;
+        self.frames[0].accurate = false;
+        self.frames[0].pending_null = false;
+        for entry in self.finny.iter_mut() {
+            entry.initialized = false;
+        }
+    }
+
+    fn evaluate(&mut self, board: &Board, net: &SimpleNetwork) -> i32 {
+        debug_assert_eq!(net.hidden, self.hidden);
+        if self.frames[self.index].accurate && self.frames[self.index].pending_null {
+            self.frames[self.index].hash = board.hash;
+            self.frames[self.index].pending_null = false;
+        }
+        if !self.frames[self.index].accurate || self.frames[self.index].hash != board.hash {
+            if self.index != 0 && self.frames[self.index - 1].accurate {
+                self.update_from_parent(board, net);
+            } else {
+                self.refresh(board, net);
+            }
+        }
+        let frame = &self.frames[self.index];
+        finish_simple(
+            net,
+            &frame.values[board.side_to_move.index()][..self.hidden],
+            &frame.values[board.side_to_move.opponent().index()][..self.hidden],
+            self.hidden,
+        )
+    }
+
+    fn refresh(&mut self, board: &Board, net: &SimpleNetwork) {
+        let occupancy = snapshot_occupancy(board);
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            self.finny_refresh(side, kings[pov], &occupancy, net);
+            let src =
+                self.finny[side.index() * SIMPLE_BUCKETS + simple_bucket(kings[pov], side)].values;
+            self.frames[self.index].values[pov] = src;
+        }
+        let frame = &mut self.frames[self.index];
+        frame.kings = [kings[0] as u8, kings[1] as u8];
+        frame.hash = board.hash;
+        frame.accurate = true;
+        frame.pending_has_move = false;
+        frame.pending_null = false;
+    }
+
+    fn update_from_parent(&mut self, board: &Board, net: &SimpleNetwork) {
+        let current = self.index;
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        let parent_kings = [
+            usize::from(self.frames[current - 1].kings[0]),
+            usize::from(self.frames[current - 1].kings[1]),
+        ];
+        let needs_refresh = [
+            simple_bucket(parent_kings[0], Color::White) != simple_bucket(kings[0], Color::White),
+            simple_bucket(parent_kings[1], Color::Black) != simple_bucket(kings[1], Color::Black),
+        ];
+        if needs_refresh.iter().any(|&refresh| refresh) {
+            let occupancy = snapshot_occupancy(board);
+            for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+                if !needs_refresh[pov] {
+                    continue;
+                }
+                self.finny_refresh(side, kings[pov], &occupancy, net);
+                self.frames[current].values[pov] = self.finny
+                    [side.index() * SIMPLE_BUCKETS + simple_bucket(kings[pov], side)]
+                .values;
+            }
+        }
+        let pending_has_move = self.frames[current].pending_has_move;
+        let pending_move = self.frames[current].pending_move;
+        let pending_mover = self.frames[current].pending_mover;
+        let pending_captured = self.frames[current].pending_captured;
+        let parent_values = self.frames[current - 1].values;
+        let hidden = self.hidden;
+        let frame = &mut self.frames[current];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            if needs_refresh[pov] {
+                continue;
+            }
+            frame.values[pov] = parent_values[pov];
+            if pending_has_move {
+                apply_simple_move_delta(
+                    Self::acc_mut(&mut frame.values[pov], hidden),
+                    net,
+                    kings[pov],
+                    side,
+                    pending_move,
+                    pending_mover,
+                    pending_captured,
+                );
+            }
+        }
+        frame.kings = [kings[0] as u8, kings[1] as u8];
+        frame.hash = board.hash;
+        frame.accurate = true;
+        frame.pending_has_move = false;
+        frame.pending_null = false;
+    }
+
+    fn finny_refresh(
+        &mut self,
+        side: Color,
+        king: usize,
+        occupancy: &[u64; 12],
+        net: &SimpleNetwork,
+    ) {
+        let hidden = self.hidden;
+        let entry = &mut self.finny[side.index() * SIMPLE_BUCKETS + simple_bucket(king, side)];
+        if !entry.initialized {
+            entry.values[..hidden].copy_from_slice(&net.feature_biases[..hidden]);
+            add_simple_pieces(&mut entry.values[..hidden], net, king, side, occupancy);
+            entry.occupancy = *occupancy;
+            entry.initialized = true;
+            return;
+        }
+        if entry.occupancy == *occupancy {
+            return;
+        }
+        for color in 0..2 {
+            for piece in 0..Piece::COUNT {
+                let index = color * Piece::COUNT + piece;
+                let piece = Piece::from_index(piece).expect("piece index is valid");
+                let piece_color = if color == 0 {
+                    Color::White
+                } else {
+                    Color::Black
+                };
+                let mut added = occupancy[index] & !entry.occupancy[index];
+                while added != 0 {
+                    let sq = added.trailing_zeros() as usize;
+                    added &= added - 1;
+                    apply_simple_feature(
+                        &mut entry.values[..hidden],
+                        net,
+                        king,
+                        side,
+                        piece,
+                        piece_color,
+                        sq,
+                        1,
+                    );
+                }
+                let mut removed = entry.occupancy[index] & !occupancy[index];
+                while removed != 0 {
+                    let sq = removed.trailing_zeros() as usize;
+                    removed &= removed - 1;
+                    apply_simple_feature(
+                        &mut entry.values[..hidden],
+                        net,
+                        king,
+                        side,
+                        piece,
+                        piece_color,
+                        sq,
+                        -1,
+                    );
+                }
+            }
+        }
+        entry.occupancy = *occupancy;
+    }
+}
+
+fn add_simple_pieces(
+    acc: &mut [i16],
+    net: &SimpleNetwork,
+    king: usize,
+    pov: Color,
+    occupancy: &[u64; 12],
+) {
+    for color in 0..2 {
+        for piece in 0..Piece::COUNT {
+            let mut bb = occupancy[color * Piece::COUNT + piece];
+            while bb != 0 {
+                let sq = bb.trailing_zeros() as usize;
+                bb &= bb - 1;
+                apply_simple_feature(
+                    acc,
+                    net,
+                    king,
+                    pov,
+                    Piece::from_index(piece).expect("piece index is valid"),
+                    if color == 0 {
+                        Color::White
+                    } else {
+                        Color::Black
+                    },
+                    sq,
+                    1,
+                );
+            }
+        }
+    }
+}
+
+fn apply_simple_move_delta(
+    acc: &mut [i16],
+    net: &SimpleNetwork,
+    king: usize,
+    side: Color,
+    mv: Move,
+    mover: u8,
+    captured: u8,
+) {
+    debug_assert_ne!(mover, u8::MAX);
+    let mover_piece = Piece::from_index(usize::from(mover) / 2).expect("mover piece is valid");
+    let mover_color = if mover & 1 == 0 {
+        Color::White
+    } else {
+        Color::Black
+    };
+    let resulting = mv.promotion.unwrap_or(mover_piece);
+    apply_simple_feature(
+        acc,
+        net,
+        king,
+        side,
+        mover_piece,
+        mover_color,
+        mv.from.index(),
+        -1,
+    );
+    apply_simple_feature(
+        acc,
+        net,
+        king,
+        side,
+        resulting,
+        mover_color,
+        mv.to.index(),
+        1,
+    );
+    if mv.is_capture() && mv.flag != MoveFlag::EnPassant {
+        apply_simple_feature(
+            acc,
+            net,
+            king,
+            side,
+            Piece::from_index(usize::from(captured) / 2).expect("captured piece is valid"),
+            if captured & 1 == 0 {
+                Color::White
+            } else {
+                Color::Black
+            },
+            mv.to.index(),
+            -1,
+        );
+    } else if mv.flag == MoveFlag::EnPassant {
+        apply_simple_feature(
+            acc,
+            net,
+            king,
+            side,
+            Piece::Pawn,
+            mover_color.opponent(),
+            Square::from_file_rank(mv.to.file(), mv.from.rank()).index(),
+            -1,
+        );
+    } else if mv.is_castling() {
+        let (rook_from, rook_to) = match (mover_color, mv.flag) {
+            (Color::White, MoveFlag::KingCastle) => (Square::H1.index(), Square::F1.index()),
+            (Color::White, MoveFlag::QueenCastle) => (Square::A1.index(), Square::D1.index()),
+            (Color::Black, MoveFlag::KingCastle) => (Square::H8.index(), Square::F8.index()),
+            (Color::Black, MoveFlag::QueenCastle) => (Square::A8.index(), Square::D8.index()),
+            _ => unreachable!(),
+        };
+        apply_simple_feature(
+            acc,
+            net,
+            king,
+            side,
+            Piece::Rook,
+            mover_color,
+            rook_from,
+            -1,
+        );
+        apply_simple_feature(acc, net, king, side, Piece::Rook, mover_color, rook_to, 1);
+    }
+}
+
+pub(crate) struct ViridithasAccumulatorState {
+    simple: Option<SimpleAccumulatorState>,
+}
+
+impl ViridithasAccumulatorState {
+    pub(crate) fn for_network(network: &ViridithasNetwork) -> Self {
+        Self {
+            simple: match network {
+                ViridithasNetwork::Simple(net) => Some(SimpleAccumulatorState::new(net.hidden)),
+                ViridithasNetwork::Layered(_) | ViridithasNetwork::Sandhi(_) => None,
+            },
+        }
+    }
+
+    pub(crate) fn push_move(&mut self, board: &Board, mv: Move) {
+        if let Some(state) = &mut self.simple {
+            state.push_move(board, mv);
+        }
+    }
+
+    pub(crate) fn push_null(&mut self) {
+        if let Some(state) = &mut self.simple {
+            state.push_null();
+        }
+    }
+
+    pub(crate) fn pop(&mut self) {
+        if let Some(state) = &mut self.simple {
+            state.pop();
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        if let Some(state) = &mut self.simple {
+            state.clear();
+        }
+    }
+
+    pub(crate) fn evaluate(&mut self, board: &Board, network: &ViridithasNetwork) -> i32 {
+        match (network, self.simple.as_mut()) {
+            (ViridithasNetwork::Simple(net), Some(state)) => state.evaluate(board, net),
+            _ => network.evaluate(board),
+        }
+    }
+}
+
 pub fn load(path: &Path) -> Result<Box<ViridithasNetwork>, String> {
     let bytes = std::fs::read(path).map_err(|error| {
         format!(
@@ -898,5 +1405,87 @@ mod tests {
             Path::new("ak_default.bin"),
             &[0, 1, 2]
         ));
+    }
+
+    fn patterned_simple() -> SimpleNetwork {
+        let hidden = 256;
+        let mut feature_weights = vec![0i16; KING_BUCKETS * FEATURES * hidden];
+        for (index, weight) in feature_weights.iter_mut().enumerate() {
+            *weight = ((index % 251) as i16).wrapping_sub(125);
+        }
+        SimpleNetwork {
+            hidden,
+            features_per_bucket: FEATURES,
+            feature_weights: feature_weights.into_boxed_slice(),
+            feature_biases: vec![0i16; hidden].into_boxed_slice(),
+            output_weights: vec![3i16; hidden * 2].into_boxed_slice(),
+            output_bias: 11,
+        }
+    }
+
+    fn assert_simple_matches(
+        state: &mut SimpleAccumulatorState,
+        net: &SimpleNetwork,
+        board: &Board,
+    ) {
+        let expected_us = accumulate_simple::<HIDDEN>(net, board, board.side_to_move);
+        let expected_them = accumulate_simple::<HIDDEN>(net, board, board.side_to_move.opponent());
+        assert_eq!(
+            state.evaluate(board, net),
+            finish_simple(net, &expected_us, &expected_them, net.hidden)
+        );
+        let stm = board.side_to_move.index();
+        assert_eq!(
+            &state.frames[state.index].values[stm][..net.hidden],
+            &expected_us[..net.hidden]
+        );
+        assert_eq!(
+            &state.frames[state.index].values[stm ^ 1][..net.hidden],
+            &expected_them[..net.hidden]
+        );
+    }
+
+    #[test]
+    fn simple_incremental_matches_scratch_after_moves_and_pop() {
+        types::init();
+        let net = patterned_simple();
+        let mut state = SimpleAccumulatorState::new(net.hidden);
+        let mut board = Board::new();
+        assert_simple_matches(&mut state, &net, &board);
+        let mut last_move = None;
+        for uci in ["e2e4", "e7e5", "g1f3", "b8c6"] {
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|mv| mv.to_uci() == uci)
+                .copied()
+                .expect("test move is legal");
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            last_move = Some(mv);
+            assert_simple_matches(&mut state, &net, &board);
+        }
+        state.pop();
+        board.unmake_move(last_move.expect("at least one move was made"));
+        assert_simple_matches(&mut state, &net, &board);
+    }
+
+    #[test]
+    fn simple_incremental_matches_scratch_for_king_walk() {
+        types::init();
+        let net = patterned_simple();
+        let mut state = SimpleAccumulatorState::new(net.hidden);
+        let mut board =
+            Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").expect("test FEN is valid");
+        assert_simple_matches(&mut state, &net, &board);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|mv| mv.to_uci() == "e1e2")
+            .copied()
+            .expect("e1e2 is legal");
+        state.push_move(&board, mv);
+        board.make_move(mv);
+        assert_simple_matches(&mut state, &net, &board);
     }
 }

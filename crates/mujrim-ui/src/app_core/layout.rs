@@ -132,6 +132,14 @@ pub fn clamp_dock_height(height: f64, window_height: f64) -> f64 {
     height.clamp(DOCK_MIN_PX, max)
 }
 
+/// Parent of the dock split handle is the dock itself. Using that height as the
+/// window size pins the clamp at `DOCK_MIN_PX` after the first shrink.
+pub fn dock_resize_window_height(observed: f64, current_dock: f64) -> f64 {
+    observed
+        .max(current_dock + TITLE_BAR_PX + BOARD_MIN_PX)
+        .max(DOCK_MAX_PX + TITLE_BAR_PX + BOARD_MIN_PX)
+}
+
 /// Dock sits at the bottom: dragging the split up (negative dy) grows it.
 pub fn apply_dock_drag(height: f64, delta_y: f64, window_height: f64) -> f64 {
     clamp_dock_height(height - delta_y, window_height)
@@ -154,7 +162,11 @@ pub fn select_live_game<'a>(
     preferred: Option<&str>,
 ) -> Option<&'a LiveGameBoard> {
     preferred
-        .and_then(|key| live.iter().find(|game| game.game_key == key))
+        .and_then(|key| {
+            live.iter()
+                .find(|game| game.game_key == key && !game.is_placeholder())
+        })
+        .or_else(|| live.iter().rev().find(|game| !game.is_placeholder()))
         .or_else(|| focused_live_game(live))
 }
 
@@ -229,8 +241,9 @@ pub fn live_clock_faces_at(
     let black_stored = live.and_then(|game| game.black_clock_ms).or(white_stored);
     let synced = live.and_then(|game| game.clock_synced_ms);
     let now = now_ms.unwrap_or(synced.unwrap_or(0));
-    let white_ms = remaining_clock_ms(white_stored, synced, now, white_to_move, paused);
-    let black_ms = remaining_clock_ms(black_stored, synced, now, !white_to_move, paused);
+    let countdown = paused || live.is_some_and(LiveGameBoard::is_placeholder);
+    let white_ms = remaining_clock_ms(white_stored, synced, now, white_to_move, countdown);
+    let black_ms = remaining_clock_ms(black_stored, synced, now, !white_to_move, countdown);
     (
         ClockFace {
             name: clock_player_label(white_name, true),
@@ -417,6 +430,19 @@ mod tests {
         assert!(shrunk < DOCK_OPEN_PX);
         assert!(clamp_dock_height(20.0, 900.0) >= DOCK_MIN_PX);
         assert!(clamp_dock_height(900.0, 400.0) <= DOCK_MAX_PX);
+        let after_shrink = apply_dock_drag(DOCK_OPEN_PX, 200.0, 900.0);
+        assert!(after_shrink <= DOCK_MIN_PX + 1.0);
+        let stuck = apply_dock_drag(after_shrink, -200.0, after_shrink);
+        assert!(
+            (stuck - after_shrink).abs() < 1.0,
+            "passing the dock height as the window pins the clamp"
+        );
+        let window = dock_resize_window_height(after_shrink, after_shrink);
+        let grown_again = apply_dock_drag(after_shrink, -200.0, window);
+        assert!(
+            grown_again > after_shrink + 40.0,
+            "resize must be able to grow after the first shrink"
+        );
     }
 
     #[test]
@@ -452,6 +478,17 @@ mod tests {
                 .game_key,
             "g1"
         );
+        let mixed = vec![
+            board("pending-0", Some(0), Some(180_000)),
+            board("g2", Some(180_000), Some(180_000)),
+        ];
+        assert_eq!(
+            select_live_game(&mixed, Some("pending-0"))
+                .expect("skip placeholder")
+                .game_key,
+            "g2"
+        );
+        assert_eq!(select_live_game(&mixed, None).expect("real").game_key, "g2");
     }
 
     #[test]
@@ -497,6 +534,20 @@ mod tests {
         let (white, black) = live_clock_faces_at(Some(&live), None, None, true, Some(5_900), false);
         assert_eq!(white.display, "0:07.1");
         assert_eq!(black.display, "1:00");
+        let mut pending = board("pending-0", Some(180_000), Some(180_000));
+        pending.clock_synced_ms = Some(1_000);
+        let (white, _) = live_clock_faces_at(
+            Some(&pending),
+            None,
+            Some(180_000),
+            true,
+            Some(90_000),
+            false,
+        );
+        assert_eq!(
+            white.display, "3:00",
+            "placeholder clocks must not drain between games"
+        );
     }
 
     #[test]

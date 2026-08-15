@@ -3,7 +3,7 @@
 //! Each adapter installs a matching evaluator and search stack as one unit so
 //! Stockfish / Reckless / Akimbo / Mujrim HCE cannot drift apart at runtime.
 
-use eval::nnue::{ActiveNetwork, NnueSearchProfile};
+use eval::nnue::{ActiveNetwork, NnueNetworkSource, NnueSearchProfile};
 
 use crate::engine::SearchEngine;
 use crate::search_stack::{
@@ -88,6 +88,20 @@ impl EvalSearchAdapter for AkimboAdapter {
     }
 }
 
+fn bind_matching_disk_network(
+    engine: &mut SearchEngine,
+    preset: &str,
+    expected: NnueSearchProfile,
+) {
+    match eval::nnue::load_network_for_preset(preset) {
+        Ok(network) if network.search_profile() == expected => {
+            engine.set_nnue_network(network);
+            engine.set_use_nnue(true);
+        }
+        Ok(_) | Err(_) => engine.set_use_nnue(false),
+    }
+}
+
 impl EvalSearchAdapter for ViridithasAdapter {
     fn id(&self) -> &'static str {
         "viridithas"
@@ -99,10 +113,7 @@ impl EvalSearchAdapter for ViridithasAdapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(ViridithasSearchProfile.compose());
-        if let Ok(network) = eval::nnue::load_network_for_preset("viridithas") {
-            engine.set_nnue_network(network);
-        }
-        engine.set_use_nnue(true);
+        bind_matching_disk_network(engine, "viridithas", NnueSearchProfile::Viridithas);
     }
 }
 
@@ -116,11 +127,8 @@ impl EvalSearchAdapter for ObsidianAdapter {
     }
 
     fn install(&self, engine: &mut SearchEngine) {
-        match eval::nnue::load_network_for_preset("obsidian") {
-            Ok(network) => engine.set_nnue_network(network),
-            Err(_) => engine.set_search_stack(ObsidianSearchProfile.compose()),
-        }
-        engine.set_use_nnue(true);
+        engine.set_search_stack(ObsidianSearchProfile.compose());
+        bind_matching_disk_network(engine, "obsidian", NnueSearchProfile::Obsidian);
     }
 }
 
@@ -135,10 +143,7 @@ impl EvalSearchAdapter for PlentyChessAdapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(PlentyChessSearchProfile.compose());
-        if let Ok(network) = eval::nnue::load_network_for_preset("plentychess") {
-            engine.set_nnue_network(network);
-        }
-        engine.set_use_nnue(true);
+        bind_matching_disk_network(engine, "plentychess", NnueSearchProfile::PlentyChess);
     }
 }
 
@@ -153,7 +158,7 @@ impl EvalSearchAdapter for Lc0Adapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(Lc0SearchProfile.compose());
-        engine.set_use_nnue(true);
+        engine.set_use_nnue(false);
     }
 }
 
@@ -279,21 +284,41 @@ mod tests {
         assert_eq!(engine.contempt(), 48);
     }
 
+    fn assert_adapter_owns_its_network(id: &str, expected: NnueSearchProfile, net_present: bool) {
+        let mut engine = SearchEngine::new(1, 1);
+        assert!(install_adapter(&mut engine, id));
+        assert_eq!(engine.eval_mode(), EvalMode::Nnue(expected));
+        if net_present {
+            assert!(engine.use_nnue(), "{id} must evaluate its own net");
+            assert_eq!(engine.nnue_preset_hint(), expected.as_str());
+        } else {
+            assert!(
+                !engine.use_nnue(),
+                "{id} must not evaluate a foreign leftover net"
+            );
+        }
+    }
+
     #[test]
     fn viridithas_and_obsidian_adapters_install_matching_stacks() {
+        let viri_net = eval::nnue::discover_named_network("sandhi-s2-b200.nnue.zst").is_some()
+            || eval::nnue::discover_named_network("viri_default.nnue.zst").is_some();
+        assert_adapter_owns_its_network("viridithas", NnueSearchProfile::Viridithas, viri_net);
         let mut viri = SearchEngine::new(1, 1);
         assert!(install_adapter(&mut viri, "viridithas"));
-        assert!(viri.use_nnue());
-        assert_eq!(
-            viri.eval_mode(),
-            EvalMode::Nnue(NnueSearchProfile::Viridithas)
-        );
         viri.set_contempt(48);
         assert_eq!(viri.contempt(), 0);
 
+        let obs_net = eval::nnue::discover_named_network("obs_default.bin").is_some()
+            || eval::nnue::discover_named_network("net89perm.bin").is_some();
+        assert_adapter_owns_its_network("obsidian", NnueSearchProfile::Obsidian, obs_net);
         let mut obs = SearchEngine::new(1, 1);
         assert!(install_adapter(&mut obs, "obsidian"));
-        assert_eq!(obs.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Obsidian));
+        assert_ne!(
+            obs.nnue_info().format.to_string(),
+            "Stockfish",
+            "obsidian adapter must not bind a Stockfish net"
+        );
         obs.set_contempt(48);
         assert_eq!(obs.contempt(), 0);
     }
@@ -323,17 +348,12 @@ mod tests {
 
     #[test]
     fn plentychess_and_lc0_adapters_install_matching_stacks() {
+        let plenty_net = cfg!(feature = "plentychess-nnue")
+            && (eval::nnue::discover_named_network("plenty_default.bin").is_some()
+                || eval::nnue::discover_named_network("0179r.bin").is_some());
+        assert_adapter_owns_its_network("plentychess", NnueSearchProfile::PlentyChess, plenty_net);
         let mut plenty = SearchEngine::new(1, 1);
         assert!(install_adapter(&mut plenty, "plentychess"));
-        assert_eq!(
-            plenty.eval_mode(),
-            EvalMode::Nnue(NnueSearchProfile::PlentyChess)
-        );
-        if eval::nnue::discover_named_network("plenty_default.bin").is_some()
-            || eval::nnue::discover_named_network("0179r.bin").is_some()
-        {
-            assert_eq!(plenty.nnue_info().format.to_string(), "PlentyChess");
-        }
         plenty.set_contempt(48);
         assert_eq!(plenty.contempt(), 0);
 
@@ -341,12 +361,51 @@ mod tests {
         assert!(install_adapter(&mut lc0, "lc0"));
         assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
         assert!(lc0.eval_mode().is_lc0_nnue());
+        assert!(
+            !lc0.use_nnue(),
+            "in-process Lc0 has no transformer net and must not evaluate Reckless/Stockfish"
+        );
         assert_eq!(
             lc0.search_stack.policies.move_ordering,
             MoveOrderingProfile::Reckless
         );
         lc0.set_contempt(48);
         assert_eq!(lc0.contempt(), 0);
+    }
+
+    #[test]
+    fn adapters_never_evaluate_a_foreign_network() {
+        let cases = [
+            ("akimbo", "akimbo"),
+            ("viridithas", "viridithas"),
+            ("obsidian", "obsidian"),
+            ("plentychess", "plentychess"),
+            ("lc0", "lc0"),
+            ("mujrim-hce", "mujrim-hce"),
+        ];
+        for (id, expected) in cases {
+            let mut engine = SearchEngine::new(1, 1);
+            assert!(install_adapter(&mut engine, id));
+            if engine.use_nnue() {
+                assert_eq!(
+                    engine.nnue_preset_hint(),
+                    expected,
+                    "{id} evaluated a foreign net"
+                );
+            }
+        }
+        #[cfg(feature = "stockfish-nnue")]
+        {
+            let mut engine = SearchEngine::new(1, 1);
+            assert!(install_adapter(&mut engine, "stockfish"));
+            assert_eq!(engine.nnue_preset_hint(), "stockfish");
+        }
+        #[cfg(feature = "reckless-nnue")]
+        {
+            let mut engine = SearchEngine::new(1, 1);
+            assert!(install_adapter(&mut engine, "reckless"));
+            assert_eq!(engine.nnue_preset_hint(), "reckless");
+        }
     }
 
     #[test]

@@ -111,6 +111,11 @@ fn paint_board(
             let x = geom.origin_x + col as f64 * sq;
             let y = geom.origin_y + row as f64 * sq;
             cx.fill(&Rect::new(x, y, x + sq, y + sq), theme::rgba(fill), 0.0);
+            if board.is_in_check(board.side_to_move)
+                && sq_id == board.king_square(board.side_to_move)
+            {
+                paint_check_square(cx, x, y, sq);
+            }
             if settings.show_legal_moves && game.legal_highlights.contains(&sq_id) {
                 let occupied = board.piece_on(sq_id).is_some();
                 let center = Point::new(x + sq * 0.5, y + sq * 0.5);
@@ -559,6 +564,41 @@ fn paint_threat_arrows(
     }
 }
 
+fn paint_check_square(cx: &mut floem::context::PaintCx<'_>, x: f64, y: f64, sq: f64) {
+    cx.fill(
+        &Rect::new(x, y, x + sq, y + sq),
+        Color::from_rgba8(196, 36, 48, 72),
+        0.0,
+    );
+    let cells = check_hatch_cells(sq);
+    let cell = sq / cells as f64;
+    for row in 0..cells {
+        for col in 0..cells {
+            if (row + col) % 2 != 0 {
+                continue;
+            }
+            let px = x + col as f64 * cell + cell * 0.18;
+            let py = y + row as f64 * cell + cell * 0.18;
+            let size = cell * 0.64;
+            cx.fill(
+                &Rect::new(px, py, px + size, py + size),
+                Color::from_rgba8(168, 22, 34, 46),
+                0.0,
+            );
+        }
+    }
+    let inset = (sq * 0.07).max(1.5);
+    cx.stroke(
+        &Rect::new(x + inset, y + inset, x + sq - inset, y + sq - inset),
+        Color::from_rgba8(220, 56, 64, 88),
+        &Stroke::new((sq * 0.035).clamp(1.2, 2.6)),
+    );
+}
+
+fn check_hatch_cells(sq: f64) -> usize {
+    if sq < 28.0 { 5 } else { 7 }
+}
+
 fn square_display(square: Square, flipped: bool) -> (usize, usize) {
     let file = square.file();
     let rank = square.rank();
@@ -686,6 +726,18 @@ mod tests {
     }
 
     #[test]
+    fn check_hatch_stays_inside_the_square() {
+        assert_eq!(check_hatch_cells(24.0), 5);
+        assert_eq!(check_hatch_cells(64.0), 7);
+        let sq = 64.0;
+        let cells = check_hatch_cells(sq);
+        let cell = sq / cells as f64;
+        let extent = cell * 0.18 + cell * 0.64;
+        assert!(extent <= cell);
+        assert!(extent * cells as f64 <= sq + 0.01);
+    }
+
+    #[test]
     fn threat_overlay_is_limited_to_study_and_learn() {
         types::init();
         let board = types::Board::new();
@@ -708,6 +760,8 @@ mod tests {
             "arrow_start",
             "coord_labels",
             "COORD_GUTTER_PX",
+            "paint_check_square",
+            "king_square",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

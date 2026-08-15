@@ -538,6 +538,63 @@ const MAX_DIRTY_THREAT_DELTAS: usize = 96;
 const MAX_PIECE_FEATURES: usize = 32;
 const MAX_THREAT_FEATURES: usize = 256;
 const MAX_PAIR_FEATURES: usize = 256;
+const KING_BUCKET_COUNT: usize = 32;
+const FINNY_ENTRIES: usize = 2 * 2 * KING_BUCKET_COUNT;
+
+#[rustfmt::skip]
+const KING_BUCKETS: [usize; 64] = [
+    28, 29, 30, 31, 31, 30, 29, 28,
+    24, 25, 26, 27, 27, 26, 25, 24,
+    20, 21, 22, 23, 23, 22, 21, 20,
+    16, 17, 18, 19, 19, 18, 17, 16,
+    12, 13, 14, 15, 15, 14, 13, 12,
+     8,  9, 10, 11, 11, 10,  9,  8,
+     4,  5,  6,  7,  7,  6,  5,  4,
+     0,  1,  2,  3,  3,  2,  1,  0,
+];
+
+#[inline(always)]
+fn king_bucket(king_square: usize, perspective: usize) -> usize {
+    KING_BUCKETS[king_square ^ (56 * perspective)]
+}
+
+#[inline(always)]
+fn king_mirrored(king_square: usize) -> bool {
+    king_square & 7 < 4
+}
+
+#[inline(always)]
+fn king_feature_changed(old: u8, new: u8, perspective: usize) -> bool {
+    let old = usize::from(old);
+    let new = usize::from(new);
+    king_bucket(old, perspective) != king_bucket(new, perspective)
+        || king_mirrored(old) != king_mirrored(new)
+}
+
+#[inline(always)]
+fn finny_index(perspective: usize, king_square: usize) -> usize {
+    perspective * 2 * KING_BUCKET_COUNT
+        + usize::from(king_mirrored(king_square)) * KING_BUCKET_COUNT
+        + king_bucket(king_square, perspective)
+}
+
+#[inline(always)]
+fn snapshot_occupancy(board: &Board) -> [u64; 12] {
+    [
+        board.pieces[0][0],
+        board.pieces[0][1],
+        board.pieces[0][2],
+        board.pieces[0][3],
+        board.pieces[0][4],
+        board.pieces[0][5],
+        board.pieces[1][0],
+        board.pieces[1][1],
+        board.pieces[1][2],
+        board.pieces[1][3],
+        board.pieces[1][4],
+        board.pieces[1][5],
+    ]
+}
 
 #[derive(Clone)]
 struct FeatureLists {
@@ -781,8 +838,27 @@ impl ThreatDeltaSink for StockfishFrame {
     }
 }
 
+struct FinnyEntry {
+    pieces: [i16; L1],
+    psqt: [i32; PSQT_BUCKETS],
+    occupancy: [u64; 12],
+    initialized: bool,
+}
+
+impl Default for FinnyEntry {
+    fn default() -> Self {
+        Self {
+            pieces: [0; L1],
+            psqt: [0; PSQT_BUCKETS],
+            occupancy: [0; 12],
+            initialized: false,
+        }
+    }
+}
+
 pub(crate) struct StockfishAccumulatorState {
     frames: Box<[StockfishFrame]>,
+    finny: Box<[FinnyEntry]>,
     index: usize,
 }
 
@@ -790,6 +866,10 @@ impl StockfishAccumulatorState {
     pub(crate) fn new() -> Self {
         Self {
             frames: vec![StockfishFrame::default(); STOCKFISH_STATE_FRAMES].into_boxed_slice(),
+            finny: (0..FINNY_ENTRIES)
+                .map(|_| FinnyEntry::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             index: 0,
         }
     }
@@ -841,6 +921,9 @@ impl StockfishAccumulatorState {
         self.index = 0;
         self.frames[0].accurate = false;
         self.frames[0].pending_null = false;
+        for entry in self.finny.iter_mut() {
+            entry.initialized = false;
+        }
     }
 
     pub(crate) fn evaluate(&mut self, board: &Board, network: &StockfishNetwork) -> i32 {
@@ -861,19 +944,30 @@ impl StockfishAccumulatorState {
     }
 
     fn refresh(&mut self, board: &Board, network: &StockfishNetwork) {
-        let frame = &mut self.frames[self.index];
-        frame.psqt = [[0; PSQT_BUCKETS]; 2];
+        let king_squares = current_king_squares(board);
+        let occupancy = snapshot_occupancy(board);
         let features = FeatureLists::collect_both(board);
         for (perspective, perspective_features) in features.iter().enumerate() {
-            frame.accumulators[perspective].copy_from_slice(&network.feature_biases);
-            apply_all_features(
+            self.finny_refresh_pieces(
+                perspective,
+                usize::from(king_squares[perspective]),
+                &occupancy,
+                network,
+            );
+            let cache =
+                &self.finny[finny_index(perspective, usize::from(king_squares[perspective]))];
+            let frame = &mut self.frames[self.index];
+            frame.accumulators[perspective] = cache.pieces;
+            frame.psqt[perspective] = cache.psqt;
+            apply_threats_and_pairs(
                 &mut frame.accumulators[perspective],
                 &mut frame.psqt[perspective],
                 network,
                 perspective_features,
             );
         }
-        frame.king_squares = current_king_squares(board);
+        let frame = &mut self.frames[self.index];
+        frame.king_squares = king_squares;
         frame.position_hash = board.hash;
         frame.accurate = true;
         frame.pending_threats = None;
@@ -887,34 +981,52 @@ impl StockfishAccumulatorState {
             board.pieces[0][Piece::Pawn.index()],
             board.pieces[1][Piece::Pawn.index()],
         ];
-        let (before, after) = self.frames.split_at_mut(current);
-        let parent = &before[current - 1];
-        let frame = &mut after[0];
-        if let (Some(snapshot), Some(mv)) = (frame.pending_threats.take(), frame.pending_move) {
-            collect_snapshot_move_deltas(frame, snapshot, mv);
+        {
+            let frame = &mut self.frames[current];
+            if let (Some(snapshot), Some(mv)) = (frame.pending_threats.take(), frame.pending_move) {
+                collect_snapshot_move_deltas(frame, snapshot, mv);
+            }
         }
+        let parent_kings = self.frames[current - 1].king_squares;
+        let threat_overflowed = self.frames[current].threat_overflowed;
         let needs_refresh = [
-            frame.threat_overflowed || parent.king_squares[0] != king_squares[0],
-            frame.threat_overflowed || parent.king_squares[1] != king_squares[1],
+            threat_overflowed || king_feature_changed(parent_kings[0], king_squares[0], 0),
+            threat_overflowed || king_feature_changed(parent_kings[1], king_squares[1], 1),
         ];
-        let refresh_features = needs_refresh
-            .iter()
-            .any(|&refresh| refresh)
-            .then(|| FeatureLists::collect_both(board));
-
-        for perspective in 0..2 {
-            if needs_refresh[perspective] {
-                frame.accumulators[perspective].copy_from_slice(&network.feature_biases);
-                frame.psqt[perspective] = [0; PSQT_BUCKETS];
-                apply_all_features(
+        if needs_refresh.iter().any(|&refresh| refresh) {
+            let occupancy = snapshot_occupancy(board);
+            let features = FeatureLists::collect_both(board);
+            for perspective in 0..2 {
+                if !needs_refresh[perspective] {
+                    continue;
+                }
+                self.finny_refresh_pieces(
+                    perspective,
+                    usize::from(king_squares[perspective]),
+                    &occupancy,
+                    network,
+                );
+                let cache =
+                    &self.finny[finny_index(perspective, usize::from(king_squares[perspective]))];
+                let frame = &mut self.frames[current];
+                frame.accumulators[perspective] = cache.pieces;
+                frame.psqt[perspective] = cache.psqt;
+                apply_threats_and_pairs(
                     &mut frame.accumulators[perspective],
                     &mut frame.psqt[perspective],
                     network,
-                    &refresh_features.as_ref().expect("refresh features exist")[perspective],
+                    &features[perspective],
                 );
+            }
+        }
+
+        let (before, after) = self.frames.split_at_mut(current);
+        let parent = &before[current - 1];
+        let frame = &mut after[0];
+        for perspective in 0..2 {
+            if needs_refresh[perspective] {
                 continue;
             }
-
             frame.accumulators[perspective] = parent.accumulators[perspective];
             frame.psqt[perspective] = parent.psqt[perspective];
             apply_piece_move_delta(
@@ -951,6 +1063,63 @@ impl StockfishAccumulatorState {
         frame.position_hash = board.hash;
         frame.accurate = true;
         frame.pending_null = false;
+    }
+
+    fn finny_refresh_pieces(
+        &mut self,
+        perspective: usize,
+        king_square: usize,
+        occupancy: &[u64; 12],
+        network: &StockfishNetwork,
+    ) {
+        let entry = &mut self.finny[finny_index(perspective, king_square)];
+        if !entry.initialized {
+            entry.pieces.copy_from_slice(&network.feature_biases);
+            entry.psqt = [0; PSQT_BUCKETS];
+            for color in 0..2 {
+                for piece in 0..Piece::COUNT {
+                    let mut bb = occupancy[color * Piece::COUNT + piece];
+                    while bb != 0 {
+                        let square = bb.trailing_zeros() as usize;
+                        bb &= bb - 1;
+                        let feature =
+                            piece_feature_index(color, piece, square, king_square, perspective);
+                        apply_i16_feature(&mut entry.pieces, &network.piece_weights, feature, 1);
+                        apply_psqt_feature(&mut entry.psqt, &network.piece_psqt, feature, 1);
+                    }
+                }
+            }
+            entry.occupancy = *occupancy;
+            entry.initialized = true;
+            return;
+        }
+        if entry.occupancy == *occupancy {
+            return;
+        }
+        for color in 0..2 {
+            for piece in 0..Piece::COUNT {
+                let index = color * Piece::COUNT + piece;
+                let mut added = occupancy[index] & !entry.occupancy[index];
+                while added != 0 {
+                    let square = added.trailing_zeros() as usize;
+                    added &= added - 1;
+                    let feature =
+                        piece_feature_index(color, piece, square, king_square, perspective);
+                    apply_i16_feature(&mut entry.pieces, &network.piece_weights, feature, 1);
+                    apply_psqt_feature(&mut entry.psqt, &network.piece_psqt, feature, 1);
+                }
+                let mut removed = entry.occupancy[index] & !occupancy[index];
+                while removed != 0 {
+                    let square = removed.trailing_zeros() as usize;
+                    removed &= removed - 1;
+                    let feature =
+                        piece_feature_index(color, piece, square, king_square, perspective);
+                    apply_i16_feature(&mut entry.pieces, &network.piece_weights, feature, -1);
+                    apply_psqt_feature(&mut entry.psqt, &network.piece_psqt, feature, -1);
+                }
+            }
+        }
+        entry.occupancy = *occupancy;
     }
 }
 
@@ -1152,16 +1321,12 @@ fn collect_pawn_pair_features(
     list
 }
 
-fn apply_all_features(
+fn apply_threats_and_pairs(
     accumulator: &mut [i16; L1],
     psqt: &mut [i32; PSQT_BUCKETS],
     network: &StockfishNetwork,
     features: &FeatureLists,
 ) {
-    for &feature in &features.pieces[..features.piece_count] {
-        apply_i16_feature(accumulator, &network.piece_weights, usize::from(feature), 1);
-        apply_psqt_feature(psqt, &network.piece_psqt, usize::from(feature), 1);
-    }
     for &feature in &features.threats[..features.threat_count] {
         apply_i8_feature(
             accumulator,
@@ -1347,11 +1512,6 @@ fn piece_feature_index(
     king_square: usize,
     perspective: usize,
 ) -> usize {
-    const KING_BUCKETS: [usize; 64] = [
-        28, 29, 30, 31, 31, 30, 29, 28, 24, 25, 26, 27, 27, 26, 25, 24, 20, 21, 22, 23, 23, 22, 21,
-        20, 16, 17, 18, 19, 19, 18, 17, 16, 12, 13, 14, 15, 15, 14, 13, 12, 8, 9, 10, 11, 11, 10,
-        9, 8, 4, 5, 6, 7, 7, 6, 5, 4, 0, 1, 2, 3, 3, 2, 1, 0,
-    ];
     let vertical_flip = 56 * perspective;
     // HalfKAv2_hm OrientTBL flips files a-d. FullThreats / PP_3Wide flip e-h instead —
     // keep these conventions distinct or the network diverges from Stockfish.
@@ -2053,5 +2213,50 @@ mod tests {
             let board = Board::from_fen(fen).expect("test FEN is valid");
             assert_eq!(state.evaluate(&board, &network), network.evaluate(&board));
         }
+    }
+
+    #[test]
+    fn king_feature_change_is_bucket_or_file_half() {
+        // e1 (file 4) and d1 (file 3) share bucket 31 but flip HalfKAv2_hm orient.
+        assert!(king_feature_changed(4, 3, 0));
+        // e1 and e2 change bucket (31 → 27) with the same file half.
+        assert!(king_feature_changed(4, 12, 0));
+        // Same square is a no-op.
+        assert!(!king_feature_changed(4, 4, 0));
+    }
+
+    #[test]
+    fn finny_king_walk_matches_reference_and_reuses_bucket() {
+        types::init();
+        let network = load_embedded().expect("current embedded Stockfish network must decode");
+        let mut state = StockfishAccumulatorState::new();
+        let mut board =
+            Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").expect("test FEN is valid");
+        assert_eq!(state.evaluate(&board, &network), network.evaluate(&board));
+
+        let mut last_move = None;
+        for uci in ["e1e2", "e8e7", "e2e1"] {
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|mv| mv.to_uci() == uci)
+                .copied()
+                .expect("test move is legal");
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            last_move = Some(mv);
+            assert_eq!(
+                state.evaluate(&board, &network),
+                network.evaluate(&board),
+                "{uci}"
+            );
+        }
+
+        assert!(state.finny[finny_index(0, 4)].initialized);
+        assert!(state.finny[finny_index(0, 12)].initialized);
+
+        state.pop();
+        board.unmake_move(last_move.expect("king returned to e1"));
+        assert_eq!(state.evaluate(&board, &network), network.evaluate(&board));
     }
 }
