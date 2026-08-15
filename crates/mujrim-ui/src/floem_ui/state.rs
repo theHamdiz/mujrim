@@ -11,6 +11,7 @@ use mujrim_study::annotation::MoveAnnotation;
 use mujrim_study::database::{EngineMetadata, GameSummary, StudyDatabase};
 use mujrim_study::gambit::OwnedGambit;
 use mujrim_study::opening::{OpeningExplorer, PrepSide, SavedLine};
+use mujrim_study::study_doc::Study;
 use mujrim_study::tournament_store::StoredTournament;
 use mujrim_study::training_store::{TrainingItem, TrainingStore};
 
@@ -91,6 +92,17 @@ pub struct AppState {
     pub prep_notes: RwSignal<String>,
     pub prep_side: RwSignal<PrepSide>,
     pub move_note: RwSignal<String>,
+    pub studies: RwSignal<Vec<Study>>,
+    pub active_study_id: RwSignal<Option<String>>,
+    pub active_chapter_id: RwSignal<Option<String>>,
+    pub study_path: RwSignal<Vec<usize>>,
+    pub study_title: RwSignal<String>,
+    pub chapter_title: RwSignal<String>,
+    pub board_edit: RwSignal<bool>,
+    pub edit_fen: RwSignal<String>,
+    pub tray_piece: RwSignal<Option<(types::Piece, types::Color)>>,
+    pub explain_marks: RwSignal<Vec<types::Square>>,
+    pub live_analysis: RwSignal<bool>,
     pub tournament_history: RwSignal<Vec<StoredTournament>>,
     pub current_tournament_id: RwSignal<Option<String>>,
     pub persisted_tournament_games: RwSignal<usize>,
@@ -238,6 +250,17 @@ impl AppState {
             prep_notes: RwSignal::new(String::new()),
             prep_side: RwSignal::new(PrepSide::White),
             move_note: RwSignal::new(String::new()),
+            studies: RwSignal::new(Vec::new()),
+            active_study_id: RwSignal::new(None),
+            active_chapter_id: RwSignal::new(None),
+            study_path: RwSignal::new(Vec::new()),
+            study_title: RwSignal::new("New study".to_owned()),
+            chapter_title: RwSignal::new("Chapter 1".to_owned()),
+            board_edit: RwSignal::new(false),
+            edit_fen: RwSignal::new(mujrim_study::opening::START_FEN.to_owned()),
+            tray_piece: RwSignal::new(None),
+            explain_marks: RwSignal::new(Vec::new()),
+            live_analysis: RwSignal::new(false),
             tournament_history: RwSignal::new(Vec::new()),
             current_tournament_id: RwSignal::new(None),
             persisted_tournament_games: RwSignal::new(0),
@@ -301,6 +324,9 @@ impl AppState {
         if let Some(database) = study.as_ref() {
             if let Ok(lines) = database.list_lines() {
                 state.saved_lines.set(lines);
+            }
+            if let Ok(studies) = database.list_studies() {
+                state.studies.set(studies);
             }
             if let Ok(history) = database.list_tournaments() {
                 state.tournament_history.set(history);

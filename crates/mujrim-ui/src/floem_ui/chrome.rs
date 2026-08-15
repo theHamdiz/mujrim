@@ -135,28 +135,6 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
         ),
         pill(
             state,
-            icons::GRADUATION_CAP,
-            "Learn",
-            move || matches!(state.screen.get(), Screen::Learn),
-            {
-                let handles = handles.clone();
-                move || {
-                    actions::open_learn(state, &handles);
-                }
-            },
-        ),
-        pill(
-            state,
-            icons::CLIPBOARD,
-            "Library",
-            move || matches!(state.screen.get(), Screen::Library),
-            {
-                let handles = handles.clone();
-                move || actions::open_library(state, &handles)
-            },
-        ),
-        pill(
-            state,
             icons::TROPHY,
             "Tournaments",
             move || matches!(state.screen.get(), Screen::Tournaments),
@@ -184,12 +162,7 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
 pub fn screen_tools(state: AppState, handles: AppHandles) -> impl IntoView {
     let playing = move || matches!(state.screen.get(), Screen::Playing);
     let analysis = move || matches!(state.screen.get(), Screen::Analysis);
-    let study = move || {
-        matches!(
-            state.screen.get(),
-            Screen::Study | Screen::Learn | Screen::Library
-        )
-    };
+    let study = move || matches!(state.screen.get(), Screen::Study);
     Stack::horizontal((
         Stack::horizontal((
             pill(state, icons::PLUS, "New", || false, {
@@ -392,16 +365,16 @@ mod tests {
             "Tournaments nav must resume a paused event or open setup"
         );
         assert!(
-            production.contains("open_library"),
-            "Library nav must open the library screen"
+            production.contains("ensure_study_board"),
+            "Study nav must seed the shared study board"
         );
         assert!(
-            production.contains("GRADUATION_CAP"),
-            "Learn nav must use the graduation-cap icon"
+            !production.contains("\"Learn\""),
+            "Learn is a Study tab, not a title-bar pill"
         );
         assert!(
-            production.contains("open_learn"),
-            "Learn nav must load the book-backed gambit catalog"
+            !production.contains("\"Library\""),
+            "Library is a Study tab, not a title-bar pill"
         );
         assert!(
             production.contains("\"Ateed\""),

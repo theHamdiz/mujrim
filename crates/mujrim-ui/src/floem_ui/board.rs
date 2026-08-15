@@ -240,7 +240,7 @@ fn paint_board(
             let light = (row + col) % 2 == 0;
             let sq_id = game::display_to_square(row, col, game.flipped);
             let mut fill = if light { colors.light } else { colors.dark };
-            if game.selected_square == Some(sq_id) {
+            if game.selected_square == Some(sq_id) || state.explain_marks.get().contains(&sq_id) {
                 fill = colors.selected;
             } else if settings.show_last_move && game.last_move_squares.contains(&sq_id) {
                 fill = if light {
@@ -641,12 +641,7 @@ fn threat_marks_for(
     screen: Screen,
     show_threats: bool,
 ) -> Vec<mujrim_study::threats::ThreatMark> {
-    if !show_threats
-        || !matches!(
-            screen,
-            Screen::Study | Screen::Learn | Screen::Analysis | Screen::Library
-        )
-    {
+    if !show_threats || !matches!(screen, Screen::Study | Screen::Analysis) {
         return Vec::new();
     }
     mujrim_study::threats::threatened_pieces(board)
@@ -815,6 +810,15 @@ fn on_pointer_move(state: AppState, _handles: &AppHandles, event: &PointerUpdate
 fn on_pointer_up(state: AppState, handles: &AppHandles, event: &PointerButtonEvent) {
     let point = event.state.logical_point();
     let Some(square) = event_square(state, point.x, point.y) else {
+        if state.board_edit.get_untracked() && event.button == Some(PointerButton::Primary) {
+            let Some(mut game) = state.game.get_untracked() else {
+                return;
+            };
+            if let Some((from, _)) = game.end_drag() {
+                state.game.set(Some(game));
+                actions::move_edit_piece(state, handles, from, from);
+            }
+        }
         return;
     };
     if event.button == Some(PointerButton::Secondary) {
@@ -929,6 +933,7 @@ mod tests {
             "arena_cell_index",
             "arena_cell_visible",
             "tournament_ui_fingerprint",
+            "explain_marks",
         ] {
             assert!(production.contains(needle), "missing {needle}");
         }

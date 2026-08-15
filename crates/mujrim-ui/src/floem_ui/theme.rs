@@ -4,7 +4,9 @@ use floem::prelude::Color;
 
 use crate::app_core::palette::{GuiPalette, Rgba};
 
-pub const CURIOUS_FAMILY: &str = "Curious Track";
+pub const CURIOUS_FAMILY: &str = UI_FAMILY;
+pub const UI_FAMILY: &str = "Inter";
+pub const MONO_FAMILY: &str = "JetBrains Mono";
 pub const TYPE_CAPTION: f32 = 11.0;
 pub const TYPE_BODY: f32 = 13.0;
 pub const TYPE_TITLE: f32 = 16.0;

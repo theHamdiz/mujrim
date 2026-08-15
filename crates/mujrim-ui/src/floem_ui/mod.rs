@@ -26,7 +26,28 @@ use tokio::runtime::Runtime;
 use self::state::AppState;
 use crate::app_core::windowing::WindowPolicy;
 
-const CURIOUS_FONT: &[u8] = include_bytes!("../../assets/CuriousTrack.ttf");
+const INTER_REGULAR: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
+const INTER_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Inter-Medium.ttf");
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
+const INTER_BOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-Bold.ttf");
+const JETBRAINS_REGULAR: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+const JETBRAINS_BOLD: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf");
+
+fn register_bundled_fonts() {
+    let mut font_cx = FONT_CONTEXT.lock();
+    for bytes in [
+        INTER_REGULAR,
+        INTER_MEDIUM,
+        INTER_SEMIBOLD,
+        INTER_BOLD,
+        JETBRAINS_REGULAR,
+        JETBRAINS_BOLD,
+    ] {
+        font_cx
+            .collection
+            .register_fonts(bytes.to_vec().into(), None);
+    }
+}
 
 pub fn run() {
     let runtime = Runtime::new().expect("tokio runtime");
@@ -34,11 +55,15 @@ pub fn run() {
         tokio::task::block_in_place(|| {
             #[cfg(target_os = "macos")]
             set_macos_dock_icon();
+            register_bundled_fonts();
             {
-                let mut font_cx = FONT_CONTEXT.lock();
-                font_cx
-                    .collection
-                    .register_fonts(CURIOUS_FONT.to_vec().into(), None);
+                let settings = crate::app_core::settings::AppSettings::load();
+                crate::app_core::fonts::register_user_fonts(&settings.custom_font_paths, |bytes| {
+                    let mut font_cx = FONT_CONTEXT.lock();
+                    font_cx
+                        .collection
+                        .register_fonts(bytes.to_vec().into(), None);
+                });
             }
             let mut config = windowing::main_window_config(WindowPolicy::current());
             if let Some(icon) = load_window_icon() {
@@ -78,10 +103,12 @@ fn app_view(window_id: WindowId) -> impl IntoView {
     let results = modals::tournament_results_modal(state)
         .style(move |s| overlay_host_style(s, state.show_tournament_results.get()));
     Stack::new((shell.style(|s| s.size_full()), options, tournament, results))
-        .style(|s| {
+        .style(move |s| {
+            let settings = state.settings.get();
             s.size_full()
                 .min_width(0.0)
                 .min_height(0.0)
+                .font_family(settings.ui_font.clone())
                 .overflow_x(Overflow::Clip)
                 .overflow_y(Overflow::Clip)
         })
@@ -178,5 +205,12 @@ mod tests {
             !production.contains("Empty::new().into_any()"),
             "creating overlay widgets inside dyn_view leaves them without a window root"
         );
+        assert!(
+            !production.contains("CuriousTrack") && !production.contains("Curious Track"),
+            "Curious Track must not be registered as a global fallback"
+        );
+        assert!(production.contains("Inter-Regular.ttf"));
+        assert!(production.contains("JetBrainsMono-Regular.ttf"));
+        assert!(production.contains("settings.ui_font"));
     }
 }

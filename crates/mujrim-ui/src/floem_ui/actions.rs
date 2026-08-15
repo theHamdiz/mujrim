@@ -233,6 +233,18 @@ pub fn resign(state: AppState, handles: &AppHandles) {
 }
 
 pub fn on_board_press(state: AppState, handles: &AppHandles, square: Square) {
+    if state.board_edit.get_untracked() {
+        if state.tray_piece.get_untracked().is_some() {
+            place_edit_piece(state, handles, square);
+            return;
+        }
+        let Some(mut game) = state.game.get_untracked() else {
+            return;
+        };
+        game.begin_drag(square);
+        state.game.set(Some(game));
+        return;
+    }
     let Some(mut game) = state.game.get_untracked() else {
         return;
     };
@@ -250,7 +262,7 @@ pub fn on_board_press(state: AppState, handles: &AppHandles, square: Square) {
     if state.review_ply.get_untracked().is_some() {
         if matches!(
             state.screen.get_untracked(),
-            Screen::Study | Screen::Learn | Screen::Analysis | Screen::Library
+            Screen::Study | Screen::Analysis
         ) {
             resume_from_review(state);
         } else {
@@ -282,6 +294,17 @@ pub fn on_board_press(state: AppState, handles: &AppHandles, square: Square) {
 }
 
 pub fn on_board_release(state: AppState, handles: &AppHandles, square: Square) {
+    if state.board_edit.get_untracked() {
+        let Some(mut game) = state.game.get_untracked() else {
+            return;
+        };
+        let drag = game.end_drag();
+        state.game.set(Some(game));
+        if let Some((from, _)) = drag {
+            move_edit_piece(state, handles, from, square);
+        }
+        return;
+    }
     let Some(mut game) = state.game.get_untracked() else {
         return;
     };
@@ -390,6 +413,8 @@ fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: 
     }
     state.move_log.update(|log| log.push(mv.to_uci()));
     state.move_annotations.update(|items| items.push(None));
+    record_study_move(state, handles, &mv.to_uci());
+    review_active_puzzle(state, handles);
     follow_live_tail(state);
     let slide = state.game.with_untracked(|game| {
         game.as_ref()
@@ -407,6 +432,48 @@ fn apply_played_move(state: AppState, handles: &AppHandles, mv: Move, captured: 
         return;
     }
     engine::maybe_start_engine_turn(state, handles);
+    maybe_live_analyze(state, handles);
+}
+
+fn review_active_puzzle(state: AppState, handles: &AppHandles) {
+    let Some(item) = state.active_puzzle.get_untracked() else {
+        return;
+    };
+    let played = state.move_log.get_untracked();
+    if played.len() > item.puzzle.solution.len()
+        || played
+            .iter()
+            .zip(&item.puzzle.solution)
+            .any(|(played, expected)| played != expected)
+    {
+        grade_puzzle(state, handles, &item.puzzle.id, 1);
+        return;
+    }
+    if logic::puzzle_line_matches(&played, &item.puzzle.solution) {
+        grade_puzzle(state, handles, &item.puzzle.id, 5);
+    }
+}
+
+fn grade_puzzle(state: AppState, handles: &AppHandles, id: &str, grade: u8) {
+    let today = logic::today_day();
+    let result = handles
+        .training
+        .borrow_mut()
+        .as_mut()
+        .ok_or_else(|| "Training database is unavailable.".to_owned())
+        .and_then(|store| store.review(id, grade, today));
+    match result {
+        Ok(_) => {
+            state.active_puzzle.set(None);
+            refresh_training_due(state, handles);
+            state.status.set(if grade >= 3 {
+                "Correct. Scheduled the next review.".to_owned()
+            } else {
+                "Not the solution. This puzzle will return soon.".to_owned()
+            });
+        }
+        Err(error) => state.status.set(error),
+    }
 }
 
 fn follow_live_tail(state: AppState) {
@@ -898,7 +965,8 @@ pub fn refresh_study(state: AppState, handles: &AppHandles) {
 
 pub fn open_library(state: AppState, handles: &AppHandles) {
     refresh_study(state, handles);
-    state.screen.set(Screen::Library);
+    set_study_tab(state, crate::app_core::settings::StudyTab::Library);
+    state.screen.set(Screen::Study);
 }
 
 pub fn load_library_game(state: AppState, handles: &AppHandles, id: String) {
@@ -923,9 +991,10 @@ pub fn load_library_game(state: AppState, handles: &AppHandles, id: String) {
                 ));
                 if !matches!(
                     state.screen.get_untracked(),
-                    Screen::Study | Screen::Learn | Screen::Analysis | Screen::Library
+                    Screen::Study | Screen::Analysis
                 ) {
-                    state.screen.set(Screen::Library);
+                    set_study_tab(state, crate::app_core::settings::StudyTab::Library);
+                    state.screen.set(Screen::Study);
                 }
                 state.status.set("Loaded library game.".to_owned());
                 sync_move_note(state, handles);
@@ -992,7 +1061,8 @@ pub fn start_training(state: AppState, handles: &AppHandles, id: String) {
                 state.active_puzzle.set(Some(item.clone()));
                 state.puzzle_line.set(Vec::new());
                 state.active_gambit_id.set(None);
-                state.screen.set(Screen::Learn);
+                set_study_tab(state, crate::app_core::settings::StudyTab::Learn);
+                state.screen.set(Screen::Study);
                 state.status.set(format!(
                     "Training: {}. Find the best continuation.",
                     item.puzzle.themes.join(", ")
@@ -1061,7 +1131,7 @@ pub fn study_opening_move(state: AppState, uci: String) {
             state
                 .status
                 .set("Opening move played on the study board.".to_owned());
-            if !matches!(state.screen.get_untracked(), Screen::Study | Screen::Learn) {
+            if !matches!(state.screen.get_untracked(), Screen::Study) {
                 state.screen.set(Screen::Study);
             }
         }
@@ -1082,6 +1152,178 @@ pub fn ensure_study_board(state: AppState, handles: &AppHandles) {
     state.review_ply.set(None);
     state.game.set(Some(GameState::new(types::Board::new())));
     sync_move_note(state, handles);
+}
+
+pub fn toggle_board_edit(state: AppState, handles: &AppHandles) {
+    let next = !state.board_edit.get_untracked();
+    state.board_edit.set(next);
+    if next {
+        ensure_study_board(state, handles);
+        if let Some(game) = state.game.get_untracked() {
+            state.edit_fen.set(game.board.to_fen());
+        }
+        state.white_player.set(PlayerConfig::Human);
+        state.black_player.set(PlayerConfig::Human);
+        state
+            .status
+            .set("Board editor on. Drag pieces or pick from the tray.".to_owned());
+    } else {
+        state.tray_piece.set(None);
+        state.status.set("Board editor off.".to_owned());
+    }
+}
+
+pub fn set_tray_piece(state: AppState, piece: types::Piece, color: types::Color) {
+    state.tray_piece.set(Some((piece, color)));
+}
+
+pub fn apply_edit_fen(state: AppState, handles: &AppHandles) {
+    types::init();
+    match types::Board::from_fen(&state.edit_fen.get_untracked()) {
+        Ok(board) => {
+            if !editor_kings_ok(&board) {
+                state
+                    .status
+                    .set("A legal setup needs exactly one king of each color.".to_owned());
+                return;
+            }
+            commit_edited_board(state, handles, board);
+            state.status.set("Loaded FEN onto the board.".to_owned());
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn clear_edit_board(state: AppState, handles: &AppHandles) {
+    types::init();
+    match types::Board::from_fen("8/8/8/8/8/8/8/8 w - - 0 1") {
+        Ok(board) => {
+            state.edit_fen.set(board.to_fen());
+            commit_edited_board(state, handles, board);
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn startpos_edit(state: AppState, handles: &AppHandles) {
+    types::init();
+    let board = types::Board::new();
+    state.edit_fen.set(board.to_fen());
+    commit_edited_board(state, handles, board);
+}
+
+pub fn play_from_edit(state: AppState, handles: &AppHandles) {
+    state.board_edit.set(false);
+    state.tray_piece.set(None);
+    state.screen.set(Screen::Analysis);
+    analyze_game(state, handles);
+}
+
+pub fn place_edit_piece(state: AppState, handles: &AppHandles, square: Square) {
+    let Some(mut game) = state.game.get_untracked() else {
+        return;
+    };
+    if let Some((piece, color)) = state.tray_piece.get_untracked() {
+        if let Some((existing, existing_color)) = game.board.piece_on(square) {
+            game.board.remove_piece(existing, existing_color, square);
+        }
+        game.board.put_piece(piece, color, square);
+    } else if let Some((existing, existing_color)) = game.board.piece_on(square) {
+        game.board.remove_piece(existing, existing_color, square);
+    }
+    commit_edited_board(state, handles, game.board);
+}
+
+pub fn move_edit_piece(state: AppState, handles: &AppHandles, from: Square, to: Square) {
+    let Some(mut game) = state.game.get_untracked() else {
+        return;
+    };
+    let Some((piece, color)) = game.board.piece_on(from) else {
+        return;
+    };
+    game.board.remove_piece(piece, color, from);
+    if from != to {
+        if let Some((existing, existing_color)) = game.board.piece_on(to) {
+            game.board.remove_piece(existing, existing_color, to);
+        }
+        game.board.put_piece(piece, color, to);
+    }
+    commit_edited_board(state, handles, game.board);
+}
+
+fn commit_edited_board(state: AppState, handles: &AppHandles, board: types::Board) {
+    state.initial_fen.set(board.to_fen());
+    state.edit_fen.set(board.to_fen());
+    state.move_log.set(Vec::new());
+    state.move_annotations.set(Vec::new());
+    state.review_ply.set(None);
+    state.game.set(Some(GameState::new(board)));
+    let _ = handles;
+}
+
+pub(crate) fn editor_kings_ok(board: &types::Board) -> bool {
+    board
+        .piece_bb(types::Piece::King, types::Color::White)
+        .count_ones()
+        == 1
+        && board
+            .piece_bb(types::Piece::King, types::Color::Black)
+            .count_ones()
+            == 1
+}
+
+pub fn set_edit_side(state: AppState, handles: &AppHandles, color: types::Color) {
+    patch_edit_board(state, handles, |board| board.side_to_move = color);
+}
+
+pub fn toggle_edit_castle(state: AppState, handles: &AppHandles, right: u8) {
+    patch_edit_board(state, handles, |board| board.castling_rights ^= right);
+}
+
+pub fn cycle_edit_ep(state: AppState, handles: &AppHandles) {
+    patch_edit_board(state, handles, |board| {
+        let rank = if board.side_to_move == types::Color::White {
+            5
+        } else {
+            2
+        };
+        board.en_passant = match board.en_passant {
+            None => Some(types::Square::from_file_rank(0, rank)),
+            Some(square) if square.file() < 7 => {
+                Some(types::Square::from_file_rank(square.file() + 1, rank))
+            }
+            Some(_) => None,
+        };
+    });
+}
+
+fn patch_edit_board(state: AppState, handles: &AppHandles, patch: impl FnOnce(&mut types::Board)) {
+    let Some(game) = state.game.get_untracked() else {
+        return;
+    };
+    let mut board = game.board;
+    patch(&mut board);
+    match types::Board::from_fen(&board.to_fen()) {
+        Ok(board) => commit_edited_board(state, handles, board),
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn highlight_explain(state: AppState, squares: Vec<Square>) {
+    state.explain_marks.set(squares);
+}
+
+pub fn set_live_analysis(state: AppState, handles: &AppHandles, enabled: bool) {
+    state.live_analysis.set(enabled);
+    if enabled {
+        analyze_game(state, handles);
+    }
+}
+
+fn maybe_live_analyze(state: AppState, handles: &AppHandles) {
+    if state.live_analysis.get_untracked() && state.screen.get_untracked() == Screen::Analysis {
+        analyze_game(state, handles);
+    }
 }
 
 pub fn view_ply(state: AppState, handles: &AppHandles, ply: usize) {
@@ -1237,10 +1479,15 @@ pub fn refresh_learn_catalog(state: AppState, handles: &AppHandles) {
         .set(logic::learn_gambit_catalog(handles.book.as_ref().as_ref()));
 }
 
+pub fn set_study_tab(state: AppState, tab: crate::app_core::settings::StudyTab) {
+    update_settings(state, |settings| settings.study_tab = tab);
+}
+
 pub fn open_learn(state: AppState, handles: &AppHandles) {
     ensure_study_board(state, handles);
     refresh_learn_catalog(state, handles);
-    state.screen.set(Screen::Learn);
+    set_study_tab(state, crate::app_core::settings::StudyTab::Learn);
+    state.screen.set(Screen::Study);
 }
 
 pub fn refresh_saved_lines(state: AppState, handles: &AppHandles) {
@@ -1316,6 +1563,333 @@ pub fn load_preparation(state: AppState, handles: &AppHandles, id: String) {
     }
 }
 
+pub fn refresh_studies(state: AppState, handles: &AppHandles) {
+    if let Some(database) = handles.study.borrow().as_ref()
+        && let Ok(studies) = database.list_studies()
+    {
+        state.studies.set(studies);
+    }
+}
+
+pub fn create_study(state: AppState, handles: &AppHandles) {
+    let title = state.study_title.get_untracked();
+    let title = if title.trim().is_empty() {
+        "Untitled study".to_owned()
+    } else {
+        title
+    };
+    let study = mujrim_study::study_doc::Study::new(title);
+    persist_study(state, handles, study);
+}
+
+pub fn add_study_chapter(state: AppState, handles: &AppHandles) {
+    let Some(id) = state.active_study_id.get_untracked() else {
+        state.status.set("Open a study first.".to_owned());
+        return;
+    };
+    let mut studies = state.studies.get_untracked();
+    let Some(study) = studies.iter_mut().find(|study| study.id == id) else {
+        state
+            .status
+            .set("That study is no longer available.".to_owned());
+        return;
+    };
+    let title = state.chapter_title.get_untracked();
+    let title = if title.trim().is_empty() {
+        format!("Chapter {}", study.chapters.len() + 1)
+    } else {
+        title
+    };
+    let fen = logic::displayed_study_fen(
+        &state.initial_fen.get_untracked(),
+        &state.move_log.get_untracked(),
+        state.review_ply.get_untracked(),
+        state.game.get_untracked().map(|game| game.board.to_fen()),
+    );
+    study.chapters.push(mujrim_study::study_doc::Chapter::new(
+        title,
+        fen,
+        mujrim_study::move_tree::MoveTree::default(),
+    ));
+    persist_study(state, handles, study.clone());
+}
+
+pub fn save_chapter_from_board(state: AppState, handles: &AppHandles) {
+    let Some(id) = state.active_study_id.get_untracked() else {
+        create_study(state, handles);
+        return;
+    };
+    let mut studies = state.studies.get_untracked();
+    let Some(study) = studies.iter_mut().find(|study| study.id == id) else {
+        state
+            .status
+            .set("That study is no longer available.".to_owned());
+        return;
+    };
+    let fen = state.initial_fen.get_untracked();
+    let moves = state.move_log.get_untracked();
+    match mujrim_study::move_tree::MoveTree::from_mainline(&fen, &moves) {
+        Ok(tree) => {
+            if let Some(chapter) = active_chapter_mut(study, state) {
+                chapter.start_fen = fen;
+                chapter.tree = tree;
+            } else {
+                study.chapters.push(mujrim_study::study_doc::Chapter::new(
+                    state.chapter_title.get_untracked(),
+                    fen,
+                    tree,
+                ));
+            }
+            persist_study(state, handles, study.clone());
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn load_study(state: AppState, handles: &AppHandles, id: String) {
+    let study = state
+        .studies
+        .get_untracked()
+        .into_iter()
+        .find(|study| study.id == id);
+    let Some(study) = study else {
+        refresh_studies(state, handles);
+        state
+            .status
+            .set("That study is no longer available.".to_owned());
+        return;
+    };
+    state.active_study_id.set(Some(study.id.clone()));
+    state.study_title.set(study.title.clone());
+    if let Some(chapter) = study.chapters.first() {
+        apply_chapter(state, handles, chapter);
+    }
+    state.status.set(format!("Opened '{}'.", study.title));
+}
+
+pub fn delete_study(state: AppState, handles: &AppHandles, id: String) {
+    let result = handles
+        .study
+        .borrow_mut()
+        .as_mut()
+        .ok_or_else(|| "Study library is unavailable.".to_owned())
+        .and_then(|database| database.delete_study(&id));
+    match result {
+        Ok(()) => {
+            if state.active_study_id.get_untracked().as_deref() == Some(id.as_str()) {
+                state.active_study_id.set(None);
+                state.active_chapter_id.set(None);
+            }
+            state.status.set("Deleted study.".to_owned());
+            refresh_studies(state, handles);
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn study_tree_labels(state: AppState) -> Vec<(Vec<usize>, String)> {
+    let Some(chapter) = active_chapter(state) else {
+        return Vec::new();
+    };
+    let mut labels = Vec::new();
+    collect_tree_labels(&chapter.tree.children, &[], 0, &mut labels);
+    labels
+}
+
+pub fn jump_study_path(state: AppState, handles: &AppHandles, path: Vec<usize>) {
+    let Some(chapter) = active_chapter(state) else {
+        return;
+    };
+    let mut moves = Vec::new();
+    let mut children = &chapter.tree.children;
+    for &index in &path {
+        let Some(node) = children.get(index) else {
+            return;
+        };
+        moves.push(node.uci.clone());
+        children = &node.children;
+    }
+    match logic::replay_study_game(&chapter.start_fen, &moves) {
+        Ok(game) => {
+            state.initial_fen.set(chapter.start_fen.clone());
+            state.move_log.set(moves.clone());
+            state.move_annotations.set(vec![None; moves.len()]);
+            state
+                .review_ply
+                .set(settings::review_cursor_for_view(moves.len(), moves.len()));
+            state.study_path.set(path);
+            state.game.set(Some(game));
+            if let Some(node) = chapter.tree.node_at(&state.study_path.get_untracked()) {
+                state.move_note.set(node.comment.clone());
+            }
+            let _ = handles;
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn record_study_move(state: AppState, handles: &AppHandles, uci: &str) {
+    let Some(id) = state.active_study_id.get_untracked() else {
+        return;
+    };
+    let mut studies = state.studies.get_untracked();
+    let Some(study) = studies.iter_mut().find(|study| study.id == id) else {
+        return;
+    };
+    let Some(chapter) = active_chapter_mut(study, state) else {
+        return;
+    };
+    match chapter
+        .tree
+        .play_uci(&state.study_path.get_untracked(), uci)
+    {
+        Ok(path) => {
+            state.study_path.set(path);
+            persist_study(state, handles, study.clone());
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn train_current_preparation(state: AppState, handles: &AppHandles) {
+    let moves = state.move_log.get_untracked();
+    if moves.is_empty() {
+        state.status.set("Play or load a line first.".to_owned());
+        return;
+    }
+    let fen = state.initial_fen.get_untracked();
+    let puzzle = mujrim_study::training::Puzzle {
+        id: format!(
+            "prep-{:016x}",
+            fnv1a64(format!("{fen} {}", moves.join(" ")).as_bytes())
+        ),
+        fen,
+        solution: moves,
+        themes: vec!["repertoire".to_owned()],
+        rating: 1500,
+    };
+    let mut training = handles.training.borrow_mut();
+    match training.as_mut() {
+        Some(store) => match store.add(puzzle.clone()) {
+            Ok(_) => {
+                drop(training);
+                start_training(state, handles, puzzle.id);
+            }
+            Err(error) => state.status.set(error),
+        },
+        None => state
+            .status
+            .set("Training database is unavailable.".to_owned()),
+    }
+}
+
+fn persist_study(state: AppState, handles: &AppHandles, study: mujrim_study::study_doc::Study) {
+    let result = handles
+        .study
+        .borrow_mut()
+        .as_mut()
+        .ok_or_else(|| "Study library is unavailable.".to_owned())
+        .and_then(|database| database.save_study(&study));
+    match result {
+        Ok(()) => {
+            state.active_study_id.set(Some(study.id.clone()));
+            if let Some(chapter) = study.chapters.first() {
+                state.active_chapter_id.set(Some(chapter.id.clone()));
+            }
+            state.status.set(format!("Saved '{}'.", study.title));
+            refresh_studies(state, handles);
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+fn apply_chapter(
+    state: AppState,
+    handles: &AppHandles,
+    chapter: &mujrim_study::study_doc::Chapter,
+) {
+    state.active_chapter_id.set(Some(chapter.id.clone()));
+    state.chapter_title.set(chapter.title.clone());
+    state.study_path.set(Vec::new());
+    let moves = chapter.tree.mainline();
+    match logic::replay_study_game(&chapter.start_fen, &moves) {
+        Ok(game) => {
+            state.initial_fen.set(chapter.start_fen.clone());
+            state.move_log.set(moves.clone());
+            state.move_annotations.set(vec![None; moves.len()]);
+            state
+                .review_ply
+                .set(settings::review_cursor_for_view(moves.len(), moves.len()));
+            state.game.set(Some(game));
+            sync_move_note(state, handles);
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+fn active_chapter(state: AppState) -> Option<mujrim_study::study_doc::Chapter> {
+    let study_id = state.active_study_id.get_untracked()?;
+    let chapter_id = state.active_chapter_id.get_untracked();
+    let study = state
+        .studies
+        .get_untracked()
+        .into_iter()
+        .find(|study| study.id == study_id)?;
+    chapter_id
+        .and_then(|id| {
+            study
+                .chapters
+                .iter()
+                .find(|chapter| chapter.id == id)
+                .cloned()
+        })
+        .or_else(|| study.chapters.first().cloned())
+}
+
+fn active_chapter_mut(
+    study: &mut mujrim_study::study_doc::Study,
+    state: AppState,
+) -> Option<&mut mujrim_study::study_doc::Chapter> {
+    let chapter_id = state.active_chapter_id.get_untracked();
+    if let Some(id) = chapter_id {
+        study.chapters.iter_mut().find(|chapter| chapter.id == id)
+    } else {
+        study.chapters.first_mut()
+    }
+}
+
+fn collect_tree_labels(
+    children: &[mujrim_study::move_tree::MoveNode],
+    path: &[usize],
+    ply: usize,
+    out: &mut Vec<(Vec<usize>, String)>,
+) {
+    for (index, node) in children.iter().enumerate() {
+        let mut next = path.to_vec();
+        next.push(index);
+        let number = if ply.is_multiple_of(2) {
+            format!("{}. ", ply / 2 + 1)
+        } else {
+            String::new()
+        };
+        let branch = if index > 0 { " ⊞ " } else { "" };
+        out.push((
+            next.clone(),
+            format!("{branch}{number}{}{}", node.san, node.glyphs),
+        ));
+        collect_tree_labels(&node.children, &next, ply + 1, out);
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
 pub fn delete_preparation(state: AppState, handles: &AppHandles, id: String) {
     let result = handles
         .study
@@ -1358,7 +1932,8 @@ pub fn start_gambit_lesson(state: AppState, handles: &AppHandles, id: String) {
                     .review_ply
                     .set(settings::review_cursor_for_view(ply, lesson.moves.len()));
                 state.active_puzzle.set(None);
-                state.screen.set(Screen::Learn);
+                set_study_tab(state, crate::app_core::settings::StudyTab::Learn);
+                state.screen.set(Screen::Study);
                 state.status.set(format!(
                     "Gambit: {} ({}) · arrows and ← → step the line.",
                     lesson.name, lesson.eco
@@ -2400,6 +2975,45 @@ fn parse_score_cp(label: &str) -> Option<i32> {
         .ok()
 }
 
+pub fn import_ui_font(state: AppState) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Fonts", &["ttf", "otf", "ttc"])
+        .pick_file()
+    else {
+        return;
+    };
+    match crate::app_core::fonts::import_font_file(&path) {
+        Ok((family, dest)) => {
+            if let Ok(bytes) = std::fs::read(&dest) {
+                let mut font_cx = floem::text::FONT_CONTEXT.lock();
+                font_cx.collection.register_fonts(bytes.into(), None);
+            }
+            update_settings(state, |settings| {
+                settings.ui_font = family.clone();
+                let path = dest.display().to_string();
+                if !settings.custom_font_paths.iter().any(|item| item == &path) {
+                    settings.custom_font_paths.push(path);
+                }
+            });
+            state.status.set(format!("Loaded font {family}."));
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn speak_explanation(text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("spd-say")
+        .arg("--wait")
+        .arg(text)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 pub fn update_settings(state: AppState, patch: impl FnOnce(&mut AppSettings)) {
     state.settings.update(patch);
     state.persist_settings();
@@ -2561,6 +3175,15 @@ mod tests {
     }
 
     #[test]
+    fn editor_requires_both_kings() {
+        types::init();
+        let missing = types::Board::from_fen("8/8/8/8/8/8/8/4K3 w - - 0 1").expect("fen");
+        assert!(!editor_kings_ok(&missing));
+        let ok = types::Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").expect("fen");
+        assert!(editor_kings_ok(&ok));
+    }
+
+    #[test]
     fn parse_score_cp_reads_uci_style_labels() {
         assert_eq!(
             parse_score_cp("depth 12/14 | score 34 cp | 100 nodes"),
@@ -2615,6 +3238,11 @@ mod tests {
             "arrows_from_uci_pv",
             "next_incremental_uci",
             "fn begin_tournament",
+            "fn highlight_explain",
+            "fn set_live_analysis",
+            "fn set_edit_side",
+            "fn cycle_edit_ep",
+            "fn editor_kings_ok",
             "fn open_learn",
             "fn handle_board_key",
             "fn navigate_board_ply",

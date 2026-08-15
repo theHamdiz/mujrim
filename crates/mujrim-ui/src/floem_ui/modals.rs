@@ -112,6 +112,57 @@ fn display_tab(state: AppState) -> impl IntoView {
                 actions::update_settings(state, |settings| settings.piece_set = set);
             },
         ),
+        widgets::picker_row(
+            state,
+            "UI font",
+            move || crate::app_core::fonts::FontChoice {
+                family: state.settings.get().ui_font,
+            },
+            crate::app_core::fonts::bundled_ui_fonts()
+                .into_iter()
+                .chain(state.settings.get().custom_font_paths.iter().map(|path| {
+                    crate::app_core::fonts::FontChoice {
+                        family: std::path::Path::new(path)
+                            .file_stem()
+                            .map(|stem| stem.to_string_lossy().replace('-', " "))
+                            .unwrap_or_else(|| path.clone()),
+                    }
+                }))
+                .collect::<Vec<_>>(),
+            move |choice| {
+                actions::update_settings(state, |settings| settings.ui_font = choice.family);
+            },
+        ),
+        widgets::picker_row(
+            state,
+            "Mono font",
+            move || crate::app_core::fonts::FontChoice {
+                family: state.settings.get().mono_font,
+            },
+            crate::app_core::fonts::bundled_mono_fonts(),
+            move |choice| {
+                actions::update_settings(state, |settings| settings.mono_font = choice.family);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Ligatures",
+            move || state.settings.get().font_ligatures,
+            move |value| {
+                actions::update_settings(state, |settings| settings.font_ligatures = value);
+            },
+        ),
+        widgets::toggle_row(
+            state,
+            "Speak explanations",
+            move || state.settings.get().explain_speak,
+            move |value| {
+                actions::update_settings(state, |settings| settings.explain_speak = value);
+            },
+        ),
+        widgets::ghost_button(state, "Add font file", move || {
+            actions::import_ui_font(state)
+        }),
         widgets::toggle_row(
             state,
             "Coordinates",

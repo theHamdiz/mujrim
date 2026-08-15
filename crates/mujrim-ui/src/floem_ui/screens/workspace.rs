@@ -49,22 +49,14 @@ pub fn study(state: AppState, handles: AppHandles) -> impl IntoView {
     )
 }
 
+#[allow(dead_code)]
 pub fn learn(state: AppState, handles: AppHandles) -> impl IntoView {
-    workspace(
-        state,
-        handles.clone(),
-        false,
-        super::study::learn_sidebar(state, handles),
-    )
+    study(state, handles)
 }
 
+#[allow(dead_code)]
 pub fn library(state: AppState, handles: AppHandles) -> impl IntoView {
-    workspace(
-        state,
-        handles.clone(),
-        false,
-        super::study::library_sidebar(state, handles),
-    )
+    study(state, handles)
 }
 
 pub fn tournaments(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -269,7 +261,7 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
         }),
         Stack::horizontal((
             eval_bar::eval_bar(state).style(move |s| {
-                if arena_layout(state) || state.game.get().is_none() {
+                if arena_layout(state) || (state.game.get().is_none() && !state.board_edit.get()) {
                     s.display(Display::None)
                 } else {
                     s
@@ -304,6 +296,13 @@ fn board_pane(state: AppState, handles: AppHandles, show_clocks: bool) -> impl I
                 s.display(Display::None).flex_grow(0.0f32).height(0.0)
             } else {
                 s
+            }
+        }),
+        piece_tray(state, handles.clone()).style(move |s| {
+            if state.board_edit.get() {
+                s
+            } else {
+                s.display(Display::None).height(0.0)
             }
         }),
         live_board_grid(state, handles),
@@ -343,10 +342,7 @@ fn empty_board(state: AppState, handles: AppHandles, tournament_board: bool) -> 
             Label::derived(move || {
                 (if state.screen.get() == Screen::Tournaments {
                     "Configure the tournament, then Start."
-                } else if matches!(
-                    state.screen.get(),
-                    Screen::Study | Screen::Learn | Screen::Library
-                ) {
+                } else if matches!(state.screen.get(), Screen::Study) {
                     "Explorer, library, and saved lines load onto this board."
                 } else {
                     "Start a game from Home."
@@ -700,42 +696,66 @@ fn playing_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
 fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
     let telemetry = handles.telemetry.clone();
     Stack::vertical((
-        pane_title("Multi-Engine Studio"),
-        eval_graph::eval_graph(state),
-        Label::derived(move || {
-            state
-                .analysis
-                .get()
-                .map_or_else(|| telemetry.get().label, |snap| snap.status)
-        })
-        .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
-        Label::derived(move || {
-            state
-                .analysis
-                .get()
-                .and_then(|snap| snap.consensus.clone())
-                .unwrap_or_default()
-        })
-        .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
-        widgets::stepper_row(
-            state,
-            "MultiPV",
-            "",
-            move || state.analysis_multipv.get(),
-            move |value| state.analysis_multipv.set(value),
-            1,
-            5,
-        ),
-        analysis_engine_toggles(state, handles.clone()),
-        widgets::primary_button(state, "Run Multi-Engine Analysis", {
-            let handles = handles.clone();
-            move || actions::analyze_game(state, &handles)
-        }),
-        widgets::ghost_button(state, "Review Current Game", {
-            let handles = handles.clone();
-            move || actions::review_played_game(state, &handles)
-        }),
-        widgets::explanation_card(state, move || explanation_text(state)),
+        board_editor_card(state, handles.clone()),
+        widgets::explanation_card(state, move || explanation_lines(state)),
+        Label::new("!! brilliant   ! good   !? interesting   ? inaccuracy   ?? blunder")
+            .style(|s| s.font_size(11.0).min_width(0.0).width_full().text_wrap()),
+        Stack::vertical((
+            pane_title("Multi-Engine Studio"),
+            eval_graph::eval_graph(state),
+            Label::derived(move || {
+                state
+                    .analysis
+                    .get()
+                    .map_or_else(|| telemetry.get().label, |snap| snap.status)
+            })
+            .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
+            Label::derived(move || {
+                state
+                    .analysis
+                    .get()
+                    .and_then(|snap| snap.consensus.clone())
+                    .unwrap_or_default()
+            })
+            .style(|s| s.font_size(12.0).min_width(0.0).width_full().text_wrap()),
+            Label::derived(move || analysis_pv_scores(state)).style(move |s| {
+                s.font_size(12.0)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .font_family({
+                        let family = state.settings.get().mono_font;
+                        if family.is_empty() {
+                            theme::MONO_FAMILY.to_owned()
+                        } else {
+                            family
+                        }
+                    })
+            }),
+            widgets::stepper_row(
+                state,
+                "MultiPV",
+                "",
+                move || state.analysis_multipv.get(),
+                move |value| state.analysis_multipv.set(value),
+                1,
+                5,
+            ),
+            analysis_engine_toggles(state, handles.clone()),
+            widgets::primary_button(state, "Run Multi-Engine Analysis", {
+                let handles = handles.clone();
+                move || actions::analyze_game(state, &handles)
+            }),
+            widgets::ghost_button(state, "Review Current Game", {
+                let handles = handles.clone();
+                move || actions::review_played_game(state, &handles)
+            }),
+            widgets::toggle_row(state, "Live analysis", move || state.live_analysis.get(), {
+                let handles = handles.clone();
+                move |value| actions::set_live_analysis(state, &handles, value)
+            }),
+        ))
+        .style(|s| s.row_gap(8.0).width_full()),
         pane_title("Engine PV arrows"),
         Label::derived(move || {
             state.analysis.get().map_or_else(
@@ -780,6 +800,146 @@ fn analysis_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
             .height_full()
             .min_height(0.0)
     })
+}
+
+fn board_editor_card(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("Board setup", pal),
+            widgets::toggle_row(state, "Edit board", move || state.board_edit.get(), {
+                let handles = handles.clone();
+                move |value| {
+                    if value != state.board_edit.get_untracked() {
+                        actions::toggle_board_edit(state, &handles);
+                    }
+                }
+            }),
+            TextInput::new(state.edit_fen).style(move |s| {
+                s.width_full()
+                    .min_width(0.0)
+                    .height(34.0)
+                    .border_radius(10.0)
+                    .font_family(state.settings.get().mono_font.clone())
+            }),
+            Stack::horizontal((
+                widgets::ghost_button(state, "Apply FEN", {
+                    let handles = handles.clone();
+                    move || actions::apply_edit_fen(state, &handles)
+                }),
+                widgets::ghost_button(state, "Start", {
+                    let handles = handles.clone();
+                    move || actions::startpos_edit(state, &handles)
+                }),
+                widgets::ghost_button(state, "Clear", {
+                    let handles = handles.clone();
+                    move || actions::clear_edit_board(state, &handles)
+                }),
+                widgets::primary_button(state, "Play from here", {
+                    let handles = handles.clone();
+                    move || actions::play_from_edit(state, &handles)
+                }),
+            ))
+            .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap)),
+            Stack::horizontal((
+                widgets::ghost_button(state, "White to move", {
+                    let handles = handles.clone();
+                    move || actions::set_edit_side(state, &handles, types::Color::White)
+                }),
+                widgets::ghost_button(state, "Black to move", {
+                    let handles = handles.clone();
+                    move || actions::set_edit_side(state, &handles, types::Color::Black)
+                }),
+                widgets::ghost_button(state, "K", {
+                    let handles = handles.clone();
+                    move || {
+                        actions::toggle_edit_castle(
+                            state,
+                            &handles,
+                            types::board::WHITE_KING_CASTLE,
+                        )
+                    }
+                }),
+                widgets::ghost_button(state, "Q", {
+                    let handles = handles.clone();
+                    move || {
+                        actions::toggle_edit_castle(
+                            state,
+                            &handles,
+                            types::board::WHITE_QUEEN_CASTLE,
+                        )
+                    }
+                }),
+                widgets::ghost_button(state, "k", {
+                    let handles = handles.clone();
+                    move || {
+                        actions::toggle_edit_castle(
+                            state,
+                            &handles,
+                            types::board::BLACK_KING_CASTLE,
+                        )
+                    }
+                }),
+                widgets::ghost_button(state, "q", {
+                    let handles = handles.clone();
+                    move || {
+                        actions::toggle_edit_castle(
+                            state,
+                            &handles,
+                            types::board::BLACK_QUEEN_CASTLE,
+                        )
+                    }
+                }),
+                widgets::ghost_button(state, "Cycle EP", {
+                    let handles = handles.clone();
+                    move || actions::cycle_edit_ep(state, &handles)
+                }),
+            ))
+            .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap)),
+        ))
+        .style(|s| s.row_gap(8.0).width_full()),
+    )
+}
+
+fn piece_tray(state: AppState, _handles: AppHandles) -> impl IntoView {
+    let pieces = [
+        (types::Piece::King, types::Color::White, "K"),
+        (types::Piece::Queen, types::Color::White, "Q"),
+        (types::Piece::Rook, types::Color::White, "R"),
+        (types::Piece::Bishop, types::Color::White, "B"),
+        (types::Piece::Knight, types::Color::White, "N"),
+        (types::Piece::Pawn, types::Color::White, "P"),
+        (types::Piece::King, types::Color::Black, "k"),
+        (types::Piece::Queen, types::Color::Black, "q"),
+        (types::Piece::Rook, types::Color::Black, "r"),
+        (types::Piece::Bishop, types::Color::Black, "b"),
+        (types::Piece::Knight, types::Color::Black, "n"),
+        (types::Piece::Pawn, types::Color::Black, "p"),
+    ];
+    Stack::horizontal(
+        pieces
+            .into_iter()
+            .map(|(piece, color, label)| {
+                Button::new(label)
+                    .action(move || actions::set_tray_piece(state, piece, color))
+                    .style(move |s| {
+                        let pal = theme::palette(state.settings.get().board_theme);
+                        let selected = state.tray_piece.get() == Some((piece, color));
+                        s.size(28.0, 28.0)
+                            .border_radius(6.0)
+                            .border(0.0)
+                            .font_size(13.0)
+                            .background(if selected {
+                                theme::rgba(pal.accent)
+                            } else {
+                                theme::rgba(pal.panel)
+                            })
+                    })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .style(|s| s.col_gap(4.0).flex_wrap(FlexWrap::Wrap).padding_top(6.0))
 }
 
 fn analysis_engine_toggles(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -1635,12 +1795,24 @@ fn engine_lines(state: AppState, handles: AppHandles) -> impl IntoView {
     })
 }
 
+#[allow(dead_code)]
 pub(super) fn explanation_text(state: AppState) -> String {
+    explanation_lines(state)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn explanation_lines(state: AppState) -> Vec<(String, Vec<types::Square>)> {
     let fen = state.initial_fen.get();
     let moves = state.move_log.get();
     let ply = state.review_ply.get().unwrap_or(moves.len());
     let Ok(board) = logic::board_at_ply(&fen, &moves, ply) else {
-        return "Load a position to hear the threats and plans.".to_owned();
+        return vec![(
+            "Load a position to hear the threats and plans.".to_owned(),
+            Vec::new(),
+        )];
     };
     let last = if ply > 0 {
         let annotation = state.move_annotations.get().get(ply - 1).copied().flatten();
@@ -1652,12 +1824,42 @@ pub(super) fn explanation_text(state: AppState) -> String {
             annotation,
             score_cp: score,
             mv,
-            san: None,
+            san: moves.get(ply - 1).cloned(),
         }
     } else {
         mujrim_study::explain::MoveContext::default()
     };
-    mujrim_study::explain::explain_position(&board, ply, last).panel_text()
+    let explanation = mujrim_study::explain::explain_position(&board, ply, last);
+    let lines = explanation.lines();
+    if lines.is_empty() {
+        vec![(explanation.panel_text(), Vec::new())]
+    } else {
+        lines
+            .into_iter()
+            .map(|line| (line.text, line.squares))
+            .collect()
+    }
+}
+
+fn analysis_pv_scores(state: AppState) -> String {
+    let Some(snap) = state.analysis.get() else {
+        return String::new();
+    };
+    snap.analysis
+        .opinions
+        .iter()
+        .flat_map(|opinion| {
+            opinion.lines.iter().map(move |line| {
+                format!(
+                    "{}  {:+.2}  {}",
+                    opinion.engine_name,
+                    line.score_cp as f32 / 100.0,
+                    line.pv.join(" ")
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -1699,6 +1901,13 @@ mod tests {
             "apply_sidebar_drag",
             "standing_rows_list",
             "explanation_card",
+            "explanation_lines",
+            "board_editor_card",
+            "piece_tray",
+            "White to move",
+            "Cycle EP",
+            "analysis_pv_scores",
+            "set_live_analysis",
             "set_analysis_engine",
             "split_handle",
             "request_pointer_capture",

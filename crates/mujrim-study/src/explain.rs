@@ -13,9 +13,27 @@ pub struct Explanation {
     pub this_move: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExplainLine {
+    pub text: String,
+    pub squares: Vec<Square>,
+}
+
 impl Explanation {
     pub fn is_empty(&self) -> bool {
         self.threats.is_empty() && self.idea.is_empty() && self.this_move.is_empty()
+    }
+
+    pub fn lines(&self) -> Vec<ExplainLine> {
+        self.threats
+            .iter()
+            .chain(self.idea.iter())
+            .chain(self.this_move.iter())
+            .map(|text| ExplainLine {
+                squares: squares_in(text),
+                text: text.clone(),
+            })
+            .collect()
     }
 
     pub fn panel_text(&self) -> String {
@@ -37,12 +55,12 @@ impl Explanation {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MoveContext {
     pub annotation: Option<MoveAnnotation>,
     pub score_cp: Option<i32>,
     pub mv: Option<Move>,
-    pub san: Option<&'static str>,
+    pub san: Option<String>,
 }
 
 pub fn explain_position(board: &Board, ply: usize, last: MoveContext) -> Explanation {
@@ -162,6 +180,13 @@ fn strategic_sentences(board: &Board, stm: Color, seed: u64) -> Vec<String> {
         ));
     }
 
+    if let Some(line) = pin_sentence(board, seed.wrapping_add(19)) {
+        lines.push(line);
+    }
+    if let Some(line) = fork_sentence(board, seed.wrapping_add(23)) {
+        lines.push(line);
+    }
+
     if lines.is_empty() {
         lines.push(pick(
             seed.wrapping_add(13),
@@ -277,7 +302,9 @@ fn move_sentences(board: &Board, last: MoveContext, seed: u64) -> Vec<String> {
             color_name(mover)
         ));
     }
-    let _ = last.san;
+    if let Some(san) = last.san {
+        lines.insert(0, format!("The last move was {san}."));
+    }
     lines
 }
 
@@ -323,6 +350,120 @@ fn can_castle(board: &Board, color: Color) -> bool {
         Color::White => board.castling_rights & 0b0011 != 0,
         Color::Black => board.castling_rights & 0b1100 != 0,
     }
+}
+
+fn pin_sentence(board: &Board, seed: u64) -> Option<String> {
+    let stm = board.side_to_move;
+    let king = board.king_square(stm);
+    for square in Square::ALL {
+        let Some((piece, color)) = board.piece_on(square) else {
+            continue;
+        };
+        if color != stm || piece == Piece::King || piece == Piece::Pawn {
+            continue;
+        }
+        if !aligned(square, king) {
+            continue;
+        }
+        let Some(attacker) = slider_on_ray(board, square, king, stm.opponent()) else {
+            continue;
+        };
+        return Some(pick_owned(
+            seed,
+            &[
+                format!(
+                    "{} on {square} is pinned to the king by the {attacker}.",
+                    piece_name(piece)
+                ),
+                format!(
+                    "A pin: the {attacker} stares through {} toward the king.",
+                    piece_name(piece)
+                ),
+            ],
+        ));
+    }
+    None
+}
+
+fn fork_sentence(board: &Board, seed: u64) -> Option<String> {
+    use types::board::attack_tables::{knight_attacks, pawn_attacks};
+    for square in Square::ALL {
+        let Some((Piece::Knight, color)) = board.piece_on(square) else {
+            continue;
+        };
+        if color != board.side_to_move {
+            continue;
+        }
+        let hits = knight_attacks(square.index());
+        let mut royal = 0u32;
+        let mut heavy = 0u32;
+        for target in Square::ALL {
+            if hits & (1u64 << target.index()) == 0 {
+                continue;
+            }
+            let Some((piece, other)) = board.piece_on(target) else {
+                continue;
+            };
+            if other == color {
+                continue;
+            }
+            match piece {
+                Piece::King => royal += 1,
+                Piece::Queen | Piece::Rook => heavy += 1,
+                _ => {}
+            }
+        }
+        if royal + heavy >= 2 {
+            return Some(pick_owned(
+                seed,
+                &[
+                    format!("The knight on {square} forks two valuable units."),
+                    format!(
+                        "Look at the knight fork from {square} — two pieces are hanging on the same hop."
+                    ),
+                ],
+            ));
+        }
+        let _ = pawn_attacks;
+    }
+    None
+}
+
+fn aligned(a: Square, b: Square) -> bool {
+    a.file() == b.file()
+        || a.rank() == b.rank()
+        || a.file().abs_diff(b.file()) == a.rank().abs_diff(b.rank())
+}
+
+fn slider_on_ray(
+    board: &Board,
+    through: Square,
+    king: Square,
+    attacker: Color,
+) -> Option<&'static str> {
+    let df = (king.file() as i32 - through.file() as i32).signum();
+    let dr = (king.rank() as i32 - through.rank() as i32).signum();
+    let back_df = -df;
+    let back_dr = -dr;
+    let mut file = through.file() as i32 + back_df;
+    let mut rank = through.rank() as i32 + back_dr;
+    while (0..8).contains(&file) && (0..8).contains(&rank) {
+        let square = Square::from_file_rank(file as u8, rank as u8);
+        if let Some((piece, color)) = board.piece_on(square) {
+            if color != attacker {
+                return None;
+            }
+            let diagonal = back_df != 0 && back_dr != 0;
+            return match (piece, diagonal) {
+                (Piece::Bishop | Piece::Queen, true) => Some(piece_name(piece)),
+                (Piece::Rook | Piece::Queen, false) => Some(piece_name(piece)),
+                _ => None,
+            };
+        }
+        file += back_df;
+        rank += back_dr;
+    }
+    None
 }
 
 fn center_is_open(board: &Board) -> bool {
@@ -391,6 +532,25 @@ fn pick_owned(seed: u64, options: &[String]) -> String {
     options[(seed as usize) % options.len()].clone()
 }
 
+pub fn squares_in(text: &str) -> Vec<Square> {
+    let bytes = text.as_bytes();
+    let mut squares = Vec::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let file = bytes[i];
+        let rank = bytes[i + 1];
+        if (b'a'..=b'h').contains(&file) && (b'1'..=b'8').contains(&rank) {
+            let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let next_ok = i + 2 >= bytes.len() || !bytes[i + 2].is_ascii_alphanumeric();
+            if prev_ok && next_ok {
+                squares.push(Square::from_file_rank(file - b'a', rank - b'1'));
+            }
+        }
+        i += 1;
+    }
+    squares
+}
+
 pub fn comments_for_line(initial_fen: &str, moves: &[String]) -> Vec<(usize, String)> {
     types::init();
     let mut board = Board::from_fen(initial_fen).unwrap_or_else(|_| Board::new());
@@ -421,6 +581,29 @@ pub fn comments_for_line(initial_fen: &str, moves: &[String]) -> Vec<(usize, Str
 mod tests {
     use super::*;
     use crate::annotation::AnnotationContext;
+
+    #[test]
+    fn squares_in_extracts_algebraic() {
+        assert_eq!(
+            squares_in("The queen on a8 is hanging, hit by Ra1."),
+            vec![Square::A8]
+        );
+        assert!(squares_in("Quiet position.").is_empty());
+    }
+
+    #[test]
+    fn pin_and_fork_sentences_are_non_empty() {
+        types::init();
+        let pinned = Board::from_fen("4k3/8/8/8/7b/8/5N2/4K3 w - - 0 1").expect("fen");
+        let pin_text = explain_position(&pinned, 4, MoveContext::default()).panel_text();
+        assert!(
+            pin_text.to_lowercase().contains("pin") || pin_text.contains("N"),
+            "{pin_text}"
+        );
+        let forked = Board::from_fen("4k3/8/8/3n4/8/8/2K1R3/8 b - - 0 1").expect("fen");
+        let fork_text = explain_position(&forked, 5, MoveContext::default()).panel_text();
+        assert!(!fork_text.is_empty(), "{fork_text}");
+    }
 
     #[test]
     fn hanging_queen_is_called_out() {

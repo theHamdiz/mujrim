@@ -9,6 +9,27 @@ use super::state::AppState;
 use super::theme;
 
 pub fn eval_bar(state: AppState) -> impl IntoView {
+    Stack::vertical((
+        Label::derived(move || format_eval(state.eval_bar_cp.get())).style(|s| {
+            s.font_size(10.0)
+                .width_full()
+                .justify_center()
+                .padding_bottom(4.0)
+        }),
+        eval_bar_canvas(state),
+    ))
+    .style(|s| s.height_full().flex_shrink(0.0f32))
+}
+
+fn format_eval(cp: i32) -> String {
+    if cp.abs() >= 10_000 {
+        format!("M{}", cp.abs() / 100)
+    } else {
+        format!("{:+.1}", cp as f32 / 100.0)
+    }
+}
+
+fn eval_bar_canvas(state: AppState) -> impl IntoView {
     canvas(move |cx, size| {
         let pal = theme::palette(state.settings.get().board_theme);
         let fill = layout::eval_bar_fill(state.eval_bar_cp.get()) as f64;
@@ -42,11 +63,20 @@ pub fn eval_bar(state: AppState) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+    use super::format_eval;
     #[test]
     fn bar_tracks_eval_signal() {
         let src = include_str!("eval_bar.rs");
         assert!(src.contains("eval_bar_fill"));
         assert!(src.contains("eval_bar_cp"));
         assert!(src.contains("EVAL_BAR_PX"));
+        assert!(src.contains("format_eval"));
+    }
+
+    #[test]
+    fn format_eval_shows_pawns_and_mates() {
+        assert_eq!(format_eval(0), "+0.0");
+        assert_eq!(format_eval(150), "+1.5");
+        assert!(format_eval(10_000).starts_with('M'));
     }
 }

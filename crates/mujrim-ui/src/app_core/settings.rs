@@ -96,11 +96,45 @@ pub enum Screen {
     Menu,
     Playing,
     Study,
-    Learn,
-    Library,
     Tournaments,
     Analysis,
     Ateed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StudyTab {
+    Studies,
+    #[default]
+    Explore,
+    Prepare,
+    Learn,
+    Library,
+}
+
+impl StudyTab {
+    pub const ALL: [Self; 5] = [
+        Self::Studies,
+        Self::Explore,
+        Self::Prepare,
+        Self::Learn,
+        Self::Library,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Studies => "Studies",
+            Self::Explore => "Explore",
+            Self::Prepare => "Prepare",
+            Self::Learn => "Learn",
+            Self::Library => "Library",
+        }
+    }
+}
+
+impl std::fmt::Display for StudyTab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +201,12 @@ pub struct AppSettings {
     pub show_threats: bool,
     pub dock_height_px: f64,
     pub eval_bar_engine: String,
+    pub study_tab: StudyTab,
+    pub explain_speak: bool,
+    pub ui_font: String,
+    pub mono_font: String,
+    pub font_ligatures: bool,
+    pub custom_font_paths: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -201,11 +241,19 @@ impl Default for AppSettings {
             show_threats: true,
             dock_height_px: super::layout::DOCK_OPEN_PX,
             eval_bar_engine: EVAL_BAR_DEFAULT_ENGINE.to_owned(),
+            study_tab: StudyTab::Explore,
+            explain_speak: false,
+            ui_font: DEFAULT_UI_FONT.to_owned(),
+            mono_font: DEFAULT_MONO_FONT.to_owned(),
+            font_ligatures: true,
+            custom_font_paths: Vec::new(),
         }
     }
 }
 
 pub const EVAL_BAR_DEFAULT_ENGINE: &str = "mujrim-v60";
+pub const DEFAULT_UI_FONT: &str = "Inter";
+pub const DEFAULT_MONO_FONT: &str = "JetBrains Mono";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalBarEngineChoice {
@@ -344,6 +392,12 @@ mod tests {
                 < f64::EPSILON
         );
         assert_eq!(settings.eval_bar_engine, EVAL_BAR_DEFAULT_ENGINE);
+        assert_eq!(settings.study_tab, StudyTab::Explore);
+        assert_eq!(settings.ui_font, DEFAULT_UI_FONT);
+        assert_eq!(settings.mono_font, DEFAULT_MONO_FONT);
+        assert!(settings.font_ligatures);
+        assert!(!settings.explain_speak);
+        assert_eq!(StudyTab::ALL.len(), 5);
         assert!(
             (settings.dock_height_px - crate::app_core::layout::DOCK_OPEN_PX).abs() < f64::EPSILON
         );
@@ -361,6 +415,11 @@ mod tests {
             capture_anim_style: CaptureAnimStyle::Shatter,
             piece_anim_style: PieceAnimStyle::Warp,
             sidebar_width_px: 400.0,
+            ui_font: "Inter".to_owned(),
+            mono_font: "JetBrains Mono".to_owned(),
+            font_ligatures: false,
+            explain_speak: true,
+            custom_font_paths: vec!["/tmp/Custom.ttf".to_owned()],
             ..AppSettings::default()
         };
         let encoded = toml::to_string(&settings).expect("encode");
@@ -371,6 +430,14 @@ mod tests {
         assert_eq!(decoded.capture_anim_style, CaptureAnimStyle::Shatter);
         assert_eq!(decoded.piece_anim_style, PieceAnimStyle::Warp);
         assert!((decoded.sidebar_width_px - 400.0).abs() < f64::EPSILON);
+        assert_eq!(decoded.ui_font, "Inter");
+        assert_eq!(decoded.mono_font, "JetBrains Mono");
+        assert!(!decoded.font_ligatures);
+        assert!(decoded.explain_speak);
+        assert_eq!(
+            decoded.custom_font_paths,
+            vec!["/tmp/Custom.ttf".to_owned()]
+        );
     }
 
     #[test]

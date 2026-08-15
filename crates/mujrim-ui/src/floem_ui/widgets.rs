@@ -582,13 +582,61 @@ pub fn body_copy(
     wrapping_label(move || text.clone(), pal)
 }
 
-pub fn explanation_card(state: AppState, body: impl Fn() -> String + 'static) -> impl IntoView {
+pub fn explanation_card(
+    state: AppState,
+    lines: impl Fn() -> Vec<(String, Vec<types::Square>)> + 'static,
+) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
+    let lines = std::rc::Rc::new(lines);
+    let spoken = lines.clone();
     card(
         state,
         Stack::vertical((
             section_label("Position explainer", pal),
-            wrapping_label(body, pal),
+            dyn_view({
+                let lines = lines.clone();
+                move || {
+                    let items = lines();
+                    if items.is_empty() {
+                        return wrapping_label(
+                            || "Quiet position — no immediate tactical alarms.".to_owned(),
+                            pal,
+                        )
+                        .into_any();
+                    }
+                    Stack::vertical(
+                        items
+                            .into_iter()
+                            .map(|(text, squares)| {
+                                Button::new(text)
+                                    .action(move || {
+                                        super::actions::highlight_explain(state, squares.clone())
+                                    })
+                                    .style(move |s| {
+                                        s.width_full()
+                                            .min_width(0.0)
+                                            .justify_start()
+                                            .border(0.0)
+                                            .padding_vert(2.0)
+                                            .font_size(theme::TYPE_BODY)
+                                            .color(theme::rgba(pal().text_secondary))
+                                            .background(floem::peniko::Color::TRANSPARENT)
+                                    })
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .style(|s| s.row_gap(4.0).width_full())
+                    .into_any()
+                }
+            }),
+            ghost_button(state, "Speak", move || {
+                let spoken = spoken()
+                    .into_iter()
+                    .map(|(text, _)| text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                super::actions::speak_explanation(&spoken);
+            }),
         ))
         .style(|s| s.row_gap(theme::SPACE_SM).width_full().min_width(0.0)),
     )
@@ -797,6 +845,14 @@ mod tests {
         assert!(
             standings.contains("STANDING_SLOTS"),
             "standings must keep a mounted slot list"
+        );
+        assert!(
+            production.contains("highlight_explain"),
+            "explainer bullets must highlight referenced squares"
+        );
+        assert!(
+            production.contains("Speak"),
+            "explainer text stays visible; Speak is optional"
         );
     }
 }

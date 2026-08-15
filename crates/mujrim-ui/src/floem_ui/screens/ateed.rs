@@ -409,7 +409,14 @@ fn monitor_panel(state: AppState) -> impl IntoView {
         })
         .style(move |s| {
             s.font_size(12.0)
-                .font_family("monospace".to_owned())
+                .font_family({
+                    let family = state.settings.get().mono_font;
+                    if family.is_empty() {
+                        super::super::theme::MONO_FAMILY.to_owned()
+                    } else {
+                        family
+                    }
+                })
                 .color(theme::rgba(pal().text_secondary))
                 .min_width(0.0)
                 .width_full()

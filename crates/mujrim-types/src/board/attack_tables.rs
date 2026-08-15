@@ -19,6 +19,7 @@ pub struct AttackTables {
     pub rook_masks: [Bitboard; 64],
     pub bishop_table: Box<[[Bitboard; 512]; 64]>,
     pub rook_table: Box<[[Bitboard; 4096]; 64]>,
+    pub use_pext: bool,
 }
 
 static TABLES: std::sync::OnceLock<AttackTables> = std::sync::OnceLock::new();
@@ -55,6 +56,7 @@ impl AttackTables {
             rook_masks: [0; 64],
             bishop_table: boxed_zeroed(),
             rook_table: boxed_zeroed(),
+            use_pext: detect_pext(),
         };
         t.init_pawn_attacks();
         t.init_knight_attacks();
@@ -171,7 +173,7 @@ impl AttackTables {
 
             let mut subset: Bitboard = 0;
             loop {
-                let index = (subset.wrapping_mul(b_magic) >> (64 - b_bits)) as usize;
+                let index = slider_index(subset, b_mask, b_magic, b_bits, self.use_pext);
                 self.bishop_table[sq][index] = bishop_attacks_slow(sq, subset);
                 subset = subset.wrapping_sub(b_mask) & b_mask;
                 if subset == 0 {
@@ -187,7 +189,7 @@ impl AttackTables {
 
             subset = 0;
             loop {
-                let index = (subset.wrapping_mul(r_magic) >> (64 - r_bits)) as usize;
+                let index = slider_index(subset, r_mask, r_magic, r_bits, self.use_pext);
                 self.rook_table[sq][index] = rook_attacks_slow(sq, subset);
                 subset = subset.wrapping_sub(r_mask) & r_mask;
                 if subset == 0 {
@@ -200,13 +202,57 @@ impl AttackTables {
 
 // ── Public attack lookup functions ──────────────────────────────────────────
 
+fn detect_pext() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        is_x86_feature_detected!("bmi2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+#[inline(always)]
+fn slider_index(
+    occupancy: Bitboard,
+    mask: Bitboard,
+    magic: u64,
+    bits: u32,
+    use_pext: bool,
+) -> usize {
+    if use_pext {
+        #[cfg(target_arch = "x86_64")]
+        {
+            return unsafe { pext_u64(occupancy, mask) as usize };
+        }
+    }
+    ((occupancy & mask).wrapping_mul(magic) >> (64 - bits)) as usize
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi2")]
+unsafe fn pext_u64(value: u64, mask: u64) -> u64 {
+    core::arch::x86_64::_pext_u64(value, mask)
+}
+
+/// True when slider lookups were built with BMI2 PEXT indices.
+pub fn uses_pext() -> bool {
+    tables().use_pext
+}
+
 /// Returns the bishop attacks for a given square and occupancy.
 #[inline(always)]
 pub fn bishop_attacks(sq: usize, occupancy: Bitboard) -> Bitboard {
     let t = tables();
     let mask = t.bishop_masks[sq];
-    let index =
-        ((occupancy & mask).wrapping_mul(BISHOP_MAGICS[sq]) >> (64 - BISHOP_BITS[sq])) as usize;
+    let index = slider_index(
+        occupancy,
+        mask,
+        BISHOP_MAGICS[sq],
+        BISHOP_BITS[sq],
+        t.use_pext,
+    );
     t.bishop_table[sq][index]
 }
 
@@ -215,7 +261,7 @@ pub fn bishop_attacks(sq: usize, occupancy: Bitboard) -> Bitboard {
 pub fn rook_attacks(sq: usize, occupancy: Bitboard) -> Bitboard {
     let t = tables();
     let mask = t.rook_masks[sq];
-    let index = ((occupancy & mask).wrapping_mul(ROOK_MAGICS[sq]) >> (64 - ROOK_BITS[sq])) as usize;
+    let index = slider_index(occupancy, mask, ROOK_MAGICS[sq], ROOK_BITS[sq], t.use_pext);
     t.rook_table[sq][index]
 }
 
@@ -572,5 +618,27 @@ mod tests {
         assert!(attacks & Square::A3.bitboard() != 0);
         assert!(attacks & Square::A4.bitboard() != 0);
         assert!(attacks & Square::A5.bitboard() == 0);
+    }
+
+    #[test]
+    fn slider_lookups_match_slow_generator() {
+        setup();
+        let occupancies = [0u64, 0x00FF_0000_00FF_0000, 0x1818_1818_1818_1818, u64::MAX];
+        for occ in occupancies {
+            for sq in 0..64 {
+                assert_eq!(
+                    bishop_attacks(sq, occ),
+                    bishop_attacks_slow(sq, occ),
+                    "bishop {sq} pext={}",
+                    uses_pext()
+                );
+                assert_eq!(
+                    rook_attacks(sq, occ),
+                    rook_attacks_slow(sq, occ),
+                    "rook {sq} pext={}",
+                    uses_pext()
+                );
+            }
+        }
     }
 }

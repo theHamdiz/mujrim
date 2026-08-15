@@ -4409,6 +4409,8 @@ dependencies = [
  "flate2",
  "mujrim-types",
  "rusqlite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

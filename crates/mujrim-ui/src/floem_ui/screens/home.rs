@@ -54,6 +54,10 @@ pub fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
                     actions::open_learn(state, &handles);
                 }
             }),
+            widgets::ghost_button(state, "Open Library", {
+                let handles = handles.clone();
+                move || actions::open_library(state, &handles)
+            }),
             widgets::ghost_button(state, "Engine Tournament", {
                 let handles = handles.clone();
                 move || {

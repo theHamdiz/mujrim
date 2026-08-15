@@ -7,6 +7,7 @@ use mujrim_study::opening::PrepSide;
 
 use crate::app_core::layout;
 use crate::app_core::logic;
+use crate::app_core::settings::StudyTab;
 
 use super::super::actions;
 use super::super::state::{AppHandles, AppState};
@@ -16,29 +17,19 @@ use super::workspace;
 
 pub fn study_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
-        opening_card(state, handles.clone()),
-        notes_card(state, handles.clone()),
-        Stack::vertical((
-            pane_title("Moves"),
-            workspace::move_list(state, handles.clone()),
-            workspace::ply_nav(state, handles.clone()),
-        ))
-        .style(|s| s.row_gap(6.0).width_full().min_width(0.0)),
-        preparations_card(state, handles.clone()),
-        library_card(state, handles),
-    ))
-    .style(|s| {
-        s.flex_col()
-            .row_gap(10.0)
-            .width_full()
-            .min_width(0.0)
-            .min_height(0.0)
-    })
-}
-
-pub fn library_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
-    Stack::vertical((
-        library_card(state, handles.clone()),
+        progress_strip(state, handles.clone()),
+        study_tab_bar(state, handles.clone()),
+        dyn_view({
+            let handles = handles.clone();
+            move || match state.settings.get().study_tab {
+                StudyTab::Studies => studies_panel(state, handles.clone()).into_any(),
+                StudyTab::Explore => opening_card(state, handles.clone()).into_any(),
+                StudyTab::Prepare => preparations_card(state, handles.clone()).into_any(),
+                StudyTab::Learn => learn_panel(state, handles.clone()).into_any(),
+                StudyTab::Library => library_card(state, handles.clone()).into_any(),
+            }
+        }),
+        variation_tree_card(state, handles.clone()),
         notes_card(state, handles.clone()),
         Stack::vertical((
             pane_title("Moves"),
@@ -56,36 +47,246 @@ pub fn library_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
     })
 }
 
+#[allow(dead_code)]
+pub fn library_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
+    study_sidebar(state, handles)
+}
+
+#[allow(dead_code)]
 pub fn learn_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
+    study_sidebar(state, handles)
+}
+
+fn study_tab_bar(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::horizontal(
+        StudyTab::ALL
+            .into_iter()
+            .map(|tab| {
+                let handles = handles.clone();
+                widgets::ghost_button(state, tab.label(), move || {
+                    actions::set_study_tab(state, tab);
+                    if tab == StudyTab::Learn {
+                        actions::refresh_learn_catalog(state, &handles);
+                    }
+                    if tab == StudyTab::Library {
+                        actions::refresh_study(state, &handles);
+                    }
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .style(|s| s.col_gap(4.0).flex_wrap(FlexWrap::Wrap).width_full())
+}
+
+fn progress_strip(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    widgets::card(
+        state,
+        Label::derived({
+            let handles = handles.clone();
+            move || {
+                let due = state.training_due.get().len();
+                let lines = state.saved_lines.get().len();
+                let studies = state.studies.get().len();
+                let games = handles
+                    .study
+                    .borrow()
+                    .as_ref()
+                    .map(mujrim_study::database::StudyDatabase::len)
+                    .unwrap_or(0);
+                format!("{studies} studies · {lines} prep lines · {due} due · {games} games")
+            }
+        })
+        .style(move |s| {
+            s.font_size(12.0)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(pal().text_secondary))
+        }),
+    )
+}
+
+fn studies_panel(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("Studies", pal),
+            widgets::body_copy(
+                "Create a study, add chapters, and fork sidelines by playing a different move.",
+                pal,
+            ),
+            TextInput::new(state.study_title).style(|s| {
+                s.width_full()
+                    .min_width(0.0)
+                    .height(34.0)
+                    .border_radius(10.0)
+            }),
+            TextInput::new(state.chapter_title).style(|s| {
+                s.width_full()
+                    .min_width(0.0)
+                    .height(34.0)
+                    .border_radius(10.0)
+            }),
+            Stack::horizontal((
+                widgets::primary_button(state, "New study", {
+                    let handles = handles.clone();
+                    move || actions::create_study(state, &handles)
+                }),
+                widgets::ghost_button(state, "Add chapter", {
+                    let handles = handles.clone();
+                    move || actions::add_study_chapter(state, &handles)
+                }),
+                widgets::ghost_button(state, "Save chapter line", {
+                    let handles = handles.clone();
+                    move || actions::save_chapter_from_board(state, &handles)
+                }),
+            ))
+            .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap)),
+            dyn_view({
+                let handles = handles.clone();
+                move || {
+                    let studies = state.studies.get();
+                    if studies.is_empty() {
+                        return Label::new("No studies yet.")
+                            .style(move |s| {
+                                s.font_size(12.0)
+                                    .min_width(0.0)
+                                    .width_full()
+                                    .text_wrap()
+                                    .color(theme::rgba(pal().text_secondary))
+                            })
+                            .into_any();
+                    }
+                    let list = studies
+                        .into_iter()
+                        .map(|study| {
+                            let id = study.id.clone();
+                            let delete_id = id.clone();
+                            Stack::vertical((
+                                Label::new(format!(
+                                    "{} · {} chapters",
+                                    study.title,
+                                    study.chapters.len()
+                                ))
+                                .style(|s| {
+                                    s.font_size(13.0)
+                                        .font_bold()
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_wrap()
+                                }),
+                                Stack::horizontal((
+                                    widgets::ghost_button(state, "Open", {
+                                        let handles = handles.clone();
+                                        move || actions::load_study(state, &handles, id.clone())
+                                    }),
+                                    widgets::ghost_button(state, "Delete", {
+                                        let handles = handles.clone();
+                                        move || {
+                                            actions::delete_study(
+                                                state,
+                                                &handles,
+                                                delete_id.clone(),
+                                            )
+                                        }
+                                    }),
+                                ))
+                                .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap)),
+                            ))
+                            .style(move |s| {
+                                let pal = pal();
+                                s.width_full()
+                                    .row_gap(4.0)
+                                    .padding(8.0)
+                                    .border_radius(10.0)
+                                    .background(theme::rgba(pal.bg))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_view()
+                        .style(|s| s.width_full().row_gap(6.0).flex_col());
+                    widgets::capped_scroll(list, layout::LIST_SCROLL_PX).into_any()
+                }
+            }),
+        ))
+        .style(|s| s.row_gap(8.0).width_full()),
+    )
+}
+
+fn learn_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
         training_card(state, handles.clone()),
         gambit_card(state, handles.clone()),
         book_replies_card(state, handles.clone()),
         coaching_card(state, handles.clone()),
-        widgets::explanation_card(state, move || workspace::explanation_text(state)),
-        notes_card(state, handles.clone()),
-        Stack::vertical((
-            widgets::ghost_button(state, "Coach review", {
-                let handles = handles.clone();
-                move || actions::review_played_game(state, &handles)
-            }),
-            widgets::ghost_button(state, "Analyze game", {
-                let handles = handles.clone();
-                move || actions::analyze_game(state, &handles)
-            }),
-            pane_title("Moves"),
-            workspace::move_list(state, handles.clone()),
-            workspace::ply_nav(state, handles),
-        ))
-        .style(|s| s.row_gap(8.0).width_full().min_width(0.0)),
+        widgets::explanation_card(state, move || workspace::explanation_lines(state)),
+        widgets::ghost_button(state, "Coach review", {
+            let handles = handles.clone();
+            move || actions::review_played_game(state, &handles)
+        }),
+        widgets::ghost_button(state, "Analyze game", {
+            let handles = handles.clone();
+            move || actions::analyze_game(state, &handles)
+        }),
     ))
-    .style(|s| {
-        s.flex_col()
-            .row_gap(8.0)
-            .width_full()
-            .min_width(0.0)
-            .min_height(0.0)
-    })
+    .style(|s| s.row_gap(8.0).width_full().min_width(0.0))
+}
+
+fn variation_tree_card(state: AppState, handles: AppHandles) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("Lines", pal),
+            widgets::body_copy(
+                "Click a move to jump. Playing off-book forks a new variation in the active chapter.",
+                pal,
+            ),
+            dyn_view({
+                let handles = handles.clone();
+                move || {
+                    let labels = actions::study_tree_labels(state);
+                    if labels.is_empty() {
+                        return Label::new("Open or create a study to see the tree.")
+                            .style(move |s| {
+                                s.font_size(12.0)
+                                    .min_width(0.0)
+                                    .width_full()
+                                    .text_wrap()
+                                    .color(theme::rgba(pal().text_secondary))
+                            })
+                            .into_any();
+                    }
+                    let list = labels
+                        .into_iter()
+                        .map(|(path, label)| {
+                            let handles = handles.clone();
+                            Button::new(label)
+                                .action(move || {
+                                    actions::jump_study_path(state, &handles, path.clone())
+                                })
+                                .style(move |s| {
+                                    let pal = pal();
+                                    s.width_full()
+                                        .min_width(0.0)
+                                        .padding(8.0)
+                                        .border(0.0)
+                                        .border_radius(8.0)
+                                        .font_size(12.0)
+                                        .background(theme::rgba(pal.bg))
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_view()
+                        .style(|s| s.width_full().row_gap(4.0).flex_col());
+                    widgets::capped_scroll(list, layout::LIST_SCROLL_PX).into_any()
+                }
+            }),
+        ))
+        .style(|s| s.row_gap(8.0).width_full()),
+    )
 }
 
 fn pane_title(label: &'static str) -> impl IntoView {
@@ -662,6 +863,10 @@ fn preparations_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     .height(34.0)
                     .border_radius(10.0)
             }),
+            widgets::ghost_button(state, "Train this line", {
+                let handles = handles.clone();
+                move || actions::train_current_preparation(state, &handles)
+            }),
             widgets::primary_button(state, "Save line", {
                 let handles = handles.clone();
                 move || actions::save_preparation(state, &handles)
@@ -952,6 +1157,10 @@ mod tests {
             "move_note",
             "game_io_bar",
             "library_sidebar",
+            "New study",
+            "Train this line",
+            "Studies",
+            "study_tab_bar",
             "explanation_card",
             "body_copy",
             "text_wrap()",

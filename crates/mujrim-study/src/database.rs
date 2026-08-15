@@ -127,6 +127,25 @@ impl StudyDatabase {
                  );",
             )
             .map_err(|error| format!("failed to initialize repertoire table: {error}"))?;
+        sqlite
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS studies (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 CREATE TABLE IF NOT EXISTS study_chapters (
+                    id TEXT PRIMARY KEY,
+                    study_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    start_fen TEXT NOT NULL,
+                    tree_json TEXT NOT NULL,
+                    chapter_notes TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE INDEX IF NOT EXISTS study_chapters_study ON study_chapters(study_id, sort_order);",
+            )
+            .map_err(|error| format!("failed to initialize study documents: {error}"))?;
         let mut database = Self {
             root,
             games: BTreeMap::new(),
@@ -340,6 +359,116 @@ impl StudyDatabase {
         self.sqlite
             .execute("DELETE FROM repertoire_lines WHERE id = ?1", params![id])
             .map_err(|error| format!("failed to delete preparation: {error}"))?;
+        Ok(())
+    }
+
+    pub fn save_study(&mut self, study: &crate::study_doc::Study) -> Result<(), String> {
+        self.sqlite
+            .execute(
+                "INSERT OR REPLACE INTO studies (id, title) VALUES (?1, ?2)",
+                params![study.id, study.title],
+            )
+            .map_err(|error| format!("failed to save study: {error}"))?;
+        self.sqlite
+            .execute(
+                "DELETE FROM study_chapters WHERE study_id = ?1",
+                params![study.id],
+            )
+            .map_err(|error| format!("failed to replace study chapters: {error}"))?;
+        for (order, chapter) in study.chapters.iter().enumerate() {
+            self.sqlite
+                .execute(
+                    "INSERT INTO study_chapters
+                     (id, study_id, title, start_fen, tree_json, chapter_notes, sort_order)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        chapter.id,
+                        study.id,
+                        chapter.title,
+                        chapter.start_fen,
+                        chapter.tree.encode()?,
+                        chapter.chapter_notes,
+                        order as i64,
+                    ],
+                )
+                .map_err(|error| format!("failed to save chapter: {error}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn list_studies(&self) -> Result<Vec<crate::study_doc::Study>, String> {
+        let mut stmt = self
+            .sqlite
+            .prepare("SELECT id, title FROM studies ORDER BY created_at DESC, title ASC")
+            .map_err(|error| format!("failed to list studies: {error}"))?;
+        let ids = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("failed to read studies: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("invalid study row: {error}"))?;
+        ids.into_iter()
+            .map(|(id, _)| self.load_study(&id))
+            .collect()
+    }
+
+    pub fn load_study(&self, id: &str) -> Result<crate::study_doc::Study, String> {
+        let title = self
+            .sqlite
+            .query_row("SELECT title FROM studies WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| format!("failed to load study: {error}"))?;
+        let mut stmt = self
+            .sqlite
+            .prepare(
+                "SELECT id, title, start_fen, tree_json, chapter_notes
+                 FROM study_chapters WHERE study_id = ?1 ORDER BY sort_order ASC",
+            )
+            .map_err(|error| format!("failed to list chapters: {error}"))?;
+        let chapters = stmt
+            .query_map([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|error| format!("failed to read chapters: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("invalid chapter row: {error}"))?;
+        let chapters = chapters
+            .into_iter()
+            .map(|(id, title, start_fen, tree_json, chapter_notes)| {
+                Ok(crate::study_doc::Chapter {
+                    id,
+                    title,
+                    start_fen,
+                    tree: crate::move_tree::MoveTree::decode(&tree_json)?,
+                    chapter_notes,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(crate::study_doc::Study {
+            id: id.to_owned(),
+            title,
+            chapters,
+        })
+    }
+
+    pub fn delete_study(&mut self, id: &str) -> Result<(), String> {
+        self.sqlite
+            .execute(
+                "DELETE FROM study_chapters WHERE study_id = ?1",
+                params![id],
+            )
+            .map_err(|error| format!("failed to delete chapters: {error}"))?;
+        self.sqlite
+            .execute("DELETE FROM studies WHERE id = ?1", params![id])
+            .map_err(|error| format!("failed to delete study: {error}"))?;
         Ok(())
     }
 
@@ -745,6 +874,29 @@ mod tests {
         assert!(database.save_line(&illegal).is_err());
         database.delete_line(&line.id).unwrap();
         assert!(database.list_lines().unwrap().is_empty());
+        drop(database);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn study_documents_round_trip_with_variations() {
+        let root = temporary_database();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        let mut study = crate::study_doc::Study::from_mainline(
+            "Italian",
+            "Main",
+            crate::opening::START_FEN,
+            &["e2e4".into(), "e7e5".into()],
+        )
+        .unwrap();
+        study.chapters[0].tree.play_uci(&[0], "c7c5").unwrap();
+        database.save_study(&study).unwrap();
+        let loaded = database.load_study(&study.id).unwrap();
+        assert_eq!(loaded.title, "Italian");
+        assert_eq!(loaded.chapters[0].tree.mainline(), vec!["e2e4", "e7e5"]);
+        assert_eq!(loaded.chapters[0].tree.children[0].children[1].uci, "c7c5");
+        database.delete_study(&study.id).unwrap();
+        assert!(database.list_studies().unwrap().is_empty());
         drop(database);
         fs::remove_dir_all(&root).unwrap();
     }

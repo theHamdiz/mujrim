@@ -601,23 +601,23 @@ fn budgeted_check_extension(
 /// board's piece bitboards haven't changed since the last eval in the
 /// same king-bucket pair.
 #[inline(always)]
-fn hybrid_eval(board: &Board, nnue_state: &mut NNUEState, use_nnue: bool) -> i32 {
+fn hybrid_eval(board: &Board, state: &mut ThreadState, use_nnue: bool) -> i32 {
     if use_nnue {
-        nnue_state.evaluate(board)
+        state.nnue_state.evaluate(board)
     } else {
-        eval::evaluate(board)
+        eval::evaluate_with_hce(board, &state.hce)
     }
 }
 
 fn hybrid_eval_with_uncertainty(
     board: &Board,
-    nnue_state: &mut NNUEState,
+    state: &mut ThreadState,
     use_nnue: bool,
 ) -> (i32, i32) {
     if use_nnue {
-        nnue_state.evaluate_with_uncertainty(board)
+        state.nnue_state.evaluate_with_uncertainty(board)
     } else {
-        (eval::evaluate(board), 0)
+        (eval::evaluate_with_hce(board, &state.hce), 0)
     }
 }
 
@@ -643,7 +643,24 @@ fn reckless_material(board: &Board) -> i32 {
 #[inline(always)]
 fn make_search_move(board: &mut Board, state: &mut ThreadState, mv: Move) {
     state.nodes += 1;
-    state.nnue_state.make_move(board, mv);
+    if state.use_nnue {
+        state.nnue_state.make_move(board, mv);
+    } else {
+        state.hce_undo[state.hce_ply] = state.hce;
+        state.hce_ply += 1;
+        state.hce.apply_move(board, mv);
+        board.make_move(mv);
+    }
+}
+
+#[inline(always)]
+fn undo_search_eval(state: &mut ThreadState) {
+    if state.use_nnue {
+        state.nnue_state.pop_move();
+    } else if state.hce_ply > 0 {
+        state.hce_ply -= 1;
+        state.hce = state.hce_undo[state.hce_ply];
+    }
 }
 
 fn corrected_network_eval(
@@ -857,6 +874,12 @@ struct ThreadState {
     tbhits: u64,
     /// Root moves skipped for MultiPV follow-up lines. Read only at the root.
     root_exclude: Vec<Move>,
+    /// When false, skip NNUE accumulator updates on make/unmake.
+    use_nnue: bool,
+    /// Incremental material + PSQT used only when `use_nnue` is false.
+    hce: eval::HceState,
+    hce_undo: [eval::HceState; MAX_PLY],
+    hce_ply: usize,
 }
 
 impl ThreadState {
@@ -902,6 +925,10 @@ impl ThreadState {
             optimism: [0; 2],
             tbhits: 0,
             root_exclude: Vec::new(),
+            use_nnue: true,
+            hce: eval::HceState::default(),
+            hce_undo: [eval::HceState::default(); MAX_PLY],
+            hce_ply: 0,
         }
     }
 
@@ -1234,6 +1261,7 @@ impl SearchEngine {
     /// Enable or disable NNUE evaluation (fallback to classical eval when disabled).
     pub fn set_use_nnue(&mut self, enabled: bool) {
         self.use_nnue = enabled;
+        self.state.use_nnue = enabled;
     }
 
     /// Replace the transposition table without keeping the old and new tables
@@ -1344,6 +1372,11 @@ impl SearchEngine {
                     .stack_size(16 * 1024 * 1024)
                     .spawn(move || {
                         let mut state = ThreadState::new(nnue_network);
+                        state.use_nnue = use_nnue_clone;
+                        state.hce_ply = 0;
+                        if !use_nnue_clone {
+                            state.hce = eval::HceState::from_board(&board_clone);
+                        }
                         state.root_exclude = root_exclude;
                         let mut best_score = -INF;
                         let mut average_score = initial_root_score;
@@ -1435,6 +1468,11 @@ impl SearchEngine {
 
         // Main thread search with reporting
         self.state.reset_for_search();
+        self.state.use_nnue = self.use_nnue;
+        self.state.hce_ply = 0;
+        if !self.use_nnue {
+            self.state.hce = eval::HceState::from_board(board);
+        }
         let state = &mut self.state;
         let mut best_move = fallback_move;
         // Until depth 1 completes, the legal fallback has no searched score.
@@ -2113,7 +2151,7 @@ fn search_ab(
         return if in_check {
             0
         } else {
-            hybrid_eval(board, &mut state.nnue_state, use_nnue)
+            hybrid_eval(board, state, use_nnue)
         };
     }
 
@@ -2202,10 +2240,10 @@ fn search_ab(
         (None, 0, 0)
     } else {
         let (raw_eval, variance) = if eval_mode.is_ateed_nnue() {
-            hybrid_eval_with_uncertainty(board, &mut state.nnue_state, use_nnue)
+            hybrid_eval_with_uncertainty(board, state, use_nnue)
         } else {
             (
-                tt_raw_eval.unwrap_or_else(|| hybrid_eval(board, &mut state.nnue_state, use_nnue)),
+                tt_raw_eval.unwrap_or_else(|| hybrid_eval(board, state, use_nnue)),
                 0,
             )
         };
@@ -2318,7 +2356,9 @@ fn search_ab(
         {
             let r = params.null_move_r(depth, static_eval, beta) + i32::from(improving);
 
-            state.nnue_state.push_null();
+            if state.use_nnue {
+                state.nnue_state.push_null();
+            }
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
             state.prev_piece[ply_usize] = 0;
@@ -2340,7 +2380,9 @@ fn search_ab(
                 },
             );
             board.unmake_null_move();
-            state.nnue_state.pop_move();
+            if state.use_nnue {
+                state.nnue_state.pop_move();
+            }
 
             if stopped.load(Ordering::Relaxed) {
                 return 0;
@@ -2420,7 +2462,7 @@ fn search_ab(
                     },
                 );
                 board.unmake_move(mv);
-                state.nnue_state.pop_move();
+                undo_search_eval(state);
 
                 if stopped.load(Ordering::Relaxed) {
                     return 0;
@@ -2958,7 +3000,7 @@ fn search_ab(
         }
 
         board.unmake_move(mv);
-        state.nnue_state.pop_move();
+        undo_search_eval(state);
         moves_searched += 1;
 
         if stopped.load(Ordering::Relaxed) {
@@ -3324,10 +3366,10 @@ fn quiescence(
                 0
             };
         }
-        return hybrid_eval(board, &mut state.nnue_state, use_nnue);
+        return hybrid_eval(board, state, use_nnue);
     }
     if qs_ply >= params.max_qs_ply && !in_check {
-        return hybrid_eval(board, &mut state.nnue_state, use_nnue);
+        return hybrid_eval(board, state, use_nnue);
     }
 
     // TT probe in qsearch (important for stability!)
@@ -3411,7 +3453,7 @@ fn quiescence(
                 },
             );
             board.unmake_move(mv);
-            state.nnue_state.pop_move();
+            undo_search_eval(state);
             if stopped.load(Ordering::Relaxed) {
                 return 0;
             }
@@ -3455,7 +3497,7 @@ fn quiescence(
     // ── Fail-soft stand-pat using hybrid eval + correction history ──
     let raw_eval = qs_entry
         .and_then(|entry| entry.raw_eval)
-        .unwrap_or_else(|| hybrid_eval(board, &mut state.nnue_state, use_nnue));
+        .unwrap_or_else(|| hybrid_eval(board, state, use_nnue));
     let corr = state.correction(board, move_ordering);
     let mut stand_pat = corrected_network_eval(
         board,
@@ -3563,7 +3605,7 @@ fn quiescence(
             },
         );
         board.unmake_move(mv);
-        state.nnue_state.pop_move();
+        undo_search_eval(state);
 
         if stopped.load(Ordering::Relaxed) {
             return 0;
@@ -3990,6 +4032,24 @@ mod tests {
         assert_eq!(state.pawn_history.entries[0][0][0], 0);
         assert_eq!(state.pawn_corr[0][0], 0);
         assert_eq!(state.reckless_cont_hist[0][0][0][0], 0);
+    }
+
+    #[test]
+    fn hce_search_skips_nnue_and_returns_a_legal_move() {
+        types::init();
+        let mut engine = SearchEngine::new(8, 1);
+        engine.set_use_nnue(false);
+        let mut board = Board::new();
+        let result = engine.search_depth(&mut board, 3);
+        let legal = board.generate_legal_moves();
+        assert!(
+            legal.iter().any(|mv| *mv == result.best_move),
+            "best={} legal={:?}",
+            result.best_move.to_uci(),
+            legal.iter().map(|mv| mv.to_uci()).collect::<Vec<_>>()
+        );
+        assert!(result.nodes > 0);
+        assert!(!engine.use_nnue());
     }
 
     #[test]
@@ -5255,7 +5315,7 @@ mod tests {
                 let context = test_context(&tt, &stopped, &params, &lmr_table);
 
                 // Get raw eval for comparison
-                let raw_eval = hybrid_eval(&board, &mut state.nnue_state, true);
+                let raw_eval = hybrid_eval(&board, &mut state, true);
                 let corr = state.correction(&board, MoveOrderingProfile::StockLike);
                 let stand_pat_val = raw_eval + corr;
 

@@ -14,10 +14,12 @@
 //! - Passed pawn king proximity and piece tropism
 //! - Connectivity (defended pieces)
 
+use crate::hce_simd;
 use crate::psqt;
 use types::bitboard::{Bitboard, count_bits, iter_bits};
 use types::board::attack_tables::*;
-use types::{Board, Color, Piece, Square};
+use types::chess_move::MoveFlag;
+use types::{Board, Color, Move, Piece, Square};
 
 // ── Game phase ──────────────────────────────────────────────────────────────
 const PHASE_VALUES: [i32; 6] = [0, 1, 1, 2, 4, 0];
@@ -162,25 +164,117 @@ fn king_zone(sq: usize) -> Bitboard {
     ka | (1u64 << sq) | forward
 }
 
+/// Incremental material + PeSTO PSQT, updated on make/unmake in the HCE path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HceState {
+    pub mg: i32,
+    pub eg: i32,
+    pub phase: i32,
+}
+
+impl HceState {
+    pub fn from_board(board: &Board) -> Self {
+        let mut state = Self::default();
+        for &color in &[Color::White, Color::Black] {
+            for &piece in &Piece::ALL {
+                let bb = board.piece_bb(piece, color);
+                state.phase += PHASE_VALUES[piece.index()] * bb.count_ones() as i32;
+                let (mg, eg) = hce_simd::accumulate_psqt(piece, color, bb);
+                state.mg += mg;
+                state.eg += eg;
+            }
+        }
+        state
+    }
+
+    pub fn apply_move(&mut self, board: &Board, mv: Move) {
+        let us = board.side_to_move;
+        let them = us.opponent();
+        let Some((piece, color)) = board.piece_on(mv.from) else {
+            return;
+        };
+        debug_assert_eq!(color, us);
+        if mv.is_castling() {
+            let kingside = mv.flag == MoveFlag::KingCastle;
+            let rook_from = board.castling_rook_from(us, kingside);
+            let king_to = Board::castling_king_landing(us, kingside);
+            let rook_to = Board::castling_rook_landing(us, kingside);
+            self.remove_piece(Piece::King, us, mv.from);
+            self.remove_piece(Piece::Rook, us, rook_from);
+            self.add_piece(Piece::King, us, king_to);
+            self.add_piece(Piece::Rook, us, rook_to);
+            return;
+        }
+        self.remove_piece(piece, us, mv.from);
+        if mv.flag == MoveFlag::EnPassant {
+            let captured = Square::from_file_rank(mv.to.file(), mv.from.rank());
+            self.remove_piece(Piece::Pawn, them, captured);
+            self.add_piece(Piece::Pawn, us, mv.to);
+            return;
+        }
+        if let Some((captured, captured_color)) = board.piece_on(mv.to) {
+            self.remove_piece(captured, captured_color, mv.to);
+        }
+        self.add_piece(mv.promotion.unwrap_or(piece), us, mv.to);
+    }
+
+    fn add_piece(&mut self, piece: Piece, color: Color, square: Square) {
+        let idx = if color == Color::White {
+            square.index()
+        } else {
+            square.index() ^ 56
+        };
+        let (mg, eg) = psqt::combined_value(piece, idx);
+        let sign = if color == Color::White { 1 } else { -1 };
+        self.mg += sign * mg;
+        self.eg += sign * eg;
+        self.phase += PHASE_VALUES[piece.index()];
+    }
+
+    fn remove_piece(&mut self, piece: Piece, color: Color, square: Square) {
+        let idx = if color == Color::White {
+            square.index()
+        } else {
+            square.index() ^ 56
+        };
+        let (mg, eg) = psqt::combined_value(piece, idx);
+        let sign = if color == Color::White { 1 } else { -1 };
+        self.mg -= sign * mg;
+        self.eg -= sign * eg;
+        self.phase -= PHASE_VALUES[piece.index()];
+    }
+}
+
 /// Evaluates from the side to move's perspective.
 #[inline(always)]
 pub fn evaluate(board: &Board) -> i32 {
-    let (mg, eg, phase) = evaluate_full(board);
+    taper(evaluate_full(board), board.side_to_move)
+}
+
+/// Same public score as [`evaluate`], using an incremental material/PSQT state.
+#[inline(always)]
+pub fn evaluate_with_hce(board: &Board, hce: &HceState) -> i32 {
+    taper(evaluate_full_with_material(board, *hce), board.side_to_move)
+}
+
+fn taper(parts: (i32, i32, i32), stm: Color) -> i32 {
+    let (mg, eg, phase) = parts;
     let phase = phase.clamp(0, TOTAL_PHASE);
     let score = (mg * phase + eg * (TOTAL_PHASE - phase)) / TOTAL_PHASE;
-    if board.side_to_move == Color::White {
-        score
-    } else {
-        -score
-    }
+    if stm == Color::White { score } else { -score }
 }
 
 /// Full evaluation returning (mg, eg, phase) from White's perspective.
 #[inline]
 fn evaluate_full(board: &Board) -> (i32, i32, i32) {
-    let mut mg = 0i32;
-    let mut eg = 0i32;
-    let mut phase = 0i32;
+    evaluate_full_with_material(board, HceState::from_board(board))
+}
+
+#[inline]
+fn evaluate_full_with_material(board: &Board, material: HceState) -> (i32, i32, i32) {
+    let mut mg = material.mg;
+    let mut eg = material.eg;
+    let phase = material.phase;
 
     let occ = board.all_occupancy();
     let w_occ = board.color_occupancy(Color::White);
@@ -204,26 +298,6 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
     let mut w_attacker_weight = 0i32;
     let mut b_attackers_count = 0i32;
     let mut b_attacker_weight = 0i32;
-
-    // ── Material + PSQT (combined tables keep the hot path cache-friendly) ─
-    for &color in &[Color::White, Color::Black] {
-        let sign = if color == Color::White { 1 } else { -1 };
-        for &piece in &Piece::ALL {
-            let bb = board.piece_bb(piece, color);
-            phase += PHASE_VALUES[piece.index()] * bb.count_ones() as i32;
-
-            for sq_idx in iter_bits(bb) {
-                let idx = if color == Color::White {
-                    sq_idx
-                } else {
-                    sq_idx ^ 56
-                };
-                let (piece_mg, piece_eg) = psqt::combined_value(piece, idx);
-                mg += sign * piece_mg;
-                eg += sign * piece_eg;
-            }
-        }
-    }
 
     // Tempo for the side to move (applied from White's perspective below).
     match board.side_to_move {
@@ -386,14 +460,11 @@ fn evaluate_full(board: &Board) -> (i32, i32, i32) {
         mg -= bs_mg;
     }
 
-    // ── Pawn structure ──────────────────────────────────────────────────
+    // ── Pawn structure (Zobrist-style pawn key cache) ───────────────────
     {
-        let (w_mg, w_eg) = eval_pawn_structure(w_pawns, b_pawns, Color::White, bk_sq, wk_sq);
-        mg += w_mg;
-        eg += w_eg;
-        let (b_mg, b_eg) = eval_pawn_structure(b_pawns, w_pawns, Color::Black, wk_sq, bk_sq);
-        mg -= b_mg;
-        eg -= b_eg;
+        let (pawn_mg, pawn_eg) = pawn_structure_cached(w_pawns, b_pawns, wk_sq, bk_sq);
+        mg += pawn_mg;
+        eg += pawn_eg;
     }
 
     // ── Bishop pair ─────────────────────────────────────────────────────
@@ -673,6 +744,42 @@ fn eval_pawn_storm(enemy_pawns: Bitboard, our_color: Color, king_sq: usize) -> (
     }
 
     (mg, 0)
+}
+
+#[derive(Clone, Copy, Default)]
+struct PawnHashEntry {
+    key: u64,
+    mg: i32,
+    eg: i32,
+}
+
+thread_local! {
+    static PAWN_HASH: std::cell::RefCell<[PawnHashEntry; 8192]> =
+        const { std::cell::RefCell::new([PawnHashEntry { key: 0, mg: 0, eg: 0 }; 8192]) };
+}
+
+fn pawn_structure_key(w_pawns: Bitboard, b_pawns: Bitboard, wk: usize, bk: usize) -> u64 {
+    w_pawns
+        ^ b_pawns.rotate_left(32)
+        ^ (wk as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (bk as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+}
+
+fn pawn_structure_cached(w_pawns: Bitboard, b_pawns: Bitboard, wk: usize, bk: usize) -> (i32, i32) {
+    let key = pawn_structure_key(w_pawns, b_pawns, wk, bk);
+    let idx = (key as usize) & 8191;
+    PAWN_HASH.with(|table| {
+        let mut table = table.borrow_mut();
+        if table[idx].key == key {
+            return (table[idx].mg, table[idx].eg);
+        }
+        let (w_mg, w_eg) = eval_pawn_structure(w_pawns, b_pawns, Color::White, bk, wk);
+        let (b_mg, b_eg) = eval_pawn_structure(b_pawns, w_pawns, Color::Black, wk, bk);
+        let mg = w_mg - b_mg;
+        let eg = w_eg - b_eg;
+        table[idx] = PawnHashEntry { key, mg, eg };
+        (mg, eg)
+    })
 }
 
 // ── Pawn structure ──────────────────────────────────────────────────────────
@@ -1290,5 +1397,47 @@ mod tests {
                 "{thematic}={want} {played}={got}"
             );
         }
+    }
+
+    #[test]
+    fn incremental_hce_matches_scratch_on_random_walk() {
+        setup();
+        let mut board = Board::new();
+        let mut hce = HceState::from_board(&board);
+        assert_eq!(evaluate(&board), evaluate_with_hce(&board, &hce));
+        let mut seed = 0xC0FF_EE11_u64;
+        for _ in 0..48 {
+            let legal = board.generate_legal_moves();
+            if legal.is_empty() {
+                break;
+            }
+            seed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+            let mv = legal[(seed as usize) % legal.len()];
+            hce.apply_move(&board, mv);
+            board.make_move(mv);
+            assert_eq!(
+                hce,
+                HceState::from_board(&board),
+                "material drift after {}",
+                mv.to_uci()
+            );
+            assert_eq!(evaluate(&board), evaluate_with_hce(&board, &hce));
+        }
+    }
+
+    #[test]
+    fn pawn_hash_matches_direct_structure() {
+        setup();
+        let board = Board::new();
+        let w = board.piece_bb(Piece::Pawn, Color::White);
+        let b = board.piece_bb(Piece::Pawn, Color::Black);
+        let wk = board.king_square(Color::White).index();
+        let bk = board.king_square(Color::Black).index();
+        let cached = pawn_structure_cached(w, b, wk, bk);
+        let again = pawn_structure_cached(w, b, wk, bk);
+        let (w_mg, w_eg) = eval_pawn_structure(w, b, Color::White, bk, wk);
+        let (b_mg, b_eg) = eval_pawn_structure(b, w, Color::Black, wk, bk);
+        assert_eq!(cached, again);
+        assert_eq!(cached, (w_mg - b_mg, w_eg - b_eg));
     }
 }
