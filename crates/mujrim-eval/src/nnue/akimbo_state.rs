@@ -6,7 +6,7 @@ use super::network::{
 };
 use std::mem::MaybeUninit;
 use types::chess_move::MoveFlag;
-use types::{Board, Color, Move, Piece};
+use types::{AkimboPos, Board, BoardSnapshot, Color, Move, Piece};
 
 /// Sentinel: frame / Finny `king_sq` unset (valid squares are 0..64).
 const NO_KING_SQ: u8 = u8::MAX;
@@ -15,6 +15,8 @@ const DELTA_BATCH: usize = 64;
 const MOVE_DELTA: usize = 8;
 const MAX_PLY: usize = 256;
 const FINNY_BUCKETS: usize = 2 * NUM_BUCKETS;
+const FINNY_PAIR: usize = 2 * NUM_BUCKETS;
+const FILL_DELTA: usize = 32;
 const SEE_VALS: [i32; 6] = [100, 450, 450, 650, 1250, 0];
 
 #[inline(always)]
@@ -48,6 +50,76 @@ pub(super) fn snapshot_bbs(board: &Board) -> [u64; NUM_BBS] {
 #[inline(always)]
 pub(super) fn material_scale(board: &Board) -> i32 {
     material_scale_from_bbs(&snapshot_bbs(board))
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+fn board_bb8(board: &Board) -> [u64; 8] {
+    [
+        board.occupancy[0],
+        board.occupancy[1],
+        board.pieces[0][0] | board.pieces[1][0],
+        board.pieces[0][1] | board.pieces[1][1],
+        board.pieces[0][2] | board.pieces[1][2],
+        board.pieces[0][3] | board.pieces[1][3],
+        board.pieces[0][4] | board.pieces[1][4],
+        board.pieces[0][5] | board.pieces[1][5],
+    ]
+}
+
+#[inline(always)]
+fn material_scale_from_bb8(bb: &[u64; 8]) -> i32 {
+    let knights = bb[3].count_ones() as i32;
+    let bishops = bb[4].count_ones() as i32;
+    let rooks = bb[5].count_ones() as i32;
+    let queens = bb[6].count_ones() as i32;
+    let mat =
+        knights * SEE_VALS[1] + bishops * SEE_VALS[2] + rooks * SEE_VALS[3] + queens * SEE_VALS[4];
+    700 + mat / 32
+}
+
+fn fill_diff(
+    new_bb: &[u64; 8],
+    old_bb: &[u64; 8],
+    w_king: usize,
+    b_king: usize,
+    add_feats: &mut [[usize; FILL_DELTA]; 2],
+    sub_feats: &mut [[usize; FILL_DELTA]; 2],
+) -> (usize, usize) {
+    let mut adds = 0usize;
+    let mut subs = 0usize;
+    let wflip = if w_king % 8 > 3 { 7 } else { 0 };
+    let bflip = if b_king % 8 > 3 { 7 } else { 0 } ^ 56;
+    for side in 0..2 {
+        let old_boys = old_bb[side];
+        let new_boys = new_bb[side];
+        for piece in 0..6 {
+            let old_pc = old_bb[piece + 2] & old_boys;
+            let new_pc = new_bb[piece + 2] & new_boys;
+            if old_pc == new_pc {
+                continue;
+            }
+            let wbase = get_base_index::<0>(side, piece, w_king);
+            let bbase = get_base_index::<1>(side, piece, b_king);
+            let mut add_diff = new_pc & !old_pc;
+            while add_diff != 0 {
+                let sq = add_diff.trailing_zeros() as usize;
+                add_diff &= add_diff - 1;
+                add_feats[0][adds] = wbase + (sq ^ wflip);
+                add_feats[1][adds] = bbase + (sq ^ bflip);
+                adds += 1;
+            }
+            let mut sub_diff = old_pc & !new_pc;
+            while sub_diff != 0 {
+                let sq = sub_diff.trailing_zeros() as usize;
+                sub_diff &= sub_diff - 1;
+                sub_feats[0][subs] = wbase + (sq ^ wflip);
+                sub_feats[1][subs] = bbase + (sq ^ bflip);
+                subs += 1;
+            }
+        }
+    }
+    (adds, subs)
 }
 
 #[inline(always)]
@@ -103,9 +175,19 @@ struct FinnyEntry {
     initialized: bool,
 }
 
+/// Official `EvalTable[wbucket][bbucket]`: both accs + 8-bb snapshot.
+#[repr(C, align(64))]
+struct FinnyPair {
+    white: Accumulator,
+    black: Accumulator,
+    bbs: [u64; 8],
+    initialized: bool,
+}
+
 pub(super) struct AkimboAccumulatorState {
     stack: Box<[AkimboFrame]>,
     finny: Box<[[FinnyEntry; FINNY_BUCKETS]; 2]>,
+    pairs: Box<[[FinnyPair; FINNY_PAIR]; FINNY_PAIR]>,
     stack_index: usize,
     current: EvalEntry,
 }
@@ -121,9 +203,13 @@ impl AkimboAccumulatorState {
             // SAFETY: `FinnyEntry` is integer/bool; `initialized == false` is
             // the zero pattern and skips `acc` until the first refresh.
             unsafe { boxed_and_zeroed() };
+        let pairs: Box<[[FinnyPair; FINNY_PAIR]; FINNY_PAIR]> =
+            // SAFETY: `initialized == false` skips accs until the first fill.
+            unsafe { boxed_and_zeroed() };
         Self {
             stack,
             finny,
+            pairs,
             stack_index: 0,
             current: EvalEntry {
                 bbs: [0; NUM_BBS],
@@ -151,9 +237,6 @@ impl AkimboAccumulatorState {
 
     #[inline]
     pub(super) fn push_move(&mut self, board: &Board, mv: Move) {
-        if self.stack_index + 1 >= self.stack.len() {
-            return;
-        }
         let mover = board
             .piece_on(mv.from)
             .map(|(piece, color)| (piece.index() as u8, color.index() as u8));
@@ -164,6 +247,44 @@ impl AkimboAccumulatorState {
             }
             _ => None,
         };
+        self.push_pending(mv, mover, captured);
+    }
+
+    #[inline]
+    pub(super) fn push_move_pos(&mut self, pos: &AkimboPos, mv: Move) {
+        let mover = pos
+            .piece_on(mv.from)
+            .map(|(piece, color)| (piece.index() as u8, color.index() as u8));
+        let captured = match mv.flag {
+            MoveFlag::EnPassant => Some(Piece::Pawn.index() as u8),
+            MoveFlag::Capture | MoveFlag::PromotionCapture => {
+                pos.piece_on(mv.to).map(|(piece, _)| piece.index() as u8)
+            }
+            _ => None,
+        };
+        self.push_pending(mv, mover, captured);
+    }
+
+    #[inline]
+    pub(super) fn push_move_snap(&mut self, pos: &BoardSnapshot, mv: Move) {
+        let mover = pos
+            .piece_on(mv.from)
+            .map(|(piece, color)| (piece.index() as u8, color.index() as u8));
+        let captured = match mv.flag {
+            MoveFlag::EnPassant => Some(Piece::Pawn.index() as u8),
+            MoveFlag::Capture | MoveFlag::PromotionCapture => {
+                pos.piece_on(mv.to).map(|(piece, _)| piece.index() as u8)
+            }
+            _ => None,
+        };
+        self.push_pending(mv, mover, captured);
+    }
+
+    #[inline]
+    fn push_pending(&mut self, mv: Move, mover: Option<(u8, u8)>, captured: Option<u8>) {
+        if self.stack_index + 1 >= self.stack.len() {
+            return;
+        }
         self.stack_index += 1;
         let frame = &mut self.stack[self.stack_index];
         frame.accurate = [false, false];
@@ -213,6 +334,12 @@ impl AkimboAccumulatorState {
                 entry.king_sq = NO_KING_SQ;
             }
         }
+        for row in self.pairs.iter_mut() {
+            for entry in row.iter_mut() {
+                entry.initialized = false;
+                entry.bbs = [0; 8];
+            }
+        }
     }
 
     pub(super) fn evaluate(&mut self, board: &Board, net: &Network) -> i32 {
@@ -220,25 +347,127 @@ impl AkimboAccumulatorState {
         self.finish(board, net)
     }
 
+    /// Official pair-keyed `fill_diff` against a Copy position.
+    pub(super) fn evaluate_search_pos(&mut self, pos: &AkimboPos, net: &Network) -> i32 {
+        self.evaluate_from_bb8(
+            pos.bb8(),
+            pos.king_square(Color::White).index(),
+            pos.king_square(Color::Black).index(),
+            pos.side_to_move(),
+            net,
+        )
+    }
+
     pub(super) fn evaluate_search(&mut self, board: &Board, net: &Network) -> i32 {
+        let current_bbs = snapshot_bbs(board);
+        let w_king = board.king_square(Color::White).index() as u8;
+        let b_king = board.king_square(Color::Black).index() as u8;
         let frame = &self.stack[self.stack_index];
-        if frame.accurate[0] && frame.accurate[1] && !frame.pending_has_move && !frame.pending_null
+        if frame.accurate[0]
+            && frame.accurate[1]
+            && !frame.pending_has_move
+            && !frame.pending_null
+            && frame.bbs == current_bbs
+            && frame.king_sq[0] == w_king
+            && frame.king_sq[1] == b_king
         {
             return self.finish(board, net);
         }
         self.evaluate(board, net)
     }
 
-    fn finish(&self, board: &Board, net: &Network) -> i32 {
+    pub(super) fn evaluate_search_snap(&mut self, pos: &BoardSnapshot, net: &Network) -> i32 {
+        let current_bbs = pos.snapshot12();
+        let w_king = pos.king_square(Color::White).index() as u8;
+        let b_king = pos.king_square(Color::Black).index() as u8;
         let frame = &self.stack[self.stack_index];
-        let (boys, opps) = match board.side_to_move {
+        if frame.accurate[0]
+            && frame.accurate[1]
+            && !frame.pending_has_move
+            && !frame.pending_null
+            && frame.bbs == current_bbs
+            && frame.king_sq[0] == w_king
+            && frame.king_sq[1] == b_king
+        {
+            return self.finish_stm(pos.side_to_move(), net);
+        }
+        self.ensure_accurate_snap(pos, net);
+        self.finish_stm(pos.side_to_move(), net)
+    }
+
+    fn evaluate_from_bb8(
+        &mut self,
+        bb8: [u64; 8],
+        w_king: usize,
+        b_king: usize,
+        stm: Color,
+        net: &Network,
+    ) -> i32 {
+        let wbucket = get_bucket::<0>(w_king);
+        let bbucket = get_bucket::<1>(b_king);
+        let (white, black) = {
+            let entry = &mut self.pairs[wbucket][bbucket];
+            if !entry.initialized {
+                entry.white = net.feature_bias;
+                entry.black = net.feature_bias;
+                entry.bbs = [0; 8];
+                entry.initialized = true;
+            }
+            let mut add_feats = [[0usize; FILL_DELTA]; 2];
+            let mut sub_feats = [[0usize; FILL_DELTA]; 2];
+            let (adds, subs) = fill_diff(
+                &bb8,
+                &entry.bbs,
+                w_king,
+                b_king,
+                &mut add_feats,
+                &mut sub_feats,
+            );
+            if adds > 0 || subs > 0 {
+                let weights = nn::feature_weights_flat(net);
+                super::simd::accum_apply_deltas(
+                    &mut entry.white.vals,
+                    weights,
+                    &add_feats[0][..adds],
+                    &sub_feats[0][..subs],
+                );
+                super::simd::accum_apply_deltas(
+                    &mut entry.black.vals,
+                    weights,
+                    &add_feats[1][..adds],
+                    &sub_feats[1][..subs],
+                );
+                entry.bbs = bb8;
+            }
+            (entry.white, entry.black)
+        };
+        self.current.white = white;
+        self.current.black = black;
+        self.current.king_sq = [w_king as u8, b_king as u8];
+        let (boys, opps) = match stm {
+            Color::White => (&white, &black),
+            Color::Black => (&black, &white),
+        };
+        forward_with_network(net, boys, opps) * material_scale_from_bb8(&bb8) / 1024
+    }
+
+    fn finish(&self, board: &Board, net: &Network) -> i32 {
+        let score = self.finish_stm(board.side_to_move, net);
+        debug_assert_eq!(
+            material_scale_from_bbs(&self.stack[self.stack_index].bbs),
+            material_scale(board)
+        );
+        score
+    }
+
+    fn finish_stm(&self, stm: Color, net: &Network) -> i32 {
+        let frame = &self.stack[self.stack_index];
+        let (boys, opps) = match stm {
             Color::White => (&frame.white, &frame.black),
             Color::Black => (&frame.black, &frame.white),
         };
         let raw = forward_with_network(net, boys, opps);
-        let scale = material_scale_from_bbs(&frame.bbs);
-        debug_assert_eq!(scale, material_scale(board));
-        raw * scale / 1024
+        raw * material_scale_from_bbs(&frame.bbs) / 1024
     }
 
     fn ensure_accurate(&mut self, board: &Board, net: &Network) {
@@ -267,6 +496,67 @@ impl AkimboAccumulatorState {
         self.sync_from_board(board, net);
     }
 
+    #[allow(dead_code)]
+    fn ensure_accurate_pos(&mut self, pos: &AkimboPos, net: &Network) {
+        let idx = self.stack_index;
+        if self.stack[idx].pending_null {
+            self.apply_null();
+            return;
+        }
+        if self.stack[idx].pending_has_move {
+            self.apply_pending_bbs(
+                pos.snapshot12(),
+                pos.king_square(Color::White).index(),
+                pos.king_square(Color::Black).index(),
+                net,
+            );
+            return;
+        }
+        let current_bbs = pos.snapshot12();
+        let w_king = pos.king_square(Color::White).index();
+        let b_king = pos.king_square(Color::Black).index();
+        let frame = &self.stack[idx];
+        if frame.accurate[0]
+            && frame.accurate[1]
+            && frame.bbs == current_bbs
+            && frame.king_sq[0] == w_king as u8
+            && frame.king_sq[1] == b_king as u8
+        {
+            return;
+        }
+        self.sync_from_bbs(&current_bbs, w_king, b_king, net);
+    }
+
+    fn ensure_accurate_snap(&mut self, pos: &BoardSnapshot, net: &Network) {
+        let idx = self.stack_index;
+        if self.stack[idx].pending_null {
+            self.apply_null();
+            return;
+        }
+        if self.stack[idx].pending_has_move {
+            self.apply_pending_bbs(
+                pos.snapshot12(),
+                pos.king_square(Color::White).index(),
+                pos.king_square(Color::Black).index(),
+                net,
+            );
+            return;
+        }
+        let current_bbs = pos.snapshot12();
+        let w_king = pos.king_square(Color::White).index();
+        let b_king = pos.king_square(Color::Black).index();
+        let frame = &self.stack[idx];
+        if frame.accurate[0]
+            && frame.accurate[1]
+            && frame.bbs == current_bbs
+            && frame.king_sq[0] == w_king as u8
+            && frame.king_sq[1] == b_king as u8
+        {
+            return;
+        }
+        self.sync_from_bbs(&current_bbs, w_king, b_king, net);
+    }
+
     fn apply_null(&mut self) {
         let idx = self.stack_index;
         debug_assert!(idx > 0);
@@ -285,12 +575,27 @@ impl AkimboAccumulatorState {
     }
 
     fn apply_pending_move(&mut self, board: &Board, net: &Network) {
+        self.apply_pending_bbs(
+            snapshot_bbs(board),
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+            net,
+        );
+    }
+
+    fn apply_pending_bbs(
+        &mut self,
+        current_bbs: [u64; NUM_BBS],
+        w_king: usize,
+        b_king: usize,
+        net: &Network,
+    ) {
         let idx = self.stack_index;
         debug_assert!(idx > 0);
         let parent_ready = self.stack[idx - 1].accurate[0] && self.stack[idx - 1].accurate[1];
         if !parent_ready {
             self.stack[idx].pending_has_move = false;
-            self.sync_from_board(board, net);
+            self.sync_from_bbs(&current_bbs, w_king, b_king, net);
             return;
         }
 
@@ -300,12 +605,8 @@ impl AkimboAccumulatorState {
         let captured = (self.stack[idx].pending_captured != u8::MAX)
             .then_some(self.stack[idx].pending_captured as usize);
         let old_kings = self.stack[idx - 1].king_sq;
-        let new_kings = [
-            board.king_square(Color::White).index() as u8,
-            board.king_square(Color::Black).index() as u8,
-        ];
+        let new_kings = [w_king as u8, b_king as u8];
         let weights = nn::feature_weights_flat(net);
-        let current_bbs = snapshot_bbs(board);
 
         let refresh_white = old_kings[0] == NO_KING_SQ
             || king_needs_refresh(0, old_kings[0] as usize, new_kings[0] as usize);
@@ -359,9 +660,21 @@ impl AkimboAccumulatorState {
     }
 
     fn sync_from_board(&mut self, board: &Board, net: &Network) {
-        let current_bbs = snapshot_bbs(board);
-        let w_king = board.king_square(Color::White).index();
-        let b_king = board.king_square(Color::Black).index();
+        self.sync_from_bbs(
+            &snapshot_bbs(board),
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+            net,
+        );
+    }
+
+    fn sync_from_bbs(
+        &mut self,
+        current_bbs: &[u64; NUM_BBS],
+        w_king: usize,
+        b_king: usize,
+        net: &Network,
+    ) {
         let idx = self.stack_index;
         let old_kings = self.stack[idx].king_sq;
         let old_bbs = self.stack[idx].bbs;
@@ -376,12 +689,12 @@ impl AkimboAccumulatorState {
             apply_half_diff::<0>(
                 &mut self.stack[idx].white,
                 &old_bbs,
-                &current_bbs,
+                current_bbs,
                 w_king,
                 nn::feature_weights_flat(net),
             );
         } else {
-            self.finny_refresh::<0>(net, &current_bbs, w_king);
+            self.finny_refresh::<0>(net, current_bbs, w_king);
             self.stack[idx].white = self.finny[0][get_bucket::<0>(w_king)].acc;
         }
 
@@ -389,17 +702,17 @@ impl AkimboAccumulatorState {
             apply_half_diff::<1>(
                 &mut self.stack[idx].black,
                 &old_bbs,
-                &current_bbs,
+                current_bbs,
                 b_king,
                 nn::feature_weights_flat(net),
             );
         } else {
-            self.finny_refresh::<1>(net, &current_bbs, b_king);
+            self.finny_refresh::<1>(net, current_bbs, b_king);
             self.stack[idx].black = self.finny[1][get_bucket::<1>(b_king)].acc;
         }
 
         let frame = &mut self.stack[idx];
-        frame.bbs = current_bbs;
+        frame.bbs = *current_bbs;
         frame.king_sq = [w_king as u8, b_king as u8];
         frame.accurate = [true, true];
         frame.pending_has_move = false;
@@ -786,6 +1099,167 @@ mod tests {
         assert_eq!(
             material_scale(&board),
             700 + (4 * 450 + 4 * 450 + 4 * 650 + 2 * 1250) / 32
+        );
+    }
+
+    #[test]
+    fn evaluate_search_without_ply_matches_pushed_incremental() {
+        types::init();
+        let net = super::super::network::net();
+        let mut board = Board::new();
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+
+        let mut pushed = AkimboAccumulatorState::new();
+        let _ = pushed.evaluate(&board, net);
+        pushed.push_move(&board, mv);
+        board.make_move(mv);
+        let with_ply = pushed.evaluate_search(&board, net);
+
+        board.unmake_move(mv);
+        let mut lazy = AkimboAccumulatorState::new();
+        let _ = lazy.evaluate(&board, net);
+        board.make_move(mv);
+        let without_ply = lazy.evaluate_search(&board, net);
+        assert_eq!(without_ply, with_ply);
+    }
+
+    #[test]
+    fn evaluate_search_pos_matches_ply_stack_on_e2e4() {
+        types::init();
+        let net = super::super::network::net();
+        let mut board = Board::new();
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+
+        let mut pushed = AkimboAccumulatorState::new();
+        let _ = pushed.evaluate(&board, net);
+        pushed.push_move(&board, mv);
+        board.make_move(mv);
+        let with_ply = pushed.evaluate_search(&board, net);
+
+        board.unmake_move(mv);
+        let parent = AkimboPos::from_board(&board);
+        let mut from_pos_state = AkimboAccumulatorState::new();
+        let _ = from_pos_state.evaluate_search_pos(&parent, net);
+        from_pos_state.push_move_pos(&parent, mv);
+        let mut child = parent;
+        assert!(!child.make(mv));
+        let from_pos = from_pos_state.evaluate_search_pos(&child, net);
+        assert_eq!(from_pos, with_ply);
+    }
+
+    #[test]
+    fn evaluate_search_snap_matches_ply_stack_on_e2e4() {
+        types::init();
+        let net = super::super::network::net();
+        let mut board = Board::new();
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+
+        let mut pushed = AkimboAccumulatorState::new();
+        let _ = pushed.evaluate(&board, net);
+        pushed.push_move(&board, mv);
+        board.make_move(mv);
+        let with_ply = pushed.evaluate_search(&board, net);
+
+        board.unmake_move(mv);
+        let parent = board.snapshot();
+        let mut snap_state = AkimboAccumulatorState::new();
+        let _ = snap_state.evaluate_search_snap(&parent, net);
+        snap_state.push_move_snap(&parent, mv);
+        let mut child = parent;
+        assert!(!child.make(mv));
+        let from_snap = snap_state.evaluate_search_snap(&child, net);
+        assert_eq!(from_snap, with_ply);
+    }
+
+    fn ply_stack_eval(board: &Board, net: &Network) -> i32 {
+        let mut state = AkimboAccumulatorState::new();
+        state.ensure_accurate(board, net);
+        state.finish(board, net)
+    }
+
+    #[test]
+    fn finny_fill_diff_matches_ply_stack_oracle() {
+        types::init();
+        let net = super::super::network::net();
+        let start = Board::new();
+        assert_eq!(
+            AkimboAccumulatorState::new().evaluate(&start, net),
+            ply_stack_eval(&start, net)
+        );
+        let mut after_e2e4 = start.clone();
+        let e2e4 = after_e2e4
+            .generate_legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.to_uci() == "e2e4")
+            .expect("e2e4");
+        after_e2e4.make_move(e2e4);
+        let mut warm = AkimboAccumulatorState::new();
+        let _ = warm.evaluate(&start, net);
+        assert_eq!(
+            warm.evaluate(&after_e2e4, net),
+            ply_stack_eval(&after_e2e4, net)
+        );
+        let ke1 = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").expect("fen");
+        let kg1 = Board::from_fen("4k3/8/8/8/8/8/8/6K1 w - - 0 1").expect("fen");
+        let mut king_walk = AkimboAccumulatorState::new();
+        assert_eq!(king_walk.evaluate(&ke1, net), ply_stack_eval(&ke1, net));
+        assert_eq!(king_walk.evaluate(&kg1, net), ply_stack_eval(&kg1, net));
+    }
+
+    #[test]
+    fn finny_fill_diff_matches_scratch_after_quiet_and_king_moves() {
+        types::init();
+        let net = super::super::network::net();
+        let mut board = Board::new();
+        let mut state = AkimboAccumulatorState::new();
+        assert_eq!(state.evaluate(&board, net), {
+            let mut scratch = AkimboAccumulatorState::new();
+            scratch.evaluate(&board, net)
+        });
+        let e2e4 = board
+            .generate_legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.to_uci() == "e2e4")
+            .expect("e2e4");
+        board.make_move(e2e4);
+        assert_eq!(
+            state.evaluate(&board, net),
+            AkimboAccumulatorState::new().evaluate(&board, net)
+        );
+        let ke1 = Board::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").expect("fen");
+        let kg1 = Board::from_fen("4k3/8/8/8/8/8/8/6K1 w - - 0 1").expect("fen");
+        let mut warm = AkimboAccumulatorState::new();
+        let _ = warm.evaluate(&ke1, net);
+        assert_eq!(
+            warm.evaluate(&kg1, net),
+            AkimboAccumulatorState::new().evaluate(&kg1, net)
+        );
+    }
+
+    #[test]
+    fn material_scale_from_bb8_matches_snapshot() {
+        types::init();
+        let board = Board::new();
+        assert_eq!(
+            material_scale_from_bb8(&board_bb8(&board)),
+            material_scale(&board)
         );
     }
 }

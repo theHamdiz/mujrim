@@ -1422,6 +1422,24 @@ fn push_pairs_touching(
     out: &mut [usize],
     count: &mut usize,
 ) -> bool {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if pawn_pair_vbmi_ready() {
+        return unsafe {
+            push_pairs_touching_vbmi(pawns, color, square, king_square, perspective, out, count)
+        };
+    }
+    push_pairs_touching_scalar(pawns, color, square, king_square, perspective, out, count)
+}
+
+fn push_pairs_touching_scalar(
+    pawns: [u64; 2],
+    color: usize,
+    square: usize,
+    king_square: usize,
+    perspective: usize,
+    out: &mut [usize],
+    count: &mut usize,
+) -> bool {
     for (other_color, &other_pawns) in pawns.iter().enumerate() {
         let mut partners = other_pawns & pawn_pair_mask(square);
         while partners != 0 {
@@ -1439,6 +1457,78 @@ fn push_pairs_touching(
                 perspective,
             );
             *count += 1;
+        }
+    }
+    true
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn pawn_pair_vbmi_ready() -> bool {
+    static READY: OnceLock<bool> = OnceLock::new();
+    *READY.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vbmi")
+    })
+}
+
+/// Official viridithas `add_pawn_pawn_indexes` VBMI triangle for one moved pawn.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
+unsafe fn push_pairs_touching_vbmi(
+    pawns: [u64; 2],
+    color: usize,
+    square: usize,
+    king_square: usize,
+    perspective: usize,
+    out: &mut [usize],
+    count: &mut usize,
+) -> bool {
+    use std::arch::x86_64::{
+        _mm256_loadu_si256, _mm512_add_epi16, _mm512_cvtepu8_epi16, _mm512_loadu_si512,
+        _mm512_maskz_compress_epi8, _mm512_max_epu16, _mm512_min_epu16, _mm512_mullo_epi16,
+        _mm512_set1_epi16, _mm512_srli_epi16, _mm512_storeu_si512, _mm512_sub_epi16,
+    };
+
+    let mask = pawn_pair_mask(square);
+    let id_a = pawn_compressed_id(color, square, king_square, perspective) as u16;
+    let mirror = usize::from(king_square & 7 >= 4);
+    unsafe {
+        let id_a_v = _mm512_set1_epi16(id_a as i16);
+        let one = _mm512_set1_epi16(1);
+        let base = _mm512_set1_epi16(THREAT_FEATURES as i16);
+        for other_color in 0..2 {
+            let partners = pawns[other_color] & mask;
+            if partners == 0 {
+                continue;
+            }
+            let n = partners.count_ones() as usize;
+            if *count + n > out.len() {
+                return false;
+            }
+            let lut = &PAWN_COMPRESSED_U8[perspective][mirror][other_color];
+            let compressed =
+                _mm512_maskz_compress_epi8(partners, _mm512_loadu_si512(lut.as_ptr().cast()));
+            let mut packed = [0u8; 64];
+            _mm512_storeu_si512(packed.as_mut_ptr().cast(), compressed);
+            let mut offset = 0;
+            while offset < n {
+                let chunk = (n - offset).min(16);
+                let pids =
+                    _mm512_cvtepu8_epi16(_mm256_loadu_si256(packed.as_ptr().add(offset).cast()));
+                let hi = _mm512_max_epu16(id_a_v, pids);
+                let lo = _mm512_min_epu16(id_a_v, pids);
+                let prod = _mm512_mullo_epi16(hi, _mm512_sub_epi16(hi, one));
+                let idx = _mm512_add_epi16(_mm512_srli_epi16(prod, 1), lo);
+                let feat = _mm512_add_epi16(idx, base);
+                let mut tmp = [0u16; 16];
+                _mm512_storeu_si512(tmp.as_mut_ptr().cast(), feat);
+                for &feature in &tmp[..chunk] {
+                    out[*count] = usize::from(feature);
+                    *count += 1;
+                }
+                offset += chunk;
+            }
         }
     }
     true
@@ -1700,13 +1790,84 @@ fn pawn_pair_feature_index(
     king_square: usize,
     perspective: usize,
 ) -> usize {
-    let orient = (7 * usize::from(king_square & 7 >= 4)) ^ (56 * perspective);
-    let first_id = (first_color ^ perspective) * 48 + (first ^ orient) - 8;
-    let second_id = (second_color ^ perspective) * 48 + (second ^ orient) - 8;
+    let first_id = pawn_compressed_id(first_color, first, king_square, perspective);
+    let second_id = pawn_compressed_id(second_color, second, king_square, perspective);
     let hi = first_id.max(second_id);
     let lo = first_id.min(second_id);
-    THREAT_FEATURES + hi * (hi - 1) / 2 + lo
+    THREAT_FEATURES + PAIR_TRIANGLE[hi] + lo
 }
+
+#[inline(always)]
+fn pawn_compressed_id(
+    color: usize,
+    square: usize,
+    king_square: usize,
+    perspective: usize,
+) -> usize {
+    let mirror = usize::from(king_square & 7 >= 4);
+    PAWN_COMPRESSED[perspective][mirror][color][square]
+}
+
+/// `hi * (hi - 1) / 2` for pawn-compressed ids in `0..96`.
+const PAIR_TRIANGLE: [usize; 96] = {
+    let mut table = [0usize; 96];
+    let mut hi = 0;
+    while hi < 96 {
+        table[hi] = hi * hi.saturating_sub(1) / 2;
+        hi += 1;
+    }
+    table
+};
+
+/// `[perspective][king_file_e_or_more][pawn_color][square] → 0..96` compressed pawn id.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+const PAWN_COMPRESSED_U8: [[[[u8; 64]; 2]; 2]; 2] = {
+    let mut table = [[[[0u8; 64]; 2]; 2]; 2];
+    let mut perspective = 0;
+    while perspective < 2 {
+        let mut mirror = 0;
+        while mirror < 2 {
+            let mut color = 0;
+            while color < 2 {
+                let mut square = 0;
+                while square < 64 {
+                    table[perspective][mirror][color][square] =
+                        PAWN_COMPRESSED[perspective][mirror][color][square] as u8;
+                    square += 1;
+                }
+                color += 1;
+            }
+            mirror += 1;
+        }
+        perspective += 1;
+    }
+    table
+};
+
+/// `[perspective][king_file_e_or_more][pawn_color][square] → 0..96` compressed pawn id.
+const PAWN_COMPRESSED: [[[[usize; 64]; 2]; 2]; 2] = {
+    let mut table = [[[[0usize; 64]; 2]; 2]; 2];
+    let mut perspective = 0;
+    while perspective < 2 {
+        let mut mirror = 0;
+        while mirror < 2 {
+            let orient = (7 * mirror) ^ (56 * perspective);
+            let mut color = 0;
+            while color < 2 {
+                let mut square = 0;
+                while square < 64 {
+                    let id = (color ^ perspective) * 48 + (square ^ orient);
+                    table[perspective][mirror][color][square] = id.saturating_sub(8);
+                    square += 1;
+                }
+                color += 1;
+            }
+            mirror += 1;
+        }
+        perspective += 1;
+    }
+    table
+};
 
 #[inline(always)]
 fn piece_attacks(piece: usize, piece_color: usize, square: usize, occupied: u64) -> u64 {
@@ -2221,6 +2382,116 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pawn_pair_vbmi_matches_scalar_on_startpos_and_e2e4() {
+        let start = [
+            Board::new().pieces[0][Piece::Pawn.index()],
+            Board::new().pieces[1][Piece::Pawn.index()],
+        ];
+        let mut after_board = Board::new();
+        after_board.make_move(Move::double_pawn(Square::E2, Square::E4));
+        let after = [
+            after_board.pieces[0][Piece::Pawn.index()],
+            after_board.pieces[1][Piece::Pawn.index()],
+        ];
+        for king in [4usize, 60] {
+            for pov in 0..2 {
+                let mut scalar_adds = [0usize; 64];
+                let mut scalar_subs = [0usize; 64];
+                let mut simd_adds = [0usize; 64];
+                let mut simd_subs = [0usize; 64];
+                let mut sc = 0;
+                let mut ss = 0;
+                let mut ac = 0;
+                let mut asub = 0;
+                assert!(push_pairs_touching_scalar(
+                    start,
+                    0,
+                    Square::E2.index(),
+                    king,
+                    pov,
+                    &mut scalar_subs,
+                    &mut ss,
+                ));
+                assert!(push_pairs_touching_scalar(
+                    after,
+                    0,
+                    Square::E4.index(),
+                    king,
+                    pov,
+                    &mut scalar_adds,
+                    &mut sc,
+                ));
+                assert!(push_pairs_touching(
+                    start,
+                    0,
+                    Square::E2.index(),
+                    king,
+                    pov,
+                    &mut simd_subs,
+                    &mut asub,
+                ));
+                assert!(push_pairs_touching(
+                    after,
+                    0,
+                    Square::E4.index(),
+                    king,
+                    pov,
+                    &mut simd_adds,
+                    &mut ac,
+                ));
+                let mut left = scalar_adds[..sc].to_vec();
+                let mut right = simd_adds[..ac].to_vec();
+                left.sort_unstable();
+                right.sort_unstable();
+                assert_eq!(left, right, "adds king={king} pov={pov}");
+                let mut left = scalar_subs[..ss].to_vec();
+                let mut right = simd_subs[..asub].to_vec();
+                left.sort_unstable();
+                right.sort_unstable();
+                assert_eq!(left, right, "subs king={king} pov={pov}");
+            }
+        }
+    }
+
+    #[test]
+    fn pawn_pair_lut_matches_arithmetic() {
+        for perspective in 0..2 {
+            for king_square in 0..64 {
+                let orient = (7 * usize::from(king_square & 7 >= 4)) ^ (56 * perspective);
+                for first_color in 0..2 {
+                    for first in 8..56 {
+                        for second_color in 0..2 {
+                            for second in 8..56 {
+                                if first == second && first_color == second_color {
+                                    continue;
+                                }
+                                let first_id =
+                                    (first_color ^ perspective) * 48 + (first ^ orient) - 8;
+                                let second_id =
+                                    (second_color ^ perspective) * 48 + (second ^ orient) - 8;
+                                let hi = first_id.max(second_id);
+                                let lo = first_id.min(second_id);
+                                let expected = THREAT_FEATURES + hi * (hi - 1) / 2 + lo;
+                                assert_eq!(
+                                    pawn_pair_feature_index(
+                                        first_color,
+                                        first,
+                                        second_color,
+                                        second,
+                                        king_square,
+                                        perspective,
+                                    ),
+                                    expected
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn moved_pawn_pair_delta_matches_full_collect_diff() {

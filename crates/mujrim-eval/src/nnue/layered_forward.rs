@@ -4,7 +4,9 @@
 //! path remains the bit-exact reference. NNZ skips all-zero 4-byte activation
 //! blocks the same way Obsidian / Viridithas / Reckless do.
 
-use std::cell::RefCell;
+use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 const NNZ_BLOCK: usize = 4;
@@ -20,10 +22,81 @@ impl<T> Align64<T> {
     }
 }
 
+/// Heap slice forced to 64-byte alignment so AVX-512 loads do not split lines.
+pub(crate) struct Align64Box<T> {
+    ptr: NonNull<T>,
+    len: usize,
+}
+
+unsafe impl<T: Send> Send for Align64Box<T> {}
+unsafe impl<T: Sync> Sync for Align64Box<T> {}
+
+impl<T: Copy> Align64Box<T> {
+    pub(crate) fn from_slice(src: &[T]) -> Self {
+        let len = src.len();
+        if len == 0 {
+            return Self {
+                ptr: NonNull::dangling(),
+                len: 0,
+            };
+        }
+        let layout = Self::layout(len);
+        unsafe {
+            let raw = alloc(layout);
+            if raw.is_null() {
+                handle_alloc_error(layout);
+            }
+            raw.cast::<T>().copy_from_nonoverlapping(src.as_ptr(), len);
+            Self {
+                ptr: NonNull::new_unchecked(raw.cast()),
+                len,
+            }
+        }
+    }
+
+    fn layout(len: usize) -> Layout {
+        Layout::from_size_align(size_of::<T>() * len, 64.max(align_of::<T>()))
+            .expect("Align64Box layout")
+    }
+}
+
+impl<T> Deref for Align64Box<T> {
+    type Target = [T];
+
+    #[inline]
+    fn deref(&self) -> &[T] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl<T> DerefMut for Align64Box<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [T] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl<T> Drop for Align64Box<T> {
+    fn drop(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        let layout = Layout::from_size_align(size_of::<T>() * self.len, 64.max(align_of::<T>()))
+            .expect("Align64Box layout");
+        unsafe {
+            dealloc(self.ptr.as_ptr().cast(), layout);
+        }
+    }
+}
+
 #[inline]
 pub(crate) fn find_nnz(ft_out: &[u8], indexes: &mut [u16]) -> usize {
     debug_assert_eq!(ft_out.len() % NNZ_BLOCK, 0);
     debug_assert!(indexes.len() >= ft_out.len() / NNZ_BLOCK);
+    (kernels().find_nnz)(ft_out, indexes)
+}
+
+fn find_nnz_scalar(ft_out: &[u8], indexes: &mut [u16]) -> usize {
     let blocks = ft_out.len() / NNZ_BLOCK;
     let packed = unsafe { std::slice::from_raw_parts(ft_out.as_ptr().cast::<u32>(), blocks) };
     let mut count = 0;
@@ -127,10 +200,6 @@ pub(crate) fn affine_sparse(input: &[u8], weights: &[i8], output: &mut [i32]) {
     (kernels().blocked)(input, &nnz[..count], &packed, output);
 }
 
-thread_local! {
-    static NNZ_SCRATCH: RefCell<[u16; MAX_NNZ_BLOCKS]> = const { RefCell::new([0; MAX_NNZ_BLOCKS]) };
-}
-
 /// Sparse L1 over weights already packed as `[block][output][4]`.
 #[inline]
 pub(crate) fn affine_sparse_packed(input: &[u8], weights: &[i8], output: &mut [i32]) {
@@ -138,14 +207,12 @@ pub(crate) fn affine_sparse_packed(input: &[u8], weights: &[i8], output: &mut [i
     debug_assert_eq!(input.len() % NNZ_BLOCK, 0);
     let blocks = input.len() / NNZ_BLOCK;
     debug_assert!(blocks <= MAX_NNZ_BLOCKS);
-    NNZ_SCRATCH.with(|scratch| {
-        let mut nnz = scratch.borrow_mut();
-        let count = find_nnz(input, &mut nnz[..blocks]);
-        if count == 0 {
-            return;
-        }
-        (kernels().blocked)(input, &nnz[..count], weights, output);
-    });
+    let mut nnz = [0u16; MAX_NNZ_BLOCKS];
+    let count = find_nnz(input, &mut nnz[..blocks]);
+    if count == 0 {
+        return;
+    }
+    (kernels().blocked)(input, &nnz[..count], weights, output);
 }
 
 #[inline]
@@ -160,6 +227,56 @@ pub(crate) fn affine_f32(inputs: &[f32], weights: &[f32], biases: &[f32], output
 pub(crate) fn dot_f32(inputs: &[f32], weights: &[f32], bias: f32) -> f32 {
     debug_assert_eq!(inputs.len(), weights.len());
     (kernels().dot_f32)(inputs, weights, bias)
+}
+
+const SWISH_K: f32 = 6.0;
+
+#[inline]
+pub(crate) fn hard_swish6(value: f32) -> f32 {
+    value * (value + SWISH_K * 0.5).clamp(0.0, SWISH_K) / SWISH_K
+}
+
+/// Official sandhi L1 finish: `swish(sum * scale + bias)`.
+#[inline]
+pub(crate) fn hard_swish6_bias(sums: &[i32], biases: &[f32], scale: f32, out: &mut [f32]) {
+    debug_assert_eq!(sums.len(), biases.len());
+    debug_assert_eq!(sums.len(), out.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            unsafe {
+                avx512::hard_swish6_bias(sums, biases, scale, out);
+            }
+            return;
+        }
+    }
+    for (j, sum) in sums.iter().enumerate() {
+        out[j] = hard_swish6((*sum as f32).mul_add(scale, biases[j]));
+    }
+}
+
+/// Official sandhi L2: `swish(gate) * id + residual`.
+#[inline]
+pub(crate) fn swiglu_residual(pre: &[f32], residual: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(pre.len(), residual.len() * 2);
+    debug_assert_eq!(out.len(), residual.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            unsafe {
+                avx512::swiglu_residual(pre, residual, out);
+            }
+            return;
+        }
+    }
+    let n = residual.len();
+    for i in 0..n {
+        out[i] = hard_swish6(pre[i]).mul_add(pre[i + n], residual[i]);
+    }
 }
 
 #[inline]
@@ -180,11 +297,13 @@ pub(crate) fn square_clamp01(values: &mut [f32]) {
 type BlockedKernel = fn(&[u8], &[u16], &[i8], &mut [i32]);
 type AffineF32Kernel = fn(&[f32], &[f32], &mut [f32]);
 type DotF32Kernel = fn(&[f32], &[f32], f32) -> f32;
+type FindNnzKernel = fn(&[u8], &mut [u16]) -> usize;
 
 struct KernelDispatch {
     blocked: BlockedKernel,
     affine_f32: AffineF32Kernel,
     dot_f32: DotF32Kernel,
+    find_nnz: FindNnzKernel,
 }
 
 static KERNEL_DISPATCH: OnceLock<KernelDispatch> = OnceLock::new();
@@ -197,12 +316,25 @@ fn kernels() -> &'static KernelDispatch {
 fn detect_kernels() -> KernelDispatch {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vnni")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            return KernelDispatch {
+                blocked: avx512_blocked,
+                affine_f32: avx512_affine_f32,
+                dot_f32: avx512_dot_f32,
+                find_nnz: avx512_find_nnz,
+            };
+        }
         if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
         {
             return KernelDispatch {
                 blocked: avx2_blocked,
                 affine_f32: avx2_affine_f32,
                 dot_f32: avx2_dot_f32,
+                find_nnz: avx2_find_nnz,
             };
         }
     }
@@ -210,6 +342,7 @@ fn detect_kernels() -> KernelDispatch {
         blocked: scalar::blocked,
         affine_f32: scalar::affine_f32,
         dot_f32: scalar::dot_f32,
+        find_nnz: find_nnz_scalar,
     }
 }
 
@@ -248,6 +381,37 @@ mod scalar {
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_find_nnz(ft_out: &[u8], indexes: &mut [u16]) -> usize {
+    unsafe { avx512::find_nnz(ft_out, indexes) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx2_find_nnz(ft_out: &[u8], indexes: &mut [u16]) -> usize {
+    unsafe { avx2::find_nnz(ft_out, indexes) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_blocked(input: &[u8], nnz: &[u16], weights: &[i8], output: &mut [i32]) {
+    if output.len().is_multiple_of(16) && output.len() <= 64 {
+        unsafe { avx512::blocked(input, nnz, weights, output) }
+    } else if output.len().is_multiple_of(8) && output.len() <= 64 {
+        unsafe { avx2::blocked(input, nnz, weights, output) }
+    } else {
+        scalar::blocked(input, nnz, weights, output);
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_affine_f32(inputs: &[f32], weights: &[f32], outputs: &mut [f32]) {
+    unsafe { avx512::affine_f32(inputs, weights, outputs) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_dot_f32(inputs: &[f32], weights: &[f32], bias: f32) -> f32 {
+    unsafe { avx512::dot_f32(inputs, weights, bias) }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn avx2_blocked(input: &[u8], nnz: &[u16], weights: &[i8], output: &mut [i32]) {
     if output.len().is_multiple_of(8) && output.len() <= 64 {
         unsafe { avx2::blocked(input, nnz, weights, output) }
@@ -271,6 +435,37 @@ mod avx2 {
     #![allow(clippy::undocumented_unsafe_blocks)]
 
     use std::arch::x86_64::*;
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn find_nnz(ft_out: &[u8], indexes: &mut [u16]) -> usize {
+        unsafe {
+            let blocks = ft_out.len() / super::NNZ_BLOCK;
+            let packed = ft_out.as_ptr().cast::<u32>();
+            let zero = _mm256_setzero_si256();
+            let mut count = 0;
+            let mut block = 0;
+            while block + 8 <= blocks {
+                let values = _mm256_loadu_si256(packed.add(block).cast());
+                let eq_zero = _mm256_cmpeq_epi32(values, zero);
+                let mut bits = (!_mm256_movemask_ps(_mm256_castsi256_ps(eq_zero))) as u32 & 0xFF;
+                while bits != 0 {
+                    let lane = bits.trailing_zeros();
+                    indexes[count] = (block as u32 + lane) as u16;
+                    count += 1;
+                    bits &= bits - 1;
+                }
+                block += 8;
+            }
+            while block < blocks {
+                if *packed.add(block) != 0 {
+                    indexes[count] = block as u16;
+                    count += 1;
+                }
+                block += 1;
+            }
+            count
+        }
+    }
 
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn blocked(input: &[u8], nnz: &[u16], weights: &[i8], output: &mut [i32]) {
@@ -347,9 +542,225 @@ mod avx2 {
     }
 }
 
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+mod avx512 {
+    #![allow(clippy::undocumented_unsafe_blocks)]
+
+    use std::arch::x86_64::*;
+
+    #[target_feature(enable = "avx512f")]
+    pub(super) unsafe fn find_nnz(ft_out: &[u8], indexes: &mut [u16]) -> usize {
+        unsafe {
+            let blocks = ft_out.len() / super::NNZ_BLOCK;
+            let packed = ft_out.as_ptr().cast::<u32>();
+            let zero = _mm512_setzero_si512();
+            let mut count = 0;
+            let mut block = 0;
+            while block + 16 <= blocks {
+                let values = _mm512_loadu_si512(packed.add(block).cast());
+                let mut bits = u32::from(_mm512_cmpneq_epi32_mask(values, zero));
+                while bits != 0 {
+                    let lane = bits.trailing_zeros();
+                    indexes[count] = (block as u32 + lane) as u16;
+                    count += 1;
+                    bits &= bits - 1;
+                }
+                block += 16;
+            }
+            while block < blocks {
+                if *packed.add(block) != 0 {
+                    indexes[count] = block as u16;
+                    count += 1;
+                }
+                block += 1;
+            }
+            count
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    pub(super) unsafe fn blocked(input: &[u8], nnz: &[u16], weights: &[i8], output: &mut [i32]) {
+        unsafe {
+            debug_assert!(output.len().is_multiple_of(16));
+            debug_assert!(output.len() <= 64);
+            let outputs = output.len();
+            let groups = outputs / 16;
+            let packed = input.as_ptr().cast::<i32>();
+            let mut acc = [_mm512_setzero_si512(); 4];
+            let mut aux = [_mm512_setzero_si512(); 4];
+            let tail = nnz.len() - (nnz.len() % 4);
+            for chunk in nnz[..tail].chunks_exact(4) {
+                let a = _mm512_set1_epi32(*packed.add(usize::from(chunk[0])));
+                let b = _mm512_set1_epi32(*packed.add(usize::from(chunk[1])));
+                let c = _mm512_set1_epi32(*packed.add(usize::from(chunk[2])));
+                let d = _mm512_set1_epi32(*packed.add(usize::from(chunk[3])));
+                let wa = usize::from(chunk[0]) * outputs * 4;
+                let wb = usize::from(chunk[1]) * outputs * 4;
+                let wc = usize::from(chunk[2]) * outputs * 4;
+                let wd = usize::from(chunk[3]) * outputs * 4;
+                for group in 0..groups {
+                    let off = group * 64;
+                    acc[group] = _mm512_dpbusd_epi32(
+                        acc[group],
+                        a,
+                        _mm512_loadu_si512(weights.as_ptr().add(wa + off).cast()),
+                    );
+                    acc[group] = _mm512_dpbusd_epi32(
+                        acc[group],
+                        b,
+                        _mm512_loadu_si512(weights.as_ptr().add(wb + off).cast()),
+                    );
+                    aux[group] = _mm512_dpbusd_epi32(
+                        aux[group],
+                        c,
+                        _mm512_loadu_si512(weights.as_ptr().add(wc + off).cast()),
+                    );
+                    aux[group] = _mm512_dpbusd_epi32(
+                        aux[group],
+                        d,
+                        _mm512_loadu_si512(weights.as_ptr().add(wd + off).cast()),
+                    );
+                }
+            }
+            for &block in &nnz[tail..] {
+                let splat = _mm512_set1_epi32(*packed.add(usize::from(block)));
+                let weight_base = usize::from(block) * outputs * 4;
+                for (group, sum) in acc.iter_mut().enumerate().take(groups) {
+                    let row =
+                        _mm512_loadu_si512(weights.as_ptr().add(weight_base + group * 64).cast());
+                    *sum = _mm512_dpbusd_epi32(*sum, splat, row);
+                }
+            }
+            for (group, sum) in acc.iter_mut().enumerate().take(groups) {
+                *sum = _mm512_add_epi32(*sum, aux[group]);
+            }
+            for (group, sum) in acc.iter().enumerate().take(groups) {
+                let dest = output.as_mut_ptr().add(group * 16).cast();
+                let current = _mm512_loadu_si512(dest);
+                _mm512_storeu_si512(dest, _mm512_add_epi32(current, *sum));
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,fma")]
+    pub(super) unsafe fn hard_swish6_bias(
+        sums: &[i32],
+        biases: &[f32],
+        scale: f32,
+        out: &mut [f32],
+    ) {
+        unsafe {
+            let k = _mm512_set1_ps(super::SWISH_K);
+            let inv_k = _mm512_set1_ps(1.0 / super::SWISH_K);
+            let half_k = _mm512_set1_ps(super::SWISH_K * 0.5);
+            let zero = _mm512_setzero_ps();
+            let mul = _mm512_set1_ps(scale);
+            let mut i = 0;
+            while i + 16 <= sums.len() {
+                let unscaled = _mm512_cvtepi32_ps(_mm512_loadu_si512(sums.as_ptr().add(i).cast()));
+                let bias = _mm512_loadu_ps(biases.as_ptr().add(i));
+                let preact = _mm512_fmadd_ps(unscaled, mul, bias);
+                let gate = _mm512_min_ps(_mm512_max_ps(_mm512_add_ps(preact, half_k), zero), k);
+                _mm512_storeu_ps(
+                    out.as_mut_ptr().add(i),
+                    _mm512_mul_ps(_mm512_mul_ps(preact, gate), inv_k),
+                );
+                i += 16;
+            }
+            while i < sums.len() {
+                out[i] = super::hard_swish6((sums[i] as f32).mul_add(scale, biases[i]));
+                i += 1;
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,fma")]
+    pub(super) unsafe fn swiglu_residual(pre: &[f32], residual: &[f32], out: &mut [f32]) {
+        unsafe {
+            let n = residual.len();
+            let k = _mm512_set1_ps(super::SWISH_K);
+            let inv_k = _mm512_set1_ps(1.0 / super::SWISH_K);
+            let half_k = _mm512_set1_ps(super::SWISH_K * 0.5);
+            let zero = _mm512_setzero_ps();
+            let mut i = 0;
+            while i + 16 <= n {
+                let gate_pre = _mm512_loadu_ps(pre.as_ptr().add(i));
+                let id_pre = _mm512_loadu_ps(pre.as_ptr().add(i + n));
+                let skip = _mm512_loadu_ps(residual.as_ptr().add(i));
+                let clamped =
+                    _mm512_min_ps(_mm512_max_ps(_mm512_add_ps(gate_pre, half_k), zero), k);
+                let swish = _mm512_mul_ps(_mm512_mul_ps(gate_pre, clamped), inv_k);
+                _mm512_storeu_ps(
+                    out.as_mut_ptr().add(i),
+                    _mm512_fmadd_ps(swish, id_pre, skip),
+                );
+                i += 16;
+            }
+            while i < n {
+                out[i] = super::hard_swish6(pre[i]).mul_add(pre[i + n], residual[i]);
+                i += 1;
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx2,fma")]
+    pub(super) unsafe fn affine_f32(inputs: &[f32], weights: &[f32], outputs: &mut [f32]) {
+        unsafe {
+            let width = outputs.len();
+            if width.is_multiple_of(16) {
+                for (index, &input) in inputs.iter().enumerate() {
+                    let x = _mm512_set1_ps(input);
+                    let row = weights.as_ptr().add(index * width);
+                    for out_index in (0..width).step_by(16) {
+                        let acc = _mm512_loadu_ps(outputs.as_ptr().add(out_index));
+                        let w = _mm512_loadu_ps(row.add(out_index));
+                        _mm512_storeu_ps(
+                            outputs.as_mut_ptr().add(out_index),
+                            _mm512_fmadd_ps(x, w, acc),
+                        );
+                    }
+                }
+                return;
+            }
+            if width.is_multiple_of(8) {
+                super::avx2::affine_f32(inputs, weights, outputs);
+                return;
+            }
+            super::scalar::affine_f32(inputs, weights, outputs);
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx2,fma")]
+    pub(super) unsafe fn dot_f32(inputs: &[f32], weights: &[f32], bias: f32) -> f32 {
+        unsafe {
+            if inputs.len().is_multiple_of(16) {
+                let mut acc = _mm512_setzero_ps();
+                for index in (0..inputs.len()).step_by(16) {
+                    let a = _mm512_loadu_ps(inputs.as_ptr().add(index));
+                    let b = _mm512_loadu_ps(weights.as_ptr().add(index));
+                    acc = _mm512_fmadd_ps(a, b, acc);
+                }
+                return bias + _mm512_reduce_add_ps(acc);
+            }
+            if inputs.len().is_multiple_of(8) {
+                return super::avx2::dot_f32(inputs, weights, bias);
+            }
+            super::scalar::dot_f32(inputs, weights, bias)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn align64_box_keeps_payload_and_alignment() {
+        let src = (0..1024u16).map(|v| v as i16).collect::<Vec<_>>();
+        let boxed = Align64Box::from_slice(&src);
+        assert_eq!(&*boxed, src.as_slice());
+        assert_eq!(boxed.as_ptr() as usize % 64, 0);
+    }
 
     #[test]
     fn find_nnz_skips_zero_blocks() {
@@ -468,5 +879,36 @@ mod tests {
         let mut squares = [-0.5f32, 0.5, 2.0];
         square_clamp01(&mut squares);
         assert_eq!(squares, [0.0, 0.25, 1.0]);
+    }
+
+    #[test]
+    fn hard_swish6_bias_matches_scalar_for_sandhi_l1() {
+        let sums: [i32; 32] = core::array::from_fn(|i| (i as i32) * 17 - 80);
+        let biases: [f32; 32] = core::array::from_fn(|i| (i as f32) * 0.03 - 0.4);
+        let scale = 1.0 / 4096.0;
+        let mut expected = [0.0f32; 32];
+        for (j, sum) in sums.iter().enumerate() {
+            expected[j] = hard_swish6((*sum as f32).mul_add(scale, biases[j]));
+        }
+        let mut actual = [0.0f32; 32];
+        hard_swish6_bias(&sums, &biases, scale, &mut actual);
+        for (got, want) in actual.iter().zip(expected) {
+            assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn swiglu_residual_matches_scalar_for_sandhi_l2() {
+        let pre: [f32; 64] = core::array::from_fn(|i| (i as f32) * 0.08 - 2.4);
+        let residual: [f32; 32] = core::array::from_fn(|i| (i as f32) * 0.05 - 0.7);
+        let mut expected = [0.0f32; 32];
+        for i in 0..32 {
+            expected[i] = hard_swish6(pre[i]).mul_add(pre[i + 32], residual[i]);
+        }
+        let mut actual = [0.0f32; 32];
+        swiglu_residual(&pre, &residual, &mut actual);
+        for (got, want) in actual.iter().zip(expected) {
+            assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+        }
     }
 }

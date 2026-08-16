@@ -155,6 +155,9 @@ fn piece_bit(id: u8) -> u8 {
 fn permute(focus: usize, mailbox: &[u8; 64], ignore: Option<usize>) -> ([u8; 64], [u8; 64]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
+        if avx512_vbmi_ready() {
+            return unsafe { permute_avx512_vbmi(focus, mailbox, ignore) };
+        }
         if avx2_ready() {
             return unsafe { permute_avx2(focus, mailbox, ignore) };
         }
@@ -186,6 +189,110 @@ fn avx2_ready() -> bool {
     use std::sync::OnceLock;
     static READY: OnceLock<bool> = OnceLock::new();
     *READY.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn avx512_vbmi_ready() -> bool {
+    use std::sync::OnceLock;
+    static READY: OnceLock<bool> = OnceLock::new();
+    *READY.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vbmi")
+    })
+}
+
+/// 64-byte VBMI permute of the mailbox, then the official piece-bit LUT.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
+unsafe fn permute_avx512_vbmi(
+    focus: usize,
+    mailbox: &[u8; 64],
+    ignore: Option<usize>,
+) -> ([u8; 64], [u8; 64]) {
+    use std::arch::x86_64::{
+        _mm_loadu_si128, _mm512_broadcast_i32x4, _mm512_cmpeq_epi8_mask, _mm512_loadu_si512,
+        _mm512_maskz_shuffle_epi8, _mm512_permutexvar_epi8, _mm512_set1_epi8, _mm512_storeu_si512,
+    };
+
+    unsafe {
+        let mut mb = *mailbox;
+        if let Some(sq) = ignore {
+            mb[sq] = u8::MAX;
+        }
+        let bytes = _mm512_loadu_si512(mb.as_ptr().cast());
+        let idxs = _mm512_loadu_si512(PERMUTATION[focus].as_ptr().cast());
+        let invalid = _mm512_cmpeq_epi8_mask(idxs, _mm512_set1_epi8(0x80u8 as i8));
+        let permuted = _mm512_permutexvar_epi8(idxs, bytes);
+        let lut = _mm512_broadcast_i32x4(_mm_loadu_si128(PIECE_TO_BIT.as_ptr().cast()));
+        let bits = _mm512_maskz_shuffle_epi8(!invalid, lut, permuted);
+        let mut indexes = [0x80u8; 64];
+        let mut bit_bytes = [0u8; 64];
+        _mm512_storeu_si512(indexes.as_mut_ptr().cast(), idxs);
+        _mm512_storeu_si512(bit_bytes.as_mut_ptr().cast(), bits);
+        (indexes, bit_bytes)
+    }
+}
+
+/// Official `Vector::mask` / `!unoccupied`: one bit per byte via `pmovmskb`.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn mask_nonzero_avx2(bits: &[u8; 64]) -> BitRays {
+    use std::arch::x86_64::{
+        __m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_setzero_si256,
+    };
+    unsafe {
+        let zero = _mm256_setzero_si256();
+        let low = _mm256_loadu_si256(bits.as_ptr().cast::<__m256i>());
+        let high = _mm256_loadu_si256(bits.as_ptr().cast::<__m256i>().add(1));
+        let unoccupied = u64::from(_mm256_movemask_epi8(_mm256_cmpeq_epi8(low, zero)) as u32)
+            | (u64::from(_mm256_movemask_epi8(_mm256_cmpeq_epi8(high, zero)) as u32) << 32);
+        BitRays(!unoccupied)
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn mask_bit_avx2(bits: &[u8; 64], bit: u8) -> BitRays {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
+        _mm256_set1_epi8, _mm256_setzero_si256,
+    };
+    unsafe {
+        let zero = _mm256_setzero_si256();
+        let needle = _mm256_set1_epi8(bit as i8);
+        let low = _mm256_and_si256(_mm256_loadu_si256(bits.as_ptr().cast::<__m256i>()), needle);
+        let high = _mm256_and_si256(
+            _mm256_loadu_si256(bits.as_ptr().cast::<__m256i>().add(1)),
+            needle,
+        );
+        let absent = u64::from(_mm256_movemask_epi8(_mm256_cmpeq_epi8(low, zero)) as u32)
+            | (u64::from(_mm256_movemask_epi8(_mm256_cmpeq_epi8(high, zero)) as u32) << 32);
+        BitRays(!absent)
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn mask_and_table_avx2(bits: &[u8; 64], table: &[u8; 64]) -> BitRays {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
+        _mm256_setzero_si256,
+    };
+    unsafe {
+        let zero = _mm256_setzero_si256();
+        let low = _mm256_and_si256(
+            _mm256_loadu_si256(bits.as_ptr().cast::<__m256i>()),
+            _mm256_loadu_si256(table.as_ptr().cast::<__m256i>()),
+        );
+        let high = _mm256_and_si256(
+            _mm256_loadu_si256(bits.as_ptr().cast::<__m256i>().add(1)),
+            _mm256_loadu_si256(table.as_ptr().cast::<__m256i>().add(1)),
+        );
+        let absent = u64::from(_mm256_movemask_epi8(_mm256_cmpeq_epi8(low, zero)) as u32)
+            | (u64::from(_mm256_movemask_epi8(_mm256_cmpeq_epi8(high, zero)) as u32) << 32);
+        BitRays(!absent)
+    }
 }
 
 /// Official `geometry/avx2.rs` mailbox permute: 64-byte pshufb + PIECE_TO_BIT LUT.
@@ -245,6 +352,14 @@ unsafe fn permute_avx2(
 }
 
 fn occupied_mask(bits: &[u8; 64]) -> BitRays {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if avx2_ready() {
+        return unsafe { mask_nonzero_avx2(bits) };
+    }
+    occupied_mask_scalar(bits)
+}
+
+fn occupied_mask_scalar(bits: &[u8; 64]) -> BitRays {
     let mut mask = 0u64;
     for (i, &bit) in bits.iter().enumerate() {
         if bit != 0 {
@@ -261,6 +376,14 @@ fn closest_occupied(bits: &[u8; 64]) -> BitRays {
 }
 
 fn test_king(bits: &[u8; 64]) -> BitRays {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if avx2_ready() {
+        return unsafe { mask_bit_avx2(bits, KING) };
+    }
+    test_king_scalar(bits)
+}
+
+fn test_king_scalar(bits: &[u8; 64]) -> BitRays {
     let mut mask = 0u64;
     for (i, &bit) in bits.iter().enumerate() {
         if bit & KING != 0 {
@@ -271,6 +394,14 @@ fn test_king(bits: &[u8; 64]) -> BitRays {
 }
 
 fn incoming_attackers(bits: &[u8; 64], closest: BitRays) -> BitRays {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if avx2_ready() {
+        return unsafe { mask_and_table_avx2(bits, &INCOMING_THREATS_MASK) } & closest;
+    }
+    incoming_attackers_scalar(bits, closest)
+}
+
+fn incoming_attackers_scalar(bits: &[u8; 64], closest: BitRays) -> BitRays {
     let mut mask = 0u64;
     for (i, &bit) in bits.iter().enumerate() {
         if bit & INCOMING_THREATS_MASK[i] != 0 {
@@ -281,6 +412,16 @@ fn incoming_attackers(bits: &[u8; 64], closest: BitRays) -> BitRays {
 }
 
 fn incoming_sliders(bits: &[u8; 64], closest: BitRays) -> BitRays {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if avx2_ready() {
+        return unsafe { mask_and_table_avx2(bits, &INCOMING_SLIDERS_MASK) }
+            & closest
+            & BitRays(NON_KNIGHT);
+    }
+    incoming_sliders_scalar(bits, closest)
+}
+
+fn incoming_sliders_scalar(bits: &[u8; 64], closest: BitRays) -> BitRays {
     let mut mask = 0u64;
     for (i, &bit) in bits.iter().enumerate() {
         if bit & INCOMING_SLIDERS_MASK[i] != 0 {
@@ -619,6 +760,44 @@ mod tests {
     }
 
     #[test]
+    fn mailbox_snapshot_matches_full_snapshot_for_bit_rays() {
+        types::init();
+        let mut board = Board::new();
+        let full = ThreatSnapshot::from_board(&board);
+        let cheap = ThreatSnapshot::from_mailbox(&board);
+        assert_eq!(full.mailbox(), cheap.mailbox());
+        assert_eq!(full.color(), cheap.color());
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+        let mut a = DeltaList(Vec::new());
+        let mut b = DeltaList(Vec::new());
+        collect_bit_ray_move_deltas(&mut a, full, mv);
+        collect_bit_ray_move_deltas(&mut b, cheap, mv);
+        assert_eq!(a.0, b.0);
+    }
+
+    #[test]
+    fn avx512_vbmi_permute_matches_scalar_when_detected() {
+        types::init();
+        let mailbox = *Board::new().piece_ids();
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if super::avx512_vbmi_ready() {
+            for focus in 0..64 {
+                let scalar = permute_scalar(focus, &mailbox, Some(28));
+                let vbmi = unsafe { super::permute_avx512_vbmi(focus, &mailbox, Some(28)) };
+                assert_eq!(scalar.0, vbmi.0, "vbmi indexes focus={focus}");
+                assert_eq!(scalar.1, vbmi.1, "vbmi bits focus={focus}");
+            }
+            return;
+        }
+        let _ = mailbox;
+    }
+
+    #[test]
     fn avx2_permute_matches_scalar_on_startpos() {
         types::init();
         let mailbox = *Board::new().piece_ids();
@@ -634,6 +813,29 @@ mod tests {
                 "ignore indexes focus={focus}"
             );
             assert_eq!(ignored.1, ignored_dispatched.1, "ignore bits focus={focus}");
+        }
+    }
+
+    #[test]
+    fn bit_ray_masks_match_scalar_scans() {
+        types::init();
+        let mailbox = *Board::new().piece_ids();
+        for focus in [0, 12, 28, 36, 63] {
+            let (_, bits) = permute_scalar(focus, &mailbox, None);
+            assert_eq!(
+                super::occupied_mask(&bits).0,
+                super::occupied_mask_scalar(&bits).0
+            );
+            assert_eq!(super::test_king(&bits).0, super::test_king_scalar(&bits).0);
+            let closest = super::closest_occupied(&bits);
+            assert_eq!(
+                super::incoming_attackers(&bits, closest).0,
+                super::incoming_attackers_scalar(&bits, closest).0
+            );
+            assert_eq!(
+                super::incoming_sliders(&bits, closest).0,
+                super::incoming_sliders_scalar(&bits, closest).0
+            );
         }
     }
 }

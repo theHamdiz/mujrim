@@ -334,6 +334,17 @@ struct OpponentThreats {
     all: u64,
 }
 
+#[inline]
+fn opponent_attacks_all(board: &Board) -> u64 {
+    let color = board.side_to_move.opponent();
+    let occupancy = board.all_occupancy() & !board.king_square(board.side_to_move).bitboard();
+    let mut all = 0u64;
+    for piece in Piece::ALL {
+        all |= attack_set(piece, color, board.piece_bb(piece, color), occupancy);
+    }
+    all
+}
+
 fn opponent_threats(board: &Board) -> OpponentThreats {
     let color = board.side_to_move.opponent();
     let occupancy = board.all_occupancy() & !board.king_square(board.side_to_move).bitboard();
@@ -660,14 +671,31 @@ fn reckless_material(board: &Board) -> i32 {
 /// search-node entry. Stand-pat qsearch and null-move probes do not increment.
 #[inline(always)]
 fn make_search_move(board: &mut Board, state: &mut ThreadState, mv: Move) {
+    make_search_move_ex(board, state, mv, true);
+}
+
+/// Snapshot/restore callers skip `UndoInfo`; hash history is still pushed.
+fn make_search_move_no_undo(board: &mut Board, state: &mut ThreadState, mv: Move) {
+    make_search_move_ex(board, state, mv, false);
+}
+
+fn make_search_move_ex(board: &mut Board, state: &mut ThreadState, mv: Move, record_undo: bool) {
     state.nodes += 1;
     if state.use_nnue {
-        state.nnue_state.make_move(board, mv);
+        if record_undo {
+            state.nnue_state.make_move(board, mv);
+        } else {
+            state.nnue_state.make_move_without_undo(board, mv);
+        }
     } else {
         state.hce_undo[state.hce_ply] = state.hce;
         state.hce_ply += 1;
         state.hce.apply_move(board, mv);
-        board.make_move(mv);
+        if record_undo {
+            board.make_move(mv);
+        } else {
+            board.make_move_without_undo(mv);
+        }
     }
 }
 
@@ -926,6 +954,8 @@ pub(crate) struct ThreadState {
     dbl_exts: [i32; MAX_PLY],
     /// Minimum ply before NMP is allowed again (Akimbo anti-recursion).
     min_nmp_ply: usize,
+    /// Official Viridithas per-side NMP ban during verification.
+    nmp_banned: [bool; 2],
     /// Per-ply cutoff count for LMR adjustment (Akimbo: reduce less if cutoffs < 4).
     cutoffs: [u32; MAX_PLY],
     /// Number of moves searched at each active node.
@@ -987,6 +1017,7 @@ impl ThreadState {
             minor_corr: boxed_zeroed(),
             dbl_exts: [0; MAX_PLY],
             min_nmp_ply: 0,
+            nmp_banned: [false; 2],
             cutoffs: [0; MAX_PLY],
             move_counts: [0; MAX_PLY],
             tt_moves: [NULL_MOVE; MAX_PLY],
@@ -1051,6 +1082,7 @@ impl ThreadState {
         self.threats.fill(0);
         self.dbl_exts.fill(0);
         self.min_nmp_ply = 0;
+        self.nmp_banned = [false; 2];
         self.cutoffs.fill(0);
         self.move_counts.fill(0);
         self.tt_moves.fill(NULL_MOVE);
@@ -2074,6 +2106,10 @@ fn stock_like_lmr_search_depth(effective_depth: i32, reduction: i32, is_pv: bool
     (effective_depth - reduction).max(1) + i32::from(is_pv)
 }
 
+const VIRI_SE_MARGIN_NUM: i32 = 48;
+const VIRI_SE_MARGIN_DEN: i32 = 64;
+const VIRI_DEXT_MARGIN: i32 = 13;
+const VIRI_TEXT_MARGIN: i32 = 201;
 const VIRI_PROBCUT_MARGIN: i32 = 176;
 const VIRI_PROBCUT_IMPROVING_MARGIN: i32 = 78;
 const VIRI_PROBCUT_EVAL_DIV: i32 = 289;
@@ -2119,6 +2155,113 @@ fn akimbo_probcut_beta(beta: i32) -> i32 {
 fn viridithas_lmr_search_depth(depth: i32, extension: i32, reduction: i32) -> i32 {
     let new_depth = depth + extension;
     (new_depth - reduction).clamp(0, new_depth + 1)
+}
+
+/// Official later-move reduction: LMR table when it applies, else `r = 1`.
+///
+/// v20.0.0 stores `ss.reduction = 1024` and searches at `depth + extension - 1`
+/// whenever `depth <= 2` or the move is the first non-root later move. Using
+/// `r = 0` here keeps depth-1 later moves in alpha-beta instead of QS.
+#[inline(always)]
+fn viridithas_later_move_reduction(lmr_ready: bool, reduction_1024ths: i32) -> (i32, i32) {
+    if lmr_ready {
+        (reduction_1024ths, reduction_1024ths / 1024)
+    } else {
+        (1024, 1)
+    }
+}
+
+const VIRI_DO_DEEPER_BASE: i32 = 32;
+const VIRI_DO_DEEPER_DEPTH: i32 = 8;
+const VIRI_DO_SHALLOWER_MARGIN: i32 = 16;
+const VIRI_NMP_IMPROVING_MARGIN: i32 = 132;
+const VIRI_NMP_DEPTH_MUL: i32 = -8;
+const VIRI_NMP_VERIFY_DEPTH: i32 = 12;
+
+/// Official NMP static gate: `eval + improving * 132 + depth * -8 >= beta`.
+#[inline(always)]
+fn viridithas_nmp_static_gate(static_eval: i32, beta: i32, depth: i32, improving: bool) -> bool {
+    static_eval + i32::from(improving) * VIRI_NMP_IMPROVING_MARGIN + depth * VIRI_NMP_DEPTH_MUL
+        >= beta
+}
+
+#[inline(always)]
+fn viridithas_nmp_needs_verify(depth: i32, beta: i32) -> bool {
+    depth >= VIRI_NMP_VERIFY_DEPTH || beta.abs() >= MATE_SCORE - 100
+}
+
+/// Official later-move depth after a reduced ZW that beat alpha.
+#[inline(always)]
+fn viridithas_research_depth(
+    new_depth: i32,
+    whole_reduction: i32,
+    score: i32,
+    best_score: i32,
+) -> i32 {
+    if whole_reduction > 1 {
+        let do_deeper =
+            score > best_score + VIRI_DO_DEEPER_BASE + VIRI_DO_DEEPER_DEPTH * whole_reduction;
+        let do_shallower = score < best_score + new_depth;
+        new_depth + i32::from(do_deeper) - i32::from(do_shallower)
+    } else if score < best_score + VIRI_DO_SHALLOWER_MARGIN {
+        new_depth - 1
+    } else {
+        new_depth
+    }
+}
+
+#[inline(always)]
+fn viridithas_singular_beta(tt_score: i32, depth: i32) -> i32 {
+    tt_score - depth * VIRI_SE_MARGIN_NUM / VIRI_SE_MARGIN_DEN
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViridithasSingular {
+    MultiCut(i32),
+    Extend(i32),
+}
+
+struct ViridithasSingularInput {
+    s_score: i32,
+    s_beta: i32,
+    tt_score: i32,
+    beta: i32,
+    is_pv: bool,
+    is_cut: bool,
+    is_quiet: bool,
+    dextensions: i32,
+}
+
+/// Official v20.0.0 singular-extension verdict, including multi-cut.
+#[inline(always)]
+fn viridithas_singular_verdict(input: ViridithasSingularInput) -> ViridithasSingular {
+    let ViridithasSingularInput {
+        s_score,
+        s_beta,
+        tt_score,
+        beta,
+        is_pv,
+        is_cut,
+        is_quiet,
+        dextensions,
+    } = input;
+    if s_score < s_beta {
+        if !is_pv && dextensions <= 12 && s_score < s_beta - VIRI_DEXT_MARGIN {
+            ViridithasSingular::Extend(
+                2 + i32::from(is_quiet && s_score < s_beta - VIRI_TEXT_MARGIN),
+            )
+        } else {
+            ViridithasSingular::Extend(1)
+        }
+    } else if !is_pv && s_score >= beta {
+        ViridithasSingular::MultiCut(s_score)
+    } else if tt_score >= beta {
+        ViridithasSingular::Extend(-3 + i32::from(is_pv))
+    } else if is_cut {
+        ViridithasSingular::Extend(-2)
+    } else {
+        ViridithasSingular::Extend(0)
+    }
 }
 
 /// Official `lm_reduction(depth, moves_made) + ttpv * 768` preview used by LMP/FP.
@@ -4005,9 +4148,14 @@ fn piece_value(piece: Piece) -> i32 {
 /// Hash pawn structure for correction history.
 #[inline(always)]
 fn pawn_hash(board: &Board) -> usize {
-    let wp = board.piece_bb(Piece::Pawn, types::Color::White);
-    let bp = board.piece_bb(Piece::Pawn, types::Color::Black);
-    // FNV-1a inspired hash of two u64 bitboards
+    pawn_hash_bbs(
+        board.piece_bb(Piece::Pawn, types::Color::White),
+        board.piece_bb(Piece::Pawn, types::Color::Black),
+    )
+}
+
+#[inline(always)]
+fn pawn_hash_bbs(wp: u64, bp: u64) -> usize {
     let mut h = 0xcbf29ce484222325u64;
     h ^= wp;
     h = h.wrapping_mul(0x100000001b3);
@@ -4019,12 +4167,15 @@ fn pawn_hash(board: &Board) -> usize {
 /// Hash material configuration for correction history.
 #[inline(always)]
 fn material_hash(board: &Board) -> usize {
+    material_hash_bbs(|piece, color| board.piece_bb(piece, color))
+}
+
+#[inline(always)]
+fn material_hash_bbs(mut piece_bb: impl FnMut(Piece, types::Color) -> u64) -> usize {
     let mut h = 0x9e3779b97f4a7c15u64;
     for &piece in &Piece::ALL {
         for &color in &[types::Color::White, types::Color::Black] {
-            h ^= board
-                .piece_bb(piece, color)
-                .wrapping_mul(piece.index() as u64 + 1);
+            h ^= piece_bb(piece, color).wrapping_mul(piece.index() as u64 + 1);
             h = h.wrapping_mul(0x100000001b3);
         }
     }
@@ -4034,10 +4185,16 @@ fn material_hash(board: &Board) -> usize {
 /// Hash minor piece (knight+bishop) positions for correction history.
 #[inline(always)]
 fn minor_hash(board: &Board) -> usize {
-    let wn = board.piece_bb(Piece::Knight, types::Color::White);
-    let bn = board.piece_bb(Piece::Knight, types::Color::Black);
-    let wb = board.piece_bb(Piece::Bishop, types::Color::White);
-    let bb = board.piece_bb(Piece::Bishop, types::Color::Black);
+    minor_hash_bbs(
+        board.piece_bb(Piece::Knight, types::Color::White),
+        board.piece_bb(Piece::Knight, types::Color::Black),
+        board.piece_bb(Piece::Bishop, types::Color::White),
+        board.piece_bb(Piece::Bishop, types::Color::Black),
+    )
+}
+
+#[inline(always)]
+fn minor_hash_bbs(wn: u64, bn: u64, wb: u64, bb: u64) -> usize {
     let mut h = 0x517cc1b727220a95u64;
     h ^= wn;
     h = h.wrapping_mul(0x100000001b3);
@@ -4416,6 +4573,101 @@ mod tests {
         assert!(viridithas_preview_lmr_depth(8, 8, false) < 8);
         assert!(
             viridithas_preview_lmr_depth(8, 8, true) < viridithas_preview_lmr_depth(8, 8, false)
+        );
+    }
+
+    #[test]
+    fn snapshot_make_matches_board_make_and_restore() {
+        types::init();
+        let mut board = Board::new();
+        let parent = board.snapshot();
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+        let mut child = parent;
+        assert!(!child.make(mv));
+        board.restore_snapshot(child);
+        let mut via_make = Board::new();
+        via_make.make_move(mv);
+        assert_eq!(board.hash, via_make.hash);
+        assert_eq!(board.side_to_move, via_make.side_to_move);
+        board.restore_snapshot(parent);
+        assert_eq!(board.hash, Board::new().hash);
+    }
+
+    #[test]
+    fn viridithas_later_moves_default_to_one_ply_when_lmr_table_is_off() {
+        let (stored, whole) = viridithas_later_move_reduction(false, 0);
+        assert_eq!(stored, 1024);
+        assert_eq!(whole, 1);
+        assert_eq!(viridithas_lmr_search_depth(1, 0, whole), 0);
+        assert_eq!(viridithas_lmr_search_depth(2, 0, whole), 1);
+        let (stored, whole) = viridithas_later_move_reduction(true, 2500);
+        assert_eq!(stored, 2500);
+        assert_eq!(whole, 2);
+        assert_eq!(viridithas_lmr_search_depth(8, 0, whole), 6);
+    }
+
+    #[test]
+    fn viridithas_research_matches_official_deeper_shallower_and_r1_skip() {
+        // r=1: only the fail-high-near-best shallower nudge, no ZW re-search.
+        assert_eq!(viridithas_research_depth(8, 1, 50, 40), 7);
+        assert_eq!(viridithas_research_depth(8, 1, 80, 40), 8);
+        // r=2: deeper when the reduced score crushes best + 32 + 8*r.
+        assert_eq!(viridithas_research_depth(8, 2, 200, 40), 9);
+        assert_eq!(viridithas_research_depth(8, 2, 41, 40), 7);
+        assert!(viridithas_nmp_static_gate(100, 80, 4, true));
+        assert!(!viridithas_nmp_static_gate(80, 80, 8, false));
+        assert!(!viridithas_nmp_needs_verify(8, 50));
+        assert!(viridithas_nmp_needs_verify(12, 50));
+        assert!(viridithas_nmp_needs_verify(6, MATE_SCORE - 50));
+    }
+
+    #[test]
+    fn viridithas_singular_matches_official_multicut_and_extensions() {
+        assert_eq!(viridithas_singular_beta(100, 8), 94);
+        let verdict = |s_score, s_beta, tt_score, beta, is_pv, is_cut, is_quiet| {
+            viridithas_singular_verdict(ViridithasSingularInput {
+                s_score,
+                s_beta,
+                tt_score,
+                beta,
+                is_pv,
+                is_cut,
+                is_quiet,
+                dextensions: 0,
+            })
+        };
+        assert_eq!(
+            verdict(82, 94, 100, 50, false, true, true),
+            ViridithasSingular::Extend(1)
+        );
+        assert_eq!(
+            verdict(80, 94, 100, 50, false, true, true),
+            ViridithasSingular::Extend(2)
+        );
+        assert_eq!(
+            verdict(-120, 94, 100, 50, false, true, true),
+            ViridithasSingular::Extend(3)
+        );
+        assert_eq!(
+            verdict(60, 50, 100, 55, false, true, false),
+            ViridithasSingular::MultiCut(60)
+        );
+        assert_eq!(
+            verdict(60, 50, 40, 70, false, true, false),
+            ViridithasSingular::Extend(-2)
+        );
+        assert_eq!(
+            verdict(60, 50, 80, 70, false, false, false),
+            ViridithasSingular::Extend(-3)
+        );
+        assert_eq!(
+            verdict(60, 50, 40, 70, true, false, false),
+            ViridithasSingular::Extend(0)
         );
     }
 
@@ -5362,6 +5614,43 @@ mod tests {
             },
         );
         assert_eq!(score, draw_score(state.nodes));
+    }
+
+    #[test]
+    fn snapshot_qs_matches_unmake_qs_on_italian_game() {
+        setup();
+        let fen = "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3";
+        let mut unmake_board = Board::from_fen(fen).unwrap();
+        let mut snapshot_board = Board::from_fen(fen).unwrap();
+        let unmake_tt = TranspositionTable::new(1);
+        let snapshot_tt = TranspositionTable::new(1);
+        let stopped = AtomicBool::new(false);
+        let mut unmake_state = ThreadState::new(Arc::new(ActiveNetwork::Embedded));
+        let mut snapshot_state = ThreadState::new(Arc::new(ActiveNetwork::Embedded));
+        unmake_state.in_check[0] = unmake_board.in_check();
+        snapshot_state.in_check[0] = snapshot_board.in_check();
+        let params = SearchParams::default();
+        let lmr_table = params.build_lmr_table();
+        let unmake_ctx = test_context(&unmake_tt, &stopped, &params, &lmr_table);
+        let snapshot_ctx = test_context(&snapshot_tt, &stopped, &params, &lmr_table);
+        let unmake = dedicated_qs::quiescence(
+            &mut unmake_board,
+            &mut unmake_state,
+            &unmake_ctx,
+            -INF,
+            INF,
+            0,
+        );
+        let snapshot = dedicated_qs::quiescence_snapshot(
+            &mut snapshot_board,
+            &mut snapshot_state,
+            &snapshot_ctx,
+            -INF,
+            INF,
+            0,
+        );
+        assert_eq!(unmake, snapshot);
+        assert_eq!(unmake_board.hash, snapshot_board.hash);
     }
 
     #[test]

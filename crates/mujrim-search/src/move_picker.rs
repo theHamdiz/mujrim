@@ -16,7 +16,97 @@ use crate::policy::MoveOrderingProfile;
 use crate::see;
 use std::mem::MaybeUninit;
 use types::chess_move::NULL_MOVE;
-use types::{Board, Move, MoveList};
+use types::{AkimboPos, Board, BoardSnapshot, Color, Move, MoveList};
+
+/// Board or official-style `AkimboPos` used by the staged picker.
+pub trait MoveSource {
+    fn side_to_move(&self) -> Color;
+    fn gen_captures(&self) -> MoveList;
+    fn gen_quiets(&self) -> MoveList;
+    fn is_legal_move(&self, mv: Move) -> bool;
+    fn see_ge(&self, mv: Move, threshold: i32) -> bool;
+}
+
+impl MoveSource for Board {
+    #[inline]
+    fn side_to_move(&self) -> Color {
+        self.side_to_move
+    }
+
+    #[inline]
+    fn gen_captures(&self) -> MoveList {
+        self.generate_captures(self.side_to_move)
+    }
+
+    #[inline]
+    fn gen_quiets(&self) -> MoveList {
+        self.generate_pseudo_legal_quiets(self.side_to_move)
+    }
+
+    #[inline]
+    fn is_legal_move(&self, mv: Move) -> bool {
+        Board::is_legal_move(self, mv)
+    }
+
+    #[inline]
+    fn see_ge(&self, mv: Move, threshold: i32) -> bool {
+        see::see_ge(self, mv, threshold)
+    }
+}
+
+impl MoveSource for AkimboPos {
+    #[inline]
+    fn side_to_move(&self) -> Color {
+        AkimboPos::side_to_move(self)
+    }
+
+    #[inline]
+    fn gen_captures(&self) -> MoveList {
+        self.generate_captures(self.side_to_move())
+    }
+
+    #[inline]
+    fn gen_quiets(&self) -> MoveList {
+        self.generate_pseudo_legal_quiets(self.side_to_move())
+    }
+
+    #[inline]
+    fn is_legal_move(&self, mv: Move) -> bool {
+        AkimboPos::is_legal_move(self, mv)
+    }
+
+    #[inline]
+    fn see_ge(&self, mv: Move, threshold: i32) -> bool {
+        see::see_ge_pos(self, mv, threshold)
+    }
+}
+
+impl MoveSource for BoardSnapshot {
+    #[inline]
+    fn side_to_move(&self) -> Color {
+        BoardSnapshot::side_to_move(self)
+    }
+
+    #[inline]
+    fn gen_captures(&self) -> MoveList {
+        self.generate_captures(self.side_to_move())
+    }
+
+    #[inline]
+    fn gen_quiets(&self) -> MoveList {
+        self.generate_pseudo_legal_quiets(self.side_to_move())
+    }
+
+    #[inline]
+    fn is_legal_move(&self, mv: Move) -> bool {
+        BoardSnapshot::is_legal_move(self, mv)
+    }
+
+    #[inline]
+    fn see_ge(&self, mv: Move, threshold: i32) -> bool {
+        see::see_ge_snap(self, mv, threshold)
+    }
+}
 
 /// Maximum number of moves we track scores for.
 const MAX_SCORED: usize = 256;
@@ -126,13 +216,13 @@ const _: () = assert!(std::mem::size_of::<MovePicker>() <= 5 * 1024);
 impl MovePicker {
     /// Builds a picker without validating moves that search may never consume.
     #[inline]
-    pub fn new(
-        board: &mut Board,
+    pub fn new<P: MoveSource>(
+        pos: &P,
         tt_move: Option<Move>,
         killers: [Move; 2],
         countermove: Move,
     ) -> Self {
-        let captures = board.generate_captures(board.side_to_move);
+        let captures = pos.gen_captures();
 
         Self {
             stage: Stage::TtMove,
@@ -161,13 +251,13 @@ impl MovePicker {
 
     /// Test helper matching [`Self::new`].
     #[cfg(test)]
-    fn new_for_test(
-        board: &mut Board,
+    fn new_for_test<P: MoveSource>(
+        pos: &P,
         tt_move: Option<Move>,
         killers: [Move; 2],
         countermove: Move,
     ) -> Self {
-        Self::new(board, tt_move, killers, countermove)
+        Self::new(pos, tt_move, killers, countermove)
     }
 
     /// Create a simpler structure for qsearch-only experiments (not used by main QS path).
@@ -239,14 +329,14 @@ impl MovePicker {
     }
 
     /// Lazily fill the quiet list when it is first needed.
-    fn ensure_quiets(&mut self, board: &mut Board) {
+    fn ensure_quiets<P: MoveSource>(&mut self, pos: &P) {
         if self.quiets.is_none() {
-            self.quiets = Some(board.generate_pseudo_legal_quiets(board.side_to_move));
+            self.quiets = Some(pos.gen_quiets());
         }
     }
 
-    fn find_matching_quiet(&mut self, board: &mut Board, key: Move) -> Option<Move> {
-        self.ensure_quiets(board);
+    fn find_matching_quiet<P: MoveSource>(&mut self, pos: &P, key: Move) -> Option<Move> {
+        self.ensure_quiets(pos);
         let q = self.quiets.as_ref()?;
         for i in 0..q.len() {
             let m = q[i];
@@ -257,15 +347,11 @@ impl MovePicker {
         None
     }
 
-    pub fn next<FC, FQ>(
-        &mut self,
-        board: &mut Board,
-        score_capture: &FC,
-        score_quiet: &FQ,
-    ) -> Option<Move>
+    pub fn next<P, FC, FQ>(&mut self, pos: &P, score_capture: &FC, score_quiet: &FQ) -> Option<Move>
     where
-        FC: Fn(&Board, Move) -> i32,
-        FQ: Fn(&Board, Move) -> i32,
+        P: MoveSource,
+        FC: Fn(&P, Move) -> i32,
+        FQ: Fn(&P, Move) -> i32,
     {
         loop {
             match self.stage {
@@ -273,17 +359,15 @@ impl MovePicker {
                     self.stage = Stage::GenerateCaptures;
                     if let Some(ttm) = self.tt_move {
                         if let Some(mv) = self.find_matching_capture(ttm)
-                            && board.is_legal_move(mv)
-                            && (!self.skip_bad_captures
-                                || !mv.is_capture()
-                                || see::see_ge(board, mv, 0))
+                            && pos.is_legal_move(mv)
+                            && (!self.skip_bad_captures || !mv.is_capture() || pos.see_ge(mv, 0))
                         {
                             self.tt_yielded = true;
                             return Some(mv);
                         }
                         if !self.skip_quiets
-                            && let Some(mv) = self.find_matching_quiet(board, ttm)
-                            && board.is_legal_move(mv)
+                            && let Some(mv) = self.find_matching_quiet(pos, ttm)
+                            && pos.is_legal_move(mv)
                         {
                             self.tt_yielded = true;
                             return Some(mv);
@@ -307,7 +391,7 @@ impl MovePicker {
                         }
 
                         let score = if is_capture {
-                            score_capture(board, mv)
+                            score_capture(pos, mv)
                         } else {
                             900_000
                         };
@@ -315,8 +399,7 @@ impl MovePicker {
                         self.captures.as_mut_slice()[write] = mv;
                         self.capture_scores[write].write(score);
                         let threshold = self.move_ordering.noisy_see_threshold(score);
-                        self.capture_good[write]
-                            .write(!is_capture || see::see_ge(board, mv, threshold));
+                        self.capture_good[write].write(!is_capture || pos.see_ge(mv, threshold));
                         write += 1;
                     }
                     self.captures.truncate(write);
@@ -330,7 +413,7 @@ impl MovePicker {
                         self.capture_idx,
                     ) {
                         self.capture_idx += 1;
-                        if board.is_legal_move(mv) {
+                        if pos.is_legal_move(mv) {
                             return Some(mv);
                         }
                         continue;
@@ -350,8 +433,8 @@ impl MovePicker {
                             && !self.is_tt_move(k)
                             && !k.is_capture()
                             && !k.is_promotion()
-                            && let Some(mv) = self.find_matching_quiet(board, k)
-                            && board.is_legal_move(mv)
+                            && let Some(mv) = self.find_matching_quiet(pos, k)
+                            && pos.is_legal_move(mv)
                         {
                             self.killer0_emitted = true;
                             return Some(mv);
@@ -364,8 +447,8 @@ impl MovePicker {
                             && !self.is_tt_move(k)
                             && !k.is_capture()
                             && !k.is_promotion()
-                            && let Some(mv) = self.find_matching_quiet(board, k)
-                            && board.is_legal_move(mv)
+                            && let Some(mv) = self.find_matching_quiet(pos, k)
+                            && pos.is_legal_move(mv)
                         {
                             self.killer1_emitted = true;
                             return Some(mv);
@@ -389,8 +472,8 @@ impl MovePicker {
                             && !cm.is_promotion()
                             && !same_move_key(cm, self.killers[0])
                             && !same_move_key(cm, self.killers[1])
-                            && let Some(mv) = self.find_matching_quiet(board, cm)
-                            && board.is_legal_move(mv)
+                            && let Some(mv) = self.find_matching_quiet(pos, cm)
+                            && pos.is_legal_move(mv)
                         {
                             self.cm_emitted = true;
                             return Some(mv);
@@ -404,10 +487,7 @@ impl MovePicker {
                         continue;
                     }
                     self.stage = Stage::Quiets;
-                    let mut quiets = self
-                        .quiets
-                        .take()
-                        .unwrap_or_else(|| board.generate_pseudo_legal_quiets(board.side_to_move));
+                    let mut quiets = self.quiets.take().unwrap_or_else(|| pos.gen_quiets());
 
                     let mut quiet_count = 0usize;
                     let generated_count = quiets.len();
@@ -428,7 +508,7 @@ impl MovePicker {
                         }
 
                         if quiet_count < MAX_SCORED {
-                            let score = score_quiet(board, mv);
+                            let score = score_quiet(pos, mv);
                             quiets.as_mut_slice()[quiet_count] = mv;
                             self.quiet_scores[quiet_count].write(score);
                             quiet_count += 1;
@@ -448,7 +528,7 @@ impl MovePicker {
                     });
                     if let Some(mv) = next {
                         self.quiet_idx += 1;
-                        if board.is_legal_move(mv) {
+                        if pos.is_legal_move(mv) {
                             return Some(mv);
                         }
                         continue;
@@ -467,7 +547,7 @@ impl MovePicker {
                         self.capture_idx,
                     ) {
                         self.capture_idx += 1;
-                        if board.is_legal_move(mv) {
+                        if pos.is_legal_move(mv) {
                             return Some(mv);
                         }
                         continue;
@@ -504,8 +584,8 @@ mod tests {
     #[test]
     fn move_ordering_profile_is_selected_without_allocation() {
         setup();
-        let mut board = Board::new();
-        let picker = MovePicker::new(&mut board, None, [NULL_MOVE; 2], NULL_MOVE)
+        let board = Board::new();
+        let picker = MovePicker::new(&board, None, [NULL_MOVE; 2], NULL_MOVE)
             .with_move_ordering(MoveOrderingProfile::Reckless);
         assert_eq!(picker.move_ordering, MoveOrderingProfile::Reckless);
     }
@@ -513,11 +593,11 @@ mod tests {
     #[test]
     fn picker_reports_bad_capture_stage_for_losing_noisy_moves() {
         setup();
-        let mut board = Board::from_fen("r3k3/p7/8/8/8/8/8/Q3K3 w - - 0 1").unwrap();
+        let board = Board::from_fen("r3k3/p7/8/8/8/8/8/Q3K3 w - - 0 1").unwrap();
         let score_capture = |_: &Board, _: Move| 0;
         let score_quiet = |_: &Board, _: Move| 0;
-        let mut picker = MovePicker::new(&mut board, None, [NULL_MOVE; 2], NULL_MOVE);
-        while let Some(mv) = picker.next(&mut board, &score_capture, &score_quiet) {
+        let mut picker = MovePicker::new(&board, None, [NULL_MOVE; 2], NULL_MOVE);
+        while let Some(mv) = picker.next(&board, &score_capture, &score_quiet) {
             if mv.to_uci() == "a1a7" {
                 assert!(picker.is_bad_capture_stage());
                 return;
@@ -546,12 +626,12 @@ mod tests {
     fn test_picker_yields_all_legal() {
         setup();
         let mut board = Board::new();
-        let mut picker = MovePicker::new_for_test(&mut board, None, [NULL_MOVE; 2], NULL_MOVE);
+        let mut picker = MovePicker::new_for_test(&board, None, [NULL_MOVE; 2], NULL_MOVE);
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
 
         let mut moves = Vec::new();
-        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+        while let Some(mv) = picker.next(&board, &score_cap, &score_quiet) {
             moves.push(mv);
         }
 
@@ -572,11 +652,11 @@ mod tests {
         let legal = board.generate_legal_moves();
         let tt = legal[0];
 
-        let mut picker = MovePicker::new_for_test(&mut board, Some(tt), [NULL_MOVE; 2], NULL_MOVE);
+        let mut picker = MovePicker::new_for_test(&board, Some(tt), [NULL_MOVE; 2], NULL_MOVE);
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
 
-        let first = picker.next(&mut board, &score_cap, &score_quiet);
+        let first = picker.next(&board, &score_cap, &score_quiet);
         assert!(first.is_some());
         let first = first.unwrap();
         assert_eq!(first.from, tt.from);
@@ -590,12 +670,12 @@ mod tests {
         let legal = board.generate_legal_moves();
         let tt = legal[0];
 
-        let mut picker = MovePicker::new_for_test(&mut board, Some(tt), [NULL_MOVE; 2], NULL_MOVE);
+        let mut picker = MovePicker::new_for_test(&board, Some(tt), [NULL_MOVE; 2], NULL_MOVE);
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
 
         let mut moves = Vec::new();
-        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+        while let Some(mv) = picker.next(&board, &score_cap, &score_quiet) {
             let count = moves
                 .iter()
                 .filter(|m: &&Move| {
@@ -613,12 +693,12 @@ mod tests {
         let mut board =
             Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
                 .unwrap();
-        let mut picker = MovePicker::new_for_test(&mut board, None, [NULL_MOVE; 2], NULL_MOVE);
+        let mut picker = MovePicker::new_for_test(&board, None, [NULL_MOVE; 2], NULL_MOVE);
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
 
         let mut moves = Vec::new();
-        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+        while let Some(mv) = picker.next(&board, &score_cap, &score_quiet) {
             moves.push(mv);
         }
 
@@ -637,12 +717,12 @@ mod tests {
         setup();
         let mut board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
         let killer = Move::promotion(types::Square::A7, types::Square::A8, Piece::Queen);
-        let mut picker = MovePicker::new_for_test(&mut board, None, [killer, NULL_MOVE], NULL_MOVE);
+        let mut picker = MovePicker::new_for_test(&board, None, [killer, NULL_MOVE], NULL_MOVE);
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
 
         let mut moves = Vec::new();
-        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+        while let Some(mv) = picker.next(&board, &score_cap, &score_quiet) {
             moves.push(mv);
         }
 
@@ -656,15 +736,14 @@ mod tests {
     #[test]
     fn test_picker_keeps_underpromotion_when_killer_is_same_underpromo() {
         setup();
-        let mut board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
         let underpromo = Move::promotion(types::Square::A7, types::Square::A8, Piece::Knight);
-        let mut picker =
-            MovePicker::new_for_test(&mut board, None, [underpromo, NULL_MOVE], NULL_MOVE);
+        let mut picker = MovePicker::new_for_test(&board, None, [underpromo, NULL_MOVE], NULL_MOVE);
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
 
         let mut moves = Vec::new();
-        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+        while let Some(mv) = picker.next(&board, &score_cap, &score_quiet) {
             moves.push(mv);
         }
 
@@ -677,14 +756,14 @@ mod tests {
     #[test]
     fn test_underpromotions_survive_skip_quiets() {
         setup();
-        let mut board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
-        let mut picker = MovePicker::new_for_test(&mut board, None, [NULL_MOVE; 2], NULL_MOVE);
+        let board = Board::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").unwrap();
+        let mut picker = MovePicker::new_for_test(&board, None, [NULL_MOVE; 2], NULL_MOVE);
         picker.skip_quiets();
         let score_cap = |_: &Board, _: Move| -> i32 { 0 };
         let score_quiet = |_: &Board, _: Move| -> i32 { 0 };
 
         let mut seen = Vec::new();
-        while let Some(mv) = picker.next(&mut board, &score_cap, &score_quiet) {
+        while let Some(mv) = picker.next(&board, &score_cap, &score_quiet) {
             seen.push(mv.to_uci());
         }
 
@@ -697,51 +776,47 @@ mod tests {
     #[test]
     fn qsearch_mode_omits_losing_captures() {
         setup();
-        let mut board = Board::from_fen("r3k3/p7/8/8/8/8/8/Q3K3 w - - 0 1").unwrap();
+        let board = Board::from_fen("r3k3/p7/8/8/8/8/8/Q3K3 w - - 0 1").unwrap();
         let losing = Move::capture(types::Square::A1, types::Square::A7);
         assert!(!see::see_ge(&board, losing, 0));
 
-        let mut picker = MovePicker::new(&mut board, None, [NULL_MOVE; 2], NULL_MOVE);
+        let mut picker = MovePicker::new(&board, None, [NULL_MOVE; 2], NULL_MOVE);
         picker.skip_quiets();
         picker.skip_bad_captures();
         let mut moves = Vec::new();
-        while let Some(mv) = picker.next(&mut board, &|_, _| 0, &|_, _| 0) {
+        while let Some(mv) = picker.next(&board, &|_, _| 0, &|_, _| 0) {
             moves.push(mv);
         }
         assert!(!moves.iter().any(|mv| same_move_key(*mv, losing)));
 
-        let mut tt_picker = MovePicker::new(&mut board, Some(losing), [NULL_MOVE; 2], NULL_MOVE);
+        let mut tt_picker = MovePicker::new(&board, Some(losing), [NULL_MOVE; 2], NULL_MOVE);
         tt_picker.skip_quiets();
         tt_picker.skip_bad_captures();
-        assert!(tt_picker.next(&mut board, &|_, _| 0, &|_, _| 0).is_none());
+        assert!(tt_picker.next(&board, &|_, _| 0, &|_, _| 0).is_none());
 
-        let mut start = Board::new();
+        let start = Board::new();
         let quiet = Move::quiet(types::Square::E2, types::Square::E4);
-        let mut quiet_picker = MovePicker::new(&mut start, Some(quiet), [NULL_MOVE; 2], NULL_MOVE);
+        let mut quiet_picker = MovePicker::new(&start, Some(quiet), [NULL_MOVE; 2], NULL_MOVE);
         quiet_picker.skip_quiets();
         quiet_picker.skip_bad_captures();
-        assert!(
-            quiet_picker
-                .next(&mut start, &|_, _| 0, &|_, _| 0)
-                .is_none()
-        );
+        assert!(quiet_picker.next(&start, &|_, _| 0, &|_, _| 0).is_none());
     }
 
     #[test]
     fn checkmate_position_yields_no_moves() {
         setup();
-        let mut board =
+        let board =
             Board::from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3")
                 .unwrap();
-        let mut picker = MovePicker::new(&mut board, None, [NULL_MOVE; 2], NULL_MOVE);
-        assert!(picker.next(&mut board, &|_, _| 0, &|_, _| 0).is_none());
+        let mut picker = MovePicker::new(&board, None, [NULL_MOVE; 2], NULL_MOVE);
+        assert!(picker.next(&board, &|_, _| 0, &|_, _| 0).is_none());
     }
 
     #[test]
     fn stalemate_position_yields_no_moves() {
         setup();
-        let mut board = Board::from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1").unwrap();
-        let mut picker = MovePicker::new(&mut board, None, [NULL_MOVE; 2], NULL_MOVE);
-        assert!(picker.next(&mut board, &|_, _| 0, &|_, _| 0).is_none());
+        let board = Board::from_fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1").unwrap();
+        let mut picker = MovePicker::new(&board, None, [NULL_MOVE; 2], NULL_MOVE);
+        assert!(picker.next(&board, &|_, _| 0, &|_, _| 0).is_none());
     }
 }

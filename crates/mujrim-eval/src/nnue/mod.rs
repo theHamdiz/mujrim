@@ -45,7 +45,11 @@ pub mod akimbo_format;
 #[cfg(feature = "stockfish-nnue")]
 pub mod stockfish_format;
 
-#[cfg(any(feature = "stockfish-nnue", feature = "obsidian-nnue"))]
+#[cfg(any(
+    feature = "stockfish-nnue",
+    feature = "obsidian-nnue",
+    feature = "akimbo-nnue"
+))]
 mod stockfish_simd;
 
 #[cfg(any(

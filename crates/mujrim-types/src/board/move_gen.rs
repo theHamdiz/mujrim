@@ -1,111 +1,12 @@
 //! Legal and pseudo-legal move generation.
 
+use super::Board;
 use super::attack_tables::*;
-use super::{BLACK_KING_CASTLE, BLACK_QUEEN_CASTLE, Board, WHITE_KING_CASTLE, WHITE_QUEEN_CASTLE};
-use crate::bitboard::*;
 use crate::chess_move::{Move, MoveFlag, MoveList};
-use crate::piece::{Color, Piece};
+use crate::piece::Piece;
 use crate::square::Square;
 
 impl Board {
-    /// Returns true if the given square is attacked by the given color.
-    pub fn is_square_attacked(&self, sq: Square, by_color: Color) -> bool {
-        let sq_idx = sq.index();
-        let occ = self.all_occupancy();
-
-        // Pawn attacks: check if any opponent pawn attacks this square
-        if pawn_attacks(by_color.opponent().index(), sq_idx) & self.piece_bb(Piece::Pawn, by_color)
-            != 0
-        {
-            return true;
-        }
-        // Knight
-        if knight_attacks(sq_idx) & self.piece_bb(Piece::Knight, by_color) != 0 {
-            return true;
-        }
-        // King
-        if king_attacks(sq_idx) & self.piece_bb(Piece::King, by_color) != 0 {
-            return true;
-        }
-        // Bishop / Queen (diagonals)
-        let diag = bishop_attacks(sq_idx, occ);
-        if diag & (self.piece_bb(Piece::Bishop, by_color) | self.piece_bb(Piece::Queen, by_color))
-            != 0
-        {
-            return true;
-        }
-        // Rook / Queen (lines)
-        let lines = rook_attacks(sq_idx, occ);
-        if lines & (self.piece_bb(Piece::Rook, by_color) | self.piece_bb(Piece::Queen, by_color))
-            != 0
-        {
-            return true;
-        }
-
-        false
-    }
-
-    #[inline(always)]
-    fn is_square_attacked_after(
-        &self,
-        sq: Square,
-        by_color: Color,
-        occupancy: Bitboard,
-        removed_attackers: Bitboard,
-    ) -> bool {
-        let sq_idx = sq.index();
-        let attackers = !removed_attackers;
-        if pawn_attacks(by_color.opponent().index(), sq_idx)
-            & self.piece_bb(Piece::Pawn, by_color)
-            & attackers
-            != 0
-        {
-            return true;
-        }
-        if knight_attacks(sq_idx) & self.piece_bb(Piece::Knight, by_color) & attackers != 0 {
-            return true;
-        }
-        if king_attacks(sq_idx) & self.piece_bb(Piece::King, by_color) & attackers != 0 {
-            return true;
-        }
-        if bishop_attacks(sq_idx, occupancy)
-            & (self.piece_bb(Piece::Bishop, by_color) | self.piece_bb(Piece::Queen, by_color))
-            & attackers
-            != 0
-        {
-            return true;
-        }
-        rook_attacks(sq_idx, occupancy)
-            & (self.piece_bb(Piece::Rook, by_color) | self.piece_bb(Piece::Queen, by_color))
-            & attackers
-            != 0
-    }
-
-    #[inline(always)]
-    fn castling_is_legal_after_move(&self, mv: Move, us: Color) -> bool {
-        let them = us.opponent();
-        let kingside = match mv.flag {
-            MoveFlag::KingCastle => true,
-            MoveFlag::QueenCastle => false,
-            _ => return false,
-        };
-        let king_to = Board::castling_king_landing(us, kingside);
-        let rook_from = self.castling_rook_from(us, kingside);
-        let rook_to = Board::castling_rook_landing(us, kingside);
-        let transit = rook_to;
-        if self.is_square_attacked_after(mv.from, them, self.all_occupancy(), 0) {
-            return false;
-        }
-        let without_king = self.all_occupancy() & !mv.from.bitboard();
-        let transit_occupancy = without_king | transit.bitboard();
-        if self.is_square_attacked_after(transit, them, transit_occupancy, 0) {
-            return false;
-        }
-        let final_occupancy =
-            (without_king & !rook_from.bitboard()) | rook_to.bitboard() | king_to.bitboard();
-        !self.is_square_attacked_after(king_to, them, final_occupancy, 0)
-    }
-
     /// Generates all legal moves for the current side to move.
     /// Uses in-place make/unmake for performance (no board cloning).
     pub fn generate_legal_moves(&mut self) -> MoveList {
@@ -119,34 +20,6 @@ impl Board {
             }
         }
         legal
-    }
-
-    /// Generates all pseudo-legal moves (may leave king in check).
-    pub fn generate_pseudo_legal_moves(&self, color: Color) -> MoveList {
-        let mut moves = MoveList::new();
-
-        self.gen_pawn_moves(color, &mut moves);
-        self.gen_knight_moves(color, &mut moves);
-        self.gen_bishop_moves(color, &mut moves);
-        self.gen_rook_moves(color, &mut moves);
-        self.gen_queen_moves(color, &mut moves);
-        self.gen_king_moves(color, &mut moves);
-        self.gen_castling_moves(color, &mut moves);
-
-        moves
-    }
-
-    /// Generates all pseudo-legal capture moves directly (for quiescence search).
-    /// Much faster than generating all moves and filtering.
-    pub fn generate_captures(&self, color: Color) -> MoveList {
-        let mut moves = MoveList::new();
-        self.gen_pawn_captures(color, &mut moves);
-        self.gen_piece_captures(Piece::Knight, color, &mut moves);
-        self.gen_sliding_captures(Piece::Bishop, color, &mut moves);
-        self.gen_sliding_captures(Piece::Rook, color, &mut moves);
-        self.gen_sliding_captures(Piece::Queen, color, &mut moves);
-        self.gen_king_captures(color, &mut moves);
-        moves
     }
 
     /// Generates legal captures only (for quiescence search).
@@ -179,537 +52,53 @@ impl Board {
         legal
     }
 
-    /// Pseudo-legal quiet moves only (empty destination squares); no captures, EP, or promotions.
-    pub fn generate_pseudo_legal_quiets(&self, color: Color) -> MoveList {
-        let mut moves = MoveList::new();
-        self.gen_pawn_quiets(color, &mut moves);
-        self.gen_knight_quiets(color, &mut moves);
-        self.gen_bishop_quiets(color, &mut moves);
-        self.gen_rook_quiets(color, &mut moves);
-        self.gen_queen_quiets(color, &mut moves);
-        self.gen_king_quiets(color, &mut moves);
-        self.gen_castling_moves(color, &mut moves);
-        moves
-    }
-
-    /// Returns true if a pseudo-legal move leaves the moving king safe.
-    #[inline(always)]
-    pub fn is_legal_move(&self, mv: Move) -> bool {
+    /// Whether `mv` checks the opponent, computed from the current position.
+    #[inline]
+    pub fn gives_check(&self, mv: Move) -> bool {
         let us = self.side_to_move;
         let them = us.opponent();
-        let moving_piece = match self.piece_of_color_on(mv.from, us) {
-            Some(piece) => piece,
-            None => return false,
-        };
-
+        let king = self.king_square(them);
+        let king_bb = king.bitboard();
+        let from_bb = mv.from.bitboard();
+        let to_bb = mv.to.bitboard();
+        let mut occ = (self.all_occupancy() & !from_bb) | to_bb;
+        let mut vacated = from_bb;
+        if mv.flag == MoveFlag::EnPassant {
+            let cap = Square::from_file_rank(mv.to.file(), mv.from.rank());
+            occ &= !cap.bitboard();
+            vacated |= cap.bitboard();
+        }
         if mv.is_castling() {
-            return moving_piece == Piece::King && self.castling_is_legal_after_move(mv, us);
+            let kingside = mv.flag == MoveFlag::KingCastle;
+            let rook_from = self.castling_rook_from(us, kingside);
+            let rook_to = Self::castling_rook_landing(us, kingside);
+            occ = (occ & !rook_from.bitboard()) | rook_to.bitboard();
+            vacated |= rook_from.bitboard();
+            if rook_attacks(rook_to.index(), occ) & king_bb != 0 {
+                return true;
+            }
         }
-
-        let removed_attacker = if mv.flag == MoveFlag::EnPassant {
-            Square::from_file_rank(mv.to.file(), mv.from.rank()).bitboard()
-        } else if mv.is_capture() {
-            mv.to.bitboard()
-        } else {
-            0
+        let Some(moved) = self.piece_of_color_on(mv.from, us) else {
+            return false;
         };
-        let occupancy =
-            (self.all_occupancy() & !mv.from.bitboard() & !removed_attacker) | mv.to.bitboard();
-        let king = if moving_piece == Piece::King {
-            mv.to
-        } else {
-            self.king_square(us)
+        let piece = mv.promotion.unwrap_or(moved);
+        let direct = match piece {
+            Piece::Pawn => pawn_attacks(us.index(), mv.to.index()),
+            Piece::Knight => knight_attacks(mv.to.index()),
+            Piece::Bishop => bishop_attacks(mv.to.index(), occ),
+            Piece::Rook => rook_attacks(mv.to.index(), occ),
+            Piece::Queen => queen_attacks(mv.to.index(), occ),
+            Piece::King => king_attacks(mv.to.index()),
         };
-        !self.is_square_attacked_after(king, them, occupancy, removed_attacker)
-    }
-
-    // ── Pawn moves ──────────────────────────────────────────────────────────
-
-    fn gen_pawn_moves(&self, color: Color, moves: &mut MoveList) {
-        let pawns = self.piece_bb(Piece::Pawn, color);
-        let occ = self.all_occupancy();
-        let enemies = self.color_occupancy(color.opponent());
-        let promo_rank = color.promotion_rank();
-        let dir = color.pawn_direction();
-        let start_rank = color.pawn_start_rank();
-
-        for from_idx in iter_bits(pawns) {
-            let from = Square::from_index(from_idx);
-            let from_rank = from.rank();
-            let _from_file = from.file();
-
-            // Single push
-            let to_idx = (from_idx as i32 + dir) as usize;
-            if to_idx < 64 {
-                let to = Square::from_index(to_idx);
-                let to_bb = to.bitboard();
-
-                if occ & to_bb == 0 {
-                    if to.rank() == promo_rank {
-                        // Promotion
-                        for promo_piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight]
-                        {
-                            moves.push(Move::promotion(from, to, promo_piece));
-                        }
-                    } else {
-                        moves.push(Move::quiet(from, to));
-
-                        // Double push from starting rank
-                        if from_rank == start_rank {
-                            let double_idx = (from_idx as i32 + 2 * dir) as usize;
-                            if double_idx < 64 {
-                                let double_to = Square::from_index(double_idx);
-                                if occ & double_to.bitboard() == 0 {
-                                    moves.push(Move::double_pawn(from, double_to));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Captures (diagonal)
-            let pawn_atk = pawn_attacks(color.index(), from_idx);
-            for to_idx in iter_bits(pawn_atk & enemies) {
-                let to = Square::from_index(to_idx);
-                if to.rank() == promo_rank {
-                    for promo_piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                        moves.push(Move::promotion_capture(from, to, promo_piece));
-                    }
-                } else {
-                    moves.push(Move::capture(from, to));
-                }
-            }
-
-            // En passant
-            if let Some(ep_sq) = self.en_passant
-                && pawn_atk & ep_sq.bitboard() != 0
-            {
-                moves.push(Move::en_passant(from, ep_sq));
-            }
+        if direct & king_bb != 0 {
+            return true;
         }
-    }
-
-    fn gen_pawn_quiets(&self, color: Color, moves: &mut MoveList) {
-        let pawns = self.piece_bb(Piece::Pawn, color);
-        let occ = self.all_occupancy();
-        let promo_rank = color.promotion_rank();
-        let dir = color.pawn_direction();
-        let start_rank = color.pawn_start_rank();
-
-        for from_idx in iter_bits(pawns) {
-            let from = Square::from_index(from_idx);
-            let from_rank = from.rank();
-
-            let to_idx = (from_idx as i32 + dir) as usize;
-            if to_idx < 64 {
-                let to = Square::from_index(to_idx);
-                if occ & to.bitboard() == 0 {
-                    if to.rank() == promo_rank {
-                        continue;
-                    }
-                    moves.push(Move::quiet(from, to));
-                    if from_rank == start_rank {
-                        let double_idx = (from_idx as i32 + 2 * dir) as usize;
-                        if double_idx < 64 {
-                            let double_to = Square::from_index(double_idx);
-                            if occ & double_to.bitboard() == 0 {
-                                moves.push(Move::double_pawn(from, double_to));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Knight moves ────────────────────────────────────────────────────────
-
-    fn gen_knight_moves(&self, color: Color, moves: &mut MoveList) {
-        let knights = self.piece_bb(Piece::Knight, color);
-        let friendly = self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-
-        for from_idx in iter_bits(knights) {
-            let from = Square::from_index(from_idx);
-            let attacks = knight_attacks(from_idx) & !friendly;
-
-            for to_idx in iter_bits(attacks) {
-                let to = Square::from_index(to_idx);
-                if enemies & to.bitboard() != 0 {
-                    moves.push(Move::capture(from, to));
-                } else {
-                    moves.push(Move::quiet(from, to));
-                }
-            }
-        }
-    }
-
-    fn gen_knight_quiets(&self, color: Color, moves: &mut MoveList) {
-        let knights = self.piece_bb(Piece::Knight, color);
-        let not_occupied_by_us = !self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-
-        for from_idx in iter_bits(knights) {
-            let from = Square::from_index(from_idx);
-            let attacks = knight_attacks(from_idx) & not_occupied_by_us & !enemies;
-            for to_idx in iter_bits(attacks) {
-                moves.push(Move::quiet(from, Square::from_index(to_idx)));
-            }
-        }
-    }
-
-    // ── Bishop moves ────────────────────────────────────────────────────────
-
-    fn gen_bishop_moves(&self, color: Color, moves: &mut MoveList) {
-        let bishops = self.piece_bb(Piece::Bishop, color);
-        let friendly = self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-        let occ = self.all_occupancy();
-
-        for from_idx in iter_bits(bishops) {
-            let from = Square::from_index(from_idx);
-            let attacks = bishop_attacks(from_idx, occ) & !friendly;
-
-            for to_idx in iter_bits(attacks) {
-                let to = Square::from_index(to_idx);
-                if enemies & to.bitboard() != 0 {
-                    moves.push(Move::capture(from, to));
-                } else {
-                    moves.push(Move::quiet(from, to));
-                }
-            }
-        }
-    }
-
-    fn gen_bishop_quiets(&self, color: Color, moves: &mut MoveList) {
-        let bishops = self.piece_bb(Piece::Bishop, color);
-        let not_occupied_by_us = !self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-        let occ = self.all_occupancy();
-
-        for from_idx in iter_bits(bishops) {
-            let from = Square::from_index(from_idx);
-            let attacks = bishop_attacks(from_idx, occ) & not_occupied_by_us & !enemies;
-            for to_idx in iter_bits(attacks) {
-                moves.push(Move::quiet(from, Square::from_index(to_idx)));
-            }
-        }
-    }
-
-    // ── Rook moves ──────────────────────────────────────────────────────────
-
-    fn gen_rook_moves(&self, color: Color, moves: &mut MoveList) {
-        let rooks = self.piece_bb(Piece::Rook, color);
-        let friendly = self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-        let occ = self.all_occupancy();
-
-        for from_idx in iter_bits(rooks) {
-            let from = Square::from_index(from_idx);
-            let attacks = rook_attacks(from_idx, occ) & !friendly;
-
-            for to_idx in iter_bits(attacks) {
-                let to = Square::from_index(to_idx);
-                if enemies & to.bitboard() != 0 {
-                    moves.push(Move::capture(from, to));
-                } else {
-                    moves.push(Move::quiet(from, to));
-                }
-            }
-        }
-    }
-
-    fn gen_rook_quiets(&self, color: Color, moves: &mut MoveList) {
-        let rooks = self.piece_bb(Piece::Rook, color);
-        let not_occupied_by_us = !self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-        let occ = self.all_occupancy();
-
-        for from_idx in iter_bits(rooks) {
-            let from = Square::from_index(from_idx);
-            let attacks = rook_attacks(from_idx, occ) & not_occupied_by_us & !enemies;
-            for to_idx in iter_bits(attacks) {
-                moves.push(Move::quiet(from, Square::from_index(to_idx)));
-            }
-        }
-    }
-
-    // ── Queen moves ─────────────────────────────────────────────────────────
-
-    fn gen_queen_moves(&self, color: Color, moves: &mut MoveList) {
-        let queens = self.piece_bb(Piece::Queen, color);
-        let friendly = self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-        let occ = self.all_occupancy();
-
-        for from_idx in iter_bits(queens) {
-            let from = Square::from_index(from_idx);
-            let attacks = queen_attacks(from_idx, occ) & !friendly;
-
-            for to_idx in iter_bits(attacks) {
-                let to = Square::from_index(to_idx);
-                if enemies & to.bitboard() != 0 {
-                    moves.push(Move::capture(from, to));
-                } else {
-                    moves.push(Move::quiet(from, to));
-                }
-            }
-        }
-    }
-
-    fn gen_queen_quiets(&self, color: Color, moves: &mut MoveList) {
-        let queens = self.piece_bb(Piece::Queen, color);
-        let not_occupied_by_us = !self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-        let occ = self.all_occupancy();
-
-        for from_idx in iter_bits(queens) {
-            let from = Square::from_index(from_idx);
-            let attacks = queen_attacks(from_idx, occ) & not_occupied_by_us & !enemies;
-            for to_idx in iter_bits(attacks) {
-                moves.push(Move::quiet(from, Square::from_index(to_idx)));
-            }
-        }
-    }
-
-    // ── King moves ──────────────────────────────────────────────────────────
-
-    fn gen_king_moves(&self, color: Color, moves: &mut MoveList) {
-        let king_bb = self.piece_bb(Piece::King, color);
-        if king_bb == 0 {
-            return;
-        }
-        let from_idx = get_lsb(king_bb);
-        let from = Square::from_index(from_idx);
-        let friendly = self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-
-        let attacks = king_attacks(from_idx) & !friendly;
-
-        for to_idx in iter_bits(attacks) {
-            let to = Square::from_index(to_idx);
-            if enemies & to.bitboard() != 0 {
-                moves.push(Move::capture(from, to));
-            } else {
-                moves.push(Move::quiet(from, to));
-            }
-        }
-    }
-
-    fn gen_king_quiets(&self, color: Color, moves: &mut MoveList) {
-        let king_bb = self.piece_bb(Piece::King, color);
-        if king_bb == 0 {
-            return;
-        }
-        let from_idx = get_lsb(king_bb);
-        let from = Square::from_index(from_idx);
-        let not_occupied_by_us = !self.color_occupancy(color);
-        let enemies = self.color_occupancy(color.opponent());
-        let attacks = king_attacks(from_idx) & not_occupied_by_us & !enemies;
-        for to_idx in iter_bits(attacks) {
-            moves.push(Move::quiet(from, Square::from_index(to_idx)));
-        }
-    }
-
-    // ── Castling ────────────────────────────────────────────────────────────
-
-    fn gen_castling_moves(&self, color: Color, moves: &mut MoveList) {
-        if self.castling_rights == 0 {
-            return;
-        }
-        if self.is_chess960() {
-            if self.can_castle(color, true) {
-                let from = self.king_square(color);
-                moves.push(Move::king_castle(from, self.castle_uci_to(color, true)));
-            }
-            if self.can_castle(color, false) {
-                let from = self.king_square(color);
-                moves.push(Move::queen_castle(from, self.castle_uci_to(color, false)));
-            }
-            return;
-        }
-
-        let occ = self.all_occupancy();
-        let enemy = color.opponent();
-
-        match color {
-            Color::White => {
-                // Kingside: E1 -> G1, need F1 and G1 empty, E1/F1/G1 not attacked
-                if self.castling_rights & WHITE_KING_CASTLE != 0 {
-                    let between = Square::F1.bitboard() | Square::G1.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E1, enemy)
-                        && !self.is_square_attacked(Square::F1, enemy)
-                        && !self.is_square_attacked(Square::G1, enemy)
-                    {
-                        moves.push(Move::king_castle(Square::E1, Square::G1));
-                    }
-                }
-                // Queenside: E1 -> C1, need B1/C1/D1 empty, E1/D1/C1 not attacked
-                if self.castling_rights & WHITE_QUEEN_CASTLE != 0 {
-                    let between =
-                        Square::B1.bitboard() | Square::C1.bitboard() | Square::D1.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E1, enemy)
-                        && !self.is_square_attacked(Square::D1, enemy)
-                        && !self.is_square_attacked(Square::C1, enemy)
-                    {
-                        moves.push(Move::queen_castle(Square::E1, Square::C1));
-                    }
-                }
-            }
-            Color::Black => {
-                if self.castling_rights & BLACK_KING_CASTLE != 0 {
-                    let between = Square::F8.bitboard() | Square::G8.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E8, enemy)
-                        && !self.is_square_attacked(Square::F8, enemy)
-                        && !self.is_square_attacked(Square::G8, enemy)
-                    {
-                        moves.push(Move::king_castle(Square::E8, Square::G8));
-                    }
-                }
-                if self.castling_rights & BLACK_QUEEN_CASTLE != 0 {
-                    let between =
-                        Square::B8.bitboard() | Square::C8.bitboard() | Square::D8.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E8, enemy)
-                        && !self.is_square_attacked(Square::D8, enemy)
-                        && !self.is_square_attacked(Square::C8, enemy)
-                    {
-                        moves.push(Move::queen_castle(Square::E8, Square::C8));
-                    }
-                }
-            }
-        }
-    }
-
-    fn can_castle(&self, color: Color, kingside: bool) -> bool {
-        let right = match (color, kingside) {
-            (Color::White, true) => WHITE_KING_CASTLE,
-            (Color::White, false) => WHITE_QUEEN_CASTLE,
-            (Color::Black, true) => BLACK_KING_CASTLE,
-            (Color::Black, false) => BLACK_QUEEN_CASTLE,
-        };
-        if self.castling_rights & right == 0 {
-            return false;
-        }
-        let king = self.king_square(color);
-        let rook = self.castling_rook_from(color, kingside);
-        if self.piece_on(rook) != Some((Piece::Rook, color)) {
-            return false;
-        }
-        let king_to = Board::castling_king_landing(color, kingside);
-        let rook_to = Board::castling_rook_landing(color, kingside);
-        let occ = self.all_occupancy() & !king.bitboard() & !rook.bitboard();
-        if rank_between(king, rook) & occ != 0 {
-            return false;
-        }
-        if rank_between(king, king_to) & occ != 0 {
-            return false;
-        }
-        if rank_between(rook, rook_to) & occ != 0 {
-            return false;
-        }
-        let enemy = color.opponent();
-        for sq in inclusive_rank_walk(king, king_to) {
-            if self.is_square_attacked(sq, enemy) {
-                return false;
-            }
-        }
-        true
-    }
-
-    // ── Capture-only generation (for quiescence search) ────────────────────
-
-    fn gen_pawn_captures(&self, color: Color, moves: &mut MoveList) {
-        let pawns = self.piece_bb(Piece::Pawn, color);
-        let enemies = self.color_occupancy(color.opponent());
-        let promo_rank = color.promotion_rank();
-
-        for from_idx in iter_bits(pawns) {
-            let from = Square::from_index(from_idx);
-            let pawn_atk = pawn_attacks(color.index(), from_idx);
-
-            // Normal captures
-            for to_idx in iter_bits(pawn_atk & enemies) {
-                let to = Square::from_index(to_idx);
-                if to.rank() == promo_rank {
-                    for promo_piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                        moves.push(Move::promotion_capture(from, to, promo_piece));
-                    }
-                } else {
-                    moves.push(Move::capture(from, to));
-                }
-            }
-
-            // En passant
-            if let Some(ep_sq) = self.en_passant
-                && pawn_atk & ep_sq.bitboard() != 0
-            {
-                moves.push(Move::en_passant(from, ep_sq));
-            }
-
-            // Non-capture promotions (also tactical)
-            let occ = self.all_occupancy();
-            let dir = color.pawn_direction();
-            let to_idx = (from_idx as i32 + dir) as usize;
-            if to_idx < 64 {
-                let to = Square::from_index(to_idx);
-                if occ & to.bitboard() == 0 && to.rank() == promo_rank {
-                    for promo_piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                        moves.push(Move::promotion(from, to, promo_piece));
-                    }
-                }
-            }
-        }
-    }
-
-    fn gen_piece_captures(&self, piece: Piece, color: Color, moves: &mut MoveList) {
-        let pieces = self.piece_bb(piece, color);
-        let enemies = self.color_occupancy(color.opponent());
-
-        for from_idx in iter_bits(pieces) {
-            let from = Square::from_index(from_idx);
-            let attacks = knight_attacks(from_idx) & enemies;
-            for to_idx in iter_bits(attacks) {
-                moves.push(Move::capture(from, Square::from_index(to_idx)));
-            }
-        }
-    }
-
-    fn gen_sliding_captures(&self, piece: Piece, color: Color, moves: &mut MoveList) {
-        let pieces = self.piece_bb(piece, color);
-        let enemies = self.color_occupancy(color.opponent());
-        let occ = self.all_occupancy();
-
-        for from_idx in iter_bits(pieces) {
-            let from = Square::from_index(from_idx);
-            let attacks = match piece {
-                Piece::Bishop => bishop_attacks(from_idx, occ),
-                Piece::Rook => rook_attacks(from_idx, occ),
-                Piece::Queen => queen_attacks(from_idx, occ),
-                _ => 0,
-            } & enemies;
-            for to_idx in iter_bits(attacks) {
-                moves.push(Move::capture(from, Square::from_index(to_idx)));
-            }
-        }
-    }
-
-    fn gen_king_captures(&self, color: Color, moves: &mut MoveList) {
-        let king_bb = self.piece_bb(Piece::King, color);
-        if king_bb == 0 {
-            return;
-        }
-        let from_idx = get_lsb(king_bb);
-        let from = Square::from_index(from_idx);
-        let enemies = self.color_occupancy(color.opponent());
-        let attacks = king_attacks(from_idx) & enemies;
-        for to_idx in iter_bits(attacks) {
-            moves.push(Move::capture(from, Square::from_index(to_idx)));
-        }
+        let sliders = self.color_occupancy(us) & !vacated;
+        let bishops =
+            sliders & (self.piece_bb(Piece::Bishop, us) | self.piece_bb(Piece::Queen, us));
+        let rooks = sliders & (self.piece_bb(Piece::Rook, us) | self.piece_bb(Piece::Queen, us));
+        (bishop_attacks(king.index(), occ) & bishops) != 0
+            || (rook_attacks(king.index(), occ) & rooks) != 0
     }
 }
 
@@ -737,39 +126,6 @@ impl Board {
         }
         nodes
     }
-}
-
-#[inline(always)]
-fn rank_between(from: Square, to: Square) -> u64 {
-    if from.rank() != to.rank() {
-        return 0;
-    }
-    let (lo, hi) = if from.file() < to.file() {
-        (from.file(), to.file())
-    } else {
-        (to.file(), from.file())
-    };
-    let mut bb = 0u64;
-    let rank = from.rank();
-    let mut file = lo + 1;
-    while file < hi {
-        bb |= Square::from_file_rank(file, rank).bitboard();
-        file += 1;
-    }
-    bb
-}
-
-#[inline(always)]
-fn inclusive_rank_walk(from: Square, to: Square) -> impl Iterator<Item = Square> {
-    let rank = from.rank();
-    let start = from.file();
-    let end = to.file();
-    let step: i8 = if end >= start { 1 } else { -1 };
-    let count = start.abs_diff(end) as usize + 1;
-    (0..count).map(move |i| {
-        let file = (start as i8 + step * i as i8) as u8;
-        Square::from_file_rank(file, rank)
-    })
 }
 
 #[cfg(test)]
@@ -1182,6 +538,7 @@ mod tests {
             let moves = board.generate_legal_moves();
 
             for mv in &moves {
+                let predicted = board.gives_check(*mv);
                 let mut b2 = board.clone();
                 b2.make_move(*mv);
                 assert!(
@@ -1189,6 +546,12 @@ mod tests {
                     "Move {} leaves own king in check in position: {}",
                     mv,
                     fen
+                );
+                assert_eq!(
+                    predicted,
+                    b2.in_check(),
+                    "gives_check({}) mismatch in {fen}",
+                    mv.to_uci()
                 );
             }
         }

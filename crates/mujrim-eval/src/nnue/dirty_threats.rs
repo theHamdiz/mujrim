@@ -6,7 +6,7 @@ use types::{Board, Color, Move, Piece, Square};
 
 pub(super) const MAX_DIRTY_THREAT_DELTAS: usize = 96;
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 pub(super) struct ThreatDelta(u32);
 
 impl ThreatDelta {
@@ -72,6 +72,19 @@ impl ThreatSnapshot {
     pub(super) fn from_board(board: &Board) -> Self {
         Self {
             position: ThreatPosition::from_board(board),
+            color: board.side_to_move.index(),
+        }
+    }
+
+    /// BitRays only reads the mailbox and side to move.
+    #[inline(always)]
+    pub(super) fn from_mailbox(board: &Board) -> Self {
+        Self {
+            position: ThreatPosition {
+                pieces: [0; 12],
+                occupancy: 0,
+                piece_at: *board.piece_ids(),
+            },
             color: board.side_to_move.index(),
         }
     }

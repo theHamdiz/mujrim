@@ -6,8 +6,8 @@ pub mod square;
 
 // Re-export core types for ergonomic use.
 pub use bitboard::Bitboard;
-pub use board::Board;
 pub use board::zobrist;
+pub use board::{AkimboPos, Board, BoardSnapshot};
 pub use chess_move::{Move, MoveList};
 pub use piece::{Color, Piece};
 pub use square::Square;

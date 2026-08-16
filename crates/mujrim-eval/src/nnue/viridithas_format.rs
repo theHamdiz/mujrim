@@ -115,15 +115,15 @@ pub struct LayeredNetwork {
 }
 
 pub struct SandhiNetwork {
-    aux_weights: Box<[i8]>,
-    feature_weights: Box<[i16]>,
-    feature_biases: Box<[i16]>,
-    l1_weights: Box<[i8]>,
-    l1_biases: Box<[f32]>,
-    l2_weights: Box<[f32]>,
-    l2_biases: Box<[f32]>,
-    l3_weights: Box<[f32]>,
-    l3_biases: Box<[f32]>,
+    aux_weights: super::layered_forward::Align64Box<i8>,
+    feature_weights: super::layered_forward::Align64Box<i16>,
+    feature_biases: super::layered_forward::Align64Box<i16>,
+    l1_weights: super::layered_forward::Align64Box<i8>,
+    l1_biases: super::layered_forward::Align64Box<f32>,
+    l2_weights: super::layered_forward::Align64Box<f32>,
+    l2_biases: super::layered_forward::Align64Box<f32>,
+    l3_weights: super::layered_forward::Align64Box<f32>,
+    l3_biases: super::layered_forward::Align64Box<f32>,
 }
 
 impl ViridithasNetwork {
@@ -357,6 +357,8 @@ fn finish_sandhi(
         (acc_black, acc_white, aux_black, aux_white)
     };
 
+    // Official `activate_ft_and_propagate_l1`: pairwise CReLU, sparse L1, then
+    // HardSwish6 while the 1024-byte activation stays in cache.
     let mut ft = super::layered_forward::Align64::new([0u8; SANDHI_L0]);
     activate_pairwise_sandhi_sum(us, us_aux, &mut ft.0[..SANDHI_L0 / 2]);
     activate_pairwise_sandhi_sum(them, them_aux, &mut ft.0[SANDHI_L0 / 2..]);
@@ -373,9 +375,12 @@ fn finish_sandhi(
         &mut sums,
     );
     let bias = bucket * SANDHI_L1;
-    for (j, sum) in sums.iter().enumerate() {
-        l1[j] = hard_swish6((*sum as f32).mul_add(L1_MUL, net.l1_biases[bias + j]));
-    }
+    super::layered_forward::hard_swish6_bias(
+        &sums,
+        &net.l1_biases[bias..bias + SANDHI_L1],
+        L1_MUL,
+        &mut l1,
+    );
 
     let mut l2_pre = [0.0f32; SANDHI_L2 * 2];
     let l2_weight_base = bucket * SANDHI_L1 * (SANDHI_L2 * 2);
@@ -388,9 +393,7 @@ fn finish_sandhi(
     );
     // Sandhi L2 is square (32→32); the published head adds the L1 residual.
     let mut l2 = [0.0f32; SANDHI_L2];
-    for i in 0..SANDHI_L2 {
-        l2[i] = hard_swish6(l2_pre[i]).mul_add(l2_pre[i + SANDHI_L2], l1[i]);
-    }
+    super::layered_forward::swiglu_residual(&l2_pre, &l1, &mut l2);
 
     let l3 = super::layered_forward::dot_f32(
         &l2,
@@ -877,15 +880,15 @@ fn parse_sandhi(bytes: &[u8]) -> Result<SandhiNetwork, String> {
     let l3_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS)?;
     debug_assert_eq!(offset, sandhi_size());
     Ok(SandhiNetwork {
-        aux_weights,
-        feature_weights,
-        feature_biases,
-        l1_weights,
-        l1_biases,
-        l2_weights,
-        l2_biases,
-        l3_weights,
-        l3_biases,
+        aux_weights: super::layered_forward::Align64Box::from_slice(&aux_weights),
+        feature_weights: super::layered_forward::Align64Box::from_slice(&feature_weights),
+        feature_biases: super::layered_forward::Align64Box::from_slice(&feature_biases),
+        l1_weights: super::layered_forward::Align64Box::from_slice(&l1_weights),
+        l1_biases: super::layered_forward::Align64Box::from_slice(&l1_biases),
+        l2_weights: super::layered_forward::Align64Box::from_slice(&l2_weights),
+        l2_biases: super::layered_forward::Align64Box::from_slice(&l2_biases),
+        l3_weights: super::layered_forward::Align64Box::from_slice(&l3_weights),
+        l3_biases: super::layered_forward::Align64Box::from_slice(&l3_biases),
     })
 }
 
@@ -1405,8 +1408,30 @@ impl Default for WideFrameMeta {
     }
 }
 
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
+struct WidePly<const H: usize> {
+    acc: [[i16; H]; 2],
+}
+
+impl<const H: usize> std::ops::Index<usize> for WidePly<H> {
+    type Output = [i16; H];
+
+    #[inline]
+    fn index(&self, pov: usize) -> &Self::Output {
+        &self.acc[pov]
+    }
+}
+
+impl<const H: usize> std::ops::IndexMut<usize> for WidePly<H> {
+    #[inline]
+    fn index_mut(&mut self, pov: usize) -> &mut Self::Output {
+        &mut self.acc[pov]
+    }
+}
+
 struct WideAccumulatorState<const H: usize> {
-    values: Box<[[[i16; H]; 2]]>,
+    values: Box<[WidePly<H>]>,
     meta: Box<[WideFrameMeta]>,
     index: usize,
 }
@@ -1414,7 +1439,7 @@ struct WideAccumulatorState<const H: usize> {
 impl<const H: usize> WideAccumulatorState<H> {
     fn new() -> Self {
         Self {
-            values: vec![[[0; H]; 2]; MAX_PLY].into_boxed_slice(),
+            values: vec![WidePly { acc: [[0; H]; 2] }; MAX_PLY].into_boxed_slice(),
             meta: (0..MAX_PLY)
                 .map(|_| WideFrameMeta::default())
                 .collect::<Vec<_>>()
@@ -1565,6 +1590,7 @@ impl<const H: usize> WideAccumulatorState<H> {
 }
 
 #[derive(Clone, Copy)]
+#[repr(C, align(64))]
 struct SandhiAuxFrame {
     values: [[i16; SANDHI_L0]; 2],
     lists: [AuxFeatureLists; 2],
@@ -1641,7 +1667,7 @@ impl SandhiAuxState {
             board.pieces[0][Piece::Pawn.index()],
             board.pieces[1][Piece::Pawn.index()],
         ];
-        frame.pending_threats = Some(ThreatSnapshot::from_board(board));
+        frame.pending_threats = Some(ThreatSnapshot::from_mailbox(board));
     }
 
     fn push_null(&mut self) {
@@ -1738,7 +1764,13 @@ impl SandhiAuxState {
         {
             let frame = &mut self.frames[current];
             if let (Some(snapshot), Some(mv)) = (frame.pending_threats.take(), frame.pending_move) {
-                collect_bit_ray_move_deltas(frame, snapshot, mv);
+                let mover = snapshot.mailbox()[mv.from.index()];
+                let king_quiet = usize::from(mover) / 2 == Piece::King.index()
+                    && mv.is_quiet()
+                    && !mv.is_castling();
+                if !king_quiet {
+                    collect_bit_ray_move_deltas(frame, snapshot, mv);
+                }
             }
         }
         let threat_overflowed = self.frames[current].threat_overflowed;
@@ -1799,13 +1831,17 @@ impl SandhiAuxState {
                     continue;
                 }
                 let delta = &pov_deltas[pov];
-                super::stockfish_simd::apply_i8_from_width(
-                    &mut child.values[pov],
-                    &parent.values[pov],
-                    &net.aux_weights,
-                    &delta.adds[..delta.add_count],
-                    &delta.subs[..delta.sub_count],
-                );
+                if delta.add_count == 0 && delta.sub_count == 0 {
+                    child.values[pov] = parent.values[pov];
+                } else {
+                    super::stockfish_simd::apply_i8_from_width(
+                        &mut child.values[pov],
+                        &parent.values[pov],
+                        &net.aux_weights,
+                        &delta.adds[..delta.add_count],
+                        &delta.subs[..delta.sub_count],
+                    );
+                }
                 child.lists[pov].overflowed = false;
             }
         }
@@ -2023,6 +2059,29 @@ impl ViridithasAccumulatorState {
 
     pub(crate) fn evaluate_search(&mut self, board: &Board, network: &ViridithasNetwork) -> i32 {
         self.evaluate_inner(board, network, true)
+    }
+
+    /// Official `hint_common_access`: apply pending FT/aux without the forward pass.
+    pub(crate) fn ensure_after_make(&mut self, board: &Board, network: &ViridithasNetwork) {
+        match network {
+            ViridithasNetwork::Simple(_) => {}
+            ViridithasNetwork::Layered(net) => {
+                self.layered
+                    .as_mut()
+                    .expect("layered Viridithas state")
+                    .ensure_pieces(board, &net.feature_weights, &net.feature_biases, true);
+            }
+            ViridithasNetwork::Sandhi(net) => {
+                self.sandhi
+                    .as_mut()
+                    .expect("sandhi Viridithas state")
+                    .ensure_pieces(board, &net.feature_weights, &net.feature_biases, true);
+                self.sandhi_aux
+                    .as_mut()
+                    .expect("sandhi aux state")
+                    .ensure(board, net, true);
+            }
+        }
     }
 
     fn evaluate_inner(&mut self, board: &Board, network: &ViridithasNetwork, trusted: bool) -> i32 {
@@ -2594,6 +2653,86 @@ mod tests {
     }
 
     #[test]
+    fn sandhi_evaluate_search_without_prior_ensure_matches_scratch() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let ViridithasNetwork::Sandhi(sandhi) = net.as_ref() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board = Board::new();
+        let _ = state.evaluate(&board, &net);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+        state.push_move(&board, mv);
+        board.make_move(mv);
+        assert_eq!(
+            state.evaluate_search(&board, &net),
+            evaluate_sandhi(sandhi.as_ref(), &board)
+        );
+    }
+
+    #[test]
+    fn sandhi_finish_is_deterministic_on_startpos() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let ViridithasNetwork::Sandhi(sandhi) = net.as_ref() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let board = Board::new();
+        let first = state.evaluate(&board, &net);
+        let aux = state.sandhi_aux.as_ref().expect("sandhi aux");
+        let acc_w = &state.sandhi.as_ref().expect("sandhi").values[0][0];
+        let acc_b = &state.sandhi.as_ref().expect("sandhi").values[0][1];
+        let aux_w = &aux.frames[0].values[0];
+        let aux_b = &aux.frames[0].values[1];
+        assert_eq!(
+            finish_sandhi(sandhi, &board, acc_w, acc_b, aux_w, aux_b),
+            first
+        );
+        assert_eq!(
+            finish_sandhi(sandhi, &board, acc_w, acc_b, aux_w, aux_b),
+            first
+        );
+    }
+
+    #[test]
+    fn sandhi_ensure_after_make_matches_scratch_eval() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let ViridithasNetwork::Sandhi(sandhi) = net.as_ref() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board = Board::new();
+        let _ = state.evaluate(&board, &net);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+        state.push_move(&board, mv);
+        board.make_move(mv);
+        state.ensure_after_make(&board, &net);
+        assert_eq!(
+            state.evaluate_search(&board, &net),
+            evaluate_sandhi(sandhi.as_ref(), &board)
+        );
+    }
+
+    #[test]
     fn sandhi_dirty_threat_and_search_eval_match_scratch() {
         types::init();
         let Some(net) = try_load_sandhi() else {
@@ -2617,6 +2756,25 @@ mod tests {
         assert_eq!(state.evaluate_search(&board, &net), incremental);
         let mut scratch = ViridithasAccumulatorState::for_network(&net);
         assert_eq!(scratch.evaluate(&board, &net), incremental);
+    }
+
+    #[test]
+    fn sandhi_accumulators_and_weights_are_cacheline_aligned() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let ViridithasNetwork::Sandhi(sandhi) = net.as_ref() else {
+            return;
+        };
+        let state = ViridithasAccumulatorState::for_network(&net);
+        let wide = state.sandhi.as_ref().expect("sandhi FT");
+        let aux = state.sandhi_aux.as_ref().expect("sandhi aux");
+        assert_eq!(wide.values.as_ptr() as usize % 64, 0);
+        assert_eq!(aux.frames.as_ptr() as usize % 64, 0);
+        assert_eq!(sandhi.aux_weights.as_ptr() as usize % 64, 0);
+        assert_eq!(sandhi.feature_weights.as_ptr() as usize % 64, 0);
+        assert_eq!(sandhi.l1_weights.as_ptr() as usize % 64, 0);
     }
 
     #[test]
@@ -2700,6 +2858,66 @@ mod tests {
             ns < 2_000.0,
             "sandhi push+evaluate_search regressed to {ns:.1} ns"
         );
+    }
+
+    #[test]
+    fn sandhi_ensure_versus_finish_split() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board = Board::new();
+        let _ = state.evaluate(&board, &net);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        let ViridithasNetwork::Sandhi(sandhi) = net.as_ref() else {
+            return;
+        };
+        let mut checksum = 0i32;
+        let mut ft_ns = std::time::Duration::ZERO;
+        let mut aux_ns = std::time::Duration::ZERO;
+        let mut eval_ns = std::time::Duration::ZERO;
+        for _ in 0..256 {
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            let start = std::time::Instant::now();
+            state.sandhi.as_mut().expect("sandhi FT").ensure_pieces(
+                &board,
+                &sandhi.feature_weights,
+                &sandhi.feature_biases,
+                true,
+            );
+            ft_ns += start.elapsed();
+            let start = std::time::Instant::now();
+            state
+                .sandhi_aux
+                .as_mut()
+                .expect("sandhi aux")
+                .ensure(&board, sandhi, true);
+            aux_ns += start.elapsed();
+            let start = std::time::Instant::now();
+            checksum = checksum.wrapping_add(state.evaluate_search(&board, &net));
+            eval_ns += start.elapsed();
+            state.pop();
+            board.unmake_move(mv);
+        }
+        let ft = ft_ns.as_nanos() as f64 / 256.0;
+        let aux = aux_ns.as_nanos() as f64 / 256.0;
+        let finish = eval_ns.as_nanos() as f64 / 256.0;
+        assert_ne!(checksum, i32::MIN);
+        assert!(
+            ft + aux + finish < 2_000.0,
+            "sandhi FT {ft:.1} ns + aux {aux:.1} ns + finish {finish:.1} ns"
+        );
+        eprintln!("sandhi FT {ft:.1} ns, aux {aux:.1} ns, cached evaluate {finish:.1} ns");
     }
 
     #[test]

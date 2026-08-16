@@ -1,10 +1,11 @@
 //! Official jw1912/akimbo `pvs` (main/src/search.rs), on Mujrim Board/TT/eval.
 
-use super::dedicated_qs::quiescence;
+use super::dedicated_qs::quiescence_snapshot as quiescence;
 use super::{
     INF, MATE_SCORE, MAX_PLY, SearchContext, SearchNode, ThreadState, captured_piece_index,
-    draw_score, hybrid_eval, make_search_move, nmp_material_ok, piece_index_on, score_from_tt,
-    score_to_tt, search_time_exceeded, store_killer, undo_search_eval, usable_tt_move,
+    draw_score, hybrid_eval, make_search_move_no_undo, nmp_material_ok, piece_index_on,
+    score_from_tt, score_to_tt, search_time_exceeded, store_killer, undo_search_eval,
+    usable_tt_move,
 };
 use crate::move_picker::MovePicker;
 use crate::policy::{
@@ -173,7 +174,7 @@ pub(crate) fn pvs(
                 state.nnue_state.push_null();
             }
             let null_snap = board.snapshot();
-            board.make_null_move();
+            board.make_null_move_without_undo();
             state.prev_move[ply_usize] = NULL_MOVE;
             if ply_usize + 1 < MAX_PLY {
                 state.in_check[ply_usize + 1] = false;
@@ -250,8 +251,9 @@ pub(crate) fn pvs(
                 if !see::see_ge(board, mv, 1) {
                     continue;
                 }
+                tt.prefetch(board.tt_hash_after(mv));
                 let pc_snap = board.snapshot();
-                make_search_move(board, state, mv);
+                make_search_move_no_undo(board, state, mv);
                 if ply_usize + 1 < MAX_PLY {
                     state.in_check[ply_usize + 1] = board.in_check();
                 }
@@ -399,8 +401,9 @@ pub(crate) fn pvs(
 
         let moved_piece = piece_index_on(board, mv.from);
         let captured = captured_piece_index(board, mv);
+        tt.prefetch(board.tt_hash_after(mv));
         let child_snap = board.snapshot();
-        make_search_move(board, state, mv);
+        make_search_move_no_undo(board, state, mv);
         let gives_check = board.in_check();
         if ply_usize + 1 < MAX_PLY {
             state.in_check[ply_usize + 1] = gives_check;

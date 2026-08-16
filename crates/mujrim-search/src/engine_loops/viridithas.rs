@@ -3,12 +3,14 @@
 use super::dedicated_qs::quiescence;
 use super::{
     INF, MATE_SCORE, MAX_PLY, SearchContext, SearchNode, ThreadState, captured_piece_index,
-    draw_score, hybrid_eval, make_search_move, nmp_material_ok, piece_index_on, score_from_tt,
-    score_to_tt, search_time_exceeded, store_killer, undo_search_eval, usable_tt_move,
+    draw_score, gives_direct_check, hybrid_eval, make_search_move, nmp_material_ok, piece_index_on,
+    score_from_tt, score_to_tt, search_time_exceeded, store_killer, undo_search_eval,
+    usable_tt_move,
 };
 use crate::move_picker::MovePicker;
 use crate::policy::{
-    LmpContext, LmpPolicy, LmrContext, LmrPolicy, ViridithasLmpPolicy, ViridithasLmrPolicy,
+    FutilityContext, FutilityPolicy, LmpContext, LmpPolicy, LmrContext, LmrPolicy,
+    ViridithasFutilityPolicy, ViridithasLmpPolicy, ViridithasLmrPolicy,
 };
 use crate::see;
 use crate::tt::{NodeType, TTData};
@@ -68,6 +70,11 @@ pub(crate) fn alpha_beta(
     let ply_usize = (ply as usize).min(MAX_PLY - 1);
     state.pv_len[ply_usize] = 0;
     state.cutoffs[ply_usize] = 0;
+    state.dbl_exts[ply_usize] = if is_root {
+        0
+    } else {
+        state.dbl_exts[ply_usize.saturating_sub(1)]
+    };
     if !is_root && ply > state.seldepth {
         state.seldepth = ply;
     }
@@ -127,10 +134,16 @@ pub(crate) fn alpha_beta(
         }
     }
 
+    if use_nnue {
+        state.nnue_state.hint_common_access(board);
+    }
+
     let static_eval = if in_check {
         0
     } else if singular {
         state.static_evals[ply_usize]
+    } else if let Some(raw) = raw_eval {
+        raw + state.correction(board, move_ordering)
     } else {
         let raw = hybrid_eval(board, state, use_nnue);
         raw_eval = Some(raw);
@@ -195,9 +208,13 @@ pub(crate) fn alpha_beta(
         if allow_null
             && depth > 2
             && nmp_material_ok(board, board.side_to_move)
-            && static_eval >= beta
+            && !state.nmp_banned[board.side_to_move.index()]
+            && super::viridithas_nmp_static_gate(static_eval, beta, depth, improving)
         {
-            let r = 4 + depth / 3 + ((static_eval - beta) / 200).min(4);
+            let r = 4
+                + depth / 3
+                + ((static_eval - beta) / 200).min(4)
+                + i32::from(tt_move.is_some_and(|mv| mv.is_capture()));
             if state.use_nnue {
                 state.nnue_state.push_null();
             }
@@ -231,7 +248,39 @@ pub(crate) fn alpha_beta(
                 return 0;
             }
             if nw >= beta {
-                return if nw > MATE_SCORE - 100 { beta } else { nw };
+                if !super::viridithas_nmp_needs_verify(depth, beta) {
+                    return if nw.abs() > MATE_SCORE - 100 {
+                        beta
+                    } else {
+                        nw
+                    };
+                }
+                let us = board.side_to_move.index();
+                state.nmp_banned[us] = true;
+                let veri = alpha_beta(
+                    board,
+                    state,
+                    context,
+                    SearchNode {
+                        depth: depth - r,
+                        alpha: beta - 1,
+                        beta,
+                        ply,
+                        is_pv: false,
+                        is_root: false,
+                        excluded_move: None,
+                        total_extensions: 0,
+                        nominal_depth: depth,
+                        allow_null: false,
+                    },
+                );
+                state.nmp_banned[us] = false;
+                if stopped.load(Ordering::Relaxed) {
+                    return 0;
+                }
+                if veri >= beta {
+                    return veri;
+                }
             }
         }
 
@@ -250,6 +299,7 @@ pub(crate) fn alpha_beta(
                     if !see::see_ge(board, mv, see_pivot) {
                         continue;
                     }
+                    tt.prefetch(board.tt_hash_after(mv));
                     make_search_move(board, state, mv);
                     if ply_usize + 1 < MAX_PLY {
                         state.in_check[ply_usize + 1] = board.in_check();
@@ -324,7 +374,7 @@ pub(crate) fn alpha_beta(
     }
 
     let us = board.side_to_move;
-    let threats = super::opponent_threats(board).all;
+    let threats = super::opponent_attacks_all(board);
     state.threats[ply_usize] = threats;
     let killers = state.killers[ply_usize];
     let mut picker =
@@ -362,7 +412,7 @@ pub(crate) fn alpha_beta(
     let mut alpha_raises = 0i32;
     let try_singular = !is_root
         && !singular
-        && depth >= params.se_depth_min
+        && depth >= 6 + i32::from(tt_was_pv)
         && tt_move.is_some()
         && tt_depth >= depth - 3
         && tt_bound != NodeType::UpperBound
@@ -375,27 +425,68 @@ pub(crate) fn alpha_beta(
             continue;
         }
         let is_quiet = mv.is_quiet();
-        if !is_root
-            && !is_pv
-            && !in_check
-            && best_score > -MATE_SCORE + 100
-            && ViridithasLmpPolicy
-                .decision(&LmpContext {
-                    depth,
-                    move_count: legal + 1,
-                    improvement: 0,
-                    improving,
-                    is_root,
-                    is_pv,
-                    in_check,
-                    is_quiet,
-                    best_score,
-                    stock_depth_limit: 8,
-                    stock_move_threshold: 99,
-                })
-                .is_some()
-        {
-            break;
+        let lmr_depth = super::viridithas_preview_lmr_depth(depth, legal, tt_was_pv);
+        if !is_root && !is_pv && !in_check && best_score > -MATE_SCORE + 100 {
+            if lmr_depth < 9
+                && ViridithasLmpPolicy
+                    .decision(&LmpContext {
+                        depth,
+                        move_count: legal + 1,
+                        improvement: 0,
+                        improving,
+                        is_root,
+                        is_pv,
+                        in_check,
+                        is_quiet,
+                        best_score,
+                        stock_depth_limit: 8,
+                        stock_move_threshold: 99,
+                    })
+                    .is_some()
+            {
+                picker.skip_quiets();
+                if is_quiet {
+                    continue;
+                }
+            }
+            let hist = state.stat_score(
+                mv,
+                us_idx,
+                piece_index_on(board, mv.from),
+                ply_usize,
+                move_ordering,
+            );
+            if is_quiet
+                && !super::is_killer(mv, &killers)
+                && lmr_depth < 7
+                && hist / 32 < -3186 * (depth - 1)
+            {
+                picker.skip_quiets();
+                continue;
+            }
+            if is_quiet
+                && ViridithasFutilityPolicy
+                    .decision(&FutilityContext {
+                        depth: lmr_depth,
+                        eval: static_eval,
+                        alpha,
+                        history: hist,
+                        improving,
+                        is_root,
+                        is_pv,
+                        in_check,
+                        is_quiet: true,
+                        move_count: legal + 1,
+                        best_score,
+                        gives_direct_check: gives_direct_check(board, mv),
+                        stock_depth_limit: 6,
+                        stock_margin: 0,
+                    })
+                    .is_some()
+            {
+                picker.skip_quiets();
+                continue;
+            }
         }
         if !is_root && !is_pv && depth < 10 && best_score > -MATE_SCORE + 100 {
             let see_margin = if is_quiet {
@@ -411,7 +502,7 @@ pub(crate) fn alpha_beta(
         let mut extension = 0;
         if try_singular && tt_move.is_some_and(|ttm| same_move(mv, ttm)) {
             let tt_sc = tt_score.expect("singular has tt score");
-            let s_beta = tt_sc - params.se_margin(depth);
+            let s_beta = super::viridithas_singular_beta(tt_sc, depth);
             let s_score = alpha_beta(
                 board,
                 state,
@@ -426,18 +517,32 @@ pub(crate) fn alpha_beta(
                     excluded_move: Some(mv),
                     total_extensions: 0,
                     nominal_depth: depth,
-                    allow_null: false,
+                    allow_null,
                 },
             );
-            if s_score < s_beta {
-                extension = 1;
-            } else if tt_sc >= beta {
-                extension = -1;
+            match super::viridithas_singular_verdict(super::ViridithasSingularInput {
+                s_score,
+                s_beta,
+                tt_score: tt_sc,
+                beta,
+                is_pv,
+                is_cut: allow_null,
+                is_quiet,
+                dextensions: state.dbl_exts[ply_usize],
+            }) {
+                super::ViridithasSingular::MultiCut(score) => return score,
+                super::ViridithasSingular::Extend(ext) => {
+                    extension = ext;
+                    if ext >= 2 {
+                        state.dbl_exts[ply_usize] += 1;
+                    }
+                }
             }
         }
 
         let moved_piece = piece_index_on(board, mv.from);
         let captured = captured_piece_index(board, mv);
+        tt.prefetch(board.tt_hash_after(mv));
         make_search_move(board, state, mv);
         let gives_check = board.in_check();
         if ply_usize + 1 < MAX_PLY {
@@ -447,51 +552,57 @@ pub(crate) fn alpha_beta(
         state.prev_piece[ply_usize] = moved_piece;
         legal += 1;
 
-        let mut reduction_1024 = 0;
-        let lmr_ready = depth > 2 && legal > usize::from(is_root);
-        if lmr_ready && (is_quiet || ViridithasLmrPolicy.reduce_noisy_moves()) {
-            reduction_1024 = ViridithasLmrPolicy
-                .reduction_1024ths(&LmrContext {
-                    depth,
-                    move_count: legal,
-                    is_quiet,
-                    is_pv,
-                    improving,
-                    improvement: 0,
-                    alpha_raises,
-                    is_killer: false,
-                    gives_check,
-                    is_recapture: false,
-                    mv_stat_score: state.stat_score(
-                        mv,
-                        us.index(),
-                        moved_piece,
-                        ply_usize,
-                        move_ordering,
-                    ),
-                    corr_abs: 0,
-                    is_cut_node: allow_null,
-                    winning_beta: false,
-                    tt_was_pv,
-                    tt_score_above_alpha: tt_score.is_some_and(|s| s > alpha),
-                    tt_score_below_alpha: tt_score.is_some_and(|s| s < alpha),
-                    tt_depth_sufficient: tt_score.is_some() && tt_depth >= depth,
-                    tt_move_missing: tt_move.is_none(),
-                    tt_capture: tt_move.is_some_and(|m| m.is_capture()),
-                    hist_lmr_div: params.hist_lmr_div,
-                    lmr_corr_mul: params.lmr_corr_mul,
-                    lmr_cut_node_bonus: params.lmr_cut_node_bonus,
-                    child_cutoffs: state.cutoffs[(ply_usize + 1).min(MAX_PLY - 1)],
-                })
-                .max(0);
-        }
-
+        let lmr_ready = depth > 2
+            && legal > 1 + usize::from(is_root)
+            && (is_quiet || ViridithasLmrPolicy.reduce_noisy_moves());
+        let mut whole_reduction = 0;
         let child_depth = if legal == 1 {
+            state.reductions[ply_usize] = 0;
             depth + extension - 1
         } else {
-            super::viridithas_lmr_search_depth(depth, extension, reduction_1024 / 1024)
+            let table_1024 = if lmr_ready {
+                ViridithasLmrPolicy
+                    .reduction_1024ths(&LmrContext {
+                        depth,
+                        move_count: legal,
+                        is_quiet,
+                        is_pv,
+                        improving,
+                        improvement: 0,
+                        alpha_raises,
+                        is_killer: false,
+                        gives_check,
+                        is_recapture: false,
+                        mv_stat_score: state.stat_score(
+                            mv,
+                            us.index(),
+                            moved_piece,
+                            ply_usize,
+                            move_ordering,
+                        ),
+                        corr_abs: 0,
+                        is_cut_node: allow_null,
+                        winning_beta: false,
+                        tt_was_pv,
+                        tt_score_above_alpha: tt_score.is_some_and(|s| s > alpha),
+                        tt_score_below_alpha: tt_score.is_some_and(|s| s < alpha),
+                        tt_depth_sufficient: tt_score.is_some() && tt_depth >= depth,
+                        tt_move_missing: tt_move.is_none(),
+                        tt_capture: tt_move.is_some_and(|m| m.is_capture()),
+                        hist_lmr_div: params.hist_lmr_div,
+                        lmr_corr_mul: params.lmr_corr_mul,
+                        lmr_cut_node_bonus: params.lmr_cut_node_bonus,
+                        child_cutoffs: state.cutoffs[(ply_usize + 1).min(MAX_PLY - 1)],
+                    })
+                    .max(0)
+            } else {
+                0
+            };
+            let (stored, whole) = super::viridithas_later_move_reduction(lmr_ready, table_1024);
+            whole_reduction = whole;
+            state.reductions[ply_usize] = stored;
+            super::viridithas_lmr_search_depth(depth, extension, whole)
         };
-        state.reductions[ply_usize] = reduction_1024;
 
         let score = if legal == 1 {
             -alpha_beta(
@@ -529,13 +640,41 @@ pub(crate) fn alpha_beta(
                     allow_null: true,
                 },
             );
-            if zw > alpha && (is_pv || reduction_1024 > 0) {
+            state.reductions[ply_usize] = 1024;
+            let mut new_depth = depth + extension;
+            if zw > alpha && whole_reduction > 1 {
+                new_depth =
+                    super::viridithas_research_depth(new_depth, whole_reduction, zw, best_score);
+                if new_depth - 1 > child_depth {
+                    zw = -alpha_beta(
+                        board,
+                        state,
+                        context,
+                        SearchNode {
+                            depth: new_depth - 1,
+                            alpha: -alpha - 1,
+                            beta: -alpha,
+                            ply: ply + 1,
+                            is_pv: false,
+                            is_root: false,
+                            excluded_move: None,
+                            total_extensions: 0,
+                            nominal_depth: depth,
+                            allow_null: !allow_null,
+                        },
+                    );
+                }
+            } else if zw > alpha {
+                new_depth =
+                    super::viridithas_research_depth(new_depth, whole_reduction, zw, best_score);
+            }
+            if zw > alpha && zw < beta {
                 zw = -alpha_beta(
                     board,
                     state,
                     context,
                     SearchNode {
-                        depth: depth + extension - 1,
+                        depth: new_depth - 1,
                         alpha: -beta,
                         beta: -alpha,
                         ply: ply + 1,

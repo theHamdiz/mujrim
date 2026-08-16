@@ -1261,7 +1261,8 @@ pub fn move_edit_piece(state: AppState, handles: &AppHandles, from: Square, to: 
     commit_edited_board(state, handles, game.board);
 }
 
-fn commit_edited_board(state: AppState, handles: &AppHandles, board: types::Board) {
+fn commit_edited_board(state: AppState, handles: &AppHandles, mut board: types::Board) {
+    board.refresh_threats();
     state.initial_fen.set(board.to_fen());
     state.edit_fen.set(board.to_fen());
     state.move_log.set(Vec::new());

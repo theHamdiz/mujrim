@@ -1,7 +1,16 @@
+mod akimbo_pos;
 pub mod attack_tables;
+mod copy_pos;
+mod mailbox;
 mod move_gen;
 pub mod zobrist;
 
+pub use akimbo_pos::AkimboPos;
+pub use mailbox::MailboxPos;
+
+use self::attack_tables::{
+    bishop_attacks, king_attacks, knight_attacks, queen_attacks, rook_attacks,
+};
 use self::zobrist::zobrist;
 use crate::bitboard::*;
 use crate::chess_move::{Move, MoveFlag};
@@ -10,7 +19,7 @@ use crate::square::Square;
 use std::fmt;
 
 #[inline(always)]
-const fn evaluation_material_value(piece: Piece) -> i32 {
+pub(super) const fn evaluation_material_value(piece: Piece) -> i32 {
     match piece {
         Piece::Pawn => 109,
         Piece::Knight => 403,
@@ -27,7 +36,54 @@ pub const WHITE_QUEEN_CASTLE: u8 = 0b0010;
 pub const BLACK_KING_CASTLE: u8 = 0b0100;
 pub const BLACK_QUEEN_CASTLE: u8 = 0b1000;
 pub const ALL_CASTLING: u8 = 0b1111;
-const EMPTY_PIECE_ID: u8 = u8::MAX;
+pub(super) const EMPTY_PIECE_ID: u8 = u8::MAX;
+
+#[inline]
+pub(super) fn compute_opponent_attacks(
+    pieces: &[[Bitboard; 6]; 2],
+    occupancy: [Bitboard; 2],
+    stm: Color,
+) -> u64 {
+    let color = stm.opponent();
+    let color_i = color.index();
+    let king = pieces[stm.index()][Piece::King.index()];
+    let occ = (occupancy[0] | occupancy[1]) & !king;
+    let mut all = pawn_attack_set(color, pieces[color_i][Piece::Pawn.index()]);
+    all |= attack_bb(Piece::Knight, pieces[color_i][Piece::Knight.index()], occ);
+    all |= attack_bb(Piece::Bishop, pieces[color_i][Piece::Bishop.index()], occ);
+    all |= attack_bb(Piece::Rook, pieces[color_i][Piece::Rook.index()], occ);
+    all |= attack_bb(Piece::Queen, pieces[color_i][Piece::Queen.index()], occ);
+    all |= attack_bb(Piece::King, pieces[color_i][Piece::King.index()], occ);
+    all
+}
+
+#[inline]
+fn attack_bb(piece: Piece, mut pieces: u64, occupancy: u64) -> u64 {
+    let mut attacks = 0u64;
+    while pieces != 0 {
+        let square = pieces.trailing_zeros() as usize;
+        pieces &= pieces - 1;
+        attacks |= match piece {
+            Piece::Knight => knight_attacks(square),
+            Piece::Bishop => bishop_attacks(square, occupancy),
+            Piece::Rook => rook_attacks(square, occupancy),
+            Piece::Queen => queen_attacks(square, occupancy),
+            Piece::King => king_attacks(square),
+            Piece::Pawn => 0,
+        };
+    }
+    attacks
+}
+
+#[inline(always)]
+const fn pawn_attack_set(color: Color, pawns: u64) -> u64 {
+    const NOT_A_FILE: u64 = !0x0101_0101_0101_0101;
+    const NOT_H_FILE: u64 = !0x8080_8080_8080_8080;
+    match color {
+        Color::White => ((pawns & NOT_A_FILE) << 7) | ((pawns & NOT_H_FILE) << 9),
+        Color::Black => ((pawns & NOT_A_FILE) >> 9) | ((pawns & NOT_H_FILE) >> 7),
+    }
+}
 
 /// Information needed to undo a move — stored on a stack.
 #[derive(Copy, Clone, Debug)]
@@ -38,10 +94,12 @@ pub struct UndoInfo {
     pub halfmove_clock: u32,
     pub plies_from_null: usize,
     pub hash: u64,
+    pub threats: u64,
 }
 
 /// Copy of the board fields that official Akimbo keeps on a `Copy` `Position`.
 #[derive(Copy, Clone)]
+#[repr(C)]
 pub struct BoardSnapshot {
     pieces: [[Bitboard; 6]; 2],
     occupancy: [Bitboard; 2],
@@ -59,10 +117,12 @@ pub struct BoardSnapshot {
     plies_from_null: usize,
     history_len: usize,
     hash_history_len: usize,
+    threats: u64,
 }
 
 /// The chess board state.
 #[derive(Clone)]
+#[repr(C)]
 pub struct Board {
     /// pieces[color][piece_type] — one bitboard per color per piece.
     pub pieces: [[Bitboard; 6]; 2],
@@ -97,6 +157,8 @@ pub struct Board {
     /// Hash history for repetition detection.
     /// Each entry is the hash BEFORE the move was made.
     pub hash_history: Vec<u64>,
+    /// Opponent attack map against the side to move. Refreshed on make/null.
+    threats: u64,
 }
 
 /// Receives piece mutations while a move is applied.
@@ -178,6 +240,7 @@ impl Board {
             plies_from_null: 0,
             history: Vec::with_capacity(256),
             hash_history: Vec::with_capacity(256),
+            threats: 0,
         }
     }
 
@@ -244,14 +307,28 @@ impl Board {
 
     #[inline(always)]
     fn relocate_piece(&mut self, piece: Piece, color: Color, from: Square, to: Square) {
-        clear_bit(&mut self.pieces[color.index()][piece.index()], from.index());
-        set_bit(&mut self.pieces[color.index()][piece.index()], to.index());
-        clear_bit(&mut self.occupancy[color.index()], from.index());
-        set_bit(&mut self.occupancy[color.index()], to.index());
+        let from_bit = 1u64 << from.index();
+        let to_bit = 1u64 << to.index();
+        let moved = from_bit | to_bit;
+        let color_i = color.index();
+        let piece_i = piece.index();
+        self.pieces[color_i][piece_i] ^= moved;
+        self.occupancy[color_i] ^= moved;
         self.piece_at[from.index()] = EMPTY_PIECE_ID;
-        self.piece_at[to.index()] = (piece.index() * 2 + color.index()) as u8;
-        self.hash ^= zobrist().piece_keys[color.index()][piece.index()][from.index()];
-        self.hash ^= zobrist().piece_keys[color.index()][piece.index()][to.index()];
+        self.piece_at[to.index()] = (piece_i * 2 + color_i) as u8;
+        let keys = &zobrist().piece_keys[color_i][piece_i];
+        self.hash ^= keys[from.index()] ^ keys[to.index()];
+    }
+
+    /// Opponent attacks against the side to move (official Viridithas `threats.all`).
+    #[inline(always)]
+    pub const fn opponent_attacks(&self) -> u64 {
+        self.threats
+    }
+
+    /// Rebuild the cached opponent-attack map. Call after setup edits.
+    pub fn refresh_threats(&mut self) {
+        self.threats = compute_opponent_attacks(&self.pieces, self.occupancy, self.side_to_move);
     }
 
     /// Total non-king material in the evaluation network's native units.
@@ -286,6 +363,12 @@ impl Board {
     #[inline(always)]
     pub const fn piece_ids(&self) -> &[u8; 64] {
         &self.piece_at
+    }
+
+    /// Plies since the last null move (repetition window).
+    #[inline(always)]
+    pub fn plies_from_null(&self) -> usize {
+        self.plies_from_null
     }
 
     /// Returns the square of the king for the given color.
@@ -346,7 +429,7 @@ impl Board {
     }
 
     #[inline(always)]
-    const fn rook_file_index(color: Color, kingside: bool) -> usize {
+    pub(super) const fn rook_file_index(color: Color, kingside: bool) -> usize {
         match (color, kingside) {
             (Color::White, true) => 0,
             (Color::White, false) => 1,
@@ -415,81 +498,13 @@ impl Board {
     /// The raw [`Self::hash`] remains unchanged for repetition detection.
     #[inline(always)]
     pub fn tt_hash(&self) -> u64 {
-        let bucket = (self.halfmove_clock.saturating_sub(8) as usize / 8).min(15);
-        self.hash ^ zobrist().fiftymove_keys[bucket]
+        MailboxPos::tt_hash(self)
     }
 
     /// Computes the transposition-table key after `mv` without mutating the board.
     #[inline(always)]
     pub fn tt_hash_after(&self, mv: Move) -> u64 {
-        let z = zobrist();
-        let us = self.side_to_move;
-        let them = us.opponent();
-        let from = mv.from;
-        let to = mv.to;
-        let piece = self
-            .piece_of_color_on(from, us)
-            .expect("tt_hash_after: no piece on source square");
-        let mut hash = self.hash;
-
-        if let Some(ep) = self.en_passant {
-            hash ^= z.en_passant_keys[ep.file() as usize];
-        }
-
-        let captured = match mv.flag {
-            MoveFlag::Capture | MoveFlag::PromotionCapture => {
-                self.piece_of_color_on(to, them).inspect(|captured| {
-                    hash ^= z.piece_keys[them.index()][captured.index()][to.index()];
-                })
-            }
-            MoveFlag::EnPassant => {
-                let captured_square = Square::from_file_rank(to.file(), from.rank());
-                hash ^= z.piece_keys[them.index()][Piece::Pawn.index()][captured_square.index()];
-                Some(Piece::Pawn)
-            }
-            _ => None,
-        };
-
-        hash ^= z.piece_keys[us.index()][piece.index()][from.index()];
-        if let Some(promotion) = mv.promotion {
-            hash ^= z.piece_keys[us.index()][promotion.index()][to.index()];
-        } else {
-            hash ^= z.piece_keys[us.index()][piece.index()][to.index()];
-        }
-
-        if mv.is_castling() {
-            let kingside = mv.flag == MoveFlag::KingCastle;
-            let king_to = Self::castling_king_landing(us, kingside);
-            if king_to != to {
-                hash ^= z.piece_keys[us.index()][piece.index()][to.index()];
-                hash ^= z.piece_keys[us.index()][piece.index()][king_to.index()];
-            }
-            let rook_from = self.castling_rook_from(us, kingside);
-            let rook_to = Self::castling_rook_landing(us, kingside);
-            hash ^= z.piece_keys[us.index()][Piece::Rook.index()][rook_from.index()];
-            hash ^= z.piece_keys[us.index()][Piece::Rook.index()][rook_to.index()];
-        }
-
-        if mv.flag == MoveFlag::DoublePawn {
-            let ep_rank = (from.rank() as i32 + (to.rank() as i32 - from.rank() as i32) / 2) as u8;
-            let ep_square = Square::from_file_rank(from.file(), ep_rank);
-            hash ^= z.en_passant_keys[ep_square.file() as usize];
-        }
-
-        let old_castling = self.castling_rights;
-        let new_castling = self.castling_rights_after(from, to);
-        if old_castling != new_castling {
-            hash ^= z.castling_keys[old_castling as usize];
-            hash ^= z.castling_keys[new_castling as usize];
-        }
-
-        let halfmove_clock = if piece == Piece::Pawn || captured.is_some() {
-            0
-        } else {
-            self.halfmove_clock + 1
-        };
-        let bucket = (halfmove_clock.saturating_sub(8) as usize / 8).min(15);
-        hash ^ z.side_to_move_key ^ z.fiftymove_keys[bucket]
+        MailboxPos::tt_hash_after(self, mv)
     }
 
     // ── Make / Unmake move ───────────────────────────────────────────────────
@@ -500,8 +515,19 @@ impl Board {
         self.make_move_observed(mv, &mut NullBoardObserver);
     }
 
+    /// Applies a move without recording `UndoInfo` (hash history is still pushed).
+    /// Restore the parent with [`Self::restore_snapshot`].
+    #[inline]
+    pub fn make_move_without_undo(&mut self, mv: Move) {
+        self.apply_move(mv, &mut NullBoardObserver, false);
+    }
+
     /// Applies a move and reports its piece mutations to `observer`.
     pub fn make_move_observed<O: BoardObserver>(&mut self, mv: Move, observer: &mut O) {
+        self.apply_move(mv, observer, true);
+    }
+
+    fn apply_move<O: BoardObserver>(&mut self, mv: Move, observer: &mut O, record_undo: bool) {
         // Track hash for repetition detection
         self.hash_history.push(self.hash);
         let z = zobrist();
@@ -510,16 +536,17 @@ impl Board {
         let from = mv.from;
         let to = mv.to;
 
-        // Save undo info
-        let undo = UndoInfo {
-            captured_piece: None, // will be set below if capture
-            castling_rights: self.castling_rights,
-            en_passant: self.en_passant,
-            halfmove_clock: self.halfmove_clock,
-            plies_from_null: self.plies_from_null,
-            hash: self.hash,
-        };
-        self.history.push(undo);
+        if record_undo {
+            self.history.push(UndoInfo {
+                captured_piece: None,
+                castling_rights: self.castling_rights,
+                en_passant: self.en_passant,
+                halfmove_clock: self.halfmove_clock,
+                plies_from_null: self.plies_from_null,
+                hash: self.hash,
+                threats: self.threats,
+            });
+        }
 
         // Determine what piece is moving
         let piece = self
@@ -698,17 +725,28 @@ impl Board {
 
     /// Performs a null move (skips the current side's turn).
     pub fn make_null_move(&mut self) {
+        self.make_null_move_ex(true);
+    }
+
+    /// Null move without `UndoInfo`; restore with [`Self::restore_snapshot`].
+    pub fn make_null_move_without_undo(&mut self) {
+        self.make_null_move_ex(false);
+    }
+
+    fn make_null_move_ex(&mut self, record_undo: bool) {
         self.hash_history.push(self.hash);
         let z = zobrist();
-        let undo = UndoInfo {
-            captured_piece: None,
-            castling_rights: self.castling_rights,
-            en_passant: self.en_passant,
-            halfmove_clock: self.halfmove_clock,
-            plies_from_null: self.plies_from_null,
-            hash: self.hash,
-        };
-        self.history.push(undo);
+        if record_undo {
+            self.history.push(UndoInfo {
+                captured_piece: None,
+                castling_rights: self.castling_rights,
+                en_passant: self.en_passant,
+                halfmove_clock: self.halfmove_clock,
+                plies_from_null: self.plies_from_null,
+                hash: self.hash,
+                threats: self.threats,
+            });
+        }
 
         if let Some(ep) = self.en_passant {
             self.hash ^= z.en_passant_keys[ep.file() as usize];
@@ -733,45 +771,36 @@ impl Board {
     /// without walking piece mutations (official Akimbo `let mut new = *pos`).
     #[inline]
     pub fn snapshot(&self) -> BoardSnapshot {
-        BoardSnapshot {
-            pieces: self.pieces,
-            occupancy: self.occupancy,
-            piece_at: self.piece_at,
-            side_to_move: self.side_to_move,
-            castling_rights: self.castling_rights,
-            chess960: self.chess960,
-            castling_king_file: self.castling_king_file,
-            castling_rook_file: self.castling_rook_file,
-            en_passant: self.en_passant,
-            halfmove_clock: self.halfmove_clock,
-            fullmove_number: self.fullmove_number,
-            hash: self.hash,
-            total_material: self.total_material,
-            plies_from_null: self.plies_from_null,
-            history_len: self.history.len(),
-            hash_history_len: self.hash_history.len(),
+        const PREFIX: usize = std::mem::offset_of!(Board, history);
+        let mut snap = std::mem::MaybeUninit::<BoardSnapshot>::uninit();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                std::ptr::from_ref(self).cast::<u8>(),
+                snap.as_mut_ptr().cast::<u8>(),
+                PREFIX,
+            );
+            (*snap.as_mut_ptr()).history_len = self.history.len();
+            (*snap.as_mut_ptr()).hash_history_len = self.hash_history.len();
+            (*snap.as_mut_ptr()).threats = self.threats;
+            snap.assume_init()
         }
     }
 
     /// Restore a [`snapshot`](Self::snapshot), truncating the undo stacks.
     #[inline]
     pub fn restore_snapshot(&mut self, snap: BoardSnapshot) {
-        self.pieces = snap.pieces;
-        self.occupancy = snap.occupancy;
-        self.piece_at = snap.piece_at;
-        self.side_to_move = snap.side_to_move;
-        self.castling_rights = snap.castling_rights;
-        self.chess960 = snap.chess960;
-        self.castling_king_file = snap.castling_king_file;
-        self.castling_rook_file = snap.castling_rook_file;
-        self.en_passant = snap.en_passant;
-        self.halfmove_clock = snap.halfmove_clock;
-        self.fullmove_number = snap.fullmove_number;
-        self.hash = snap.hash;
-        self.total_material = snap.total_material;
-        self.plies_from_null = snap.plies_from_null;
+        const PREFIX: usize = std::mem::offset_of!(Board, history);
+        debug_assert_eq!(PREFIX, std::mem::offset_of!(BoardSnapshot, history_len));
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                std::ptr::from_ref(&snap).cast::<u8>(),
+                std::ptr::from_mut(self).cast::<u8>(),
+                PREFIX,
+            );
+        }
         self.history.truncate(snap.history_len);
         self.hash_history.truncate(snap.hash_history_len);
+        self.threats = snap.threats;
     }
 
     // ── FEN ─────────────────────────────────────────────────────────────────
@@ -896,6 +925,7 @@ impl Board {
             .parse()
             .map_err(|_| format!("invalid fullmove number: '{}'", parts[5]))?;
 
+        board.refresh_threats();
         Ok(board)
     }
 
@@ -968,6 +998,7 @@ impl Board {
     }
 
     /// Returns true if the current side to move is in check.
+    #[inline(always)]
     pub fn in_check(&self) -> bool {
         self.is_in_check(self.side_to_move)
     }
@@ -1151,37 +1182,14 @@ impl Board {
 impl Board {
     #[inline(always)]
     fn castling_rights_after(&self, from: Square, to: Square) -> u8 {
-        if !self.chess960 {
-            return self.castling_rights
-                & CASTLING_RIGHTS_UPDATE[from.index()]
-                & CASTLING_RIGHTS_UPDATE[to.index()];
-        }
-        let mut rights = self.castling_rights;
-        let white_king = Square::from_file_rank(self.castling_king_file[0], 0);
-        let black_king = Square::from_file_rank(self.castling_king_file[1], 7);
-        if from == white_king || to == white_king {
-            rights &= !(WHITE_KING_CASTLE | WHITE_QUEEN_CASTLE);
-        }
-        if from == black_king || to == black_king {
-            rights &= !(BLACK_KING_CASTLE | BLACK_QUEEN_CASTLE);
-        }
-        let wk = self.castling_rook_from(Color::White, true);
-        let wq = self.castling_rook_from(Color::White, false);
-        let bk = self.castling_rook_from(Color::Black, true);
-        let bq = self.castling_rook_from(Color::Black, false);
-        if from == wk || to == wk {
-            rights &= !WHITE_KING_CASTLE;
-        }
-        if from == wq || to == wq {
-            rights &= !WHITE_QUEEN_CASTLE;
-        }
-        if from == bk || to == bk {
-            rights &= !BLACK_KING_CASTLE;
-        }
-        if from == bq || to == bq {
-            rights &= !BLACK_QUEEN_CASTLE;
-        }
-        rights
+        apply_castling_rights_update(
+            self.chess960,
+            self.castling_rights,
+            self.castling_king_file,
+            |color, kingside| self.castling_rook_from(color, kingside),
+            from,
+            to,
+        )
     }
 
     fn write_castling_fen(&self, fen: &mut String) {
@@ -1219,7 +1227,56 @@ impl Board {
     }
 }
 
-const CASTLING_RIGHTS_UPDATE: [u8; 64] = {
+#[inline(always)]
+pub(super) fn apply_castling_rights_update(
+    chess960: bool,
+    rights: u8,
+    king_files: [u8; 2],
+    rook_from: impl Fn(Color, bool) -> Square,
+    from: Square,
+    to: Square,
+) -> u8 {
+    if !chess960 {
+        return rights & CASTLING_RIGHTS_UPDATE[from.index()] & CASTLING_RIGHTS_UPDATE[to.index()];
+    }
+    let mut rights = rights;
+    let white_king = Square::from_file_rank(king_files[0], 0);
+    let black_king = Square::from_file_rank(king_files[1], 7);
+    if from == white_king || to == white_king {
+        rights &= !(WHITE_KING_CASTLE | WHITE_QUEEN_CASTLE);
+    }
+    if from == black_king || to == black_king {
+        rights &= !(BLACK_KING_CASTLE | BLACK_QUEEN_CASTLE);
+    }
+    let wk = rook_from(Color::White, true);
+    let wq = rook_from(Color::White, false);
+    let bk = rook_from(Color::Black, true);
+    let bq = rook_from(Color::Black, false);
+    if from == wk || to == wk {
+        rights &= !WHITE_KING_CASTLE;
+    }
+    if from == wq || to == wq {
+        rights &= !WHITE_QUEEN_CASTLE;
+    }
+    if from == bk || to == bk {
+        rights &= !BLACK_KING_CASTLE;
+    }
+    if from == bq || to == bq {
+        rights &= !BLACK_QUEEN_CASTLE;
+    }
+    rights
+}
+
+#[inline]
+pub(super) fn history_hash_at(root: &[u64], path: &[u64], index: usize) -> u64 {
+    if index < root.len() {
+        root[index]
+    } else {
+        path[index - root.len()]
+    }
+}
+
+pub(super) const CASTLING_RIGHTS_UPDATE: [u8; 64] = {
     let mut table = [ALL_CASTLING; 64];
     // White king or rooks move → lose white castling
     table[Square::E1 as usize] = ALL_CASTLING & !WHITE_KING_CASTLE & !WHITE_QUEEN_CASTLE;
@@ -1563,6 +1620,53 @@ mod tests {
     }
 
     #[test]
+    fn make_without_undo_plus_snapshot_matches_unmake() {
+        setup();
+        let mut via_unmake = Board::new();
+        let moves: Vec<Move> = via_unmake.generate_legal_moves().iter().copied().collect();
+        for mv in moves {
+            let mut via_snap = Board::new();
+            let snap = via_snap.snapshot();
+            via_snap.make_move_without_undo(mv);
+            via_snap.restore_snapshot(snap);
+            via_unmake.make_move(mv);
+            via_unmake.unmake_move(mv);
+            assert_eq!(via_snap.hash, via_unmake.hash, "{mv}");
+            assert_eq!(via_snap.to_fen(), via_unmake.to_fen(), "{mv}");
+        }
+    }
+
+    #[test]
+    fn make_without_undo_plus_restore_matches_make_unmake() {
+        setup();
+        let mut via_undo = Board::new();
+        let mv = via_undo
+            .generate_legal_moves()
+            .iter()
+            .copied()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .expect("e2e4");
+        let mut via_snap = Board::new();
+        let snap = via_snap.snapshot();
+        via_snap.make_move_without_undo(mv);
+        via_undo.make_move(mv);
+        assert_eq!(via_snap.hash, via_undo.hash);
+        assert_eq!(via_snap.to_fen(), via_undo.to_fen());
+        assert!(via_snap.history.is_empty());
+        via_snap.restore_snapshot(snap);
+        via_undo.unmake_move(mv);
+        assert_eq!(via_snap.hash, via_undo.hash);
+        assert_eq!(via_snap.hash_history.len(), via_undo.hash_history.len());
+        let null_snap = via_snap.snapshot();
+        via_snap.make_null_move_without_undo();
+        via_undo.make_null_move();
+        assert_eq!(via_snap.hash, via_undo.hash);
+        via_snap.restore_snapshot(null_snap);
+        via_undo.unmake_null_move();
+        assert_eq!(via_snap.hash, via_undo.hash);
+    }
+
+    #[test]
     fn snapshot_restore_matches_unmake_for_startpos_and_specials() {
         setup();
         let fens = [
@@ -1583,6 +1687,38 @@ mod tests {
                 assert_eq!(via_snap.hash, via_unmake.hash, "{fen} {mv}");
                 assert_eq!(via_snap.to_fen(), via_unmake.to_fen(), "{fen} {mv}");
                 assert_eq!(via_snap.pieces, via_unmake.pieces, "{fen} {mv}");
+            }
+        }
+    }
+
+    #[test]
+    fn copy_make_matches_board_make_and_stays_small() {
+        setup();
+        assert!(
+            std::mem::size_of::<BoardSnapshot>() <= 256,
+            "Copy position must stay stack-cheap, got {}",
+            std::mem::size_of::<BoardSnapshot>()
+        );
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp2ppp/8/3ppP2/8/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 3",
+        ];
+        for fen in fens {
+            let mut board = Board::from_fen(fen).expect("legal fen");
+            let moves: Vec<Move> = board.generate_legal_moves().iter().copied().collect();
+            for mv in moves {
+                let mut via_board = Board::from_fen(fen).expect("legal fen");
+                via_board.make_move(mv);
+                let mut child = Board::from_fen(fen).expect("legal fen").snapshot();
+                let illegal = child.make(mv);
+                assert!(!illegal, "{fen} {mv} marked illegal");
+                let mut via_copy = Board::from_fen(fen).expect("legal fen");
+                via_copy.restore_snapshot(child);
+                assert_eq!(via_copy.hash, via_board.hash, "{fen} {mv}");
+                assert_eq!(via_copy.side_to_move, via_board.side_to_move, "{fen} {mv}");
+                assert_eq!(via_copy.in_check(), via_board.in_check(), "{fen} {mv}");
+                assert_eq!(via_copy.pieces, via_board.pieces, "{fen} {mv}");
             }
         }
     }
@@ -1989,6 +2125,45 @@ mod tests {
                 .iter()
                 .any(|mv| mv.to_uci() == "e1f1" && mv.flag == MoveFlag::KingCastle)
         );
+    }
+
+    #[test]
+    fn cached_threats_match_recompute_across_make_unmake() {
+        setup();
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 3 3",
+            "4k3/8/8/8/8/8/4R3/4K3 b - - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        ];
+        for fen in fens {
+            let mut board = Board::from_fen(fen).expect("legal fen");
+            let start_threats = board.opponent_attacks();
+            assert_eq!(
+                board.in_check(),
+                board.is_in_check(board.side_to_move),
+                "cached in_check mismatch at {fen}"
+            );
+            for &mv in board.generate_legal_moves().iter() {
+                board.make_move(mv);
+                board.refresh_threats();
+                assert_eq!(
+                    board.in_check(),
+                    board.opponent_attacks() & board.king_square(board.side_to_move).bitboard()
+                        != 0,
+                    "threat/in_check mismatch after {} from {fen}",
+                    mv.to_uci()
+                );
+                board.unmake_move(mv);
+                board.refresh_threats();
+                assert_eq!(
+                    board.opponent_attacks(),
+                    start_threats,
+                    "unmake did not restore the position used for threats after {} from {fen}",
+                    mv.to_uci()
+                );
+            }
+        }
     }
 
     #[test]

@@ -91,6 +91,24 @@ mod tests {
     }
 
     #[test]
+    fn akimbo_depth_7_startpos_is_not_a_nonsense_wing_pawn() {
+        types::init();
+        let mut engine = SearchEngine::new(16, 1);
+        assert!(install_adapter(&mut engine, "akimbo"));
+        let mut board = Board::new();
+        let start_hash = board.hash;
+        let result = engine.search_depth(&mut board, 7);
+        let uci = result.best_move.to_uci();
+        assert_ne!(uci, "a2a3", "Akimbo depth 7 must not collapse to a2a3");
+        assert_ne!(uci, "b1c3", "Akimbo depth 7 must not collapse to b1c3");
+        assert_ne!(result.best_move, NULL_MOVE);
+        assert_eq!(
+            board.hash, start_hash,
+            "Akimbo snapshot restore must leave startpos"
+        );
+    }
+
+    #[test]
     fn viridithas_and_akimbo_loops_are_not_the_generic_pvs() {
         let viri = include_str!("viridithas.rs");
         let akimbo = include_str!("akimbo.rs");
@@ -117,12 +135,28 @@ mod tests {
         let viri = include_str!("../engine_loops/viridithas.rs");
         let akimbo = include_str!("../engine_loops/akimbo.rs");
         assert!(
-            viri.contains("reduction_1024ths") && viri.contains("viridithas_probcut_beta"),
-            "Viridithas must keep 1024ths LMR and official ProbCut"
+            viri.contains("reduction_1024ths")
+                && viri.contains("viridithas_probcut_beta")
+                && viri.contains("viridithas_later_move_reduction")
+                && viri.contains("viridithas_singular_verdict")
+                && viri.contains("skip_quiets")
+                && viri.contains("raw_eval")
+                && viri.contains("hint_common_access")
+                && viri.contains("prefetch"),
+            "Viridithas must keep 1024ths LMR, official later-move r=1, skip-quiet LMP, ProbCut, and deferred sandhi ensure"
         );
         assert!(
-            akimbo.contains("akimbo_probcut_beta") && akimbo.contains("restore_snapshot"),
-            "Akimbo must run official ProbCut and copy-style restore"
+            akimbo.contains("akimbo_probcut_beta")
+                && akimbo.contains("make_search_move_no_undo")
+                && akimbo.contains("prefetch")
+                && akimbo.contains("quiescence_snapshot"),
+            "Akimbo must run official ProbCut on snapshot make, prefetch the child TT, and use snapshot QS"
+        );
+        let qs = include_str!("../engine_loops/qs.rs");
+        assert_eq!(
+            qs.matches("tt.probe").count(),
+            1,
+            "dedicated QS must probe the TT once per node"
         );
     }
 }

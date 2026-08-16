@@ -1,10 +1,10 @@
-//! Shared capture QS for the official Akimbo / Viridithas loops.
+//! Capture QS for the official Viridithas loop.
 //! Official qsearch has no reverse-quiet re-entry into the generic PVS.
 
 use super::{
     INF, MATE_SCORE, MAX_PLY, SearchContext, ThreadState, capture_score, draw_score, hybrid_eval,
-    make_search_move, score_from_tt, score_to_tt, search_time_exceeded, undo_search_eval,
-    usable_tt_move,
+    make_search_move, make_search_move_no_undo, score_from_tt, score_to_tt, search_time_exceeded,
+    undo_search_eval, usable_tt_move,
 };
 use crate::move_picker::MovePicker;
 use crate::see;
@@ -14,6 +14,29 @@ use types::chess_move::NULL_MOVE;
 use types::{Board, Move};
 
 pub(super) fn quiescence(
+    board: &mut Board,
+    state: &mut ThreadState,
+    context: &SearchContext<'_>,
+    alpha: i32,
+    beta: i32,
+    ply: i32,
+) -> i32 {
+    quiescence_ex::<false>(board, state, context, alpha, beta, ply)
+}
+
+/// Akimbo PVS uses snapshot restore; QS should match that make path.
+pub(super) fn quiescence_snapshot(
+    board: &mut Board,
+    state: &mut ThreadState,
+    context: &SearchContext<'_>,
+    alpha: i32,
+    beta: i32,
+    ply: i32,
+) -> i32 {
+    quiescence_ex::<true>(board, state, context, alpha, beta, ply)
+}
+
+fn quiescence_ex<const SNAPSHOT: bool>(
     board: &mut Board,
     state: &mut ThreadState,
     context: &SearchContext<'_>,
@@ -74,7 +97,7 @@ pub(super) fn quiescence(
         eval
     };
 
-    if let Some(entry) = tt.probe(board.tt_hash()) {
+    let tt_move = if let Some(entry) = tt.probe(board.tt_hash()) {
         let probed = score_from_tt(entry.score, ply);
         match entry.node_type {
             NodeType::Exact => return probed,
@@ -82,11 +105,10 @@ pub(super) fn quiescence(
             NodeType::UpperBound if probed <= alpha => return probed,
             _ => {}
         }
-    }
-
-    let tt_move = tt
-        .probe(board.tt_hash())
-        .and_then(|entry| usable_tt_move(entry.best_move));
+        usable_tt_move(entry.best_move)
+    } else {
+        None
+    };
     let mut picker = MovePicker::new(board, tt_move, [NULL_MOVE; 2], NULL_MOVE)
         .with_move_ordering(move_ordering);
     if !in_check {
@@ -102,13 +124,27 @@ pub(super) fn quiescence(
         if !in_check && !see::see_ge(board, mv, 1) {
             continue;
         }
-        make_search_move(board, state, mv);
-        let child_ply = ply_usize + 1;
-        if child_ply < MAX_PLY {
-            state.in_check[child_ply] = board.in_check();
-        }
-        let score = -quiescence(board, state, context, -beta, -alpha, ply + 1);
-        board.unmake_move(mv);
+        context.tt.prefetch(board.tt_hash_after(mv));
+        let score = if SNAPSHOT {
+            let snap = board.snapshot();
+            make_search_move_no_undo(board, state, mv);
+            let child_ply = ply_usize + 1;
+            if child_ply < MAX_PLY {
+                state.in_check[child_ply] = board.in_check();
+            }
+            let score = -quiescence_ex::<true>(board, state, context, -beta, -alpha, ply + 1);
+            board.restore_snapshot(snap);
+            score
+        } else {
+            make_search_move(board, state, mv);
+            let child_ply = ply_usize + 1;
+            if child_ply < MAX_PLY {
+                state.in_check[child_ply] = board.in_check();
+            }
+            let score = -quiescence_ex::<false>(board, state, context, -beta, -alpha, ply + 1);
+            board.unmake_move(mv);
+            score
+        };
         undo_search_eval(state);
         if stopped.load(Ordering::Relaxed) {
             return 0;

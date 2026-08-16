@@ -4,7 +4,7 @@
 
 use types::bitboard::{Bitboard, get_lsb};
 use types::board::attack_tables::*;
-use types::{Board, Color, Move, Piece};
+use types::{AkimboPos, Board, BoardSnapshot, Color, Move, Piece};
 
 /// Piece values for SEE (centipawns).
 const SEE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20000];
@@ -120,19 +120,82 @@ pub fn see(board: &Board, mv: Move) -> i32 {
 /// Fully inline swap algorithm — no fallback to full `see()`.
 #[inline]
 pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
+    see_ge_arrays(
+        &board.pieces[Color::White.index()],
+        &board.pieces[Color::Black.index()],
+        board.occupancy[0] | board.occupancy[1],
+        board.side_to_move,
+        board.piece_of_color_on(mv.to, board.side_to_move.opponent()),
+        board.piece_of_color_on(mv.from, board.side_to_move),
+        mv,
+        threshold,
+    )
+}
+
+#[inline]
+pub fn see_ge_pos(pos: &AkimboPos, mv: Move, threshold: i32) -> bool {
+    let mut white = [0u64; 6];
+    let mut black = [0u64; 6];
+    for piece in Piece::ALL {
+        white[piece.index()] = pos.piece_bb(piece, Color::White);
+        black[piece.index()] = pos.piece_bb(piece, Color::Black);
+    }
+    see_ge_arrays(
+        &white,
+        &black,
+        pos.all_occupancy(),
+        pos.side_to_move(),
+        pos.piece_of_color_on(mv.to, pos.side_to_move().opponent()),
+        pos.piece_of_color_on(mv.from, pos.side_to_move()),
+        mv,
+        threshold,
+    )
+}
+
+#[inline]
+pub fn see_ge_snap(pos: &BoardSnapshot, mv: Move, threshold: i32) -> bool {
+    let mut white = [0u64; 6];
+    let mut black = [0u64; 6];
+    for piece in Piece::ALL {
+        white[piece.index()] = pos.piece_bb(piece, Color::White);
+        black[piece.index()] = pos.piece_bb(piece, Color::Black);
+    }
+    see_ge_arrays(
+        &white,
+        &black,
+        pos.all_occupancy(),
+        pos.side_to_move(),
+        pos.piece_of_color_on(mv.to, pos.side_to_move().opponent()),
+        pos.piece_of_color_on(mv.from, pos.side_to_move()),
+        mv,
+        threshold,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn see_ge_arrays(
+    white_src: &[u64; 6],
+    black_src: &[u64; 6],
+    occupancy_src: u64,
+    stm: Color,
+    captured: Option<Piece>,
+    moving_piece: Option<Piece>,
+    mv: Move,
+    threshold: i32,
+) -> bool {
     let to = mv.to.index();
     let from = mv.from.index();
 
-    let initial_value =
-        if let Some(captured) = board.piece_of_color_on(mv.to, board.side_to_move.opponent()) {
-            SEE_VALUES[captured.index()]
-        } else if mv.flag == types::chess_move::MoveFlag::EnPassant {
-            SEE_VALUES[0]
-        } else {
-            return threshold <= 0;
-        };
+    let initial_value = if let Some(captured) = captured {
+        SEE_VALUES[captured.index()]
+    } else if mv.flag == types::chess_move::MoveFlag::EnPassant {
+        SEE_VALUES[0]
+    } else {
+        return threshold <= 0;
+    };
 
-    let moving_piece = if let Some(piece) = board.piece_of_color_on(mv.from, board.side_to_move) {
+    let moving_piece = if let Some(piece) = moving_piece {
         piece
     } else {
         return threshold <= 0;
@@ -149,11 +212,11 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
     }
 
     // Full inline swap loop
-    let mut white_pieces = board.pieces[Color::White.index()];
-    let mut black_pieces = board.pieces[Color::Black.index()];
+    let mut white_pieces = *white_src;
+    let mut black_pieces = *black_src;
 
-    let mut occupancy = (board.occupancy[0] | board.occupancy[1]) & !(1u64 << from);
-    let mut side = board.side_to_move.opponent();
+    let mut occupancy = occupancy_src & !(1u64 << from);
+    let mut side = stm.opponent();
 
     loop {
         let attackers = all_attackers(to, occupancy, &white_pieces, &black_pieces);
@@ -206,7 +269,7 @@ pub fn see_ge(board: &Board, mv: Move, threshold: i32) -> bool {
         }
     }
 
-    side != board.side_to_move
+    side != stm
 }
 
 /// Get all attackers to a given square.
@@ -288,6 +351,10 @@ mod tests {
 
         assert!(see(&board, mv) < 0);
         assert!(!see_ge(&board, mv, 0));
+        let pos = types::AkimboPos::from_board(&board);
+        assert_eq!(see_ge_pos(&pos, mv, 0), see_ge(&board, mv, 0));
+        let snap = board.snapshot();
+        assert_eq!(see_ge_snap(&snap, mv, 0), see_ge(&board, mv, 0));
     }
 
     #[test]

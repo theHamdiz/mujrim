@@ -163,6 +163,15 @@ pub(crate) fn apply_i16_from_width(
 ) {
     debug_assert_eq!(dst.len(), src.len());
     let width = dst.len();
+    if dst.len().is_multiple_of(32) {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if apply_from_uses_avx512() {
+            unsafe {
+                avx512::apply_i16_from(dst, src, weights, adds, subs);
+            }
+            return;
+        }
+    }
     if dst.len().is_multiple_of(16) {
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         if apply_from_uses_avx2() {
@@ -191,6 +200,15 @@ pub(crate) fn apply_i8_from_width(
 ) {
     debug_assert_eq!(dst.len(), src.len());
     let width = dst.len();
+    if dst.len().is_multiple_of(32) {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if apply_from_uses_avx512() {
+            unsafe {
+                avx512::apply_i8_from(dst, src, weights, adds, subs);
+            }
+            return;
+        }
+    }
     if dst.len().is_multiple_of(16) {
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         if apply_from_uses_avx2() {
@@ -243,6 +261,13 @@ pub(crate) fn transform_pair_sum(
     debug_assert_eq!(second.len(), second_add.len());
     debug_assert_eq!(first.len(), second.len());
     debug_assert_eq!(first.len(), output.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if first.len().is_multiple_of(32) && apply_from_uses_avx512() {
+        unsafe {
+            avx512::transform_pair_sum(first, first_add, second, second_add, output);
+        }
+        return;
+    }
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if first.len().is_multiple_of(16) && shifted_pair_uses_avx2() {
         unsafe {
@@ -306,6 +331,15 @@ fn shifted_pair_uses_avx2() -> bool {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 fn apply_from_uses_avx2() -> bool {
     shifted_pair_uses_avx2()
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_from_uses_avx512() -> bool {
+    static AVX512: OnceLock<bool> = OnceLock::new();
+    *AVX512.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+    })
 }
 
 pub(crate) fn selected_backend() -> &'static str {
@@ -870,6 +904,205 @@ mod avx512 {
         }
     }
 
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i16_from(
+        dst: &mut [i16],
+        src: &[i16],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            let width = dst.len();
+            debug_assert_eq!(src.len(), width);
+            debug_assert_eq!(width % 32, 0);
+            const REGS: usize = 16;
+            const CHUNK: usize = 32;
+            const UNROLL: usize = CHUNK * REGS;
+            if adds.len() == 1 && subs.len() == 1 && width.is_multiple_of(UNROLL) {
+                let add_row = weights.as_ptr().add(adds[0] * width);
+                let sub_row = weights.as_ptr().add(subs[0] * width);
+                _mm_prefetch::<_MM_HINT_T0>(add_row.cast::<i8>());
+                _mm_prefetch::<_MM_HINT_T0>(sub_row.cast::<i8>());
+                for base in (0..width).step_by(UNROLL) {
+                    let add_base = add_row.add(base);
+                    let sub_base = sub_row.add(base);
+                    for r_idx in 0..REGS {
+                        let off = r_idx * CHUNK;
+                        let value = _mm512_sub_epi16(
+                            load_i16(src.as_ptr().add(base + off)),
+                            load_i16(sub_base.add(off)),
+                        );
+                        store_i16(
+                            dst.as_mut_ptr().add(base + off),
+                            _mm512_add_epi16(value, load_i16(add_base.add(off))),
+                        );
+                    }
+                }
+                return;
+            }
+            if width.is_multiple_of(UNROLL) {
+                for base in (0..width).step_by(UNROLL) {
+                    let mut regs = [_mm512_setzero_si512(); REGS];
+                    for (r_idx, reg) in regs.iter_mut().enumerate() {
+                        *reg = load_i16(src.as_ptr().add(base + r_idx * CHUNK));
+                    }
+                    for &feature in subs {
+                        let row = weights.as_ptr().add(feature * width + base);
+                        for (r_idx, reg) in regs.iter_mut().enumerate() {
+                            *reg = _mm512_sub_epi16(*reg, load_i16(row.add(r_idx * CHUNK)));
+                        }
+                    }
+                    for &feature in adds {
+                        let row = weights.as_ptr().add(feature * width + base);
+                        for (r_idx, reg) in regs.iter_mut().enumerate() {
+                            *reg = _mm512_add_epi16(*reg, load_i16(row.add(r_idx * CHUNK)));
+                        }
+                    }
+                    for (r_idx, reg) in regs.iter().enumerate() {
+                        store_i16(dst.as_mut_ptr().add(base + r_idx * CHUNK), *reg);
+                    }
+                }
+                return;
+            }
+            for index in (0..width).step_by(32) {
+                let mut value = load_i16(src.as_ptr().add(index));
+                for &feature in adds {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    value = _mm512_add_epi16(value, load_i16(row));
+                }
+                for &feature in subs {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    value = _mm512_sub_epi16(value, load_i16(row));
+                }
+                store_i16(dst.as_mut_ptr().add(index), value);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i8_from(
+        dst: &mut [i16],
+        src: &[i16],
+        weights: &[i8],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            let width = dst.len();
+            debug_assert_eq!(src.len(), width);
+            debug_assert_eq!(width % 32, 0);
+            const REGS: usize = 16;
+            const CHUNK: usize = 32;
+            const UNROLL: usize = CHUNK * REGS;
+            if width.is_multiple_of(UNROLL) {
+                // Each i8 row is `width` bytes (1024 for sandhi). Prefetch every
+                // cache line, not just the first — official only touches the
+                // start, then pays for the second 512-byte unroll.
+                for &feature in adds.iter().chain(subs.iter()) {
+                    let row = weights.as_ptr().add(feature * width);
+                    let mut line = 0;
+                    while line < width {
+                        _mm_prefetch::<_MM_HINT_T0>(row.add(line).cast::<i8>());
+                        line += 64;
+                    }
+                }
+                for base in (0..width).step_by(UNROLL) {
+                    let mut regs = [_mm512_setzero_si512(); REGS];
+                    for (r_idx, reg) in regs.iter_mut().enumerate() {
+                        *reg = load_i16(src.as_ptr().add(base + r_idx * CHUNK));
+                    }
+                    for &feature in subs {
+                        let row = weights.as_ptr().add(feature * width + base);
+                        for (r_idx, reg) in regs.iter_mut().enumerate() {
+                            let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                                row.add(r_idx * CHUNK).cast(),
+                            ));
+                            *reg = _mm512_sub_epi16(*reg, delta);
+                        }
+                    }
+                    for &feature in adds {
+                        let row = weights.as_ptr().add(feature * width + base);
+                        for (r_idx, reg) in regs.iter_mut().enumerate() {
+                            let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                                row.add(r_idx * CHUNK).cast(),
+                            ));
+                            *reg = _mm512_add_epi16(*reg, delta);
+                        }
+                    }
+                    for (r_idx, reg) in regs.iter().enumerate() {
+                        store_i16(dst.as_mut_ptr().add(base + r_idx * CHUNK), *reg);
+                    }
+                }
+                return;
+            }
+            for index in (0..width).step_by(32) {
+                let mut value = load_i16(src.as_ptr().add(index));
+                for &feature in adds {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.cast()));
+                    value = _mm512_add_epi16(value, delta);
+                }
+                for &feature in subs {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.cast()));
+                    value = _mm512_sub_epi16(value, delta);
+                }
+                store_i16(dst.as_mut_ptr().add(index), value);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn transform_pair_sum(
+        first: &[i16],
+        first_add: &[i16],
+        second: &[i16],
+        second_add: &[i16],
+        output: &mut [u8],
+    ) {
+        unsafe {
+            let zero = _mm512_setzero_si512();
+            let maximum = _mm512_set1_epi16(255);
+            for index in (0..first.len()).step_by(32) {
+                let lhs = _mm512_max_epi16(
+                    _mm512_min_epi16(
+                        _mm512_add_epi16(
+                            load_i16(first.as_ptr().add(index)),
+                            load_i16(first_add.as_ptr().add(index)),
+                        ),
+                        maximum,
+                    ),
+                    zero,
+                );
+                let rhs = _mm512_max_epi16(
+                    _mm512_min_epi16(
+                        _mm512_add_epi16(
+                            load_i16(second.as_ptr().add(index)),
+                            load_i16(second_add.as_ptr().add(index)),
+                        ),
+                        maximum,
+                    ),
+                    zero,
+                );
+                let lhs_lo = _mm512_cvtepi16_epi32(_mm512_castsi512_si256(lhs));
+                let lhs_hi = _mm512_cvtepi16_epi32(_mm512_extracti64x4_epi64::<1>(lhs));
+                let rhs_lo = _mm512_cvtepi16_epi32(_mm512_castsi512_si256(rhs));
+                let rhs_hi = _mm512_cvtepi16_epi32(_mm512_extracti64x4_epi64::<1>(rhs));
+                let prod_lo = _mm512_srli_epi32::<9>(_mm512_mullo_epi32(lhs_lo, rhs_lo));
+                let prod_hi = _mm512_srli_epi32::<9>(_mm512_mullo_epi32(lhs_hi, rhs_hi));
+                _mm_storeu_si128(
+                    output.as_mut_ptr().add(index).cast(),
+                    _mm512_cvtepi32_epi8(prod_lo),
+                );
+                _mm_storeu_si128(
+                    output.as_mut_ptr().add(index + 16).cast(),
+                    _mm512_cvtepi32_epi8(prod_hi),
+                );
+            }
+        }
+    }
+
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
     pub(super) unsafe fn affine_vnni(input: &[u8], weights: &[i8], output: &mut [i32]) {
         unsafe {
@@ -1078,6 +1311,28 @@ mod tests {
         apply_i16_feature_width(&mut expected, &weights, 0, 1);
         let mut actual = vec![0_i16; WIDTH];
         apply_i16_from_width(&mut actual, &src, &weights, &[1, 0], &[3]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn transform_pair_sum_matches_scalar() {
+        const WIDTH: usize = 1024;
+        let first = (0..WIDTH)
+            .map(|index| index as i16 - 40)
+            .collect::<Vec<_>>();
+        let first_add = (0..WIDTH)
+            .map(|index| (index as i16 % 11) - 3)
+            .collect::<Vec<_>>();
+        let second = (0..WIDTH)
+            .map(|index| 180 - index as i16)
+            .collect::<Vec<_>>();
+        let second_add = (0..WIDTH)
+            .map(|index| (index as i16 % 7) - 2)
+            .collect::<Vec<_>>();
+        let mut expected = vec![0_u8; WIDTH];
+        let mut actual = vec![0_u8; WIDTH];
+        scalar::transform_pair_sum(&first, &first_add, &second, &second_add, &mut expected);
+        transform_pair_sum(&first, &first_add, &second, &second_add, &mut actual);
         assert_eq!(actual, expected);
     }
 

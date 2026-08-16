@@ -6,7 +6,7 @@
 use super::adapter::{ActiveNetwork, NnueNetworkInfo, NnueNetworkParameters, NnueNetworkSource};
 use super::akimbo_state::AkimboAccumulatorState;
 use std::sync::Arc;
-use types::{Board, Move};
+use types::{AkimboPos, Board, BoardSnapshot, Move};
 
 /// Board bitmask state for accumulator cache validation.
 pub use super::akimbo_state::EvalEntry;
@@ -134,46 +134,99 @@ impl NNUEState {
     /// Applies a search move through the evaluator-specific update path.
     #[inline]
     pub fn make_move(&mut self, board: &mut Board, mv: Move) {
+        self.apply_move(board, mv, true);
+    }
+
+    pub fn make_move_without_undo(&mut self, board: &mut Board, mv: Move) {
+        self.apply_move(board, mv, false);
+    }
+
+    #[inline]
+    pub fn push_move_pos(&mut self, pos: &AkimboPos, mv: Move) {
+        if let Some(state) = &mut self.akimbo {
+            state.push_move_pos(pos, mv);
+        }
+    }
+
+    #[inline]
+    pub fn push_move_snap(&mut self, pos: &BoardSnapshot, mv: Move) {
+        if let Some(state) = &mut self.akimbo {
+            state.push_move_snap(pos, mv);
+        }
+    }
+
+    fn apply_move(&mut self, board: &mut Board, mv: Move, record_undo: bool) {
+        let make = |board: &mut Board, mv: Move| {
+            if record_undo {
+                board.make_move(mv);
+            } else {
+                board.make_move_without_undo(mv);
+            }
+        };
         #[cfg(feature = "reckless-nnue")]
         if let Some(state) = &mut self.reckless {
             state.push_move_observed(board, mv);
-            board.make_move_observed(mv, state);
+            if record_undo {
+                board.make_move_observed(mv, state);
+            } else {
+                board.make_move_without_undo(mv);
+            }
             return;
         }
         if let Some(state) = &mut self.akimbo {
             state.push_move(board, mv);
-            board.make_move(mv);
+            make(board, mv);
             return;
         }
         #[cfg(feature = "stockfish-nnue")]
         if let Some(state) = &mut self.stockfish {
             state.push_move(board, mv);
-            board.make_move(mv);
+            make(board, mv);
             return;
         }
         #[cfg(feature = "obsidian-nnue")]
         if let Some(state) = &mut self.obsidian {
             state.push_move(board, mv);
-            board.make_move(mv);
+            make(board, mv);
             return;
         }
         #[cfg(feature = "plentychess-nnue")]
         if let Some(state) = &mut self.plentychess {
             state.push_move(board, mv);
-            board.make_move(mv);
+            make(board, mv);
             return;
         }
         #[cfg(feature = "ateed-nnue")]
         if let Some(state) = &mut self.ateed {
             state.push_move(board, mv);
-            board.make_move(mv);
+            make(board, mv);
             return;
         }
         #[cfg(feature = "viridithas-nnue")]
         if let Some(state) = &mut self.viridithas {
             state.push_move(board, mv);
         }
-        board.make_move(mv);
+        make(board, mv);
+    }
+
+    /// Official `hint_common_access`: apply pending FT/aux after a TT miss.
+    /// TT-cut children skip this so they do not pay sandhi aux on a cutoff.
+    #[inline]
+    pub fn hint_common_access(&mut self, board: &Board) {
+        #[cfg(feature = "viridithas-nnue")]
+        self.ensure_viridithas_after_make(board);
+        #[cfg(not(feature = "viridithas-nnue"))]
+        let _ = board;
+    }
+
+    #[cfg(feature = "viridithas-nnue")]
+    fn ensure_viridithas_after_make(&mut self, board: &Board) {
+        let Some(state) = self.viridithas.as_mut() else {
+            return;
+        };
+        if let super::adapter::NnueNetworkParameters::Viridithas(net) = self.source.parameters() {
+            state.ensure_after_make(board, net);
+        }
     }
 
     /// Start an accumulator frame for a null move.
@@ -439,6 +492,46 @@ impl NNUEState {
             .as_mut()
             .expect("Akimbo source has matching accumulator state")
             .evaluate_search(board, net)
+    }
+
+    /// Official Akimbo Finny-from-pos evaluate. Dedicated loop only.
+    pub fn evaluate_search_pos(&mut self, pos: &AkimboPos) -> i32 {
+        let net = match self.source.parameters() {
+            NnueNetworkParameters::Akimbo(net) => net,
+            #[cfg(any(
+                feature = "stockfish-nnue",
+                feature = "reckless-nnue",
+                feature = "viridithas-nnue",
+                feature = "obsidian-nnue",
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue"
+            ))]
+            _ => unreachable!("evaluate_search_pos is Akimbo-only"),
+        };
+        self.akimbo
+            .as_mut()
+            .expect("Akimbo source has matching accumulator state")
+            .evaluate_search_pos(pos, net)
+    }
+
+    /// Ply-stack evaluate from a mailbox snapshot. Dedicated Akimbo loop only.
+    pub fn evaluate_search_snap(&mut self, pos: &BoardSnapshot) -> i32 {
+        let net = match self.source.parameters() {
+            NnueNetworkParameters::Akimbo(net) => net,
+            #[cfg(any(
+                feature = "stockfish-nnue",
+                feature = "reckless-nnue",
+                feature = "viridithas-nnue",
+                feature = "obsidian-nnue",
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue"
+            ))]
+            _ => unreachable!("evaluate_search_snap is Akimbo-only"),
+        };
+        self.akimbo
+            .as_mut()
+            .expect("Akimbo source has matching accumulator state")
+            .evaluate_search_snap(pos, net)
     }
 
     /// Score plus a non-negative uncertainty proxy. Only Ateed fills WDL variance;
