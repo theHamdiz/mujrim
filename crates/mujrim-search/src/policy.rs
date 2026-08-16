@@ -364,13 +364,9 @@ impl LmrPolicy for RecklessFullLmrPolicy {
 #[derive(Default)]
 pub struct ViridithasLmrPolicy;
 
-impl LmrPolicy for ViridithasLmrPolicy {
-    fn reduce_noisy_moves(&self) -> bool {
-        true
-    }
-
-    fn adjust_reduction(&self, _base_reduction: i32, ctx: &LmrContext) -> i32 {
-        // Official viridithas/src/search.rs LMTable + Config multipliers, in 1024ths.
+impl ViridithasLmrPolicy {
+    /// Official LMTable + Config multipliers, still in 1024ths for hindsight.
+    pub fn reduction_1024ths(&self, ctx: &LmrContext) -> i32 {
         let depth = f64::from(ctx.depth.clamp(1, 63));
         let played = f64::from(ctx.move_count.clamp(1, 63) as u32);
         let base = 99.0 / 100.0 * 1024.0;
@@ -388,7 +384,17 @@ impl LmrPolicy for ViridithasLmrPolicy {
         reduction -= i32::from(ctx.gives_check) * 1361;
         reduction -= ctx.corr_abs.saturating_mul(448) / 16_384;
         reduction += ctx.alpha_raises.saturating_mul(384);
-        reduction / 1024
+        reduction
+    }
+}
+
+impl LmrPolicy for ViridithasLmrPolicy {
+    fn reduce_noisy_moves(&self) -> bool {
+        true
+    }
+
+    fn adjust_reduction(&self, _base_reduction: i32, ctx: &LmrContext) -> i32 {
+        self.reduction_1024ths(ctx) / 1024
     }
 }
 
@@ -1845,6 +1851,11 @@ mod tests {
         );
         lmr.tt_capture = false;
         lmr.gives_check = true;
+        assert_eq!(
+            ViridithasLmrPolicy.reduction_1024ths(&lmr),
+            4169,
+            "official LMR keeps 1024ths: 5530 - 1361"
+        );
         assert_eq!(
             ViridithasLmrPolicy.adjust_reduction(99, &lmr),
             4,

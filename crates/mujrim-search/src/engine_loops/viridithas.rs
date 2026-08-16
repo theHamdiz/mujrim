@@ -234,6 +234,89 @@ pub(crate) fn alpha_beta(
                 return if nw > MATE_SCORE - 100 { beta } else { nw };
             }
         }
+
+        if allow_null && depth >= 3 && beta.abs() < MATE_SCORE - 100 {
+            let mut pc_beta = super::viridithas_probcut_beta(beta, improving);
+            if tt_score.is_none_or(|ts| ts >= pc_beta) {
+                let depth_base = super::viridithas_probcut_depth_base(depth, static_eval, beta);
+                let see_pivot = super::viridithas_probcut_see_pivot(pc_beta, static_eval);
+                let pc_capture =
+                    |b: &Board, mv: Move| super::capture_score(b, mv, tt_move, move_ordering);
+                let pc_quiet = |_: &Board, _: Move| 0;
+                let mut pc_picker = MovePicker::new(board, tt_move, [NULL_MOVE; 2], NULL_MOVE)
+                    .with_move_ordering(move_ordering);
+                pc_picker.skip_quiets();
+                while let Some(mv) = pc_picker.next(board, &pc_capture, &pc_quiet) {
+                    if !see::see_ge(board, mv, see_pivot) {
+                        continue;
+                    }
+                    make_search_move(board, state, mv);
+                    if ply_usize + 1 < MAX_PLY {
+                        state.in_check[ply_usize + 1] = board.in_check();
+                    }
+                    let mut value =
+                        -quiescence(board, state, context, -pc_beta, -pc_beta + 1, ply + 1);
+                    let mut pc_depth =
+                        super::viridithas_adaptive_pc_depth(depth_base, value, pc_beta)
+                            .clamp(0, (depth - 1).max(0));
+                    let base_pc_depth = depth_base.clamp(0, (depth - 1).max(0));
+                    let ada_beta = super::viridithas_ada_beta(pc_beta, base_pc_depth, pc_depth)
+                        .clamp(-MATE_SCORE + 101, MATE_SCORE - 101);
+                    if value >= pc_beta && pc_depth > 0 {
+                        value = -alpha_beta(
+                            board,
+                            state,
+                            context,
+                            SearchNode {
+                                depth: pc_depth,
+                                alpha: -ada_beta,
+                                beta: -ada_beta + 1,
+                                ply: ply + 1,
+                                is_pv: false,
+                                is_root: false,
+                                excluded_move: None,
+                                total_extensions: 0,
+                                nominal_depth: depth,
+                                allow_null: false,
+                            },
+                        );
+                        if value < ada_beta && pc_beta < ada_beta {
+                            pc_depth = base_pc_depth;
+                            value = -alpha_beta(
+                                board,
+                                state,
+                                context,
+                                SearchNode {
+                                    depth: pc_depth,
+                                    alpha: -pc_beta,
+                                    beta: -pc_beta + 1,
+                                    ply: ply + 1,
+                                    is_pv: false,
+                                    is_root: false,
+                                    excluded_move: None,
+                                    total_extensions: 0,
+                                    nominal_depth: depth,
+                                    allow_null: false,
+                                },
+                            );
+                        } else {
+                            pc_beta = ada_beta;
+                        }
+                    }
+                    board.unmake_move(mv);
+                    undo_search_eval(state);
+                    if stopped.load(Ordering::Relaxed) {
+                        return 0;
+                    }
+                    if value >= pc_beta {
+                        if value.abs() > MATE_SCORE - 100 {
+                            return value;
+                        }
+                        return value - (pc_beta - beta);
+                    }
+                }
+            }
+        }
     }
 
     if allow_null && !is_pv && tt_move.is_none() && depth >= 8 {
@@ -248,10 +331,26 @@ pub(crate) fn alpha_beta(
         MovePicker::new(board, tt_move, killers, NULL_MOVE).with_move_ordering(move_ordering);
     let score_capture = |b: &Board, mv: Move| super::capture_score(b, mv, tt_move, move_ordering);
     let history_ptr = std::ptr::from_ref(&state.history);
+    let cont_ptr = std::ptr::from_ref(&state.cont_hist);
+    let cont2_ptr = std::ptr::from_ref(&state.cont_hist2);
+    let prev_move = state.prev_move;
+    let prev_piece = state.prev_piece;
     let us_idx = us.index();
-    let score_quiet = |_: &Board, mv: Move| {
-        // SAFETY: history is only read while the picker scores, before make.
-        unsafe { (*history_ptr).get(threats, us_idx, mv) }
+    let score_quiet = |b: &Board, mv: Move| {
+        let piece = piece_index_on(b, mv.from);
+        // SAFETY: history tables are only read while the picker scores, before make.
+        let mut score = unsafe { (*history_ptr).get(threats, us_idx, mv) };
+        if ply_usize > 0 && prev_move[ply_usize - 1] != NULL_MOVE {
+            let pp = prev_piece[ply_usize - 1];
+            let pt = prev_move[ply_usize - 1].to.index();
+            score += i32::from(unsafe { (*cont_ptr)[pp][pt][piece][mv.to.index()] });
+        }
+        if ply_usize > 1 && prev_move[ply_usize - 2] != NULL_MOVE {
+            let pp = prev_piece[ply_usize - 2];
+            let pt = prev_move[ply_usize - 2].to.index();
+            score += i32::from(unsafe { (*cont2_ptr)[pp][pt][piece][mv.to.index()] });
+        }
+        score
     };
 
     let mut best_score = -INF;
@@ -351,9 +450,8 @@ pub(crate) fn alpha_beta(
         let mut reduction_1024 = 0;
         let lmr_ready = depth > 2 && legal > usize::from(is_root);
         if lmr_ready && (is_quiet || ViridithasLmrPolicy.reduce_noisy_moves()) {
-            let whole = ViridithasLmrPolicy.adjust_reduction(
-                0,
-                &LmrContext {
+            reduction_1024 = ViridithasLmrPolicy
+                .reduction_1024ths(&LmrContext {
                     depth,
                     move_count: legal,
                     is_quiet,
@@ -384,17 +482,16 @@ pub(crate) fn alpha_beta(
                     lmr_corr_mul: params.lmr_corr_mul,
                     lmr_cut_node_bonus: params.lmr_cut_node_bonus,
                     child_cutoffs: state.cutoffs[(ply_usize + 1).min(MAX_PLY - 1)],
-                },
-            );
-            reduction_1024 = whole.max(0).saturating_mul(1024);
+                })
+                .max(0);
         }
 
         let child_depth = if legal == 1 {
             depth + extension - 1
         } else {
-            (depth + extension - reduction_1024 / 1024).max(0)
+            super::viridithas_lmr_search_depth(depth, extension, reduction_1024 / 1024)
         };
-        state.reductions[ply_usize] = reduction_1024.max(if reduction_1024 > 0 { 1024 } else { 0 });
+        state.reductions[ply_usize] = reduction_1024;
 
         let score = if legal == 1 {
             -alpha_beta(

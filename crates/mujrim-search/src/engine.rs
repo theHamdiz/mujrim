@@ -2074,6 +2074,46 @@ fn stock_like_lmr_search_depth(effective_depth: i32, reduction: i32, is_pv: bool
     (effective_depth - reduction).max(1) + i32::from(is_pv)
 }
 
+const VIRI_PROBCUT_MARGIN: i32 = 176;
+const VIRI_PROBCUT_IMPROVING_MARGIN: i32 = 78;
+const VIRI_PROBCUT_EVAL_DIV: i32 = 289;
+const VIRI_PROBCUT_SEE_SCALE: i32 = 266;
+const VIRI_PROBCUT_ADA_OFFSET: i32 = 50;
+const VIRI_PROBCUT_ADA_DIV: i32 = 300;
+const AKIMBO_PROBCUT_MARGIN: i32 = 256;
+
+#[inline(always)]
+fn viridithas_probcut_beta(beta: i32, improving: bool) -> i32 {
+    (beta + VIRI_PROBCUT_MARGIN - i32::from(improving) * VIRI_PROBCUT_IMPROVING_MARGIN)
+        .min(MATE_SCORE - 101)
+}
+
+#[inline(always)]
+fn viridithas_probcut_depth_base(depth: i32, static_eval: i32, beta: i32) -> i32 {
+    depth - 3 - (static_eval - beta) / VIRI_PROBCUT_EVAL_DIV
+}
+
+#[inline(always)]
+fn viridithas_probcut_see_pivot(pc_beta: i32, static_eval: i32) -> i32 {
+    (pc_beta - static_eval) * VIRI_PROBCUT_SEE_SCALE / 256
+}
+
+#[inline(always)]
+fn viridithas_adaptive_pc_depth(depth_base: i32, qs_value: i32, pc_beta: i32) -> i32 {
+    let ada = ((qs_value - pc_beta - VIRI_PROBCUT_ADA_OFFSET) / VIRI_PROBCUT_ADA_DIV).clamp(0, 3);
+    (depth_base - ada).max(0)
+}
+
+#[inline(always)]
+fn viridithas_ada_beta(pc_beta: i32, base_pc_depth: i32, pc_depth: i32) -> i32 {
+    pc_beta + (base_pc_depth - pc_depth) * VIRI_PROBCUT_ADA_DIV
+}
+
+#[inline(always)]
+fn akimbo_probcut_beta(beta: i32) -> i32 {
+    beta + AKIMBO_PROBCUT_MARGIN
+}
+
 /// Official Viridithas LMR child depth: `depth + extension - r`, not `(depth-1) - r`.
 #[inline(always)]
 fn viridithas_lmr_search_depth(depth: i32, extension: i32, reduction: i32) -> i32 {
@@ -4377,6 +4417,23 @@ mod tests {
         assert!(
             viridithas_preview_lmr_depth(8, 8, true) < viridithas_preview_lmr_depth(8, 8, false)
         );
+    }
+
+    #[test]
+    fn viridithas_probcut_matches_official_adaptive_formulas() {
+        assert_eq!(viridithas_probcut_beta(100, true), 198);
+        assert_eq!(viridithas_probcut_beta(100, false), 276);
+        assert_eq!(viridithas_probcut_depth_base(8, 200, 100), 5);
+        assert_eq!(viridithas_probcut_depth_base(8, 500, 100), 4);
+        assert_eq!(viridithas_probcut_see_pivot(276, 100), 182);
+        assert_eq!(viridithas_adaptive_pc_depth(5, 700, 276), 4);
+        assert_eq!(viridithas_ada_beta(276, 5, 4), 576);
+    }
+
+    #[test]
+    fn akimbo_probcut_beta_is_official() {
+        assert_eq!(akimbo_probcut_beta(100), 356);
+        assert_eq!(akimbo_probcut_beta(0), 256);
     }
 
     #[test]

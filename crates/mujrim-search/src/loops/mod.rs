@@ -111,4 +111,18 @@ mod tests {
             "Akimbo loop must call the official pvs"
         );
     }
+
+    #[test]
+    fn dedicated_loops_keep_official_probcut_and_fractional_lmr() {
+        let viri = include_str!("../engine_loops/viridithas.rs");
+        let akimbo = include_str!("../engine_loops/akimbo.rs");
+        assert!(
+            viri.contains("reduction_1024ths") && viri.contains("viridithas_probcut_beta"),
+            "Viridithas must keep 1024ths LMR and official ProbCut"
+        );
+        assert!(
+            akimbo.contains("akimbo_probcut_beta") && akimbo.contains("restore_snapshot"),
+            "Akimbo must run official ProbCut and copy-style restore"
+        );
+    }
 }

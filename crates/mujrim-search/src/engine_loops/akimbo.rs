@@ -172,6 +172,7 @@ pub(crate) fn pvs(
             if state.use_nnue {
                 state.nnue_state.push_null();
             }
+            let null_snap = board.snapshot();
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
             if ply_usize + 1 < MAX_PLY {
@@ -194,7 +195,7 @@ pub(crate) fn pvs(
                     allow_null: false,
                 },
             );
-            board.unmake_null_move();
+            board.restore_snapshot(null_snap);
             if state.use_nnue {
                 state.nnue_state.pop_move();
             }
@@ -233,6 +234,69 @@ pub(crate) fn pvs(
 
     if depth >= 4 && tt_move.is_none() {
         depth -= 1;
+    }
+
+    if !is_pv && !in_check && !singular && depth > 5 && beta.abs() < MATE_SCORE - 100 {
+        let pc_beta = super::akimbo_probcut_beta(beta);
+        let can_probcut = !(tt_depth >= depth - 3 && tt_score.is_some_and(|s| s < pc_beta));
+        if can_probcut {
+            let pc_capture =
+                |b: &Board, mv: Move| super::capture_score(b, mv, tt_move, move_ordering);
+            let pc_quiet = |_: &Board, _: Move| 0;
+            let mut pc_picker = MovePicker::new(board, tt_move, [NULL_MOVE; 2], NULL_MOVE)
+                .with_move_ordering(move_ordering);
+            pc_picker.skip_quiets();
+            while let Some(mv) = pc_picker.next(board, &pc_capture, &pc_quiet) {
+                if !see::see_ge(board, mv, 1) {
+                    continue;
+                }
+                let pc_snap = board.snapshot();
+                make_search_move(board, state, mv);
+                if ply_usize + 1 < MAX_PLY {
+                    state.in_check[ply_usize + 1] = board.in_check();
+                }
+                let mut pc_score =
+                    -quiescence(board, state, context, -pc_beta, -pc_beta + 1, ply + 1);
+                if pc_score >= pc_beta {
+                    pc_score = -pvs(
+                        board,
+                        state,
+                        context,
+                        SearchNode {
+                            depth: depth - 4,
+                            alpha: -pc_beta,
+                            beta: -pc_beta + 1,
+                            ply: ply + 1,
+                            is_pv: false,
+                            is_root: false,
+                            excluded_move: None,
+                            total_extensions: 0,
+                            nominal_depth: depth,
+                            allow_null: false,
+                        },
+                    );
+                }
+                board.restore_snapshot(pc_snap);
+                undo_search_eval(state);
+                if stopped.load(Ordering::Relaxed) {
+                    return 0;
+                }
+                if pc_score >= pc_beta {
+                    tt.store(
+                        board.tt_hash(),
+                        TTData::new(
+                            depth - 3,
+                            score_to_tt(pc_beta, ply),
+                            NodeType::LowerBound,
+                            mv,
+                            false,
+                            raw_eval,
+                        ),
+                    );
+                    return pc_beta;
+                }
+            }
+        }
     }
 
     let us = board.side_to_move;
@@ -335,6 +399,7 @@ pub(crate) fn pvs(
 
         let moved_piece = piece_index_on(board, mv.from);
         let captured = captured_piece_index(board, mv);
+        let child_snap = board.snapshot();
         make_search_move(board, state, mv);
         let gives_check = board.in_check();
         if ply_usize + 1 < MAX_PLY {
@@ -441,7 +506,7 @@ pub(crate) fn pvs(
             zw
         };
 
-        board.unmake_move(mv);
+        board.restore_snapshot(child_snap);
         undo_search_eval(state);
         if stopped.load(Ordering::Relaxed) {
             return 0;

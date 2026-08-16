@@ -40,6 +40,27 @@ pub struct UndoInfo {
     pub hash: u64,
 }
 
+/// Copy of the board fields that official Akimbo keeps on a `Copy` `Position`.
+#[derive(Copy, Clone)]
+pub struct BoardSnapshot {
+    pieces: [[Bitboard; 6]; 2],
+    occupancy: [Bitboard; 2],
+    piece_at: [u8; 64],
+    side_to_move: Color,
+    castling_rights: u8,
+    chess960: bool,
+    castling_king_file: [u8; 2],
+    castling_rook_file: [u8; 4],
+    en_passant: Option<Square>,
+    halfmove_clock: u32,
+    fullmove_number: u32,
+    hash: u64,
+    total_material: i32,
+    plies_from_null: usize,
+    history_len: usize,
+    hash_history_len: usize,
+}
+
 /// The chess board state.
 #[derive(Clone)]
 pub struct Board {
@@ -706,6 +727,51 @@ impl Board {
         self.en_passant = undo.en_passant;
         self.plies_from_null = undo.plies_from_null;
         self.hash = undo.hash;
+    }
+
+    /// Snapshot the copyable position so a child make can restore the parent
+    /// without walking piece mutations (official Akimbo `let mut new = *pos`).
+    #[inline]
+    pub fn snapshot(&self) -> BoardSnapshot {
+        BoardSnapshot {
+            pieces: self.pieces,
+            occupancy: self.occupancy,
+            piece_at: self.piece_at,
+            side_to_move: self.side_to_move,
+            castling_rights: self.castling_rights,
+            chess960: self.chess960,
+            castling_king_file: self.castling_king_file,
+            castling_rook_file: self.castling_rook_file,
+            en_passant: self.en_passant,
+            halfmove_clock: self.halfmove_clock,
+            fullmove_number: self.fullmove_number,
+            hash: self.hash,
+            total_material: self.total_material,
+            plies_from_null: self.plies_from_null,
+            history_len: self.history.len(),
+            hash_history_len: self.hash_history.len(),
+        }
+    }
+
+    /// Restore a [`snapshot`](Self::snapshot), truncating the undo stacks.
+    #[inline]
+    pub fn restore_snapshot(&mut self, snap: BoardSnapshot) {
+        self.pieces = snap.pieces;
+        self.occupancy = snap.occupancy;
+        self.piece_at = snap.piece_at;
+        self.side_to_move = snap.side_to_move;
+        self.castling_rights = snap.castling_rights;
+        self.chess960 = snap.chess960;
+        self.castling_king_file = snap.castling_king_file;
+        self.castling_rook_file = snap.castling_rook_file;
+        self.en_passant = snap.en_passant;
+        self.halfmove_clock = snap.halfmove_clock;
+        self.fullmove_number = snap.fullmove_number;
+        self.hash = snap.hash;
+        self.total_material = snap.total_material;
+        self.plies_from_null = snap.plies_from_null;
+        self.history.truncate(snap.history_len);
+        self.hash_history.truncate(snap.hash_history_len);
     }
 
     // ── FEN ─────────────────────────────────────────────────────────────────
@@ -1494,6 +1560,31 @@ mod tests {
             original_fen,
             "Board not restored after deep sequence"
         );
+    }
+
+    #[test]
+    fn snapshot_restore_matches_unmake_for_startpos_and_specials() {
+        setup();
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp2ppp/8/3ppP2/8/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 3",
+        ];
+        for fen in fens {
+            let mut via_unmake = Board::from_fen(fen).expect("legal fen");
+            let moves: Vec<Move> = via_unmake.generate_legal_moves().iter().copied().collect();
+            for mv in moves {
+                let mut via_snap = Board::from_fen(fen).expect("legal fen");
+                let snap = via_snap.snapshot();
+                via_snap.make_move(mv);
+                via_snap.restore_snapshot(snap);
+                via_unmake.make_move(mv);
+                via_unmake.unmake_move(mv);
+                assert_eq!(via_snap.hash, via_unmake.hash, "{fen} {mv}");
+                assert_eq!(via_snap.to_fen(), via_unmake.to_fen(), "{fen} {mv}");
+                assert_eq!(via_snap.pieces, via_unmake.pieces, "{fen} {mv}");
+            }
+        }
     }
 
     // ── En passant ──────────────────────────────────────────────────────────
