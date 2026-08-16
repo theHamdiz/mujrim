@@ -59,3 +59,56 @@ pub(crate) fn run<F: SearchFamily>(
 ) -> i32 {
     search_ab_for::<F>(board, state, context, node)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::adapters::install_adapter;
+    use crate::engine::SearchEngine;
+    use types::Board;
+    use types::chess_move::NULL_MOVE;
+
+    #[test]
+    fn dedicated_loops_return_legal_root_moves() {
+        types::init();
+        for adapter in ["viridithas", "akimbo"] {
+            let mut engine = SearchEngine::new(8, 1);
+            assert!(
+                install_adapter(&mut engine, adapter),
+                "{adapter} adapter must install"
+            );
+            let mut board = Board::new();
+            let result = engine.search_nodes(&mut board, 800, 4);
+            assert!(result.nodes > 0, "{adapter} must visit nodes");
+            assert_ne!(result.best_move, NULL_MOVE, "{adapter} must pick a move");
+            let legal = board.generate_legal_moves();
+            assert!(
+                legal.iter().any(|mv| mv.from == result.best_move.from
+                    && mv.to == result.best_move.to
+                    && mv.flag == result.best_move.flag),
+                "{adapter} best move must be legal"
+            );
+        }
+    }
+
+    #[test]
+    fn viridithas_and_akimbo_loops_are_not_the_generic_pvs() {
+        let viri = include_str!("viridithas.rs");
+        let akimbo = include_str!("akimbo.rs");
+        assert!(
+            !viri.contains("search_ab_for<") && !viri.contains("super::run"),
+            "Viridithas must run official alpha_beta, not the generic PVS"
+        );
+        assert!(
+            !akimbo.contains("search_ab_for<") && !akimbo.contains("super::run"),
+            "Akimbo must run official pvs, not the generic PVS"
+        );
+        assert!(
+            viri.contains("dedicated_viridithas"),
+            "Viridithas loop must call the official alpha_beta"
+        );
+        assert!(
+            akimbo.contains("dedicated_akimbo"),
+            "Akimbo loop must call the official pvs"
+        );
+    }
+}

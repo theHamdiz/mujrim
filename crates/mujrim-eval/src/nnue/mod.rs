@@ -36,6 +36,9 @@ pub mod simd;
 ))]
 mod dirty_threats;
 
+#[cfg(feature = "viridithas-nnue")]
+mod bit_rays;
+
 #[cfg(feature = "akimbo-nnue")]
 pub mod akimbo_format;
 

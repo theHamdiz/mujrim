@@ -58,6 +58,7 @@ pub(super) trait ThreatDeltaSink {
 struct ThreatPosition {
     pieces: [u64; 12],
     piece_at: [u8; 64],
+    occupancy: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +74,16 @@ impl ThreatSnapshot {
             position: ThreatPosition::from_board(board),
             color: board.side_to_move.index(),
         }
+    }
+
+    #[inline(always)]
+    pub(super) fn mailbox(self) -> [u8; 64] {
+        self.position.piece_at
+    }
+
+    #[inline(always)]
+    pub(super) const fn color(self) -> usize {
+        self.color
     }
 }
 
@@ -93,6 +104,7 @@ impl ThreatPosition {
         }
         Self {
             pieces,
+            occupancy: board.all_occupancy(),
             piece_at: *board.piece_ids(),
         }
     }
@@ -103,6 +115,7 @@ impl ThreatPosition {
         let color = usize::from(id) & 1;
         self.pieces[color * Piece::COUNT + piece] &= !(1u64 << square);
         self.piece_at[square] = u8::MAX;
+        self.occupancy &= !(1u64 << square);
     }
 
     #[inline(always)]
@@ -111,13 +124,14 @@ impl ThreatPosition {
         let color = usize::from(id) & 1;
         self.pieces[color * Piece::COUNT + piece] |= 1u64 << square;
         self.piece_at[square] = id;
+        self.occupancy |= 1u64 << square;
     }
 }
 
 impl ThreatView for ThreatPosition {
     #[inline(always)]
     fn occupancy(&self) -> u64 {
-        self.pieces.iter().copied().fold(0, |all, bb| all | bb)
+        self.occupancy
     }
 
     #[inline(always)]
@@ -276,7 +290,11 @@ fn push_threats_single(
 ) {
     let piece_index = usize::from(piece) / 2;
     let color = usize::from(piece) & 1;
-    let mut attacked = piece_attacks(piece_index, color, square, occupancy) & occupancy;
+    if piece_index == Piece::King.index() {
+        return;
+    }
+    let kings = position.pieces_of(Piece::King.index());
+    let mut attacked = piece_attacks(piece_index, color, square, occupancy) & occupancy & !kings;
     while attacked != 0 {
         let target = attacked.trailing_zeros() as usize;
         attacked &= attacked - 1;
@@ -311,8 +329,7 @@ fn push_threats_single(
     let white_pawns = position.pieces_for(Color::White.index(), Piece::Pawn.index())
         & pawn_attacks(Color::Black.index(), square);
     let knights = position.pieces_of(Piece::Knight.index()) & knight_attacks(square);
-    let kings = position.pieces_of(Piece::King.index()) & king_attacks(square);
-    let mut attackers = (black_pawns | white_pawns | knights | kings) & occupancy;
+    let mut attackers = (black_pawns | white_pawns | knights) & occupancy;
     while attackers != 0 {
         let source = attackers.trailing_zeros() as usize;
         attackers &= attackers - 1;

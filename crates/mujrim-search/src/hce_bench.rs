@@ -107,6 +107,7 @@ pub fn measure_hce_search_nodes(
             stopped: false,
             use_soft_time: false,
             force_helpers: true,
+            soft_time_limit: None,
         },
     );
     HceNpsReport::from_nodes(result.nodes, start.elapsed(), threads.max(1), false)

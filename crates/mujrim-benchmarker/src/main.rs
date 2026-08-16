@@ -1011,9 +1011,13 @@ fn run_adapter_gauntlet(config: GauntletRunConfig) {
             }
             if let Some(clock) = pair["clock"].as_object() {
                 println!(
-                    "    clock        {:>5.1}%  nps {:.0}%  met={}",
+                    "    clock        {:>5.1}%  nps {:.0}%  flags {}/{} leftover {:.0}/{:.0} ms  met={}",
                     clock["score"].as_f64().unwrap_or(0.0) * 100.0,
                     clock["nps_ratio"].as_f64().unwrap_or(0.0) * 100.0,
+                    clock["adapter_flags"].as_u64().unwrap_or(0),
+                    clock["native_flags"].as_u64().unwrap_or(0),
+                    clock["adapter_leftover_ms"].as_f64().unwrap_or(0.0),
+                    clock["native_leftover_ms"].as_f64().unwrap_or(0.0),
                     clock["met"]
                 );
             }

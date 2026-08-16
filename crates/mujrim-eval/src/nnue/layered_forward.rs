@@ -4,6 +4,7 @@
 //! path remains the bit-exact reference. NNZ skips all-zero 4-byte activation
 //! blocks the same way Obsidian / Viridithas / Reckless do.
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 const NNZ_BLOCK: usize = 4;
@@ -126,6 +127,10 @@ pub(crate) fn affine_sparse(input: &[u8], weights: &[i8], output: &mut [i32]) {
     (kernels().blocked)(input, &nnz[..count], &packed, output);
 }
 
+thread_local! {
+    static NNZ_SCRATCH: RefCell<[u16; MAX_NNZ_BLOCKS]> = const { RefCell::new([0; MAX_NNZ_BLOCKS]) };
+}
+
 /// Sparse L1 over weights already packed as `[block][output][4]`.
 #[inline]
 pub(crate) fn affine_sparse_packed(input: &[u8], weights: &[i8], output: &mut [i32]) {
@@ -133,12 +138,14 @@ pub(crate) fn affine_sparse_packed(input: &[u8], weights: &[i8], output: &mut [i
     debug_assert_eq!(input.len() % NNZ_BLOCK, 0);
     let blocks = input.len() / NNZ_BLOCK;
     debug_assert!(blocks <= MAX_NNZ_BLOCKS);
-    let mut nnz = [0u16; MAX_NNZ_BLOCKS];
-    let count = find_nnz(input, &mut nnz[..blocks]);
-    if count == 0 {
-        return;
-    }
-    (kernels().blocked)(input, &nnz[..count], weights, output);
+    NNZ_SCRATCH.with(|scratch| {
+        let mut nnz = scratch.borrow_mut();
+        let count = find_nnz(input, &mut nnz[..blocks]);
+        if count == 0 {
+            return;
+        }
+        (kernels().blocked)(input, &nnz[..count], weights, output);
+    });
 }
 
 #[inline]

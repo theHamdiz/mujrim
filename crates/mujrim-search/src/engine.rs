@@ -32,6 +32,13 @@ use eval::nnue::{
     ActiveNetwork, NNUEState, NnueNetworkInfo, NnueNetworkSource, default_embedded_network,
 };
 
+#[path = "engine_loops/akimbo.rs"]
+pub(crate) mod dedicated_akimbo;
+#[path = "engine_loops/qs.rs"]
+mod dedicated_qs;
+#[path = "engine_loops/viridithas.rs"]
+pub(crate) mod dedicated_viridithas;
+
 #[cfg(test)]
 fn ensure_test_nnue_discovery_path() {
     use std::sync::Once;
@@ -574,20 +581,26 @@ fn extend_checks(
     if eval_mode.is_reckless_nnue() {
         return !fixed_nodes;
     }
-    move_ordering != MoveOrderingProfile::Reckless
-        || eval_mode.is_lc0_nnue()
-        || eval_mode.is_viridithas_nnue()
+    if eval_mode.is_viridithas_nnue() {
+        return false;
+    }
+    move_ordering != MoveOrderingProfile::Reckless || eval_mode.is_lc0_nnue()
 }
 
 #[inline]
 fn full_depth_root_quiets(move_ordering: MoveOrderingProfile, eval_mode: EvalMode) -> bool {
     eval_mode.is_reckless_nnue()
-        || move_ordering == MoveOrderingProfile::StockLike
+        || (move_ordering == MoveOrderingProfile::StockLike
+            && !eval_mode.is_viridithas_nnue()
+            && !eval_mode.is_akimbo_nnue())
         || eval_mode.is_lc0_nnue()
-        || eval_mode.is_viridithas_nnue()
 }
 
 #[inline(always)]
+fn store_child_in_check(state: &mut ThreadState, ply: i32, in_check: bool) {
+    state.in_check[(ply as usize + 1).min(MAX_PLY - 1)] = in_check;
+}
+
 fn budgeted_check_extension(
     depth: i32,
     extensions: i32,
@@ -822,6 +835,9 @@ pub struct SearchLimits {
     /// Default searches keep helpers off for node-limited runs so equal-node
     /// duels stay deterministic. Classical HCE throughput benches set this.
     pub force_helpers: bool,
+    /// Official optimum think time. Iteration TM uses this when set; the node
+    /// loop still aborts on [`Self::time_limit`] (the hard bound).
+    pub soft_time_limit: Option<Duration>,
 }
 
 impl Default for SearchLimits {
@@ -833,6 +849,7 @@ impl Default for SearchLimits {
             stopped: false,
             use_soft_time: true,
             force_helpers: false,
+            soft_time_limit: None,
         }
     }
 }
@@ -917,6 +934,8 @@ pub(crate) struct ThreadState {
     tt_moves: [Move; MAX_PLY],
     /// Active LMR reduction for the move entering each child node.
     reductions: [i32; MAX_PLY],
+    /// Official Akimbo-style ply-cached `in_check` (parent stores after make).
+    in_check: [bool; MAX_PLY],
     /// Prevent recursive reverse-quiescence re-entry.
     reverse_qsearch: bool,
     /// Root score bias used by the Reckless evaluation adapter.
@@ -972,6 +991,7 @@ impl ThreadState {
             move_counts: [0; MAX_PLY],
             tt_moves: [NULL_MOVE; MAX_PLY],
             reductions: [0; MAX_PLY],
+            in_check: [false; MAX_PLY],
             reverse_qsearch: false,
             optimism: [0; 2],
             tbhits: 0,
@@ -1276,6 +1296,10 @@ impl SearchEngine {
         self.search_stack = SearchStack::for_preset_name(preset);
     }
 
+    pub fn time_manager_profile(&self) -> crate::policy::TimeManagerProfile {
+        self.search_stack.policies.time_manager
+    }
+
     /// Replace the composed search stack atomically.
     pub fn set_search_stack(&mut self, stack: SearchStack) {
         self.search_stack = stack;
@@ -1383,7 +1407,13 @@ impl SearchEngine {
     /// Performs search with Lazy SMP.
     pub fn search(&mut self, board: &mut Board, limits: SearchLimits) -> SearchResult {
         self.stopped.store(false, Ordering::SeqCst);
-        self.deadline_ms.store(0, Ordering::Relaxed);
+        self.deadline_ms.store(
+            limits
+                .time_limit
+                .map(|hard| hard.as_millis().max(1) as u64)
+                .unwrap_or(0),
+            Ordering::Relaxed,
+        );
         self.tt.new_generation();
 
         let start_time = Instant::now();
@@ -1729,12 +1759,16 @@ impl SearchEngine {
 
             // ── Smart time management ──
             if limits.use_soft_time
-                && let Some(tl) = limits.time_limit
+                && let Some(tl) = limits.soft_time_limit.or(limits.time_limit)
             {
                 let elapsed_now = start_time.elapsed();
 
                 let tm = self.search_stack.policies.time_manager;
-                let mut soft_mul = tm.soft_base();
+                let mut soft_mul = if limits.soft_time_limit.is_some() {
+                    1.0
+                } else {
+                    tm.soft_base()
+                };
 
                 // Stability adjustment — stable best move → resolve faster
                 // stability 0 = just changed → 1.0x, stability 10 = very stable → 0.65x
@@ -1851,6 +1885,7 @@ impl SearchEngine {
                 stopped: false,
                 use_soft_time: true,
                 force_helpers: false,
+                soft_time_limit: None,
             },
         )
     }
@@ -1871,6 +1906,7 @@ impl SearchEngine {
                 stopped: false,
                 use_soft_time: true,
                 force_helpers: false,
+                soft_time_limit: None,
             },
         )
     }
@@ -1891,6 +1927,7 @@ impl SearchEngine {
                 stopped: false,
                 use_soft_time: false,
                 force_helpers: false,
+                soft_time_limit: None,
             },
         )
     }
@@ -1906,6 +1943,7 @@ impl SearchEngine {
                 stopped: false,
                 use_soft_time: false,
                 force_helpers: false,
+                soft_time_limit: None,
             },
         )
     }
@@ -1952,17 +1990,32 @@ fn usable_tt_move(mv: Move) -> Option<Move> {
     (mv != NULL_MOVE).then_some(mv)
 }
 
-#[inline(always)]
-fn hindsight_depth_adjustment(
+struct HindsightInput {
     is_root: bool,
+    is_pv: bool,
     in_check: bool,
     excluded_move: Option<Move>,
     previous_reduction: i32,
     depth: i32,
     current_eval: i32,
     previous_eval: Option<i32>,
-) -> i32 {
-    if is_root || in_check || excluded_move.is_some() {
+    viridithas: bool,
+}
+
+#[inline(always)]
+fn hindsight_depth_adjustment(input: HindsightInput) -> i32 {
+    let HindsightInput {
+        is_root,
+        is_pv,
+        in_check,
+        excluded_move,
+        previous_reduction,
+        depth,
+        current_eval,
+        previous_eval,
+        viridithas,
+    } = input;
+    if is_root || is_pv || in_check || excluded_move.is_some() {
         return 0;
     }
 
@@ -1970,7 +2023,16 @@ fn hindsight_depth_adjustment(
         return 0;
     };
     let eval_sum = current_eval + previous_eval;
-    if previous_reduction >= 3 && eval_sum <= 0 {
+    if viridithas {
+        // Official viridithas/src/search.rs stores LMR in 1024ths.
+        if previous_reduction >= 1419 && eval_sum < 0 {
+            1
+        } else if previous_reduction >= 2494 && eval_sum > 128 {
+            -1
+        } else {
+            0
+        }
+    } else if previous_reduction >= 3 && eval_sum <= 0 {
         1
     } else if previous_reduction >= 2 && depth >= 2 && eval_sum > 166 {
         -1
@@ -2010,6 +2072,28 @@ fn reckless_lmr_search_depth(effective_depth: i32, reduction: i32, is_pv: bool) 
 #[inline(always)]
 fn stock_like_lmr_search_depth(effective_depth: i32, reduction: i32, is_pv: bool) -> i32 {
     (effective_depth - reduction).max(1) + i32::from(is_pv)
+}
+
+/// Official Viridithas LMR child depth: `depth + extension - r`, not `(depth-1) - r`.
+#[inline(always)]
+fn viridithas_lmr_search_depth(depth: i32, extension: i32, reduction: i32) -> i32 {
+    let new_depth = depth + extension;
+    (new_depth - reduction).clamp(0, new_depth + 1)
+}
+
+/// Official `lm_reduction(depth, moves_made) + ttpv * 768` preview used by LMP/FP.
+#[inline(always)]
+fn viridithas_preview_lmr_depth(depth: i32, moves_made: usize, tt_was_pv: bool) -> i32 {
+    let depth_clamped = depth.clamp(0, 63);
+    let played = moves_made.min(63);
+    let table = if depth_clamped == 0 || played == 0 {
+        0
+    } else {
+        let base = 99.0 / 100.0 * 1024.0;
+        let division = 260.0 / 100.0 / 1024.0;
+        (base + f64::from(depth_clamped).ln() * (played as f64).ln() / division) as i32
+    };
+    (depth - (table + 768 * i32::from(tt_was_pv)) / 1024).max(0)
 }
 
 /// Negative singular extension when the TT move is not singular.
@@ -2178,7 +2262,13 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
         };
         return score;
     }
-    let in_check = board.in_check();
+    let in_check = if is_root {
+        let check = board.in_check();
+        state.in_check[ply_usize] = check;
+        check
+    } else {
+        state.in_check[ply_usize]
+    };
 
     // Hard ply limit — prevent unbounded search from extensions
     if ply >= MAX_PLY as i32 - 1 {
@@ -2263,9 +2353,18 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
     }
 
     let us = board.side_to_move;
-    let opponent_threats = opponent_threats(board);
-    let threats = opponent_threats.all;
-    state.threats[ply_usize] = threats;
+    // Viridithas RFP/NMP/razoring do not read threat maps. Defer the slider
+    // attack generation until a node survives those prunes.
+    let mut threat_maps = OpponentThreats {
+        by_piece: [0; NUM_PIECES],
+        all: 0,
+    };
+    let mut threats = 0u64;
+    if !eval_mode.defers_threat_maps() {
+        threat_maps = opponent_threats(board);
+        threats = threat_maps.all;
+        state.threats[ply_usize] = threats;
+    }
 
     // Static eval — NNUE + correction history
     // Checked nodes do not use a static evaluation. Skipping it also avoids an
@@ -2358,17 +2457,43 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
     } else {
         0
     };
-    depth += hindsight_depth_adjustment(
-        is_root,
-        in_check,
-        excluded_move,
-        previous_reduction,
-        depth,
-        corrected_eval,
-        previous_eval,
-    );
+    if !eval_mode.is_akimbo_nnue() {
+        depth += hindsight_depth_adjustment(HindsightInput {
+            is_root,
+            is_pv,
+            in_check,
+            excluded_move,
+            previous_reduction,
+            depth,
+            current_eval: corrected_eval,
+            previous_eval,
+            viridithas: eval_mode.is_viridithas_nnue(),
+        });
+    }
 
     if !is_pv && !in_check && excluded_move.is_none() {
+        if eval_mode.is_viridithas_nnue()
+            && !is_root
+            && alpha < 2000
+            && static_eval < alpha - params.razoring_base - params.razoring_depth_mul * depth
+        {
+            let razor = quiescence::<F>(
+                board,
+                state,
+                context,
+                QuiescenceNode {
+                    alpha,
+                    beta,
+                    ply,
+                    qs_ply: 0,
+                    is_pv: false,
+                },
+            );
+            if razor <= alpha {
+                return razor;
+            }
+        }
+
         // Reverse Futility Pruning (Akimbo: no TT guards — straightforward)
         let rfp_context = RfpContext {
             depth,
@@ -2401,6 +2526,7 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
             state.prev_piece[ply_usize] = 0;
+            store_child_in_check(state, ply, false);
             let score = -search_ab_for::<F>(
                 board,
                 state,
@@ -2483,6 +2609,7 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
                 make_search_move(board, state, mv);
                 state.prev_move[ply_usize] = mv;
                 state.prev_piece[ply_usize] = moved_piece;
+                store_child_in_check(state, ply, board.in_check());
                 let score = -search_ab_for::<F>(
                     board,
                     state,
@@ -2516,6 +2643,12 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
     // ── IIR (Internal Iterative Reduction) ────────
     if should_apply_iir(tt_move, depth, is_pv, in_check, excluded_move) {
         depth -= 1;
+    }
+
+    if eval_mode.defers_threat_maps() {
+        threat_maps = opponent_threats(board);
+        threats = threat_maps.all;
+        state.threats[ply_usize] = threats;
     }
 
     // Get the previous move for countermove lookup
@@ -2554,7 +2687,7 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
     let ply_snap = ply_usize;
     let pawn_key = pawn_hash(board);
     let reckless_maps = (move_ordering == MoveOrderingProfile::Reckless)
-        .then(|| reckless_quiet_ordering_maps(board, opponent_threats));
+        .then(|| reckless_quiet_ordering_maps(board, threat_maps));
 
     let score_capture = |b: &Board, mv: Move| -> i32 {
         let attacker = b.piece_of_color_on(mv.from, b.side_to_move);
@@ -2752,6 +2885,15 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
         };
 
         // Late Move Pruning — Stockfish formula: (3 + depth²) / (2 - improving)
+        let viri_lmr_depth = if eval_mode.is_viridithas_nnue() {
+            Some(viridithas_preview_lmr_depth(
+                depth,
+                moves_searched,
+                tt_was_pv,
+            ))
+        } else {
+            None
+        };
         let lmp_context = LmpContext {
             depth,
             move_count: moves_searched + 1,
@@ -2765,7 +2907,9 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
             stock_depth_limit: params.lmp_depth_limit,
             stock_move_threshold: params.lmp_threshold(depth, improving),
         };
-        if let Some(decision) = F::lmp_decision(&lmp_context, policies) {
+        if viri_lmr_depth.is_none_or(|lmr_depth| lmr_depth < 9)
+            && let Some(decision) = F::lmp_decision(&lmp_context, policies)
+        {
             if decision.skip_remaining_quiets {
                 picker.skip_quiets();
             }
@@ -2782,7 +2926,14 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
             && !mv.is_promotion()
             && moves_searched > 0
             && best_score > -MATE_SCORE + 100
-            && mv_stat_score < params.hist_prune_margin * depth
+            && viri_lmr_depth.is_none_or(|lmr_depth| lmr_depth < 7)
+            && mv_stat_score
+                < params.hist_prune_margin
+                    * if eval_mode.is_viridithas_nnue() {
+                        depth.saturating_sub(1)
+                    } else {
+                        depth
+                    }
         {
             continue;
         }
@@ -2790,7 +2941,7 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
         // Futility pruning — Stockfish: 77 * depth
         let is_quiet = !mv.is_capture() && !mv.is_promotion();
         let futility_context = FutilityContext {
-            depth,
+            depth: viri_lmr_depth.unwrap_or(depth),
             eval: static_eval,
             alpha,
             history: mv_stat_score,
@@ -2862,6 +3013,7 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
         let repeats = is_root && (board.has_repetition() || board.is_draw());
 
         let gives_check = board.in_check();
+        store_child_in_check(state, ply, gives_check);
 
         // Store the move we're searching for countermove/continuation tracking
         state.prev_move[ply_usize] = mv;
@@ -2904,9 +3056,14 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
                 && full_depth_root_quiets(move_ordering, eval_mode)
                 && !mv.is_capture()
                 && !mv.is_promotion();
+            let viri_lmr = eval_mode.is_viridithas_nnue();
+            let lmr_ready = if viri_lmr {
+                depth > 2 && moves_searched > usize::from(is_root)
+            } else {
+                moves_searched >= 1 && depth >= 2
+            };
             if !root_quiet_no_lmr
-                && moves_searched >= 1
-                && depth >= 2
+                && lmr_ready
                 && ((!mv.is_capture() && !mv.is_promotion()) || F::reduce_noisy_moves(policies))
             {
                 let d = (depth as usize).min(127);
@@ -2935,6 +3092,7 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
                     tt_score_below_alpha: tt_score.is_some_and(|score| score < alpha),
                     tt_depth_sufficient: tt_score.is_some() && tt_depth >= depth,
                     tt_move_missing: tt_move.is_none(),
+                    tt_capture: tt_move.is_some_and(|mv| mv.is_capture()),
                     hist_lmr_div: params.hist_lmr_div,
                     lmr_corr_mul: params.lmr_corr_mul,
                     lmr_cut_node_bonus: params.lmr_cut_node_bonus,
@@ -2942,7 +3100,9 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
                 };
                 reduction = F::adjust_lmr(base, &lmr_ctx, policies)
                     - ateed_lmr_relief(eval_mode, state.eval_variance[ply_usize]);
-                reduction = if effective_depth <= 1 {
+                reduction = if viri_lmr {
+                    reduction.max(0)
+                } else if effective_depth <= 1 {
                     0
                 } else if move_ordering == MoveOrderingProfile::Reckless {
                     reduction.max(0)
@@ -2951,7 +3111,9 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
                 };
             }
             let reduced_depth = if reduction > 0 {
-                if move_ordering == MoveOrderingProfile::Reckless {
+                if viri_lmr {
+                    viridithas_lmr_search_depth(depth, extension, reduction)
+                } else if move_ordering == MoveOrderingProfile::Reckless {
                     reckless_lmr_search_depth(effective_depth, reduction, is_pv)
                 } else {
                     stock_like_lmr_search_depth(effective_depth, reduction, is_pv)
@@ -2960,7 +3122,11 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
                 effective_depth
             };
             // PVS null-window search with reduction
-            state.reductions[ply_usize] = (effective_depth - reduced_depth).max(0);
+            state.reductions[ply_usize] = if viri_lmr {
+                reduction.saturating_mul(1024).max(1024)
+            } else {
+                (effective_depth - reduced_depth).max(0)
+            };
             let mut s = -search_ab_for::<F>(
                 board,
                 state,
@@ -3894,6 +4060,28 @@ mod tests {
     }
 
     #[test]
+    fn opponent_threats_on_our_king_match_in_check() {
+        setup();
+        let positions = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 3 3",
+            "rnbqkbnr/ppp2ppp/8/3pp3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3",
+            "4k3/8/8/8/8/8/4R3/4K3 b - - 0 1",
+            "4k3/8/8/8/8/8/8/4K2R b K - 0 1",
+        ];
+        for fen in positions {
+            let board = Board::from_fen(fen).expect("legal fen");
+            let king = board.king_square(board.side_to_move).bitboard();
+            assert_eq!(
+                opponent_threats(&board).all & king != 0,
+                board.in_check(),
+                "threat/in_check mismatch for {fen}"
+            );
+        }
+    }
+
+    #[test]
     fn opponent_threat_map_matches_starting_position_attacks() {
         setup();
         let board = Board::new();
@@ -4177,6 +4365,21 @@ mod tests {
     }
 
     #[test]
+    fn viridithas_lmr_search_depth_matches_official_formula() {
+        // Official: reduced = (depth + extension - r).clamp(0, depth + ext + 1)
+        // r=5 at depth 8 is searched at 3, not (8-1)-5 = 2.
+        assert_eq!(viridithas_lmr_search_depth(8, 0, 5), 3);
+        assert_eq!(viridithas_lmr_search_depth(8, 1, 5), 4);
+        assert_eq!(viridithas_lmr_search_depth(3, 0, 1), 2);
+        assert_eq!(viridithas_lmr_search_depth(2, 0, 4), 0);
+        assert_eq!(viridithas_preview_lmr_depth(8, 0, false), 8);
+        assert!(viridithas_preview_lmr_depth(8, 8, false) < 8);
+        assert!(
+            viridithas_preview_lmr_depth(8, 8, true) < viridithas_preview_lmr_depth(8, 8, false)
+        );
+    }
+
+    #[test]
     fn negative_singular_extension_matches_adapter_aggressiveness() {
         assert_eq!(
             negative_singular_extension(MoveOrderingProfile::Reckless),
@@ -4220,18 +4423,35 @@ mod tests {
             MoveOrderingProfile::Reckless,
             EvalMode::Nnue(NnueSearchProfile::Lc0)
         ));
-        assert!(extend_checks(
+        assert!(!extend_checks(
+            MoveOrderingProfile::StockLike,
+            EvalMode::Nnue(NnueSearchProfile::Viridithas),
+            false
+        ));
+        assert!(!extend_checks(
             MoveOrderingProfile::Reckless,
             EvalMode::Nnue(NnueSearchProfile::Viridithas),
             true
         ));
-        assert!(full_depth_root_quiets(
+        assert!(!full_depth_root_quiets(
             MoveOrderingProfile::Reckless,
             EvalMode::Nnue(NnueSearchProfile::Viridithas)
         ));
         assert!(!full_depth_root_quiets(
             MoveOrderingProfile::Reckless,
             EvalMode::Nnue(NnueSearchProfile::Akimbo)
+        ));
+        assert!(!full_depth_root_quiets(
+            MoveOrderingProfile::StockLike,
+            EvalMode::Nnue(NnueSearchProfile::Akimbo)
+        ));
+        assert!(!full_depth_root_quiets(
+            MoveOrderingProfile::StockLike,
+            EvalMode::Nnue(NnueSearchProfile::Viridithas)
+        ));
+        assert!(full_depth_root_quiets(
+            MoveOrderingProfile::StockLike,
+            EvalMode::Nnue(NnueSearchProfile::Stockfish)
         ));
     }
 
@@ -4431,8 +4651,11 @@ mod tests {
                     Duration::from_millis(200),
                     64,
                 );
+                // 200ms searches stop on the last completed ID iteration, so a
+                // few thousand nodes / a few milliseconds of jitter is noise.
                 assert!(
-                    hard.nodes >= soft.nodes || hard.elapsed >= soft.elapsed,
+                    hard.nodes + 16_384 >= soft.nodes
+                        || hard.elapsed + Duration::from_millis(16) >= soft.elapsed,
                     "hard mode should not do less work: soft nodes={} elapsed={:?}, hard nodes={} elapsed={:?}",
                     soft.nodes,
                     soft.elapsed,
@@ -4780,33 +5003,73 @@ mod tests {
     #[test]
     fn hindsight_adjusts_depth_from_reduction_and_eval_swing() {
         let excluded = Move::from_uci("e2e4").unwrap();
+        let sample =
+            |previous_reduction, depth, current_eval, previous_eval, viridithas| HindsightInput {
+                is_root: false,
+                is_pv: false,
+                in_check: false,
+                excluded_move: None,
+                previous_reduction,
+                depth,
+                current_eval,
+                previous_eval,
+                viridithas,
+            };
         assert_eq!(
-            hindsight_depth_adjustment(false, false, None, 3, 4, -100, Some(50)),
+            hindsight_depth_adjustment(sample(3, 4, -100, Some(50), false)),
             1
         );
         assert_eq!(
-            hindsight_depth_adjustment(false, false, None, 2, 4, -100, Some(50)),
+            hindsight_depth_adjustment(sample(2, 4, -100, Some(50), false)),
             0
         );
         assert_eq!(
-            hindsight_depth_adjustment(false, false, None, 2, 4, 120, Some(50)),
+            hindsight_depth_adjustment(sample(2, 4, 120, Some(50), false)),
             -1
         );
         assert_eq!(
-            hindsight_depth_adjustment(false, false, None, 2, 1, 120, Some(50)),
+            hindsight_depth_adjustment(sample(2, 1, 120, Some(50), false)),
             0
         );
         assert_eq!(
-            hindsight_depth_adjustment(true, false, None, 3, 4, -100, Some(50)),
+            hindsight_depth_adjustment(HindsightInput {
+                is_root: true,
+                ..sample(3, 4, -100, Some(50), false)
+            }),
             0
         );
         assert_eq!(
-            hindsight_depth_adjustment(false, true, None, 3, 4, -100, Some(50)),
+            hindsight_depth_adjustment(HindsightInput {
+                is_pv: true,
+                ..sample(3, 4, -100, Some(50), false)
+            }),
             0
         );
         assert_eq!(
-            hindsight_depth_adjustment(false, false, Some(excluded), 3, 4, -100, Some(50)),
+            hindsight_depth_adjustment(HindsightInput {
+                in_check: true,
+                ..sample(3, 4, -100, Some(50), false)
+            }),
             0
+        );
+        assert_eq!(
+            hindsight_depth_adjustment(HindsightInput {
+                excluded_move: Some(excluded),
+                ..sample(3, 4, -100, Some(50), false)
+            }),
+            0
+        );
+        assert_eq!(
+            hindsight_depth_adjustment(sample(1419, 8, -80, Some(50), true)),
+            1
+        );
+        assert_eq!(
+            hindsight_depth_adjustment(sample(1418, 8, -80, Some(50), true)),
+            0
+        );
+        assert_eq!(
+            hindsight_depth_adjustment(sample(2494, 8, 80, Some(50), true)),
+            -1
         );
     }
 

@@ -516,6 +516,28 @@ impl RecklessAccumulatorState {
     }
 
     pub(crate) fn evaluate_search(&mut self, board: &Board, network: &RecklessNetwork) -> i32 {
+        let index = self.stack_index;
+        if self.piece_stack[index].accurate[0]
+            && self.piece_stack[index].accurate[1]
+            && self.piece_stack[index].hash == board.hash
+            && self.threat_stack[index].accurate[0]
+            && self.threat_stack[index].accurate[1]
+            && self.threat_stack[index].hash == board.hash
+        {
+            return forward(
+                network,
+                [
+                    &self.piece_stack[index].values[0],
+                    &self.piece_stack[index].values[1],
+                ],
+                [
+                    &self.threat_stack[index].values[0],
+                    &self.threat_stack[index].values[1],
+                ],
+                board.side_to_move.index(),
+                board.all_occupancy().count_ones() as usize,
+            );
+        }
         self.evaluate(board, network)
     }
 
@@ -1369,6 +1391,11 @@ mod tests {
             let incremental = warm.evaluate(&board, embedded());
             let fresh = RecklessAccumulatorState::new().evaluate(&board, embedded());
             assert_eq!(incremental, fresh, "cache mismatch after {uci}");
+            assert_eq!(
+                warm.evaluate_search(&board, embedded()),
+                incremental,
+                "search skip mismatch after {uci}"
+            );
         }
     }
 

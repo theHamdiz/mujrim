@@ -1102,7 +1102,9 @@ mod tests {
         board: &Board,
     ) {
         let expected = scratch_piece_accumulators(net, board);
-        assert_eq!(state.evaluate(board, net), net.evaluate(board));
+        let incremental = state.evaluate(board, net);
+        assert_eq!(incremental, net.evaluate(board));
+        assert_eq!(state.evaluate_search(board, net), incremental);
         assert_eq!(state.frames[state.index].values, expected);
     }
 

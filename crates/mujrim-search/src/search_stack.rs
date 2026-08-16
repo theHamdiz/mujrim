@@ -45,6 +45,14 @@ impl EvalMode {
         matches!(self, Self::Nnue(NnueSearchProfile::Viridithas))
     }
 
+    pub const fn is_akimbo_nnue(self) -> bool {
+        matches!(self, Self::Nnue(NnueSearchProfile::Akimbo))
+    }
+
+    pub const fn defers_threat_maps(self) -> bool {
+        self.is_viridithas_nnue() || self.is_akimbo_nnue()
+    }
+
     pub const fn is_ateed_nnue(self) -> bool {
         matches!(self, Self::Nnue(NnueSearchProfile::Ateed))
     }
@@ -652,6 +660,8 @@ mod tests {
         assert!(matches!(stack.policies.lmp, LmpDispatch::Akimbo));
         assert!(matches!(stack.policies.rfp, RfpDispatch::Akimbo));
         assert!(!stack.policies.lmr.reduce_noisy_moves());
+        assert!(stack.eval_mode().is_akimbo_nnue());
+        assert!(stack.eval_mode().defers_threat_maps());
     }
 
     #[test]

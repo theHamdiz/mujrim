@@ -16,7 +16,8 @@ use eval::nnue::{
 use search::book::OpeningBook;
 use search::engine::{SearchLimits, SearchResult};
 use search::{
-    DEFAULT_PROBE_DEPTH, DEFAULT_PROBE_LIMIT, SearchEngine, SearchExperiment, install_adapter,
+    ClockBudget, DEFAULT_PROBE_DEPTH, DEFAULT_PROBE_LIMIT, SearchEngine, SearchExperiment,
+    TimeManagerProfile, install_adapter,
 };
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -89,6 +90,7 @@ struct RootCandidateSearch<'a> {
     aesthetic: AestheticConfig,
     depth: i32,
     time_limit: Option<Duration>,
+    soft_time_limit: Option<Duration>,
     node_limit: Option<u64>,
     cancel_token: &'a AtomicBool,
 }
@@ -98,9 +100,20 @@ struct RankedPvSearch<'a> {
     aesthetic: AestheticConfig,
     depth: i32,
     time_limit: Option<Duration>,
+    soft_time_limit: Option<Duration>,
     node_limit: Option<u64>,
     cancel_token: &'a AtomicBool,
     show_wdl: bool,
+}
+
+struct SearchLaunch {
+    depth: i32,
+    time_limit: Option<Duration>,
+    soft_time_limit: Option<Duration>,
+    node_limit: Option<u64>,
+    restricted_moves: Vec<Move>,
+    emit_bestmove: bool,
+    ponder_alloc: Option<Duration>,
 }
 
 struct RunningSearch {
@@ -547,6 +560,7 @@ impl UciHandler {
         board: &mut Board,
         depth: i32,
         time_limit: Option<Duration>,
+        soft_time_limit: Option<Duration>,
         node_limit: Option<u64>,
         cancel_token: &AtomicBool,
     ) -> SearchResult {
@@ -575,6 +589,7 @@ impl UciHandler {
                 stopped: false,
                 use_soft_time: time_limit.is_some() && node_limit.is_none(),
                 force_helpers: false,
+                soft_time_limit,
             },
         )
     }
@@ -591,10 +606,13 @@ impl UciHandler {
             return None;
         }
 
-        let per_move_time = request.time_limit.map(|t| {
-            t.div_f64(request.candidates.len() as f64)
+        let split = |limit: Duration| {
+            limit
+                .div_f64(request.candidates.len() as f64)
                 .max(Duration::from_millis(10))
-        });
+        };
+        let per_move_time = request.time_limit.map(split);
+        let per_move_soft = request.soft_time_limit.map(split);
         let per_move_nodes = request
             .node_limit
             .map(|n| (n / request.candidates.len() as u64).max(1));
@@ -615,6 +633,7 @@ impl UciHandler {
                 board,
                 child_depth,
                 per_move_time,
+                per_move_soft,
                 per_move_nodes,
                 request.cancel_token,
             );
@@ -647,15 +666,16 @@ impl UciHandler {
         selected
     }
 
-    fn start_search_task(
-        &mut self,
-        depth: i32,
-        time_limit: Option<Duration>,
-        node_limit: Option<u64>,
-        restricted_moves: Vec<Move>,
-        emit_bestmove: bool,
-        ponder_alloc: Option<Duration>,
-    ) -> RunningSearch {
+    fn start_search_task(&mut self, launch: SearchLaunch) -> RunningSearch {
+        let SearchLaunch {
+            depth,
+            time_limit,
+            soft_time_limit,
+            node_limit,
+            restricted_moves,
+            emit_bestmove,
+            ponder_alloc,
+        } = launch;
         let fallback_move = self
             .board
             .generate_legal_moves()
@@ -696,6 +716,7 @@ impl UciHandler {
                             aesthetic,
                             depth,
                             time_limit,
+                            soft_time_limit,
                             node_limit,
                             cancel_token: cancel_clone.as_ref(),
                         },
@@ -712,6 +733,7 @@ impl UciHandler {
                         aesthetic,
                         depth,
                         time_limit,
+                        soft_time_limit,
                         node_limit,
                         cancel_token: cancel_clone.as_ref(),
                         show_wdl,
@@ -724,6 +746,7 @@ impl UciHandler {
                     &mut board,
                     depth,
                     time_limit,
+                    soft_time_limit,
                     node_limit,
                     cancel_clone.as_ref(),
                 );
@@ -777,6 +800,7 @@ impl UciHandler {
                 board,
                 request.depth,
                 request.time_limit,
+                request.soft_time_limit,
                 request.node_limit,
                 request.cancel_token,
             );
@@ -1267,8 +1291,11 @@ impl UciHandler {
         let clock_alloc = if go.infinite {
             None
         } else if let Some(mt) = go.movetime {
-            let safe = mt.saturating_sub(self.move_overhead_ms);
-            Some(Duration::from_millis(safe.max(10)))
+            let safe = Duration::from_millis(mt.saturating_sub(self.move_overhead_ms).max(10));
+            Some(ClockBudget {
+                soft: safe,
+                hard: safe,
+            })
         } else {
             self.calculate_time_allocation(
                 go.wtime,
@@ -1278,7 +1305,16 @@ impl UciHandler {
                 go.movestogo,
             )
         };
-        let time_limit = if go.ponder { None } else { clock_alloc };
+        let time_limit = if go.ponder {
+            None
+        } else {
+            clock_alloc.map(|budget| budget.hard)
+        };
+        let soft_time_limit = if go.ponder {
+            None
+        } else {
+            clock_alloc.map(|budget| budget.soft)
+        };
         #[cfg(feature = "book")]
         let mut node_limit = go.nodes;
         #[cfg(not(feature = "book"))]
@@ -1316,19 +1352,22 @@ impl UciHandler {
             uci_println("bestmove 0000");
             return;
         }
-        let task = self.start_search_task(
+        let task = self.start_search_task(SearchLaunch {
             depth,
             time_limit,
+            soft_time_limit,
             node_limit,
             restricted_moves,
-            !go.ponder,
-            go.ponder.then_some(clock_alloc).flatten(),
-        );
+            emit_bestmove: !go.ponder,
+            ponder_alloc: go
+                .ponder
+                .then_some(clock_alloc.map(|budget| budget.hard))
+                .flatten(),
+        });
         *running = Some(task);
     }
 
-    /// Advanced time management: allocates time based on remaining clock,
-    /// increment, movestogo, and position characteristics.
+    /// Official-profile soft/hard think budget for the side to move.
     fn calculate_time_allocation(
         &self,
         wtime: Option<u64>,
@@ -1336,7 +1375,7 @@ impl UciHandler {
         winc: u64,
         binc: u64,
         movestogo: Option<u64>,
-    ) -> Option<Duration> {
+    ) -> Option<ClockBudget> {
         let our_time = match self.board.side_to_move {
             types::Color::White => wtime?,
             types::Color::Black => btime?,
@@ -1345,61 +1384,25 @@ impl UciHandler {
             types::Color::White => winc,
             types::Color::Black => binc,
         };
-
-        // Subtract overhead for safety
-        let safe_time = our_time.saturating_sub(self.move_overhead_ms);
-
-        // Emergency mode: very low time — just move fast
-        if safe_time < 100 {
-            return Some(Duration::from_millis(10));
-        }
-
-        // Estimate moves remaining in the game
-        let moves_left = if let Some(mtg) = movestogo {
-            // Tournament time control: exact moves to go
-            mtg.max(1)
-        } else {
-            // Sudden death: estimate based on game phase
-            self.estimate_moves_remaining()
-        };
-
-        // Base allocation: divide remaining time by estimated moves
-        let base_alloc = safe_time / moves_left;
-
-        // Spend half the increment, not the whole bonus, on this move.
-        let inc_bonus = our_inc / 2;
-
-        // Total allocation
-        let mut alloc = base_alloc + inc_bonus;
-
-        // Never use more than a fraction of remaining time (safety cap).
-        // Sudden death used to spend remaining/3 and flag; cap at remaining/4.
-        let max_fraction = if movestogo.is_some() {
-            safe_time / 2
-        } else {
-            safe_time / 4
-        };
-        alloc = alloc.min(max_fraction);
-
-        // Position complexity scaling: if in check or many pieces, use more time
-        if self.board.in_check() {
-            alloc = (alloc * 5) / 4; // 25% more when in check
-        }
-
-        // Clamp to reasonable bounds
-        alloc = alloc.clamp(20, safe_time.saturating_sub(10));
-
-        Some(Duration::from_millis(alloc))
-    }
-
-    /// Estimates the number of moves remaining in the game based on game phase.
-    /// Uses a smooth function of piece count for better accuracy.
-    fn estimate_moves_remaining(&self) -> u64 {
-        let total_pieces = self.board.total_piece_count() as u64;
-        // Smoother scaling: 20 + piece_count * 0.5
-        // Ranges from ~20 (2 kings) to ~36 (32 pieces)
-        let estimate = 20 + total_pieces / 2;
-        estimate.clamp(15, 40)
+        let profile = self
+            .engine
+            .as_ref()
+            .map(SearchEngine::time_manager_profile)
+            .unwrap_or(TimeManagerProfile::Default);
+        let ply = self
+            .board
+            .fullmove_number
+            .saturating_sub(1)
+            .saturating_mul(2)
+            + u32::from(self.board.side_to_move == types::Color::Black);
+        Some(profile.allocate(
+            our_time,
+            our_inc,
+            movestogo,
+            self.move_overhead_ms,
+            self.board.fullmove_number,
+            ply,
+        ))
     }
 
     /// Runs a perft test and prints results.
@@ -2199,6 +2202,7 @@ mod tests {
                 aesthetic: AestheticConfig::default(),
                 depth: 1,
                 time_limit: None,
+                soft_time_limit: None,
                 node_limit: Some(2_000),
                 cancel_token: &cancel,
             },
@@ -2225,6 +2229,7 @@ mod tests {
                 aesthetic: AestheticConfig::default(),
                 depth: 4,
                 time_limit: None,
+                soft_time_limit: None,
                 node_limit: Some(2_000),
                 cancel_token: &cancel,
             },
@@ -2255,7 +2260,15 @@ mod tests {
         let mut handler = UciHandler::new();
         handler.use_book = false;
         let tt = Arc::as_ptr(&handler.engine.as_ref().unwrap().tt);
-        let mut running = Some(handler.start_search_task(1, None, None, Vec::new(), false, None));
+        let mut running = Some(handler.start_search_task(SearchLaunch {
+            depth: 1,
+            time_limit: None,
+            soft_time_limit: None,
+            node_limit: None,
+            restricted_moves: Vec::new(),
+            emit_bestmove: false,
+            ponder_alloc: None,
+        }));
 
         handler.abort_running_search(&mut running, false);
 
@@ -2312,14 +2325,15 @@ mod tests {
     fn completed_ponder_search_waits_for_ponderhit() {
         let mut handler = UciHandler::new();
         handler.use_book = false;
-        let mut running = Some(handler.start_search_task(
-            1,
-            Some(Duration::from_millis(20)),
-            None,
-            Vec::new(),
-            false,
-            Some(Duration::from_millis(20)),
-        ));
+        let mut running = Some(handler.start_search_task(SearchLaunch {
+            depth: 1,
+            time_limit: Some(Duration::from_millis(20)),
+            soft_time_limit: None,
+            node_limit: None,
+            restricted_moves: Vec::new(),
+            emit_bestmove: false,
+            ponder_alloc: Some(Duration::from_millis(20)),
+        }));
 
         for _ in 0..40 {
             let done = running
@@ -2395,7 +2409,15 @@ mod tests {
     fn test_abort_running_search_with_emit_flag_clears_task() {
         let mut handler = UciHandler::new();
         handler.use_book = false;
-        let mut running = Some(handler.start_search_task(32, None, None, Vec::new(), false, None));
+        let mut running = Some(handler.start_search_task(SearchLaunch {
+            depth: 32,
+            time_limit: None,
+            soft_time_limit: None,
+            node_limit: None,
+            restricted_moves: Vec::new(),
+            emit_bestmove: false,
+            ponder_alloc: None,
+        }));
         handler.abort_running_search(&mut running, true);
         assert!(running.is_none());
     }
@@ -2510,14 +2532,15 @@ mod tests {
     fn ponderhit_arms_deadline_without_stopping() {
         let mut handler = UciHandler::new();
         handler.use_book = false;
-        let mut running = Some(handler.start_search_task(
-            64,
-            None,
-            None,
-            Vec::new(),
-            false,
-            Some(Duration::from_millis(50)),
-        ));
+        let mut running = Some(handler.start_search_task(SearchLaunch {
+            depth: 64,
+            time_limit: None,
+            soft_time_limit: None,
+            node_limit: None,
+            restricted_moves: Vec::new(),
+            emit_bestmove: false,
+            ponder_alloc: Some(Duration::from_millis(50)),
+        }));
         handler.handle_ponderhit(&mut running);
         let task = running.as_ref().unwrap();
         assert!(task.emit_bestmove);
@@ -2540,6 +2563,7 @@ mod tests {
                 aesthetic: AestheticConfig::default(),
                 depth: 3,
                 time_limit: None,
+                soft_time_limit: None,
                 node_limit: Some(4_000),
                 cancel_token: &cancel,
                 show_wdl: false,
@@ -2560,22 +2584,28 @@ mod tests {
     }
 
     #[test]
-    fn clock_allocation_spends_half_increment_and_caps_sudden_death() {
+    fn clock_allocation_uses_engine_profile_soft_and_hard() {
         types::init();
         let handler = UciHandler::new();
+        let profile = handler
+            .engine
+            .as_ref()
+            .expect("engine")
+            .time_manager_profile();
         let sudden = handler
             .calculate_time_allocation(Some(60_000), Some(60_000), 2_000, 2_000, None)
             .expect("sudden-death clock");
-        let safe = 60_000u64.saturating_sub(DEFAULT_MOVE_OVERHEAD_MS);
-        let moves_left = 20 + 32 / 2;
-        let expected = (safe / moves_left + 2_000 / 2).min(safe / 4);
-        assert_eq!(sudden, Duration::from_millis(expected));
+        let expected = profile.allocate(60_000, 2_000, None, DEFAULT_MOVE_OVERHEAD_MS, 1, 0);
+        assert_eq!(sudden, expected);
+        assert!(sudden.soft <= sudden.hard);
+        assert!(sudden.hard < Duration::from_millis(60_000));
 
         let to_go = handler
             .calculate_time_allocation(Some(60_000), Some(60_000), 2_000, 2_000, Some(40))
             .expect("movestogo clock");
-        let expected_mtg = (safe / 40 + 2_000 / 2).min(safe / 2);
-        assert_eq!(to_go, Duration::from_millis(expected_mtg));
-        assert!(to_go < sudden || expected_mtg <= expected);
+        let expected_mtg =
+            profile.allocate(60_000, 2_000, Some(40), DEFAULT_MOVE_OVERHEAD_MS, 1, 0);
+        assert_eq!(to_go, expected_mtg);
+        assert!(to_go.soft <= to_go.hard);
     }
 }

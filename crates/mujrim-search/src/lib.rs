@@ -28,6 +28,7 @@ pub use hce_bench::{
     CI_HCE_NODE_BUDGET, HceNpsReport, RELEASE_HCE_NPS_TARGET, measure_hce_eval_nodes,
     measure_hce_search_nodes, measure_hce_search_nps,
 };
+pub use policy::{ClockBudget, TimeManagerProfile};
 pub use search_params::SearchParams;
 pub use search_stack::{EvalMode, SearchExperiment, SearchStack, SearchStackProfile};
 pub use syzygy::{DEFAULT_PROBE_DEPTH, DEFAULT_PROBE_LIMIT, SyzygyTables};

@@ -535,9 +535,8 @@ impl StockfishNetwork {
 
 const STOCKFISH_STATE_FRAMES: usize = 256;
 const MAX_DIRTY_THREAT_DELTAS: usize = 96;
-const MAX_PIECE_FEATURES: usize = 32;
-const MAX_THREAT_FEATURES: usize = 256;
-const MAX_PAIR_FEATURES: usize = 256;
+const MAX_THREAT_FEATURES: usize = 512;
+const MAX_PAIR_FEATURES: usize = 512;
 const KING_BUCKET_COUNT: usize = 32;
 const FINNY_ENTRIES: usize = 2 * 2 * KING_BUCKET_COUNT;
 
@@ -598,8 +597,6 @@ fn snapshot_occupancy(board: &Board) -> [u64; 12] {
 
 #[derive(Clone)]
 struct FeatureLists {
-    pieces: [u16; MAX_PIECE_FEATURES],
-    piece_count: usize,
     threats: [u16; MAX_THREAT_FEATURES],
     threat_count: usize,
     pairs: [u16; MAX_PAIR_FEATURES],
@@ -609,8 +606,6 @@ struct FeatureLists {
 impl Default for FeatureLists {
     fn default() -> Self {
         Self {
-            pieces: [0; MAX_PIECE_FEATURES],
-            piece_count: 0,
             threats: [0; MAX_THREAT_FEATURES],
             threat_count: 0,
             pairs: [0; MAX_PAIR_FEATURES],
@@ -626,25 +621,6 @@ impl FeatureLists {
             board.king_square(Color::White).index(),
             board.king_square(Color::Black).index(),
         ];
-
-        for piece_color in 0..2 {
-            for piece in Piece::ALL {
-                let mut pieces = board.pieces[piece_color][piece.index()];
-                while pieces != 0 {
-                    let square = pieces.trailing_zeros() as usize;
-                    pieces &= pieces - 1;
-                    for (perspective, list) in lists.iter_mut().enumerate() {
-                        list.push_piece(piece_feature_index(
-                            piece_color,
-                            piece.index(),
-                            square,
-                            king_squares[perspective],
-                            perspective,
-                        ));
-                    }
-                }
-            }
-        }
 
         let occupied = board.all_occupancy();
         let pawn_targets = pieces_of(board, Piece::Knight) | pieces_of(board, Piece::Rook);
@@ -752,20 +728,10 @@ impl FeatureLists {
         }
 
         for list in &mut lists {
-            list.pieces[..list.piece_count].sort_unstable();
             list.threats[..list.threat_count].sort_unstable();
             list.pairs[..list.pair_count].sort_unstable();
         }
         lists
-    }
-
-    fn push_piece(&mut self, feature: usize) {
-        assert!(
-            self.piece_count < MAX_PIECE_FEATURES,
-            "too many piece features"
-        );
-        self.pieces[self.piece_count] = feature as u16;
-        self.piece_count += 1;
     }
 
     fn push_threat(&mut self, feature: usize) {
@@ -1361,6 +1327,123 @@ pub(crate) fn collect_pawn_pair_aux(
     lists
 }
 
+/// Incremental pawn-pawn features for squares that changed occupancy.
+pub(crate) fn collect_moved_pawn_pair_delta(
+    before: [u64; 2],
+    after: [u64; 2],
+    king_square: usize,
+    perspective: usize,
+    adds: &mut [usize],
+    subs: &mut [usize],
+) -> (usize, usize, bool) {
+    let lost = [before[0] & !after[0], before[1] & !after[1]];
+    let gained = [after[0] & !before[0], after[1] & !before[1]];
+    let changed = lost[0].count_ones()
+        + lost[1].count_ones()
+        + gained[0].count_ones()
+        + gained[1].count_ones();
+    if changed == 0 {
+        return (0, 0, false);
+    }
+    if changed > 2
+        || lost[0].count_ones() + lost[1].count_ones() > 1
+        || gained[0].count_ones() + gained[1].count_ones() > 1
+    {
+        let old = collect_pawn_pair_aux(before, king_square, perspective);
+        let new = collect_pawn_pair_aux(after, king_square, perspective);
+        if old.overflowed || new.overflowed {
+            return (0, 0, true);
+        }
+        let mut add_count = 0;
+        let mut sub_count = 0;
+        apply_diff(
+            &old.pairs[..old.pair_count],
+            &new.pairs[..new.pair_count],
+            |feature, sign| {
+                if sign > 0 {
+                    if add_count < adds.len() {
+                        adds[add_count] = feature;
+                        add_count += 1;
+                    }
+                } else if sub_count < subs.len() {
+                    subs[sub_count] = feature;
+                    sub_count += 1;
+                }
+            },
+        );
+        return (
+            add_count,
+            sub_count,
+            add_count == adds.len() || sub_count == subs.len(),
+        );
+    }
+    let mut add_count = 0;
+    let mut sub_count = 0;
+    let mut overflowed = false;
+    for color in 0..2 {
+        let mut remaining = lost[color];
+        while remaining != 0 {
+            let square = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            overflowed |= !push_pairs_touching(
+                before,
+                color,
+                square,
+                king_square,
+                perspective,
+                subs,
+                &mut sub_count,
+            );
+        }
+        remaining = gained[color];
+        while remaining != 0 {
+            let square = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            overflowed |= !push_pairs_touching(
+                after,
+                color,
+                square,
+                king_square,
+                perspective,
+                adds,
+                &mut add_count,
+            );
+        }
+    }
+    (add_count, sub_count, overflowed)
+}
+
+fn push_pairs_touching(
+    pawns: [u64; 2],
+    color: usize,
+    square: usize,
+    king_square: usize,
+    perspective: usize,
+    out: &mut [usize],
+    count: &mut usize,
+) -> bool {
+    for (other_color, &other_pawns) in pawns.iter().enumerate() {
+        let mut partners = other_pawns & pawn_pair_mask(square);
+        while partners != 0 {
+            let partner = partners.trailing_zeros() as usize;
+            partners &= partners - 1;
+            if *count >= out.len() {
+                return false;
+            }
+            out[*count] = pawn_pair_feature_index(
+                color,
+                square,
+                other_color,
+                partner,
+                king_square,
+                perspective,
+            );
+            *count += 1;
+        }
+    }
+    true
+}
+
 fn collect_pawn_pair_features(
     pawns: [u64; 2],
     king_square: usize,
@@ -1745,7 +1828,7 @@ pub(crate) fn threat_feature_index(
     Some(feature)
 }
 
-pub(crate) const MAX_AUX_FEATURES: usize = 256;
+pub(crate) const MAX_AUX_FEATURES: usize = 512;
 
 #[derive(Clone, Copy)]
 pub(crate) struct AuxFeatureLists {
@@ -2140,6 +2223,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn moved_pawn_pair_delta_matches_full_collect_diff() {
+        types::init();
+        let mut board = Board::new();
+        let before = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        board.make_move(mv);
+        let after = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
+        let king = board.king_square(Color::White).index();
+        let old = collect_pawn_pair_aux(before, king, 0);
+        let new = collect_pawn_pair_aux(after, king, 0);
+        let mut expected_adds = Vec::new();
+        let mut expected_subs = Vec::new();
+        apply_diff(
+            &old.pairs[..old.pair_count],
+            &new.pairs[..new.pair_count],
+            |feature, sign| {
+                if sign > 0 {
+                    expected_adds.push(feature);
+                } else {
+                    expected_subs.push(feature);
+                }
+            },
+        );
+        let mut adds = [0usize; 64];
+        let mut subs = [0usize; 64];
+        let (add_count, sub_count, overflowed) =
+            collect_moved_pawn_pair_delta(before, after, king, 0, &mut adds, &mut subs);
+        assert!(!overflowed);
+        let mut got_adds = adds[..add_count].to_vec();
+        let mut got_subs = subs[..sub_count].to_vec();
+        got_adds.sort_unstable();
+        got_subs.sort_unstable();
+        expected_adds.sort_unstable();
+        expected_subs.sort_unstable();
+        assert_eq!(got_adds, expected_adds);
+        assert_eq!(got_subs, expected_subs);
+        assert!(!expected_adds.is_empty() || !expected_subs.is_empty());
+    }
+
+    #[test]
     fn embedded_network_has_the_pinned_current_header() {
         let header = validate_embedded().expect("embedded Stockfish network must be valid");
         assert_eq!(embedded_bytes().len(), FILE_SIZE);
@@ -2239,10 +2373,12 @@ mod tests {
             state.push_move(&board, mv);
             board.make_move(mv);
             last_move = Some(mv);
+            let incremental = state.evaluate(&board, &network);
+            assert_eq!(incremental, network.evaluate(&board), "{uci}");
             assert_eq!(
-                state.evaluate(&board, &network),
-                network.evaluate(&board),
-                "{uci}"
+                state.evaluate_search(&board, &network),
+                incremental,
+                "search skip mismatch after {uci}"
             );
         }
 

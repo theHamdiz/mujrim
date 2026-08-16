@@ -16,13 +16,12 @@ use std::path::Path;
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
 
-use super::dirty_threats::{
-    MAX_DIRTY_THREAT_DELTAS, ThreatDelta, ThreatDeltaSink, ThreatSnapshot,
-    collect_snapshot_move_deltas,
-};
+use super::bit_rays::collect_bit_ray_move_deltas;
+use super::dirty_threats::{MAX_DIRTY_THREAT_DELTAS, ThreatDelta, ThreatDeltaSink, ThreatSnapshot};
 use super::stockfish_format::{
-    AuxFeatureLists, PAIR_FEATURES, THREAT_FEATURES, apply_diff, collect_aux_feature_lists,
-    collect_pawn_pair_aux, visit_pawn_pair_features, visit_threat_delta, visit_threat_features,
+    AuxFeatureLists, PAIR_FEATURES, THREAT_FEATURES, collect_aux_feature_lists,
+    collect_moved_pawn_pair_delta, visit_pawn_pair_features, visit_threat_delta,
+    visit_threat_features,
 };
 
 pub const KING_BUCKETS: usize = 16;
@@ -333,12 +332,15 @@ fn finish_layered(
 fn evaluate_sandhi(net: &SandhiNetwork, board: &Board) -> i32 {
     let mut acc_white = [0i16; SANDHI_L0];
     let mut acc_black = [0i16; SANDHI_L0];
+    let mut aux_white = [0i16; SANDHI_L0];
+    let mut aux_black = [0i16; SANDHI_L0];
     acc_white.copy_from_slice(&net.feature_biases);
     acc_black.copy_from_slice(&net.feature_biases);
-    accumulate_sandhi(net, board, Color::White, &mut acc_white);
-    accumulate_sandhi(net, board, Color::Black, &mut acc_black);
-    const ZERO: [i16; SANDHI_L0] = [0; SANDHI_L0];
-    finish_sandhi(net, board, &acc_white, &acc_black, &ZERO, &ZERO)
+    accumulate_sandhi_pieces(net, board, Color::White, &mut acc_white);
+    accumulate_sandhi_pieces(net, board, Color::Black, &mut acc_black);
+    add_sandhi_aux(net, board, Color::White, &mut aux_white);
+    add_sandhi_aux(net, board, Color::Black, &mut aux_black);
+    finish_sandhi(net, board, &acc_white, &acc_black, &aux_white, &aux_black)
 }
 
 fn finish_sandhi(
@@ -398,7 +400,7 @@ fn finish_sandhi(
     (l3 * LAYERED_SCALE as f32) as i32
 }
 
-fn accumulate_sandhi(
+fn accumulate_sandhi_pieces(
     net: &SandhiNetwork,
     board: &Board,
     perspective: Color,
@@ -418,8 +420,6 @@ fn accumulate_sandhi(
             }
         }
     }
-
-    add_sandhi_aux(net, board, perspective, acc);
 }
 
 fn add_sandhi_aux(
@@ -437,13 +437,68 @@ fn add_sandhi_aux(
     });
 }
 
+/// Official sandhi `l0_aux` is `[pawn-pairs | threats]`; SFNNv12 visitors emit
+/// threat indices first (`0..THREAT_FEATURES`) then pairs (`THREAT_FEATURES..`).
+#[inline]
+fn sandhi_aux_row(feature: usize) -> usize {
+    if feature < THREAT_FEATURES {
+        PAIR_FEATURES + feature
+    } else {
+        feature - THREAT_FEATURES
+    }
+}
+
 fn apply_sandhi_aux_feature(
     acc: &mut [i16; SANDHI_L0],
     net: &SandhiNetwork,
     feature: usize,
     sign: i16,
 ) {
-    super::stockfish_simd::apply_i8_feature_width(acc, &net.aux_weights, feature, sign);
+    super::stockfish_simd::apply_i8_feature_width(
+        acc,
+        &net.aux_weights,
+        sandhi_aux_row(feature),
+        sign,
+    );
+}
+
+const MAX_SANDHI_AUX_DELTA: usize = 192;
+
+struct SandhiAuxDelta {
+    adds: [usize; MAX_SANDHI_AUX_DELTA],
+    subs: [usize; MAX_SANDHI_AUX_DELTA],
+    add_count: usize,
+    sub_count: usize,
+    overflowed: bool,
+}
+
+impl SandhiAuxDelta {
+    fn new() -> Self {
+        Self {
+            adds: [0; MAX_SANDHI_AUX_DELTA],
+            subs: [0; MAX_SANDHI_AUX_DELTA],
+            add_count: 0,
+            sub_count: 0,
+            overflowed: false,
+        }
+    }
+
+    fn push(&mut self, feature: usize, sign: i16) {
+        let row = sandhi_aux_row(feature);
+        if sign > 0 {
+            if self.add_count < MAX_SANDHI_AUX_DELTA {
+                self.adds[self.add_count] = row;
+                self.add_count += 1;
+            } else {
+                self.overflowed = true;
+            }
+        } else if self.sub_count < MAX_SANDHI_AUX_DELTA {
+            self.subs[self.sub_count] = row;
+            self.sub_count += 1;
+        } else {
+            self.overflowed = true;
+        }
+    }
 }
 
 fn apply_sandhi_aux_lists(
@@ -454,12 +509,30 @@ fn apply_sandhi_aux_lists(
     if lists.overflowed {
         return;
     }
+    let mut delta = SandhiAuxDelta::new();
     for &feature in &lists.threats[..lists.threat_count] {
-        apply_sandhi_aux_feature(acc, net, usize::from(feature), 1);
+        delta.push(usize::from(feature), 1);
     }
     for &feature in &lists.pairs[..lists.pair_count] {
-        apply_sandhi_aux_feature(acc, net, usize::from(feature), 1);
+        delta.push(usize::from(feature), 1);
     }
+    if delta.overflowed {
+        for &feature in &lists.threats[..lists.threat_count] {
+            apply_sandhi_aux_feature(acc, net, usize::from(feature), 1);
+        }
+        for &feature in &lists.pairs[..lists.pair_count] {
+            apply_sandhi_aux_feature(acc, net, usize::from(feature), 1);
+        }
+        return;
+    }
+    let zeros = [0i16; SANDHI_L0];
+    super::stockfish_simd::apply_i8_from_width(
+        acc,
+        &zeros,
+        &net.aux_weights,
+        &delta.adds[..delta.add_count],
+        &delta.subs[..delta.sub_count],
+    );
 }
 
 #[inline]
@@ -581,6 +654,79 @@ fn add_i16(acc: &mut [i16], weights: &[i16], base: usize) {
     super::stockfish_simd::apply_i16_feature_width(acc, weights, base / width, 1);
 }
 
+/// Official Viridithas 20 load-time L1 permutation (`REPERMUTE_INDICES`).
+/// Pairwise still joins `i` with `i + 512`; this only reorders neurons for NNZ.
+const SANDHI_REPERMUTE: [usize; SANDHI_L0 / 2] = [
+    225, 481, 452, 1, 356, 313, 294, 249, 460, 508, 391, 258, 132, 335, 398, 93, 148, 120, 403,
+    259, 401, 487, 14, 482, 463, 250, 40, 326, 157, 426, 304, 421, 379, 123, 165, 48, 100, 505, 57,
+    413, 252, 296, 70, 2, 506, 170, 226, 509, 247, 130, 270, 408, 63, 497, 276, 231, 350, 190, 344,
+    31, 425, 166, 441, 183, 13, 108, 211, 142, 376, 301, 388, 135, 79, 38, 204, 20, 194, 215, 193,
+    68, 67, 449, 450, 323, 471, 49, 324, 305, 172, 480, 229, 428, 253, 503, 395, 32, 126, 213, 173,
+    197, 432, 50, 241, 169, 318, 321, 272, 453, 176, 234, 469, 288, 339, 429, 306, 364, 307, 422,
+    287, 440, 94, 88, 159, 248, 227, 483, 504, 222, 410, 377, 39, 415, 124, 95, 171, 127, 7, 235,
+    439, 149, 76, 312, 267, 46, 41, 297, 302, 56, 11, 405, 351, 455, 478, 383, 371, 263, 502, 81,
+    501, 136, 43, 162, 310, 78, 55, 64, 333, 284, 368, 278, 309, 357, 10, 240, 411, 266, 69, 155,
+    443, 101, 53, 77, 112, 28, 22, 510, 320, 496, 311, 334, 277, 489, 146, 44, 138, 394, 300, 233,
+    161, 244, 206, 417, 500, 345, 381, 458, 353, 423, 86, 177, 264, 152, 147, 349, 397, 238, 435,
+    412, 286, 265, 328, 341, 485, 378, 470, 224, 285, 236, 29, 207, 370, 45, 477, 499, 484, 303,
+    178, 150, 337, 85, 299, 246, 139, 327, 228, 382, 71, 340, 26, 143, 60, 105, 331, 92, 348, 218,
+    490, 314, 83, 467, 315, 343, 346, 338, 457, 420, 359, 279, 33, 275, 256, 358, 362, 409, 4, 308,
+    360, 104, 332, 52, 260, 153, 102, 106, 34, 192, 121, 367, 396, 329, 293, 436, 283, 473, 347,
+    91, 254, 476, 220, 117, 399, 75, 216, 316, 274, 365, 109, 18, 373, 472, 393, 58, 384, 355, 474,
+    262, 61, 160, 74, 245, 84, 199, 374, 115, 454, 479, 154, 380, 325, 255, 511, 140, 16, 290, 19,
+    118, 198, 223, 407, 269, 372, 23, 185, 113, 205, 25, 5, 89, 97, 202, 201, 342, 125, 103, 404,
+    134, 354, 208, 462, 209, 402, 289, 8, 491, 3, 141, 145, 448, 433, 167, 431, 184, 456, 51, 438,
+    200, 182, 219, 144, 210, 195, 119, 243, 30, 203, 392, 72, 122, 261, 281, 369, 280, 486, 107,
+    54, 251, 129, 156, 385, 9, 82, 451, 66, 188, 212, 168, 131, 239, 17, 158, 414, 298, 189, 445,
+    42, 99, 221, 128, 47, 446, 434, 295, 110, 137, 282, 98, 361, 464, 390, 461, 465, 175, 271, 15,
+    363, 416, 6, 317, 494, 330, 59, 427, 214, 87, 21, 319, 90, 164, 187, 366, 406, 133, 389, 430,
+    174, 12, 268, 35, 291, 493, 237, 96, 352, 111, 27, 217, 37, 73, 180, 24, 230, 442, 232, 447,
+    488, 191, 151, 186, 0, 116, 273, 418, 387, 468, 322, 495, 475, 375, 424, 444, 459, 62, 507, 65,
+    242, 179, 336, 163, 36, 419, 292, 80, 400, 466, 498, 492, 114, 386, 257, 196, 437, 181,
+];
+
+fn repermute_hidden_i16(weights: &mut [i16], hidden: usize) {
+    debug_assert_eq!(hidden, SANDHI_L0);
+    let half = hidden / 2;
+    let mut scratch = [0i16; SANDHI_L0];
+    for row in weights.chunks_exact_mut(hidden) {
+        for (tgt, src) in SANDHI_REPERMUTE.iter().copied().enumerate() {
+            scratch[tgt] = row[src];
+            scratch[tgt + half] = row[src + half];
+        }
+        row.copy_from_slice(&scratch);
+    }
+}
+
+fn repermute_hidden_i8(weights: &mut [i8], hidden: usize) {
+    debug_assert_eq!(hidden, SANDHI_L0);
+    let half = hidden / 2;
+    let mut scratch = [0i8; SANDHI_L0];
+    for row in weights.chunks_exact_mut(hidden) {
+        for (tgt, src) in SANDHI_REPERMUTE.iter().copied().enumerate() {
+            scratch[tgt] = row[src];
+            scratch[tgt + half] = row[src + half];
+        }
+        row.copy_from_slice(&scratch);
+    }
+}
+
+fn repermute_l1_inputs(weights: &mut [i8], inputs: usize, outputs: usize) {
+    debug_assert_eq!(inputs, SANDHI_L0);
+    let stride = LAYERED_OUTPUT_BUCKETS * outputs;
+    let half = inputs / 2;
+    let mut scratch = vec![0i8; weights.len()];
+    for (tgt, src) in SANDHI_REPERMUTE.iter().copied().enumerate() {
+        let dst = tgt * stride;
+        let src0 = src * stride;
+        scratch[dst..dst + stride].copy_from_slice(&weights[src0..src0 + stride]);
+        let dst = (tgt + half) * stride;
+        let src1 = (src + half) * stride;
+        scratch[dst..dst + stride].copy_from_slice(&weights[src1..src1 + stride]);
+    }
+    weights.copy_from_slice(&scratch);
+}
+
 fn transpose_viri_l1(src: &[i8], inputs: usize, outputs: usize) -> Box<[i8]> {
     let mut dst = vec![0i8; LAYERED_OUTPUT_BUCKETS * outputs * inputs].into_boxed_slice();
     for input in 0..inputs {
@@ -691,14 +837,19 @@ fn parse_layered(bytes: &[u8]) -> Result<LayeredNetwork, String> {
 
 fn parse_sandhi(bytes: &[u8]) -> Result<SandhiNetwork, String> {
     let mut offset = 0;
-    let aux_weights = read_i8s(bytes, &mut offset, SANDHI_AUX * SANDHI_L0)?;
-    let feature_weights = read_i16s(bytes, &mut offset, KING_BUCKETS * LAYERED_INPUT * SANDHI_L0)?;
-    let feature_biases = read_i16s(bytes, &mut offset, SANDHI_L0)?;
-    let l1_src = read_i8s(
+    let mut aux_weights = read_i8s(bytes, &mut offset, SANDHI_AUX * SANDHI_L0)?;
+    repermute_hidden_i8(&mut aux_weights, SANDHI_L0);
+    let mut feature_weights =
+        read_i16s(bytes, &mut offset, KING_BUCKETS * LAYERED_INPUT * SANDHI_L0)?;
+    repermute_hidden_i16(&mut feature_weights, SANDHI_L0);
+    let mut feature_biases = read_i16s(bytes, &mut offset, SANDHI_L0)?;
+    repermute_hidden_i16(&mut feature_biases, SANDHI_L0);
+    let mut l1_src = read_i8s(
         bytes,
         &mut offset,
         SANDHI_L0 * LAYERED_OUTPUT_BUCKETS * SANDHI_L1,
     )?;
+    repermute_l1_inputs(&mut l1_src, SANDHI_L0, SANDHI_L1);
     let l1_weights = super::layered_forward::pack_nnz_buckets(
         &transpose_viri_l1(&l1_src, SANDHI_L0, SANDHI_L1),
         LAYERED_OUTPUT_BUCKETS,
@@ -932,18 +1083,16 @@ impl SimpleAccumulatorState {
     }
 
     fn evaluate(&mut self, board: &Board, net: &SimpleNetwork) -> i32 {
-        debug_assert_eq!(net.hidden, self.hidden);
-        if self.frames[self.index].accurate && self.frames[self.index].pending_null {
-            self.frames[self.index].hash = board.hash;
-            self.frames[self.index].pending_null = false;
-        }
-        if !self.frames[self.index].accurate || self.frames[self.index].hash != board.hash {
-            if self.index != 0 && self.frames[self.index - 1].accurate {
-                self.update_from_parent(board, net);
-            } else {
-                self.refresh(board, net);
-            }
-        }
+        self.ensure(board, net, false);
+        self.finish(board, net)
+    }
+
+    fn evaluate_search(&mut self, board: &Board, net: &SimpleNetwork) -> i32 {
+        self.ensure(board, net, true);
+        self.finish(board, net)
+    }
+
+    fn finish(&self, board: &Board, net: &SimpleNetwork) -> i32 {
         let frame = &self.frames[self.index];
         finish_simple(
             net,
@@ -951,6 +1100,24 @@ impl SimpleAccumulatorState {
             &frame.values[board.side_to_move.opponent().index()][..self.hidden],
             self.hidden,
         )
+    }
+
+    fn ensure(&mut self, board: &Board, net: &SimpleNetwork, trusted: bool) {
+        debug_assert_eq!(net.hidden, self.hidden);
+        if self.frames[self.index].accurate && self.frames[self.index].pending_null {
+            self.frames[self.index].hash = board.hash;
+            self.frames[self.index].pending_null = false;
+        }
+        if self.frames[self.index].accurate
+            && (trusted || self.frames[self.index].hash == board.hash)
+        {
+            return;
+        }
+        if self.index != 0 && self.frames[self.index - 1].accurate {
+            self.update_from_parent(board, net);
+        } else {
+            self.refresh(board, net);
+        }
     }
 
     fn refresh(&mut self, board: &Board, net: &SimpleNetwork) {
@@ -1354,7 +1521,6 @@ impl<const H: usize> WideAccumulatorState<H> {
         let pending_move = self.meta[current].pending_move;
         let pending_mover = self.meta[current].pending_mover;
         let pending_captured = self.meta[current].pending_captured;
-        let parent_values = self.values[current - 1];
         for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
             if needs_refresh[pov] {
                 refresh_wide_perspective(
@@ -1365,11 +1531,18 @@ impl<const H: usize> WideAccumulatorState<H> {
                     kings[pov],
                     side,
                 );
+            }
+        }
+        let (parents, children) = self.values.split_at_mut(current);
+        let parent_values = &parents[current - 1];
+        let child_values = &mut children[0];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            if needs_refresh[pov] {
                 continue;
             }
             if pending_has_move {
                 apply_wide_move_delta_from(
-                    &mut self.values[current][pov],
+                    &mut child_values[pov],
                     &parent_values[pov],
                     weights,
                     kings[pov],
@@ -1379,7 +1552,7 @@ impl<const H: usize> WideAccumulatorState<H> {
                     pending_captured,
                 );
             } else {
-                self.values[current][pov] = parent_values[pov];
+                child_values[pov] = parent_values[pov];
             }
         }
         let meta = &mut self.meta[current];
@@ -1558,14 +1731,16 @@ impl SandhiAuxState {
             wide_needs_refresh(parent_kings[0], kings[0], Color::White),
             wide_needs_refresh(parent_kings[1], kings[1], Color::Black),
         ];
+        let parent_overflowed = [
+            self.frames[current - 1].lists[0].overflowed,
+            self.frames[current - 1].lists[1].overflowed,
+        ];
         {
             let frame = &mut self.frames[current];
             if let (Some(snapshot), Some(mv)) = (frame.pending_threats.take(), frame.pending_move) {
-                collect_snapshot_move_deltas(frame, snapshot, mv);
+                collect_bit_ray_move_deltas(frame, snapshot, mv);
             }
         }
-        let parent_values = self.frames[current - 1].values;
-        let parent_lists = self.frames[current - 1].lists;
         let threat_overflowed = self.frames[current].threat_overflowed;
         let pawns_before = self.frames[current].pawns_before;
         let pawns_after = [
@@ -1574,32 +1749,65 @@ impl SandhiAuxState {
         ];
         let deltas = self.frames[current].threat_deltas;
         let delta_count = self.frames[current].threat_delta_count;
+        let mut apply = [false; 2];
+        let mut pov_deltas = [SandhiAuxDelta::new(), SandhiAuxDelta::new()];
         for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
-            if needs_refresh[pov] || parent_lists[pov].overflowed || threat_overflowed {
+            if needs_refresh[pov] || parent_overflowed[pov] || threat_overflowed {
                 self.refresh_pov(board, net, pov, side);
                 continue;
             }
-            let mut aux = parent_values[pov];
-            for &delta in &deltas[..delta_count] {
-                visit_threat_delta(delta, kings[pov], pov, |feature, sign| {
-                    apply_sandhi_aux_feature(&mut aux, net, feature, sign);
+            let delta = &mut pov_deltas[pov];
+            for &threat in &deltas[..delta_count] {
+                visit_threat_delta(threat, kings[pov], pov, |feature, sign| {
+                    delta.push(feature, sign);
                 });
             }
             if pawns_before != pawns_after {
-                let old = collect_pawn_pair_aux(pawns_before, kings[pov], pov);
-                let new = collect_pawn_pair_aux(pawns_after, kings[pov], pov);
-                if old.overflowed || new.overflowed {
+                let mut pair_adds = [0usize; 64];
+                let mut pair_subs = [0usize; 64];
+                let (add_count, sub_count, overflowed) = collect_moved_pawn_pair_delta(
+                    pawns_before,
+                    pawns_after,
+                    kings[pov],
+                    pov,
+                    &mut pair_adds,
+                    &mut pair_subs,
+                );
+                if overflowed {
                     self.refresh_pov(board, net, pov, side);
                     continue;
                 }
-                apply_diff(
-                    &old.pairs[..old.pair_count],
-                    &new.pairs[..new.pair_count],
-                    |feature, sign| apply_sandhi_aux_feature(&mut aux, net, feature, sign),
-                );
+                for &feature in &pair_adds[..add_count] {
+                    delta.push(feature, 1);
+                }
+                for &feature in &pair_subs[..sub_count] {
+                    delta.push(feature, -1);
+                }
             }
-            self.frames[current].values[pov] = aux;
-            self.frames[current].lists[pov].overflowed = false;
+            if delta.overflowed {
+                self.refresh_pov(board, net, pov, side);
+                continue;
+            }
+            apply[pov] = true;
+        }
+        if apply.iter().any(|&yes| yes) {
+            let (parents, children) = self.frames.split_at_mut(current);
+            let parent = &parents[current - 1];
+            let child = &mut children[0];
+            for (pov, should_apply) in apply.into_iter().enumerate() {
+                if !should_apply {
+                    continue;
+                }
+                let delta = &pov_deltas[pov];
+                super::stockfish_simd::apply_i8_from_width(
+                    &mut child.values[pov],
+                    &parent.values[pov],
+                    &net.aux_weights,
+                    &delta.adds[..delta.add_count],
+                    &delta.subs[..delta.sub_count],
+                );
+                child.lists[pov].overflowed = false;
+            }
         }
         let frame = &mut self.frames[current];
         frame.kings = [kings[0] as u8, kings[1] as u8];
@@ -1819,11 +2027,14 @@ impl ViridithasAccumulatorState {
 
     fn evaluate_inner(&mut self, board: &Board, network: &ViridithasNetwork, trusted: bool) -> i32 {
         match network {
-            ViridithasNetwork::Simple(net) => self
-                .simple
-                .as_mut()
-                .expect("simple Viridithas state")
-                .evaluate(board, net),
+            ViridithasNetwork::Simple(net) => {
+                let state = self.simple.as_mut().expect("simple Viridithas state");
+                if trusted {
+                    state.evaluate_search(board, net)
+                } else {
+                    state.evaluate(board, net)
+                }
+            }
             ViridithasNetwork::Layered(net) => {
                 let state = self.layered.as_mut().expect("layered Viridithas state");
                 state.ensure_pieces(board, &net.feature_weights, &net.feature_biases, trusted);
@@ -2275,7 +2486,14 @@ mod tests {
         net: &ViridithasNetwork,
         board: &Board,
     ) {
-        assert_eq!(state.evaluate(board, net), net.evaluate(board));
+        let scratch = net.evaluate(board);
+        let incremental = state.evaluate(board, net);
+        assert_eq!(incremental, scratch);
+        assert_eq!(state.evaluate_search(board, net), incremental);
+        assert!(
+            incremental.abs() < 20_000,
+            "Viridithas eval left the searchable range: {incremental}"
+        );
         if let ViridithasNetwork::Sandhi(sandhi) = net {
             let aux = state.sandhi_aux.as_ref().expect("sandhi aux state");
             for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
@@ -2437,6 +2655,159 @@ mod tests {
         assert!(
             eval_ns < 1_200.0,
             "sandhi incremental evaluate is {eval_ns:.1} ns/eval (finish {finish_ns:.1} ns)"
+        );
+    }
+
+    #[test]
+    fn sandhi_search_move_stays_under_two_microseconds() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board = Board::new();
+        let _ = state.evaluate(&board, &net);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        let mut checksum = 0i32;
+        for _ in 0..64 {
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            checksum = checksum.wrapping_add(state.evaluate_search(&board, &net));
+            state.pop();
+            board.unmake_move(mv);
+        }
+        let mut elapsed = std::time::Duration::ZERO;
+        for _ in 0..512 {
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            let start = std::time::Instant::now();
+            checksum = checksum.wrapping_add(state.evaluate_search(&board, &net));
+            elapsed += start.elapsed();
+            state.pop();
+            board.unmake_move(mv);
+        }
+        let ns = elapsed.as_nanos() as f64 / 512.0;
+        assert_ne!(checksum, i32::MIN);
+        assert!(
+            ns < 2_000.0,
+            "sandhi push+evaluate_search regressed to {ns:.1} ns"
+        );
+    }
+
+    #[test]
+    #[ignore = "official BitRays+AVX2 threat updates; current path is ~1.2µs"]
+    fn sandhi_search_move_stays_under_half_microsecond() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board = Board::new();
+        let _ = state.evaluate(&board, &net);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        let mut checksum = 0i32;
+        let mut elapsed = std::time::Duration::ZERO;
+        for _ in 0..256 {
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            let start = std::time::Instant::now();
+            checksum = checksum.wrapping_add(state.evaluate_search(&board, &net));
+            elapsed += start.elapsed();
+            state.pop();
+            board.unmake_move(mv);
+        }
+        let ns = elapsed.as_nanos() as f64 / 256.0;
+        assert_ne!(checksum, i32::MIN);
+        assert!(
+            ns < 500.0,
+            "sandhi push+evaluate_search is {ns:.1} ns (official incremental budget is <500 ns)"
+        );
+    }
+
+    #[test]
+    fn sandhi_repermute_is_a_bijection_of_each_half() {
+        let mut seen = [false; SANDHI_L0 / 2];
+        for &index in &SANDHI_REPERMUTE {
+            assert!(
+                index < SANDHI_L0 / 2,
+                "repermute index {index} is out of range"
+            );
+            assert!(!seen[index], "repermute index {index} is duplicated");
+            seen[index] = true;
+        }
+        assert!(seen.iter().all(|hit| *hit));
+    }
+
+    #[test]
+    fn sandhi_aux_row_puts_pawn_pairs_before_threats() {
+        assert_eq!(sandhi_aux_row(0), PAIR_FEATURES);
+        assert_eq!(sandhi_aux_row(THREAT_FEATURES - 1), SANDHI_AUX - 1);
+        assert_eq!(sandhi_aux_row(THREAT_FEATURES), 0);
+        assert_eq!(
+            sandhi_aux_row(THREAT_FEATURES + PAIR_FEATURES - 1),
+            PAIR_FEATURES - 1
+        );
+    }
+
+    fn stm_score_after(net: &ViridithasNetwork, fen: &str, uci: &str) -> i32 {
+        let mut board = Board::from_fen(fen).expect("test FEN is valid");
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == uci)
+            .copied()
+            .unwrap_or_else(|| panic!("{uci} must be legal in {fen}"));
+        board.make_move(mv);
+        -net.evaluate(&board)
+    }
+
+    #[test]
+    fn sandhi_prefers_capturing_the_scandinavian_pawn() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let hanging = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2";
+        let take = stm_score_after(&net, hanging, "e4d5");
+        let fianchetto = stm_score_after(&net, hanging, "b2b3");
+        assert!(
+            take > fianchetto,
+            "sandhi must prefer exd5 over b3 after 1.e4 d5 (exd5 {take}, b3 {fianchetto})"
+        );
+        assert!(
+            take > 0,
+            "capturing the hanging d-pawn must stay positive for White, got {take}"
+        );
+    }
+
+    #[test]
+    fn sandhi_prefers_developing_the_italian_knight() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let italian = "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3";
+        let develop = stm_score_after(&net, italian, "g8f6");
+        let fianchetto = stm_score_after(&net, italian, "b7b6");
+        assert!(
+            develop > fianchetto,
+            "sandhi must prefer Nf6 over b6 in the Italian (Nf6 {develop}, b6 {fianchetto})"
         );
     }
 }

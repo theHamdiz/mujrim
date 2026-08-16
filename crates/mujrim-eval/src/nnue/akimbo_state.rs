@@ -47,15 +47,15 @@ pub(super) fn snapshot_bbs(board: &Board) -> [u64; NUM_BBS] {
 /// Material scaling factor (Akimbo: `eval * (700 + mat/32) / 1024`).
 #[inline(always)]
 pub(super) fn material_scale(board: &Board) -> i32 {
-    let knights = (board.pieces[0][Piece::Knight.index()] | board.pieces[1][Piece::Knight.index()])
-        .count_ones() as i32;
-    let bishops = (board.pieces[0][Piece::Bishop.index()] | board.pieces[1][Piece::Bishop.index()])
-        .count_ones() as i32;
-    let rooks = (board.pieces[0][Piece::Rook.index()] | board.pieces[1][Piece::Rook.index()])
-        .count_ones() as i32;
-    let queens = (board.pieces[0][Piece::Queen.index()] | board.pieces[1][Piece::Queen.index()])
-        .count_ones() as i32;
+    material_scale_from_bbs(&snapshot_bbs(board))
+}
 
+#[inline(always)]
+fn material_scale_from_bbs(bbs: &[u64; NUM_BBS]) -> i32 {
+    let knights = (bbs[1] | bbs[7]).count_ones() as i32;
+    let bishops = (bbs[2] | bbs[8]).count_ones() as i32;
+    let rooks = (bbs[3] | bbs[9]).count_ones() as i32;
+    let queens = (bbs[4] | bbs[10]).count_ones() as i32;
     let mat =
         knights * SEE_VALS[1] + bishops * SEE_VALS[2] + rooks * SEE_VALS[3] + queens * SEE_VALS[4];
     700 + mat / 32
@@ -236,7 +236,9 @@ impl AkimboAccumulatorState {
             Color::Black => (&frame.black, &frame.white),
         };
         let raw = forward_with_network(net, boys, opps);
-        raw * material_scale(board) / 1024
+        let scale = material_scale_from_bbs(&frame.bbs);
+        debug_assert_eq!(scale, material_scale(board));
+        raw * scale / 1024
     }
 
     fn ensure_accurate(&mut self, board: &Board, net: &Network) {
@@ -302,8 +304,6 @@ impl AkimboAccumulatorState {
             board.king_square(Color::White).index() as u8,
             board.king_square(Color::Black).index() as u8,
         ];
-        let parent_white = self.stack[idx - 1].white;
-        let parent_black = self.stack[idx - 1].black;
         let weights = nn::feature_weights_flat(net);
         let current_bbs = snapshot_bbs(board);
 
@@ -315,33 +315,40 @@ impl AkimboAccumulatorState {
         if refresh_white {
             self.finny_refresh::<0>(net, &current_bbs, new_kings[0] as usize);
             self.stack[idx].white = self.finny[0][get_bucket::<0>(new_kings[0] as usize)].acc;
-        } else {
-            self.stack[idx].white = parent_white;
-            apply_move_deltas::<0>(
-                &mut self.stack[idx].white,
-                weights,
-                new_kings[0] as usize,
-                mover_side,
-                mover_pc,
-                captured,
-                mv,
-            );
         }
-
         if refresh_black {
             self.finny_refresh::<1>(net, &current_bbs, new_kings[1] as usize);
             self.stack[idx].black = self.finny[1][get_bucket::<1>(new_kings[1] as usize)].acc;
-        } else {
-            self.stack[idx].black = parent_black;
-            apply_move_deltas::<1>(
-                &mut self.stack[idx].black,
-                weights,
-                new_kings[1] as usize,
-                mover_side,
-                mover_pc,
-                captured,
-                mv,
-            );
+        }
+
+        if !refresh_white || !refresh_black {
+            let (parents, children) = self.stack.split_at_mut(idx);
+            let parent = &parents[idx - 1];
+            let child = &mut children[0];
+            if !refresh_white {
+                apply_move_deltas_from::<0>(
+                    &mut child.white,
+                    &parent.white,
+                    weights,
+                    new_kings[0] as usize,
+                    mover_side,
+                    mover_pc,
+                    captured,
+                    mv,
+                );
+            }
+            if !refresh_black {
+                apply_move_deltas_from::<1>(
+                    &mut child.black,
+                    &parent.black,
+                    weights,
+                    new_kings[1] as usize,
+                    mover_side,
+                    mover_pc,
+                    captured,
+                    mv,
+                );
+            }
         }
 
         let frame = &mut self.stack[idx];
@@ -436,20 +443,17 @@ impl AkimboAccumulatorState {
     }
 }
 
-fn apply_move_deltas<const SIDE: usize>(
-    acc: &mut Accumulator,
-    weights: &[i16],
+fn collect_move_delta_indices<const SIDE: usize>(
+    adds: &mut [MaybeUninit<usize>; MOVE_DELTA],
+    subs: &mut [MaybeUninit<usize>; MOVE_DELTA],
     king: usize,
     mover_side: usize,
     mover_pc: usize,
     captured: Option<usize>,
     mv: Move,
-) {
-    let mut adds = [MaybeUninit::<usize>::uninit(); MOVE_DELTA];
-    let mut subs = [MaybeUninit::<usize>::uninit(); MOVE_DELTA];
+) -> (usize, usize) {
     let mut na = 0usize;
     let mut ns = 0usize;
-
     let from = mv.from.index();
     let to = mv.to.index();
     let add_pc = mv.promotion.map(Piece::index).unwrap_or(mover_pc);
@@ -491,9 +495,51 @@ fn apply_move_deltas<const SIDE: usize>(
         ));
         na += 1;
     }
+    (na, ns)
+}
 
+#[cfg(test)]
+fn apply_move_deltas<const SIDE: usize>(
+    acc: &mut Accumulator,
+    weights: &[i16],
+    king: usize,
+    mover_side: usize,
+    mover_pc: usize,
+    captured: Option<usize>,
+    mv: Move,
+) {
+    let mut adds = [MaybeUninit::<usize>::uninit(); MOVE_DELTA];
+    let mut subs = [MaybeUninit::<usize>::uninit(); MOVE_DELTA];
+    let (na, ns) = collect_move_delta_indices::<SIDE>(
+        &mut adds, &mut subs, king, mover_side, mover_pc, captured, mv,
+    );
     super::simd::accum_apply_deltas(
         &mut acc.vals,
+        weights,
+        initialized_prefix(&adds, na),
+        initialized_prefix(&subs, ns),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_move_deltas_from<const SIDE: usize>(
+    dst: &mut Accumulator,
+    src: &Accumulator,
+    weights: &[i16],
+    king: usize,
+    mover_side: usize,
+    mover_pc: usize,
+    captured: Option<usize>,
+    mv: Move,
+) {
+    let mut adds = [MaybeUninit::<usize>::uninit(); MOVE_DELTA];
+    let mut subs = [MaybeUninit::<usize>::uninit(); MOVE_DELTA];
+    let (na, ns) = collect_move_delta_indices::<SIDE>(
+        &mut adds, &mut subs, king, mover_side, mover_pc, captured, mv,
+    );
+    super::stockfish_simd::apply_i16_from_width(
+        &mut dst.vals,
+        &src.vals,
         weights,
         initialized_prefix(&adds, na),
         initialized_prefix(&subs, ns),
@@ -687,5 +733,59 @@ mod tests {
     fn new_state_starts_at_ply_zero() {
         let state = AkimboAccumulatorState::new();
         assert_eq!(state.stack_index(), 0);
+    }
+
+    #[test]
+    fn apply_from_matches_copy_then_in_place_for_quiet_pawn() {
+        types::init();
+        let mut parent = Accumulator {
+            vals: [0; nn::HIDDEN],
+        };
+        for (index, value) in parent.vals.iter_mut().enumerate() {
+            *value = (index as i16).wrapping_mul(13).wrapping_sub(40);
+        }
+        let mut weights = vec![0i16; 768 * NUM_BUCKETS * nn::HIDDEN];
+        for (index, weight) in weights.iter_mut().enumerate() {
+            *weight = ((index % 11) as i16) - 5;
+        }
+        let mv = Move::quiet(Square::E2, Square::E4);
+        let mut copied = parent;
+        apply_move_deltas::<0>(
+            &mut copied,
+            &weights,
+            Square::E1.index(),
+            0,
+            Piece::Pawn.index(),
+            None,
+            mv,
+        );
+        let mut from = Accumulator {
+            vals: [0; nn::HIDDEN],
+        };
+        apply_move_deltas_from::<0>(
+            &mut from,
+            &parent,
+            &weights,
+            Square::E1.index(),
+            0,
+            Piece::Pawn.index(),
+            None,
+            mv,
+        );
+        assert_eq!(from.vals, copied.vals);
+    }
+
+    #[test]
+    fn material_scale_reads_snapshot_bitboards() {
+        types::init();
+        let board = Board::new();
+        assert_eq!(
+            material_scale(&board),
+            material_scale_from_bbs(&snapshot_bbs(&board))
+        );
+        assert_eq!(
+            material_scale(&board),
+            700 + (4 * 450 + 4 * 450 + 4 * 650 + 2 * 1250) / 32
+        );
     }
 }

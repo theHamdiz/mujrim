@@ -115,6 +115,7 @@ dedicated_family!(
     DisabledBadNoisyFutilityPolicy,
     AkimboRfpPolicy
 );
+const _: AkimboFamily = AkimboFamily;
 dedicated_family!(
     RecklessFamily,
     RecklessFullLmrPolicy,
@@ -131,6 +132,7 @@ dedicated_family!(
     DisabledBadNoisyFutilityPolicy,
     ViridithasRfpPolicy
 );
+const _: ViridithasFamily = ViridithasFamily;
 dedicated_family!(
     ObsidianFamily,
     ObsidianLmrPolicy,

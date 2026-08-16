@@ -1209,6 +1209,7 @@ mod tests {
             elapsed: Duration::ZERO,
             candidate_telemetry: Default::default(),
             reference_telemetry: Default::default(),
+            leftover: Default::default(),
             moves: moves.iter().map(|uci| (*uci).to_owned()).collect(),
         };
         let summary = MatchSummary {
@@ -1301,6 +1302,7 @@ mod tests {
                     elapsed: std::time::Duration::from_millis(4),
                     candidate_telemetry: EngineTelemetry::default(),
                     reference_telemetry: EngineTelemetry::default(),
+                    leftover: Default::default(),
                     moves: vec!["e2e4".into(), "e7e5".into()],
                 },
                 candidate_black: GameRecord {
@@ -1312,6 +1314,7 @@ mod tests {
                     elapsed: std::time::Duration::from_millis(4),
                     candidate_telemetry: EngineTelemetry::default(),
                     reference_telemetry: EngineTelemetry::default(),
+                    leftover: Default::default(),
                     moves: vec!["d2d4".into(), "d7d5".into()],
                 },
             }],

@@ -15,11 +15,11 @@ use crate::nnue_bench::{self, NnueBenchConfig, NnueBenchResult};
 use crate::strength::{EngineSpec, MatchClock, MatchConfig, MatchSummary, run_match};
 
 /// Minimum adapter/native NPS ratio after eval work.
-pub const TARGET_NPS_RATIO: f64 = 0.70;
-/// Minimum adapter score in a same-clock H2H.
-pub const TARGET_CLOCK_H2H: f64 = 0.48;
+pub const TARGET_NPS_RATIO: f64 = 1.00;
+/// Minimum adapter score in a same-clock H2H (beat or draw).
+pub const TARGET_CLOCK_H2H: f64 = 0.50;
 /// Minimum adapter score in a nodes-equal H2H.
-pub const TARGET_NODES_H2H: f64 = 0.45;
+pub const TARGET_NODES_H2H: f64 = 0.50;
 
 /// V2 tournament clock: 3+2 with a 3-minute bonus after 40 moves.
 pub fn v2_clock() -> MatchClock {
@@ -111,6 +111,10 @@ impl GauntletTargets {
 
     pub fn nodes_met(self, adapter_points: f64, games: f64) -> bool {
         score_ratio(adapter_points, games) + f64::EPSILON >= self.nodes_h2h
+    }
+
+    pub fn flags_met(self, adapter_flags: u64, native_flags: u64) -> bool {
+        adapter_flags <= native_flags
     }
 }
 
@@ -238,18 +242,28 @@ pub struct PlayedMatchCard {
     pub score: f64,
     pub adapter_nps: Option<f64>,
     pub native_nps: Option<f64>,
+    pub adapter_flags: u64,
+    pub native_flags: u64,
+    pub adapter_leftover_ms: Option<f64>,
+    pub native_leftover_ms: Option<f64>,
     pub error: Option<String>,
 }
 
 impl PlayedMatchCard {
     pub fn from_summary(summary: &MatchSummary) -> Self {
         let json = summary.to_json_value();
+        let (adapter_flags, native_flags, adapter_leftover_ms, native_leftover_ms) =
+            clock_residue(summary);
         Self {
             games: summary.scores.games(),
             points: summary.scores.wins as f64 + 0.5 * summary.scores.draws as f64,
             score: summary.scores.score_rate(),
             adapter_nps: json_number(&json["telemetry"]["candidate"]["nps"]),
             native_nps: json_number(&json["telemetry"]["reference"]["nps"]),
+            adapter_flags,
+            native_flags,
+            adapter_leftover_ms,
+            native_leftover_ms,
             error: summary.error.clone(),
         }
     }
@@ -260,6 +274,57 @@ impl PlayedMatchCard {
             _ => 0.0,
         }
     }
+}
+
+fn clock_residue(summary: &MatchSummary) -> (u64, u64, Option<f64>, Option<f64>) {
+    let mut adapter_flags = 0;
+    let mut native_flags = 0;
+    let mut adapter_left = Vec::new();
+    let mut native_left = Vec::new();
+    for game in summary
+        .pairs
+        .iter()
+        .flat_map(|pair| [&pair.candidate_white, &pair.candidate_black])
+    {
+        let time_loss = matches!(
+            &game.termination,
+            crate::strength::runner::Termination::Forfeit(detail)
+                if detail.contains("lost on time")
+        );
+        if time_loss {
+            if game.outcome == crate::strength::stats::GameOutcome::Loss {
+                adapter_flags += 1;
+            } else if game.outcome == crate::strength::stats::GameOutcome::Win {
+                native_flags += 1;
+            }
+        }
+        let (adapter_ms, native_ms) = if game.candidate_white {
+            (
+                game.leftover.leftover_white_ms,
+                game.leftover.leftover_black_ms,
+            )
+        } else {
+            (
+                game.leftover.leftover_black_ms,
+                game.leftover.leftover_white_ms,
+            )
+        };
+        if let Some(ms) = adapter_ms {
+            adapter_left.push(ms as f64);
+        }
+        if let Some(ms) = native_ms {
+            native_left.push(ms as f64);
+        }
+    }
+    let mean = |values: &[f64]| {
+        (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
+    };
+    (
+        adapter_flags,
+        native_flags,
+        mean(&adapter_left),
+        mean(&native_left),
+    )
 }
 
 fn json_number(value: &Value) -> Option<f64> {
@@ -290,6 +355,10 @@ fn played_card_json(card: &PlayedMatchCard, target: f64, met: bool) -> Value {
         "adapter_nps": card.adapter_nps,
         "native_nps": card.native_nps,
         "nps_ratio": card.nps_ratio(),
+        "adapter_flags": card.adapter_flags,
+        "native_flags": card.native_flags,
+        "adapter_leftover_ms": card.adapter_leftover_ms,
+        "native_leftover_ms": card.native_leftover_ms,
         "target": target,
         "met": met,
         "error": card.error,
@@ -371,6 +440,9 @@ pub fn run_validation(request: &ValidationRequest) -> Result<Value, String> {
         let nodes_met = nodes_card
             .as_ref()
             .is_some_and(|card| targets.nodes_met(card.points, card.games as f64));
+        let flags_met = clock_card
+            .as_ref()
+            .is_some_and(|card| targets.flags_met(card.adapter_flags, card.native_flags));
 
         pair_cards.push(json!({
             "adapter_id": pair.adapter_id,
@@ -392,6 +464,7 @@ pub fn run_validation(request: &ValidationRequest) -> Result<Value, String> {
                 "nps": nps_met,
                 "clock_h2h": clock_met,
                 "nodes_h2h": nodes_met,
+                "flags": flags_met,
                 "nps_ratio": nps_ratio,
             },
         }));
@@ -444,18 +517,20 @@ mod tests {
     #[test]
     fn v2_targets_and_pairs_are_stable() {
         let targets = GauntletTargets::v2();
-        assert_eq!(targets.nps_ratio, 0.70);
-        assert_eq!(targets.clock_h2h, 0.48);
-        assert_eq!(targets.nodes_h2h, 0.45);
+        assert_eq!(targets.nps_ratio, 1.00);
+        assert_eq!(targets.clock_h2h, 0.50);
+        assert_eq!(targets.nodes_h2h, 0.50);
         assert_eq!(GAUNTLET_PAIRS.len(), 6);
         assert_eq!(GAUNTLET_PAIRS[0].adapter_binary, "mujrim-viri");
         assert_eq!(GAUNTLET_PAIRS[5].adapter_binary, "mujrim-v60");
-        assert!(targets.nps_met(700_000.0, 1_000_000.0));
-        assert!(!targets.nps_met(699_000.0, 1_000_000.0));
-        assert!(targets.clock_met(48.0, 100.0));
-        assert!(!targets.clock_met(47.0, 100.0));
-        assert!(targets.nodes_met(45.0, 100.0));
-        assert!(!targets.nodes_met(44.0, 100.0));
+        assert!(targets.nps_met(1_000_000.0, 1_000_000.0));
+        assert!(!targets.nps_met(999_000.0, 1_000_000.0));
+        assert!(targets.clock_met(50.0, 100.0));
+        assert!(!targets.clock_met(49.0, 100.0));
+        assert!(targets.nodes_met(50.0, 100.0));
+        assert!(!targets.nodes_met(49.0, 100.0));
+        assert!(targets.flags_met(3, 3));
+        assert!(!targets.flags_met(4, 3));
     }
 
     #[test]
@@ -522,7 +597,7 @@ mod tests {
         assert!(sample.result.incremental_ns_per_eval().is_finite());
         let json = eval_card_json(&[sample]);
         assert_eq!(json["type"], "mujrim-adapter-eval-card");
-        assert_eq!(json["targets"]["nps_ratio"], 0.70);
+        assert_eq!(json["targets"]["nps_ratio"], 1.0);
     }
 
     #[test]
@@ -636,6 +711,69 @@ mod tests {
         )
         .expect_err("missing binaries");
         assert!(err.contains("mujrim-viri"), "{err}");
+    }
+
+    #[test]
+    fn clock_residue_counts_time_losses_and_leftover() {
+        use crate::strength::runner::{ClockResidue, GameRecord, PairRecord, Termination};
+        use crate::strength::stats::GameOutcome;
+        let game =
+            |candidate_white, outcome, leftover_white, leftover_black, detail: &str| GameRecord {
+                candidate_white,
+                outcome,
+                termination: Termination::Forfeit(detail.to_owned()),
+                plies: 2,
+                nodes: 0,
+                elapsed: Duration::ZERO,
+                candidate_telemetry: Default::default(),
+                reference_telemetry: Default::default(),
+                leftover: ClockResidue {
+                    leftover_white_ms: leftover_white,
+                    leftover_black_ms: leftover_black,
+                },
+                moves: Vec::new(),
+            };
+        let summary = MatchSummary {
+            candidate: "a".into(),
+            reference: "b".into(),
+            pairs: vec![PairRecord {
+                index: 0,
+                candidate_white: game(
+                    true,
+                    GameOutcome::Loss,
+                    Some(0),
+                    Some(1_200),
+                    "White lost on time",
+                ),
+                candidate_black: game(
+                    false,
+                    GameOutcome::Win,
+                    Some(800),
+                    Some(0),
+                    "Black lost on time",
+                ),
+            }],
+            scores: Default::default(),
+            pair_counts: Default::default(),
+            elo_delta: 0.0,
+            elo_low: 0.0,
+            elo_high: 0.0,
+            llr: 0.0,
+            sprt_decision: crate::strength::stats::SprtDecision::Continue,
+            total_nodes: 0,
+            elapsed: Duration::ZERO,
+            error: None,
+            reference_elo: None,
+            config: MatchConfig::default(),
+            opening_count: 0,
+            opening_fingerprint: String::new(),
+            resumed_pairs: 0,
+        };
+        let (adapter_flags, native_flags, adapter_left, native_left) = clock_residue(&summary);
+        assert_eq!(adapter_flags, 1);
+        assert_eq!(native_flags, 1);
+        assert!((adapter_left.unwrap() - 0.0).abs() < 1e-9);
+        assert!((native_left.unwrap() - 1_000.0).abs() < 1e-9);
     }
 
     #[test]

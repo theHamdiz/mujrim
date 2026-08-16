@@ -264,6 +264,12 @@ impl EngineTelemetry {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockResidue {
+    pub leftover_white_ms: Option<u64>,
+    pub leftover_black_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct GameRecord {
     pub candidate_white: bool,
@@ -274,6 +280,7 @@ pub struct GameRecord {
     pub elapsed: Duration,
     pub candidate_telemetry: EngineTelemetry,
     pub reference_telemetry: EngineTelemetry,
+    pub leftover: ClockResidue,
     pub moves: Vec<String>,
 }
 
@@ -472,6 +479,8 @@ fn game_json(game: &GameRecord) -> serde_json::Value {
         "plies": game.plies,
         "nodes": game.nodes,
         "elapsed_ms": game.elapsed.as_millis(),
+        "leftover_white_ms": game.leftover.leftover_white_ms,
+        "leftover_black_ms": game.leftover.leftover_black_ms,
         "telemetry": {
             "candidate": telemetry_json(&game.candidate_telemetry),
             "reference": telemetry_json(&game.reference_telemetry),
@@ -915,6 +924,14 @@ fn game_from_checkpoint(
         elapsed: Duration::from_millis(elapsed_ms),
         candidate_telemetry,
         reference_telemetry,
+        leftover: ClockResidue {
+            leftover_white_ms: value
+                .get("leftover_white_ms")
+                .and_then(serde_json::Value::as_u64),
+            leftover_black_ms: value
+                .get("leftover_black_ms")
+                .and_then(serde_json::Value::as_u64),
+        },
         moves,
     })
 }
@@ -1559,7 +1576,9 @@ fn play_game(
     let mut candidate_telemetry = EngineTelemetry::default();
     let mut reference_telemetry = EngineTelemetry::default();
     let mut adjudicator = Adjudicator::new(config);
-    let emit_done = |record: GameRecord| -> GameRecord {
+    let leftover = std::cell::Cell::new(ClockResidue::default());
+    let emit_done = |mut record: GameRecord| -> GameRecord {
+        record.leftover = leftover.get();
         let white_score = if candidate_white {
             record.outcome.score()
         } else {
@@ -1606,6 +1625,10 @@ fn play_game(
     let mut white_clock = config.clock.map(|clock| clock.initial);
     let mut black_clock = white_clock;
     let mut clock_bonus_applied = false;
+    leftover.set(ClockResidue {
+        leftover_white_ms: white_clock.map(|time| time.as_millis() as u64),
+        leftover_black_ms: black_clock.map(|time| time.as_millis() as u64),
+    });
 
     for ply in moves.len()..config.max_plies {
         wait_while_paused(config);
@@ -1739,6 +1762,10 @@ fn play_game(
                 *time_left -= search_elapsed;
                 *time_left += clock.increment;
             }
+            leftover.set(ClockResidue {
+                leftover_white_ms: white_clock.map(|time| time.as_millis() as u64),
+                leftover_black_ms: black_clock.map(|time| time.as_millis() as u64),
+            });
         }
         if candidate_turn {
             candidate_telemetry.observe(&info, search_elapsed);
@@ -1815,6 +1842,10 @@ fn play_game(
                 *time += clock.bonus;
             }
             clock_bonus_applied = true;
+            leftover.set(ClockResidue {
+                leftover_white_ms: white_clock.map(|time| time.as_millis() as u64),
+                leftover_black_ms: black_clock.map(|time| time.as_millis() as u64),
+            });
         }
         emit(GameProgressEvent::Ply {
             game_key: game_key.to_owned(),
@@ -1919,6 +1950,7 @@ fn finish(
         elapsed,
         candidate_telemetry: EngineTelemetry::default(),
         reference_telemetry: EngineTelemetry::default(),
+        leftover: ClockResidue::default(),
         moves: Vec::new(),
     }
 }
@@ -1978,6 +2010,7 @@ fn draw_record(
         elapsed,
         candidate_telemetry: EngineTelemetry::default(),
         reference_telemetry: EngineTelemetry::default(),
+        leftover: ClockResidue::default(),
         moves: Vec::new(),
     }
 }
@@ -2473,6 +2506,7 @@ mod tests {
                 elapsed: Duration::ZERO,
                 candidate_telemetry: EngineTelemetry::default(),
                 reference_telemetry: EngineTelemetry::default(),
+                leftover: ClockResidue::default(),
                 moves: Vec::new(),
             };
 

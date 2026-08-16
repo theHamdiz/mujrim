@@ -181,6 +181,34 @@ pub(crate) fn apply_i16_from_width(
     }
 }
 
+/// Copy `src` into `dst` while adding/subtracting i8 feature rows in one pass.
+pub(crate) fn apply_i8_from_width(
+    dst: &mut [i16],
+    src: &[i16],
+    weights: &[i8],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    debug_assert_eq!(dst.len(), src.len());
+    let width = dst.len();
+    if dst.len().is_multiple_of(16) {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if apply_from_uses_avx2() {
+            unsafe {
+                avx2::apply_i8_from(dst, src, weights, adds, subs);
+            }
+            return;
+        }
+    }
+    dst.copy_from_slice(src);
+    for &feature in adds {
+        (kernels().apply_i8)(dst, &weights[feature * width..(feature + 1) * width], 1);
+    }
+    for &feature in subs {
+        (kernels().apply_i8)(dst, &weights[feature * width..(feature + 1) * width], -1);
+    }
+}
+
 /// Pairwise FT on `(first + first_add, second + second_add)` without a full acc copy.
 pub(crate) fn activate_shifted_pair_sum(
     first: &[i16],
@@ -466,6 +494,35 @@ mod avx2 {
                 for &feature in subs {
                     let row = weights.as_ptr().add(feature * width + index);
                     value = _mm256_sub_epi16(value, _mm256_loadu_si256(row.cast()));
+                }
+                _mm256_storeu_si256(dst.as_mut_ptr().add(index).cast(), value);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn apply_i8_from(
+        dst: &mut [i16],
+        src: &[i16],
+        weights: &[i8],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            let width = dst.len();
+            debug_assert_eq!(src.len(), width);
+            debug_assert_eq!(width % 16, 0);
+            for index in (0..width).step_by(16) {
+                let mut value = _mm256_loadu_si256(src.as_ptr().add(index).cast());
+                for &feature in adds {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    let delta = _mm256_cvtepi8_epi16(_mm_loadu_si128(row.cast()));
+                    value = _mm256_add_epi16(value, delta);
+                }
+                for &feature in subs {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    let delta = _mm256_cvtepi8_epi16(_mm_loadu_si128(row.cast()));
+                    value = _mm256_sub_epi16(value, delta);
                 }
                 _mm256_storeu_si256(dst.as_mut_ptr().add(index).cast(), value);
             }
@@ -985,6 +1042,24 @@ mod tests {
         let mut actual = expected;
         scalar::transform_pair(&first, &second, &mut expected);
         transform_pair(&first, &second, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn apply_i8_from_matches_copy_then_apply() {
+        const WIDTH: usize = 1024;
+        let weights = (0..WIDTH * 4)
+            .map(|index| (index as i16).wrapping_mul(13) as i8)
+            .collect::<Vec<_>>();
+        let src = (0..WIDTH)
+            .map(|index| (index as i16).wrapping_mul(5))
+            .collect::<Vec<_>>();
+        let mut expected = src.clone();
+        apply_i8_feature_width(&mut expected, &weights, 1, 1);
+        apply_i8_feature_width(&mut expected, &weights, 3, -1);
+        apply_i8_feature_width(&mut expected, &weights, 0, 1);
+        let mut actual = vec![0_i16; WIDTH];
+        apply_i8_from_width(&mut actual, &src, &weights, &[1, 0], &[3]);
         assert_eq!(actual, expected);
     }
 

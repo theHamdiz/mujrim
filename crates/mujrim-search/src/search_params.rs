@@ -357,6 +357,13 @@ impl SearchParams {
         params.se_double_ext_margin = 13;
         params.aspiration_window = 12;
         params.probcut_margin = 176;
+        // Official razoring is linear: 123 + 295 * depth (not depth²).
+        params.razoring_base = 123;
+        params.razoring_depth_mul = 295;
+        params.hist_prune_margin = -3186;
+        params.hist_prune_depth_limit = 6;
+        // Official has no low-depth stand-pat extension.
+        params.ldse_depth_max = 0;
         params
     }
 
@@ -703,6 +710,18 @@ mod tests {
         assert_eq!(p.ldse_depth_max, 6);
         assert_eq!(p.ldse_margin, 20);
         assert_eq!(p.aspiration_window, 10);
+    }
+
+    #[test]
+    fn viridithas_preset_locks_official_razoring_and_history_pruning() {
+        let p = SearchParams::viridithas();
+        assert_eq!(p.razoring_base, 123);
+        assert_eq!(p.razoring_depth_mul, 295);
+        assert_eq!(p.hist_prune_margin, -3186);
+        assert_eq!(p.hist_prune_depth_limit, 6);
+        assert_eq!(p.ldse_depth_max, 0);
+        assert_eq!(p.rfp_mul, 65);
+        assert_eq!(p.probcut_margin, 176);
     }
 
     #[test]

@@ -205,6 +205,7 @@ pub struct LmrContext {
     pub tt_score_below_alpha: bool,
     pub tt_depth_sufficient: bool,
     pub tt_move_missing: bool,
+    pub tt_capture: bool,
     pub hist_lmr_div: i32,
     pub lmr_corr_mul: i32,
     pub lmr_cut_node_bonus: i32,
@@ -368,15 +369,26 @@ impl LmrPolicy for ViridithasLmrPolicy {
         true
     }
 
-    fn adjust_reduction(&self, base_reduction: i32, ctx: &LmrContext) -> i32 {
-        let mut reduction = StockLikeLmrPolicy.adjust_reduction(base_reduction, ctx);
-        if ctx.is_cut_node && !ctx.tt_was_pv {
-            reduction += 1;
-        }
-        if ctx.gives_check {
-            reduction -= 1;
-        }
-        reduction
+    fn adjust_reduction(&self, _base_reduction: i32, ctx: &LmrContext) -> i32 {
+        // Official viridithas/src/search.rs LMTable + Config multipliers, in 1024ths.
+        let depth = f64::from(ctx.depth.clamp(1, 63));
+        let played = f64::from(ctx.move_count.clamp(1, 63) as u32);
+        let base = 99.0 / 100.0 * 1024.0;
+        let division = 260.0 / 100.0 / 1024.0;
+        let mut reduction = (base + depth.ln() * played.ln() / division) as i32;
+        reduction += 226;
+        reduction += i32::from(!ctx.is_pv) * 987;
+        reduction -= i32::from(ctx.tt_was_pv) * 1289;
+        reduction += i32::from(ctx.tt_was_pv && ctx.tt_score_below_alpha) * 1136;
+        reduction += i32::from(ctx.is_cut_node) * 1601;
+        reduction -= ctx.mv_stat_score.saturating_mul(1024) / 17_017;
+        reduction -= i32::from(ctx.is_killer) * 775;
+        reduction += i32::from(!ctx.improving) * 613;
+        reduction += i32::from(ctx.tt_capture) * 999;
+        reduction -= i32::from(ctx.gives_check) * 1361;
+        reduction -= ctx.corr_abs.saturating_mul(448) / 16_384;
+        reduction += ctx.alpha_raises.saturating_mul(384);
+        reduction / 1024
     }
 }
 
@@ -417,8 +429,16 @@ impl LmrPolicy for PlentyChessLmrPolicy {
 pub struct AkimboLmrPolicy;
 
 impl LmrPolicy for AkimboLmrPolicy {
-    fn adjust_reduction(&self, base_reduction: i32, ctx: &LmrContext) -> i32 {
-        StockLikeLmrPolicy.adjust_reduction(base_reduction, ctx)
+    fn adjust_reduction(&self, _base_reduction: i32, ctx: &LmrContext) -> i32 {
+        // Official jw1912/akimbo search.rs: 48/248 plus PV/check/cutoff/history.
+        let depth = f64::from(ctx.depth.max(1));
+        let played = f64::from(ctx.move_count.max(1) as u32);
+        let mut reduction = (0.48 + depth.ln() / 2.48 * played.ln()) as i32;
+        reduction -= i32::from(ctx.is_pv);
+        reduction -= i32::from(ctx.gives_check);
+        reduction -= i32::from(ctx.child_cutoffs < 4);
+        reduction -= ctx.mv_stat_score / 8192;
+        reduction.max(0)
     }
 }
 
@@ -533,9 +553,22 @@ pub struct ViridithasLmpPolicy;
 
 impl LmpPolicy for ViridithasLmpPolicy {
     fn decision(&self, context: &LmpContext) -> Option<LmpDecision> {
-        let mut context = *context;
-        context.stock_move_threshold = context.stock_move_threshold.saturating_add(2);
-        StockLikeLmpPolicy.decision(&context)
+        let depth = context.depth.clamp(1, 11) as f64;
+        let threshold = if context.improving {
+            (4.0 + 4.0 * depth * depth / 4.5) as usize
+        } else {
+            (2.5 + 2.0 * depth * depth / 4.5) as usize
+        };
+        (!context.is_pv
+            && !context.in_check
+            && !context.is_root
+            && context.is_quiet
+            && context.best_score > -29_000 + 100
+            && context.move_count > threshold)
+            .then_some(LmpDecision {
+                skip_remaining_quiets: true,
+                prune_current: true,
+            })
     }
 }
 
@@ -696,8 +729,10 @@ impl FutilityPolicy for ViridithasFutilityPolicy {
     }
 
     fn decision(&self, context: &FutilityContext) -> Option<FutilityDecision> {
-        let margin = 86 + 70 * context.depth;
-        (!context.is_pv
+        // Official uses LMR-preview depth and skips the rest of the quiets.
+        let margin = 86 + 70 * context.depth + context.history / 128;
+        (context.depth < 6
+            && !context.is_pv
             && !context.in_check
             && !context.gives_direct_check
             && context.is_quiet
@@ -705,7 +740,7 @@ impl FutilityPolicy for ViridithasFutilityPolicy {
             && context.eval + margin <= context.alpha
             && context.best_score > -29_000 + 100)
             .then_some(FutilityDecision {
-                skip_remaining_quiets: false,
+                skip_remaining_quiets: true,
                 score_floor: None,
             })
     }
@@ -948,7 +983,9 @@ pub struct AkimboRfpPolicy;
 
 impl RfpPolicy for AkimboRfpPolicy {
     fn cutoff_score(&self, eval: i32, beta: i32, context: &RfpContext) -> Option<i32> {
-        StockLikeRfpPolicy.cutoff_score(eval, beta, context)
+        // Official jw1912/akimbo: margin = 94 * depth / (improving ? 2 : 1).
+        let margin = 94 * context.depth / if context.improving { 2 } else { 1 };
+        (context.depth <= 8 && eval >= beta + margin).then_some(eval)
     }
 }
 
@@ -990,6 +1027,13 @@ pub enum TimeManagerProfile {
     Stockfish,
 }
 
+/// Official-style soft/hard think budget for one move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockBudget {
+    pub soft: std::time::Duration,
+    pub hard: std::time::Duration,
+}
+
 impl TimeManagerProfile {
     pub const fn soft_base(self) -> f64 {
         match self {
@@ -1016,6 +1060,148 @@ impl TimeManagerProfile {
             Self::Stockfish => 1.15,
         }
     }
+
+    /// Fischer / cyclic allocation from the matching official engine.
+    pub fn allocate(
+        self,
+        remaining_ms: u64,
+        increment_ms: u64,
+        movestogo: Option<u64>,
+        overhead_ms: u64,
+        fullmove_number: u32,
+        ply: u32,
+    ) -> ClockBudget {
+        if remaining_ms.saturating_sub(overhead_ms) < 100 {
+            return ClockBudget {
+                soft: std::time::Duration::from_millis(10),
+                hard: std::time::Duration::from_millis(20),
+            };
+        }
+        let (soft, hard) = match self {
+            Self::Reckless => reckless_budget(
+                remaining_ms,
+                increment_ms,
+                movestogo,
+                overhead_ms,
+                fullmove_number,
+            ),
+            Self::Viridithas => {
+                viridithas_budget(remaining_ms, increment_ms, movestogo, overhead_ms)
+            }
+            Self::Stockfish => {
+                stockfish_budget(remaining_ms, increment_ms, movestogo, overhead_ms, ply)
+            }
+            Self::Default => default_budget(remaining_ms, increment_ms, movestogo, overhead_ms),
+        };
+        let hard = hard.max(soft).max(20);
+        ClockBudget {
+            soft: std::time::Duration::from_millis(soft.max(10)),
+            hard: std::time::Duration::from_millis(hard),
+        }
+    }
+}
+
+fn spendable_clock(main: u64, overhead: u64) -> u64 {
+    let reserve = (main / 100).clamp(50, 250);
+    main.saturating_sub(overhead.saturating_add(reserve)).max(1)
+}
+
+fn reckless_budget(
+    remaining: u64,
+    increment: u64,
+    movestogo: Option<u64>,
+    overhead: u64,
+    fullmove_number: u32,
+) -> (u64, u64) {
+    let available = spendable_clock(remaining, overhead);
+    let fullmove = fullmove_number.max(1) as f64;
+    if let Some(moves) = movestogo {
+        let base = (available as f64 / moves.max(1) as f64) + 0.75 * increment as f64;
+        (
+            (base as u64).min(available),
+            ((5.0 * base) as u64).min(available),
+        )
+    } else {
+        let soft_scale = 0.0594 - 0.0492 * (-0.0386 * fullmove).exp();
+        let soft = (soft_scale * available as f64 + 0.75 * increment as f64) as u64;
+        let hard = (0.7281 * available as f64 + 0.75 * increment as f64) as u64;
+        (soft.min(available), hard.min(available))
+    }
+}
+
+fn viridithas_budget(
+    remaining: u64,
+    increment: u64,
+    movestogo: Option<u64>,
+    overhead: u64,
+) -> (u64, u64) {
+    let max_time = (remaining * 600 / 1000).saturating_sub(overhead.max(30));
+    let hard = (remaining * 46 / 100).min(max_time);
+    if let Some(moves) = movestogo {
+        let divisor = moves.clamp(2, 24);
+        let opt = (remaining / divisor).min(max_time) * 73 / 100;
+        (opt.min(hard), hard)
+    } else {
+        let computed = remaining / 24 + increment * 94 / 100;
+        let computed = computed.saturating_sub(overhead.max(30));
+        let opt = (computed.min(max_time) * 73 / 100).min(hard);
+        (opt, hard)
+    }
+}
+
+fn stockfish_budget(
+    remaining: u64,
+    increment: u64,
+    movestogo: Option<u64>,
+    overhead: u64,
+    ply: u32,
+) -> (u64, u64) {
+    let mut mtg = movestogo.unwrap_or(50).min(50);
+    if remaining < 1_000 {
+        mtg = ((remaining as f64) * 0.05) as u64;
+        mtg = mtg.max(1);
+    }
+    let time_left = remaining
+        .saturating_add(increment.saturating_mul(mtg.saturating_sub(1)))
+        .saturating_sub(overhead.saturating_mul(2 + mtg))
+        .max(1);
+    let (opt_scale, max_scale) = if movestogo.is_none() {
+        let adjust = (0.3272 * (time_left as f64).log10() - 0.4141).max(0.05);
+        let log_time = ((remaining.max(1) as f64) / 1000.0).log10();
+        let opt_constant = (0.0029869 + 0.00033554 * log_time).min(0.004905);
+        let max_constant = (3.3744 + 3.0608 * log_time).max(3.1441);
+        let ply_term = (f64::from(ply) + 3.22713).max(1.0).powf(0.46866);
+        let opt = (0.012112 + ply_term * opt_constant)
+            .min(0.19404 * remaining as f64 / time_left as f64)
+            * adjust;
+        (opt, 6.873_f64.min(max_constant + f64::from(ply) / 12.352))
+    } else {
+        (
+            ((0.88 + f64::from(ply) / 116.4) / mtg.max(1) as f64)
+                .min(0.88 * remaining as f64 / time_left as f64),
+            1.3 + 0.11 * mtg as f64,
+        )
+    };
+    let optimum = (opt_scale * time_left as f64).max(1.0) as u64;
+    let maximum = optimum.max(
+        ((0.8097 * remaining as f64) as u64)
+            .saturating_sub(overhead)
+            .min((max_scale * optimum as f64) as u64),
+    );
+    (optimum.min(remaining), maximum.min(remaining))
+}
+
+fn default_budget(
+    remaining: u64,
+    increment: u64,
+    movestogo: Option<u64>,
+    overhead: u64,
+) -> (u64, u64) {
+    let available = spendable_clock(remaining, overhead);
+    let moves = movestogo.unwrap_or(30).clamp(15, 40);
+    let soft = available / moves + increment * 3 / 4;
+    let hard = (available / 3).max(soft.saturating_mul(2));
+    (soft.min(available), hard.min(available))
 }
 
 /// History-aware static-exchange pruning policy derived from Reckless.
@@ -1166,6 +1352,7 @@ mod tests {
             tt_score_below_alpha: false,
             tt_depth_sufficient: false,
             tt_move_missing: false,
+            tt_capture: false,
             hist_lmr_div: 4096,
             lmr_corr_mul: 448,
             lmr_cut_node_bonus: 2,
@@ -1207,6 +1394,7 @@ mod tests {
             tt_score_below_alpha: false,
             tt_depth_sufficient: false,
             tt_move_missing: false,
+            tt_capture: false,
             hist_lmr_div: 8192,
             lmr_corr_mul: 448,
             lmr_cut_node_bonus: 2,
@@ -1246,6 +1434,7 @@ mod tests {
             tt_score_below_alpha: false,
             tt_depth_sufficient: false,
             tt_move_missing: false,
+            tt_capture: false,
             hist_lmr_div: 1,
             lmr_corr_mul: 1,
             lmr_cut_node_bonus: 0,
@@ -1308,6 +1497,7 @@ mod tests {
             tt_score_below_alpha: true,
             tt_depth_sufficient: false,
             tt_move_missing: true,
+            tt_capture: false,
             hist_lmr_div: 1,
             lmr_corr_mul: 1,
             lmr_cut_node_bonus: 0,
@@ -1550,11 +1740,47 @@ mod tests {
             tt_score_below_alpha: false,
             tt_depth_sufficient: false,
             tt_move_missing: false,
+            tt_capture: false,
             hist_lmr_div: 8192,
             lmr_corr_mul: 448,
             lmr_cut_node_bonus: 1,
             child_cutoffs: 10,
         }
+    }
+
+    #[test]
+    fn viridithas_lmp_uses_official_quadratic_table() {
+        let quiet = LmpContext {
+            depth: 4,
+            move_count: 10,
+            improvement: 0,
+            improving: false,
+            is_root: false,
+            is_pv: false,
+            in_check: false,
+            is_quiet: true,
+            best_score: 0,
+            stock_depth_limit: 8,
+            stock_move_threshold: 99,
+        };
+        assert!(ViridithasLmpPolicy.decision(&quiet).is_some());
+        assert!(
+            ViridithasLmpPolicy
+                .decision(&LmpContext {
+                    move_count: 9,
+                    ..quiet
+                })
+                .is_none()
+        );
+        assert!(
+            ViridithasLmpPolicy
+                .decision(&LmpContext {
+                    improving: true,
+                    move_count: 19,
+                    ..quiet
+                })
+                .is_some()
+        );
     }
 
     #[test]
@@ -1576,6 +1802,18 @@ mod tests {
             RfpDispatch::Viridithas.cutoff_score(300, 100, &context),
             Some(300)
         );
+        assert_eq!(
+            ViridithasRfpPolicy.cutoff_score(
+                300,
+                100,
+                &RfpContext {
+                    own_pieces_threatened: true,
+                    ..context
+                }
+            ),
+            Some(300),
+            "official Viridithas RFP ignores threat maps, so they can be deferred"
+        );
 
         assert!(ViridithasLmrPolicy.reduce_noisy_moves());
         let mut lmr = sample_lmr_context();
@@ -1585,12 +1823,43 @@ mod tests {
             stock + 1,
             "cut-node tax"
         );
-        lmr.gives_check = true;
-        let stock_check = StockLikeLmrPolicy.adjust_reduction(3, &lmr);
+        lmr.child_cutoffs = 0;
+        let few_cutoffs = ViridithasLmrPolicy.adjust_reduction(3, &lmr);
+        lmr.child_cutoffs = 10;
         assert_eq!(
+            few_cutoffs,
             ViridithasLmrPolicy.adjust_reduction(3, &lmr),
-            stock_check,
-            "check relief cancels the extra cut-node tax"
+            "official Viridithas LMR has no child-cutoff relief"
+        );
+        let no_raises = ViridithasLmrPolicy.adjust_reduction(3, &lmr);
+        lmr.alpha_raises = 2;
+        assert!(
+            ViridithasLmrPolicy.adjust_reduction(3, &lmr) > no_raises,
+            "official LMR taxes later alpha raises"
+        );
+        lmr.alpha_raises = 0;
+        lmr.tt_capture = true;
+        assert!(
+            ViridithasLmrPolicy.adjust_reduction(3, &lmr) > no_raises,
+            "official LMR taxes a tactical TT move"
+        );
+        lmr.tt_capture = false;
+        lmr.gives_check = true;
+        assert_eq!(
+            ViridithasLmrPolicy.adjust_reduction(99, &lmr),
+            4,
+            "official 1024ths LMR with check: (5530-1361)/1024"
+        );
+        lmr.gives_check = false;
+        assert_eq!(
+            ViridithasLmrPolicy.adjust_reduction(0, &lmr),
+            ViridithasLmrPolicy.adjust_reduction(99, &lmr),
+            "official LMR rebuilds from depth/moves, not the whole-ply table"
+        );
+        assert_eq!(
+            ViridithasLmrPolicy.adjust_reduction(0, &lmr),
+            5,
+            "official non-PV cut-node LMR at depth 8 / move 8"
         );
 
         let futility = FutilityContext {
@@ -1609,9 +1878,18 @@ mod tests {
             stock_depth_limit: 8,
             stock_margin: 0,
         };
-        // Official: 86 + 70*depth = 226; 0+226 <= 300
+        // Official: lmr_depth < 6 and 86 + 70*depth + hist/128; 0+226 <= 300
         assert!(ViridithasFutilityPolicy.decision(&futility).is_some());
         assert!(FutilityDispatch::Viridithas.decision(&futility).is_some());
+        assert!(
+            ViridithasFutilityPolicy
+                .decision(&FutilityContext {
+                    depth: 6,
+                    ..futility
+                })
+                .is_none(),
+            "official FP only applies when preview LMR depth is below 6"
+        );
     }
 
     #[test]
@@ -1631,7 +1909,71 @@ mod tests {
             LmrDispatch::PlentyChess.adjust_reduction(4, &context),
             stock
         );
-        assert_eq!(LmrDispatch::Akimbo.adjust_reduction(4, &context), stock);
+        assert_eq!(
+            LmrDispatch::Akimbo.adjust_reduction(4, &context),
+            2,
+            "official Akimbo LMR at depth 8 / move 8"
+        );
+        let mut few_cutoffs = context;
+        few_cutoffs.child_cutoffs = 3;
+        assert_eq!(
+            LmrDispatch::Akimbo.adjust_reduction(4, &few_cutoffs),
+            1,
+            "official Akimbo relieves LMR when child cutoffs < 4"
+        );
+    }
+
+    #[test]
+    fn akimbo_rfp_uses_official_margin_and_ignores_threats() {
+        let context = RfpContext {
+            depth: 4,
+            improving: true,
+            improvement: 0,
+            correction_abs: 0,
+            tt_was_pv: false,
+            own_pieces_threatened: true,
+            stock_margin: 0,
+        };
+        // Official: margin = 94 * depth / (improving ? 2 : 1) = 188
+        assert_eq!(AkimboRfpPolicy.cutoff_score(288, 100, &context), Some(288));
+        assert_eq!(AkimboRfpPolicy.cutoff_score(287, 100, &context), None);
+        assert_eq!(
+            AkimboRfpPolicy.cutoff_score(
+                288,
+                100,
+                &RfpContext {
+                    own_pieces_threatened: false,
+                    ..context
+                }
+            ),
+            Some(288),
+            "official Akimbo RFP ignores threat maps, so they can be deferred"
+        );
+        assert_eq!(
+            RfpDispatch::Akimbo.cutoff_score(288, 100, &context),
+            Some(288)
+        );
+        assert_eq!(
+            AkimboRfpPolicy.cutoff_score(
+                500,
+                100,
+                &RfpContext {
+                    depth: 9,
+                    ..context
+                }
+            ),
+            None
+        );
+        let not_improving = RfpContext {
+            improving: false,
+            ..context
+        };
+        // margin = 94 * 4 = 376; 476 >= 100 + 376
+        assert_eq!(
+            AkimboRfpPolicy.cutoff_score(476, 100, &not_improving),
+            Some(476)
+        );
+        assert_eq!(AkimboRfpPolicy.cutoff_score(475, 100, &not_improving), None);
     }
 
     #[test]
@@ -1675,5 +2017,61 @@ mod tests {
         assert!(
             TimeManagerProfile::Viridithas.soft_base() < TimeManagerProfile::Reckless.soft_base()
         );
+    }
+
+    #[test]
+    fn reckless_fischer_matches_official_soft_hard() {
+        let budget = TimeManagerProfile::Reckless.allocate(60_000, 2_000, None, 10, 1, 0);
+        let available = 60_000u64 - 10 - 250;
+        let soft_scale = 0.0594 - 0.0492 * (-0.0386_f64).exp();
+        let expected_soft = (soft_scale * available as f64 + 1_500.0) as u64;
+        let expected_hard = (0.7281 * available as f64 + 1_500.0) as u64;
+        assert_eq!(budget.soft, std::time::Duration::from_millis(expected_soft));
+        assert_eq!(budget.hard, std::time::Duration::from_millis(expected_hard));
+        assert!(budget.soft < budget.hard);
+        assert!(budget.hard < std::time::Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn reckless_cyclic_uses_five_times_base() {
+        let budget = TimeManagerProfile::Reckless.allocate(60_000, 2_000, Some(40), 10, 1, 0);
+        let available = 60_000u64 - 10 - 250;
+        let base = (available as f64 / 40.0) + 1_500.0;
+        assert_eq!(
+            budget.soft,
+            std::time::Duration::from_millis((base as u64).min(available))
+        );
+        assert_eq!(
+            budget.hard,
+            std::time::Duration::from_millis(((5.0 * base) as u64).min(available))
+        );
+    }
+
+    #[test]
+    fn viridithas_fischer_uses_official_windows() {
+        let budget = TimeManagerProfile::Viridithas.allocate(60_000, 2_000, None, 10, 1, 0);
+        let max_time = (60_000u64 * 600 / 1000).saturating_sub(30);
+        let hard = (60_000u64 * 46 / 100).min(max_time);
+        let computed = (60_000u64 / 24 + 2_000 * 94 / 100).saturating_sub(30);
+        let soft = (computed.min(max_time) * 73 / 100).min(hard);
+        assert_eq!(budget.soft, std::time::Duration::from_millis(soft));
+        assert_eq!(budget.hard, std::time::Duration::from_millis(hard));
+    }
+
+    #[test]
+    fn stockfish_optimum_stays_under_maximum() {
+        let budget = TimeManagerProfile::Stockfish.allocate(60_000, 2_000, None, 10, 1, 0);
+        assert!(budget.soft >= std::time::Duration::from_millis(10));
+        assert!(budget.soft <= budget.hard);
+        assert!(budget.hard <= std::time::Duration::from_millis(60_000));
+        let sudden = TimeManagerProfile::Default.allocate(60_000, 0, None, 10, 1, 0);
+        assert!(sudden.hard <= std::time::Duration::from_millis(60_000 / 3));
+    }
+
+    #[test]
+    fn emergency_clock_returns_minimum_think() {
+        let budget = TimeManagerProfile::Reckless.allocate(80, 0, None, 10, 1, 0);
+        assert_eq!(budget.soft, std::time::Duration::from_millis(10));
+        assert_eq!(budget.hard, std::time::Duration::from_millis(20));
     }
 }
