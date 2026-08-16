@@ -549,9 +549,7 @@ fn execute_plan(
         .copied()
         .filter(|pairing| !config.completed_pairings.contains(pairing))
         .collect();
-    let total = plan
-        .len()
-        .max(matches.len().saturating_add(remaining.len()));
+    let total = plan.len();
     let workers = config
         .match_config
         .concurrency
@@ -1085,6 +1083,10 @@ mod tests {
                 .count(),
             2,
             "serial and parallel pairings must both scope live game keys"
+        );
+        assert!(
+            production.contains("let total = plan.len();"),
+            "planned match count must stay on the locked schedule"
         );
     }
 

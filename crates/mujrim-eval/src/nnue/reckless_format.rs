@@ -515,6 +515,10 @@ impl RecklessAccumulatorState {
         self.stack_index = self.stack_index.saturating_sub(1);
     }
 
+    pub(crate) fn evaluate_search(&mut self, board: &Board, network: &RecklessNetwork) -> i32 {
+        self.evaluate(board, network)
+    }
+
     pub(crate) fn evaluate(&mut self, board: &Board, network: &RecklessNetwork) -> i32 {
         let king_squares = [
             board.king_square(Color::White).index(),

@@ -1,8 +1,11 @@
 //! Helpers for the Tournament Studio Results panel.
 
+use std::path::PathBuf;
+
 use super::tournament_live::{
     LiveTournamentSnapshot, PlayedGame, StandingRow, losses_to_label, standings_from_played,
 };
+use super::tournament_setup::TournamentSetup;
 
 /// How a follow-up field is chosen from a finished event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,14 +86,48 @@ pub fn follow_up_names(standings: &[StandingRow], size: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn follow_up_event_name(current: &str, choice: FollowUpChoice) -> String {
-    let base = current
+pub fn base_event_name(current: &str) -> &str {
+    current
         .split(" · Top ")
         .next()
         .and_then(|name| name.split(" · Final ").next())
         .and_then(|name| name.split(" · Remaining").next())
         .unwrap_or(current)
-        .trim();
+        .trim()
+}
+
+/// Keep clock / hash / threads / format from the finished event. Drop the
+/// previous field and any completed pairings so Start opens a new checkpoint.
+pub fn apply_new_tournament_defaults(setup: &mut TournamentSetup, default_engines: Vec<PathBuf>) {
+    let base = base_event_name(&setup.event);
+    setup.event = if base.is_empty() {
+        "Mujrim Tournament".to_owned()
+    } else {
+        base.to_owned()
+    };
+    setup.selected_engine_paths = default_engines;
+    setup.completed_pairings.clear();
+    setup.sanitize_for_gui();
+}
+
+/// Same event settings as the finished tournament, but only the follow-up field.
+pub fn apply_follow_up_selection(
+    setup: &mut TournamentSetup,
+    event: String,
+    engine_paths: Vec<PathBuf>,
+) {
+    setup.selected_engine_paths = engine_paths;
+    setup.completed_pairings.clear();
+    setup.event = event;
+    setup.concurrency = setup
+        .concurrency
+        .min(super::tournament_setup::detected_safe_games())
+        .max(1);
+    setup.sanitize_for_gui();
+}
+
+pub fn follow_up_event_name(current: &str, choice: FollowUpChoice) -> String {
+    let base = base_event_name(current);
     match choice.kind {
         FollowUpKind::TopHalf => format!("{base} · Top {}", choice.size),
         FollowUpKind::FinalFive | FollowUpKind::FinalThree => {
@@ -289,5 +326,65 @@ mod tests {
             follow_up_event_name("V2 · Top 10 · leftover", follow_up_choices(10)[0]),
             "V2 · Final 5"
         );
+        assert_eq!(base_event_name("V2 · Top 10 · leftover"), "V2");
+    }
+
+    #[test]
+    fn new_tournament_keeps_settings_and_drops_the_old_field() {
+        let mut setup = TournamentSetup {
+            event: "Cup · Final 5".into(),
+            time_control: crate::app_core::tournament_setup::TimeControlPreset::FivePlusThree,
+            hash_mb: 64,
+            engine_threads: 2,
+            games_per_encounter: 2,
+            concurrency: 3,
+            selected_engine_paths: vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")],
+            completed_pairings: vec![mujrim_study::tournament::Pairing {
+                white: 0,
+                black: 1,
+                round: 1,
+            }],
+            ..TournamentSetup::default()
+        };
+        apply_new_tournament_defaults(&mut setup, vec![PathBuf::from("x"), PathBuf::from("y")]);
+        assert_eq!(setup.event, "Cup");
+        assert_eq!(
+            setup.time_control,
+            crate::app_core::tournament_setup::TimeControlPreset::FivePlusThree
+        );
+        assert_eq!(setup.hash_mb, 64);
+        assert_eq!(setup.engine_threads, 2);
+        assert_eq!(setup.games_per_encounter, 2);
+        assert_eq!(setup.concurrency, 3);
+        assert_eq!(
+            setup.selected_engine_paths,
+            [PathBuf::from("x"), PathBuf::from("y")]
+        );
+        assert!(setup.completed_pairings.is_empty());
+    }
+
+    #[test]
+    fn follow_up_selection_keeps_settings_and_only_target_engines() {
+        let mut setup = TournamentSetup {
+            event: "Cup".into(),
+            hash_mb: 96,
+            selected_engine_paths: vec![
+                PathBuf::from("a"),
+                PathBuf::from("b"),
+                PathBuf::from("c"),
+                PathBuf::from("d"),
+            ],
+            ..TournamentSetup::default()
+        };
+        apply_follow_up_selection(
+            &mut setup,
+            "Cup · Final 3".into(),
+            vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")],
+        );
+        assert_eq!(setup.event, "Cup · Final 3");
+        assert_eq!(setup.hash_mb, 96);
+        assert_eq!(setup.selected_engine_paths.len(), 3);
+        assert!(!setup.selected_engine_paths.contains(&PathBuf::from("d")));
+        assert!(setup.completed_pairings.is_empty());
     }
 }

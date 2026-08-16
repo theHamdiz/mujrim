@@ -1999,6 +1999,17 @@ pub fn start_tournament(state: AppState, handles: &AppHandles) {
     begin_tournament(state, handles, false);
 }
 
+pub fn open_tournament_results(state: AppState) {
+    let snap = state.tournament_snapshot.get_untracked();
+    if snap.standings.is_empty() && snap.played_games.is_empty() {
+        state
+            .tournament_status
+            .set("No finished games are available to show.".to_owned());
+        return;
+    }
+    state.show_tournament_results.set(true);
+}
+
 pub fn start_follow_up_tournament(state: AppState, handles: &AppHandles, size: usize) {
     let snap = state.tournament_snapshot.get_untracked();
     let field = crate::app_core::tournament_results::follow_up_field(
@@ -2027,21 +2038,27 @@ pub fn start_follow_up_tournament(state: AppState, handles: &AppHandles, size: u
     }
     let event = crate::app_core::tournament_results::follow_up_event_name(&setup.event, choice);
     state.tournament_setup.update(|setup| {
-        setup.selected_engine_paths = paths;
-        setup.completed_pairings.clear();
-        setup.event = event.clone();
-        setup.concurrency = setup
-            .concurrency
-            .min(crate::app_core::tournament_setup::detected_safe_games())
-            .max(1);
-        setup.sanitize_for_gui();
+        crate::app_core::tournament_results::apply_follow_up_selection(setup, event.clone(), paths);
     });
     state.tournament_event.set(event);
     state.show_tournament_results.set(false);
     state.resume_prompt.set(None);
     state.current_tournament_id.set(None);
     crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
-    begin_tournament(state, handles, false);
+    open_tournament_setup(state, handles);
+}
+
+pub fn open_new_tournament_setup(state: AppState, handles: &AppHandles) {
+    let roster = logic::tournament_engine_roster(&handles.bundled, &handles.catalog.borrow());
+    let defaults = logic::default_tournament_engine_paths(&roster);
+    state.tournament_setup.update(|setup| {
+        crate::app_core::tournament_results::apply_new_tournament_defaults(setup, defaults);
+    });
+    state.show_tournament_results.set(false);
+    state.resume_prompt.set(None);
+    state.current_tournament_id.set(None);
+    crate::app_core::tournament_resume::ActiveTournamentCheckpoint::clear();
+    open_tournament_setup(state, handles);
 }
 
 fn begin_tournament(state: AppState, handles: &AppHandles, resume: bool) {
@@ -2263,6 +2280,27 @@ fn poll_tournament(state: AppState, handles: AppHandles) {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            let gpe = state
+                .tournament_setup
+                .get_untracked()
+                .games_per_encounter
+                .max(guard.games_per_encounter);
+            if guard.running && !guard.cancelled && guard.schedule_complete(gpe) {
+                drop(guard);
+                handle.request_cancel();
+                if let Ok(mut snap) = handle.snapshot.lock() {
+                    snap.finished = true;
+                    snap.running = false;
+                    snap.paused = false;
+                    snap.live_games.clear();
+                    snap.status_line = "Tournament finished.".to_owned();
+                }
+                let done = handle.clone_snapshot();
+                state.tournament_snapshot.set(done.clone());
+                persist_tournament_progress(state, &handles, &done);
+                announce_tournament_outcomes(state, &handles, &done);
+                return false;
+            }
             let running = guard.running;
             let arena_fp = crate::app_core::tournament_live::arena_fingerprint(&guard);
             let heavy_fp = crate::app_core::tournament_live::heavy_fingerprint(&guard);
@@ -2917,6 +2955,7 @@ pub fn load_historical_tournament(state: AppState, handles: &AppHandles, id: Str
     state.screen.set(Screen::Tournaments);
     state.dock_tab.set(DockTab::Results);
     state.dock_open.set(true);
+    state.show_tournament_results.set(false);
     if let Some(game) = state
         .tournament_snapshot
         .get_untracked()
@@ -3451,6 +3490,12 @@ mod tests {
             "next_incremental_uci",
             "fn begin_tournament",
             "fn start_follow_up_tournament",
+            "fn open_new_tournament_setup",
+            "apply_follow_up_selection",
+            "apply_new_tournament_defaults",
+            "open_tournament_setup(state, handles)",
+            "fn open_tournament_results",
+            "schedule_complete",
             "follow_up_choices",
             "follow_up_field",
             "resolve_follow_up_engine_paths",
@@ -3483,12 +3528,33 @@ mod tests {
         let start = production
             .split("pub fn start_tournament")
             .nth(1)
-            .and_then(|rest| rest.split("fn begin_tournament").next())
+            .and_then(|rest| rest.split("pub fn open_tournament_results").next())
             .expect("start");
         assert!(
             start.contains("begin_tournament(state, handles, false)"),
             "Start must open a new event, not the last one"
         );
+        let follow_up = production
+            .split("pub fn start_follow_up_tournament")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn open_new_tournament_setup").next())
+            .expect("follow-up");
+        assert!(
+            follow_up.contains("open_tournament_setup(state, handles)"),
+            "follow-up must open setup instead of starting immediately"
+        );
+        assert!(
+            !follow_up.contains("begin_tournament"),
+            "follow-up must not start an unconfigured event"
+        );
+        let new_event = production
+            .split("pub fn open_new_tournament_setup")
+            .nth(1)
+            .and_then(|rest| rest.split("fn begin_tournament").next())
+            .expect("new tournament");
+        assert!(new_event.contains("apply_new_tournament_defaults"));
+        assert!(new_event.contains("open_tournament_setup(state, handles)"));
+        assert!(!new_event.contains("begin_tournament"));
         let resume = production
             .split("pub fn resume_paused_tournament")
             .nth(1)

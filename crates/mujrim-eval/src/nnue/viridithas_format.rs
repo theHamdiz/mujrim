@@ -16,8 +16,13 @@ use std::path::Path;
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
 
+use super::dirty_threats::{
+    MAX_DIRTY_THREAT_DELTAS, ThreatDelta, ThreatDeltaSink, ThreatSnapshot,
+    collect_snapshot_move_deltas,
+};
 use super::stockfish_format::{
-    PAIR_FEATURES, THREAT_FEATURES, visit_pawn_pair_features, visit_threat_features,
+    AuxFeatureLists, PAIR_FEATURES, THREAT_FEATURES, apply_diff, collect_aux_feature_lists,
+    collect_pawn_pair_aux, visit_pawn_pair_features, visit_threat_delta, visit_threat_features,
 };
 
 pub const KING_BUCKETS: usize = 16;
@@ -219,6 +224,29 @@ fn evaluate_simple_capped(net: &SimpleNetwork, board: &Board, hidden: usize) -> 
 
 #[inline(always)]
 fn finish_simple(net: &SimpleNetwork, us: &[i16], them: &[i16], hidden: usize) -> i32 {
+    let sum = if hidden == HIDDEN {
+        let us: &[i16; HIDDEN] = us[..HIDDEN]
+            .try_into()
+            .expect("Simple us accumulator is 1024");
+        let them: &[i16; HIDDEN] = them[..HIDDEN]
+            .try_into()
+            .expect("Simple them accumulator is 1024");
+        let weights: &[i16] = &net.output_weights;
+        let w0: &[i16; HIDDEN] = weights[..HIDDEN]
+            .try_into()
+            .expect("Simple output weights cover us");
+        let w1: &[i16; HIDDEN] = weights[HIDDEN..HIDDEN * 2]
+            .try_into()
+            .expect("Simple output weights cover them");
+        net.output_bias + super::simd::flatten_pair(us, w0, them, w1)
+    } else {
+        finish_simple_scalar(net, us, them, hidden)
+    };
+    (sum / (QA * QA)) * SCALE / 64
+}
+
+#[inline(always)]
+fn finish_simple_scalar(net: &SimpleNetwork, us: &[i16], them: &[i16], hidden: usize) -> i32 {
     let mut sum = net.output_bias;
     let weights = net.output_weights.as_ptr();
     unsafe {
@@ -227,7 +255,7 @@ fn finish_simple(net: &SimpleNetwork, us: &[i16], them: &[i16], hidden: usize) -
             sum += screlu(*them.get_unchecked(i)) * i32::from(*weights.add(hidden + i));
         }
     }
-    (sum / (QA * QA)) * SCALE / 64
+    sum
 }
 
 #[inline(always)]
@@ -266,11 +294,19 @@ fn evaluate_layered(net: &LayeredNetwork, board: &Board) -> i32 {
     acc_black.copy_from_slice(&net.feature_biases);
     accumulate_layered(net, board, Color::White, &mut acc_white);
     accumulate_layered(net, board, Color::Black, &mut acc_black);
+    finish_layered(net, board, &acc_white, &acc_black)
+}
 
+fn finish_layered(
+    net: &LayeredNetwork,
+    board: &Board,
+    acc_white: &[i16; LAYERED_L1],
+    acc_black: &[i16; LAYERED_L1],
+) -> i32 {
     let (us, them) = if board.side_to_move == Color::White {
-        (&acc_white, &acc_black)
+        (acc_white, acc_black)
     } else {
-        (&acc_black, &acc_white)
+        (acc_black, acc_white)
     };
 
     let mut ft = [0u8; LAYERED_L1];
@@ -286,12 +322,12 @@ fn evaluate_layered(net: &LayeredNetwork, board: &Board) -> i32 {
     let mut l2 = [0.0f32; LAYERED_L3];
     propagate_l2(net, &l1, bucket, &mut l2);
 
-    let mut sum = net.l3_biases[bucket];
-    let l3_base = bucket;
-    for (i, value) in l2.iter().enumerate() {
-        sum += net.l3_weights[i * LAYERED_OUTPUT_BUCKETS + l3_base] * *value;
-    }
-    (sum * LAYERED_SCALE as f32) as i32
+    let l3 = super::layered_forward::dot_f32(
+        &l2,
+        &net.l3_weights[bucket * LAYERED_L3..bucket * LAYERED_L3 + LAYERED_L3],
+        net.l3_biases[bucket],
+    );
+    (l3 * LAYERED_SCALE as f32) as i32
 }
 
 fn evaluate_sandhi(net: &SandhiNetwork, board: &Board) -> i32 {
@@ -301,57 +337,65 @@ fn evaluate_sandhi(net: &SandhiNetwork, board: &Board) -> i32 {
     acc_black.copy_from_slice(&net.feature_biases);
     accumulate_sandhi(net, board, Color::White, &mut acc_white);
     accumulate_sandhi(net, board, Color::Black, &mut acc_black);
+    const ZERO: [i16; SANDHI_L0] = [0; SANDHI_L0];
+    finish_sandhi(net, board, &acc_white, &acc_black, &ZERO, &ZERO)
+}
 
-    let (us, them) = if board.side_to_move == Color::White {
-        (&acc_white, &acc_black)
+fn finish_sandhi(
+    net: &SandhiNetwork,
+    board: &Board,
+    acc_white: &[i16; SANDHI_L0],
+    acc_black: &[i16; SANDHI_L0],
+    aux_white: &[i16; SANDHI_L0],
+    aux_black: &[i16; SANDHI_L0],
+) -> i32 {
+    let (us, them, us_aux, them_aux) = if board.side_to_move == Color::White {
+        (acc_white, acc_black, aux_white, aux_black)
     } else {
-        (&acc_black, &acc_white)
+        (acc_black, acc_white, aux_black, aux_white)
     };
 
-    let mut ft = [0u8; SANDHI_L0];
-    activate_pairwise_sandhi(us, &mut ft[..SANDHI_L0 / 2]);
-    activate_pairwise_sandhi(them, &mut ft[SANDHI_L0 / 2..]);
+    let mut ft = super::layered_forward::Align64::new([0u8; SANDHI_L0]);
+    activate_pairwise_sandhi_sum(us, us_aux, &mut ft.0[..SANDHI_L0 / 2]);
+    activate_pairwise_sandhi_sum(them, them_aux, &mut ft.0[SANDHI_L0 / 2..]);
 
     let pieces = board.all_occupancy().count_ones() as usize;
     let bucket = ((pieces - 2) / 4).min(LAYERED_OUTPUT_BUCKETS - 1);
 
     let mut l1 = [0.0f32; SANDHI_L1];
     let mut sums = [0i32; SANDHI_L1];
-    for (i, input) in ft.iter().enumerate() {
-        if *input == 0 {
-            continue;
-        }
-        let row = i * LAYERED_OUTPUT_BUCKETS * SANDHI_L1 + bucket * SANDHI_L1;
-        let input = i32::from(*input);
-        for (j, sum) in sums.iter_mut().enumerate() {
-            *sum += input * i32::from(net.l1_weights[row + j]);
-        }
-    }
+    let l1_base = bucket * SANDHI_L1 * SANDHI_L0;
+    super::layered_forward::affine_sparse_packed(
+        &ft.0,
+        &net.l1_weights[l1_base..l1_base + SANDHI_L1 * SANDHI_L0],
+        &mut sums,
+    );
     let bias = bucket * SANDHI_L1;
     for (j, sum) in sums.iter().enumerate() {
         l1[j] = hard_swish6((*sum as f32).mul_add(L1_MUL, net.l1_biases[bias + j]));
     }
 
     let mut l2_pre = [0.0f32; SANDHI_L2 * 2];
+    let l2_weight_base = bucket * SANDHI_L1 * (SANDHI_L2 * 2);
     let l2_bias = bucket * SANDHI_L2 * 2;
-    l2_pre.copy_from_slice(&net.l2_biases[l2_bias..l2_bias + SANDHI_L2 * 2]);
-    for (i, input) in l1.iter().enumerate() {
-        let row = i * LAYERED_OUTPUT_BUCKETS * (SANDHI_L2 * 2) + bucket * (SANDHI_L2 * 2);
-        for (j, sum) in l2_pre.iter_mut().enumerate() {
-            *sum = input.mul_add(net.l2_weights[row + j], *sum);
-        }
-    }
+    super::layered_forward::affine_f32(
+        &l1,
+        &net.l2_weights[l2_weight_base..l2_weight_base + SANDHI_L1 * (SANDHI_L2 * 2)],
+        &net.l2_biases[l2_bias..l2_bias + SANDHI_L2 * 2],
+        &mut l2_pre,
+    );
     // Sandhi L2 is square (32→32); the published head adds the L1 residual.
     let mut l2 = [0.0f32; SANDHI_L2];
     for i in 0..SANDHI_L2 {
         l2[i] = hard_swish6(l2_pre[i]).mul_add(l2_pre[i + SANDHI_L2], l1[i]);
     }
 
-    let mut sum = net.l3_biases[bucket];
-    for (i, value) in l2.iter().enumerate() {
-        sum += net.l3_weights[i * LAYERED_OUTPUT_BUCKETS + bucket] * *value;
-    }
-    (sum * LAYERED_SCALE as f32) as i32
+    let l3 = super::layered_forward::dot_f32(
+        &l2,
+        &net.l3_weights[bucket * SANDHI_L2..bucket * SANDHI_L2 + SANDHI_L2],
+        net.l3_biases[bucket],
+    );
+    (l3 * LAYERED_SCALE as f32) as i32
 }
 
 fn accumulate_sandhi(
@@ -375,24 +419,60 @@ fn accumulate_sandhi(
         }
     }
 
+    add_sandhi_aux(net, board, perspective, acc);
+}
+
+fn add_sandhi_aux(
+    net: &SandhiNetwork,
+    board: &Board,
+    perspective: Color,
+    acc: &mut [i16; SANDHI_L0],
+) {
     let pov = perspective.index();
     visit_threat_features(board, pov, |feature| {
-        add_i8(acc, &net.aux_weights, feature * SANDHI_L0);
+        apply_sandhi_aux_feature(acc, net, feature, 1);
     });
     visit_pawn_pair_features(board, pov, |feature| {
-        add_i8(acc, &net.aux_weights, feature * SANDHI_L0);
+        apply_sandhi_aux_feature(acc, net, feature, 1);
     });
 }
 
+fn apply_sandhi_aux_feature(
+    acc: &mut [i16; SANDHI_L0],
+    net: &SandhiNetwork,
+    feature: usize,
+    sign: i16,
+) {
+    super::stockfish_simd::apply_i8_feature_width(acc, &net.aux_weights, feature, sign);
+}
+
+fn apply_sandhi_aux_lists(
+    acc: &mut [i16; SANDHI_L0],
+    net: &SandhiNetwork,
+    lists: &AuxFeatureLists,
+) {
+    if lists.overflowed {
+        return;
+    }
+    for &feature in &lists.threats[..lists.threat_count] {
+        apply_sandhi_aux_feature(acc, net, usize::from(feature), 1);
+    }
+    for &feature in &lists.pairs[..lists.pair_count] {
+        apply_sandhi_aux_feature(acc, net, usize::from(feature), 1);
+    }
+}
+
 #[inline]
-fn activate_pairwise_sandhi(acc: &[i16; SANDHI_L0], out: &mut [u8]) {
+fn activate_pairwise_sandhi_sum(acc: &[i16; SANDHI_L0], aux: &[i16; SANDHI_L0], out: &mut [u8]) {
     let half = SANDHI_L0 / 2;
     debug_assert_eq!(out.len(), half);
-    for i in 0..half {
-        let left = i32::from(acc[i]).clamp(0, QA);
-        let right = i32::from(acc[i + half]).clamp(0, QA);
-        out[i] = ((left * right) >> FT_SHIFT) as u8;
-    }
+    super::stockfish_simd::transform_pair_sum(
+        &acc[..half],
+        &aux[..half],
+        &acc[half..],
+        &aux[half..],
+        out,
+    );
 }
 
 fn accumulate_layered(
@@ -421,11 +501,7 @@ fn accumulate_layered(
 fn activate_pairwise(acc: &[i16; LAYERED_L1], out: &mut [u8]) {
     let half = LAYERED_L1 / 2;
     debug_assert_eq!(out.len(), half);
-    for i in 0..half {
-        let left = i32::from(acc[i]).clamp(0, QA);
-        let right = i32::from(acc[i + half]).clamp(0, QA);
-        out[i] = ((left * right) >> FT_SHIFT) as u8;
-    }
+    super::stockfish_simd::transform_pair(&acc[..half], &acc[half..], out);
 }
 
 fn propagate_l1(
@@ -435,16 +511,12 @@ fn propagate_l1(
     out: &mut [f32; LAYERED_L2],
 ) {
     let mut sums = [0i32; LAYERED_L2];
-    for (i, input) in inputs.iter().enumerate() {
-        if *input == 0 {
-            continue;
-        }
-        let row = i * LAYERED_OUTPUT_BUCKETS * LAYERED_L2 + bucket * LAYERED_L2;
-        let input = i32::from(*input);
-        for (j, sum) in sums.iter_mut().enumerate() {
-            *sum += input * i32::from(net.l1_weights[row + j]);
-        }
-    }
+    let l1_base = bucket * LAYERED_L2 * LAYERED_L1;
+    super::layered_forward::affine_sparse_packed(
+        inputs,
+        &net.l1_weights[l1_base..l1_base + LAYERED_L2 * LAYERED_L1],
+        &mut sums,
+    );
     let bias = bucket * LAYERED_L2;
     for (j, sum) in sums.iter().enumerate() {
         let pre = (*sum as f32).mul_add(L1_MUL, net.l1_biases[bias + j]);
@@ -459,14 +531,14 @@ fn propagate_l2(
     out: &mut [f32; LAYERED_L3],
 ) {
     let mut sums = [0.0f32; LAYERED_L3 * 2];
+    let weight_base = bucket * LAYERED_L2 * (LAYERED_L3 * 2);
     let bias = bucket * LAYERED_L3 * 2;
-    sums.copy_from_slice(&net.l2_biases[bias..bias + LAYERED_L3 * 2]);
-    for (i, input) in inputs.iter().enumerate() {
-        let row = i * LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2) + bucket * (LAYERED_L3 * 2);
-        for (j, sum) in sums.iter_mut().enumerate() {
-            *sum = input.mul_add(net.l2_weights[row + j], *sum);
-        }
-    }
+    super::layered_forward::affine_f32(
+        inputs,
+        &net.l2_weights[weight_base..weight_base + LAYERED_L2 * (LAYERED_L3 * 2)],
+        &net.l2_biases[bias..bias + LAYERED_L3 * 2],
+        &mut sums,
+    );
     for i in 0..LAYERED_L3 {
         out[i] = hard_swish6(sums[i]) * sums[i + LAYERED_L3];
     }
@@ -503,29 +575,23 @@ fn feature_index(
 }
 
 #[inline(always)]
-fn add_i8(acc: &mut [i16], weights: &[i8], base: usize) {
-    let len = acc.len();
-    debug_assert!(base + len <= weights.len());
-    let acc_ptr = acc.as_mut_ptr();
-    let weight_ptr = unsafe { weights.as_ptr().add(base) };
-    for i in 0..len {
-        unsafe {
-            *acc_ptr.add(i) = (*acc_ptr.add(i)).wrapping_add(i16::from(*weight_ptr.add(i)));
-        }
-    }
+fn add_i16(acc: &mut [i16], weights: &[i16], base: usize) {
+    let width = acc.len();
+    debug_assert!(width > 0 && base.is_multiple_of(width));
+    super::stockfish_simd::apply_i16_feature_width(acc, weights, base / width, 1);
 }
 
-#[inline(always)]
-fn add_i16(acc: &mut [i16], weights: &[i16], base: usize) {
-    let len = acc.len();
-    debug_assert!(base + len <= weights.len());
-    let acc_ptr = acc.as_mut_ptr();
-    let weight_ptr = unsafe { weights.as_ptr().add(base) };
-    for i in 0..len {
-        unsafe {
-            *acc_ptr.add(i) = (*acc_ptr.add(i)).wrapping_add(*weight_ptr.add(i));
+fn transpose_viri_l1(src: &[i8], inputs: usize, outputs: usize) -> Box<[i8]> {
+    let mut dst = vec![0i8; LAYERED_OUTPUT_BUCKETS * outputs * inputs].into_boxed_slice();
+    for input in 0..inputs {
+        for bucket in 0..LAYERED_OUTPUT_BUCKETS {
+            for output in 0..outputs {
+                dst[bucket * outputs * inputs + output * inputs + input] =
+                    src[input * LAYERED_OUTPUT_BUCKETS * outputs + bucket * outputs + output];
+            }
         }
     }
+    dst
 }
 
 #[inline(always)]
@@ -576,23 +642,39 @@ fn parse_layered(bytes: &[u8]) -> Result<LayeredNetwork, String> {
         KING_BUCKETS * LAYERED_INPUT * LAYERED_L1,
     )?;
     let feature_biases = read_i16s(bytes, &mut offset, LAYERED_L1)?;
-    let l1_weights = read_i8s(
+    let l1_src = read_i8s(
         bytes,
         &mut offset,
         LAYERED_L1 * LAYERED_OUTPUT_BUCKETS * LAYERED_L2,
     )?;
+    let l1_weights = super::layered_forward::pack_nnz_buckets(
+        &transpose_viri_l1(&l1_src, LAYERED_L1, LAYERED_L2),
+        LAYERED_OUTPUT_BUCKETS,
+        LAYERED_L1,
+        LAYERED_L2,
+    );
     let l1_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS * LAYERED_L2)?;
-    let l2_weights = read_f32s(
-        bytes,
-        &mut offset,
-        LAYERED_L2 * LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2),
-    )?;
+    let l2_weights = super::layered_forward::pack_f32_buckets(
+        &read_f32s(
+            bytes,
+            &mut offset,
+            LAYERED_L2 * LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2),
+        )?,
+        LAYERED_OUTPUT_BUCKETS,
+        LAYERED_L2,
+        LAYERED_L3 * 2,
+    );
     let l2_biases = read_f32s(
         bytes,
         &mut offset,
         LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2),
     )?;
-    let l3_weights = read_f32s(bytes, &mut offset, LAYERED_L3 * LAYERED_OUTPUT_BUCKETS)?;
+    let l3_weights = super::layered_forward::pack_f32_buckets(
+        &read_f32s(bytes, &mut offset, LAYERED_L3 * LAYERED_OUTPUT_BUCKETS)?,
+        LAYERED_OUTPUT_BUCKETS,
+        LAYERED_L3,
+        1,
+    );
     let l3_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS)?;
     debug_assert_eq!(offset, layered_velarised_size());
     Ok(LayeredNetwork {
@@ -612,19 +694,35 @@ fn parse_sandhi(bytes: &[u8]) -> Result<SandhiNetwork, String> {
     let aux_weights = read_i8s(bytes, &mut offset, SANDHI_AUX * SANDHI_L0)?;
     let feature_weights = read_i16s(bytes, &mut offset, KING_BUCKETS * LAYERED_INPUT * SANDHI_L0)?;
     let feature_biases = read_i16s(bytes, &mut offset, SANDHI_L0)?;
-    let l1_weights = read_i8s(
+    let l1_src = read_i8s(
         bytes,
         &mut offset,
         SANDHI_L0 * LAYERED_OUTPUT_BUCKETS * SANDHI_L1,
     )?;
+    let l1_weights = super::layered_forward::pack_nnz_buckets(
+        &transpose_viri_l1(&l1_src, SANDHI_L0, SANDHI_L1),
+        LAYERED_OUTPUT_BUCKETS,
+        SANDHI_L0,
+        SANDHI_L1,
+    );
     let l1_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS * SANDHI_L1)?;
-    let l2_weights = read_f32s(
-        bytes,
-        &mut offset,
-        SANDHI_L1 * LAYERED_OUTPUT_BUCKETS * (SANDHI_L2 * 2),
-    )?;
+    let l2_weights = super::layered_forward::pack_f32_buckets(
+        &read_f32s(
+            bytes,
+            &mut offset,
+            SANDHI_L1 * LAYERED_OUTPUT_BUCKETS * (SANDHI_L2 * 2),
+        )?,
+        LAYERED_OUTPUT_BUCKETS,
+        SANDHI_L1,
+        SANDHI_L2 * 2,
+    );
     let l2_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS * (SANDHI_L2 * 2))?;
-    let l3_weights = read_f32s(bytes, &mut offset, SANDHI_L2 * LAYERED_OUTPUT_BUCKETS)?;
+    let l3_weights = super::layered_forward::pack_f32_buckets(
+        &read_f32s(bytes, &mut offset, SANDHI_L2 * LAYERED_OUTPUT_BUCKETS)?,
+        LAYERED_OUTPUT_BUCKETS,
+        SANDHI_L2,
+        1,
+    );
     let l3_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS)?;
     debug_assert_eq!(offset, sandhi_size());
     Ok(SandhiNetwork {
@@ -1113,16 +1211,550 @@ fn apply_simple_move_delta(
     }
 }
 
+#[derive(Clone, Copy)]
+struct WideFrameMeta {
+    kings: [u8; 2],
+    pending_has_move: bool,
+    pending_move: Move,
+    pending_mover: u8,
+    pending_captured: u8,
+    hash: u64,
+    accurate: bool,
+    pending_null: bool,
+}
+
+impl Default for WideFrameMeta {
+    fn default() -> Self {
+        Self {
+            kings: [u8::MAX; 2],
+            pending_has_move: false,
+            pending_move: Move::quiet(Square::A1, Square::A1),
+            pending_mover: u8::MAX,
+            pending_captured: u8::MAX,
+            hash: 0,
+            accurate: false,
+            pending_null: false,
+        }
+    }
+}
+
+struct WideAccumulatorState<const H: usize> {
+    values: Box<[[[i16; H]; 2]]>,
+    meta: Box<[WideFrameMeta]>,
+    index: usize,
+}
+
+impl<const H: usize> WideAccumulatorState<H> {
+    fn new() -> Self {
+        Self {
+            values: vec![[[0; H]; 2]; MAX_PLY].into_boxed_slice(),
+            meta: (0..MAX_PLY)
+                .map(|_| WideFrameMeta::default())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            index: 0,
+        }
+    }
+
+    fn push_move(&mut self, board: &Board, mv: Move) {
+        assert!(
+            self.index + 1 < self.meta.len(),
+            "Viridithas NNUE stack exhausted"
+        );
+        self.index += 1;
+        let meta = &mut self.meta[self.index];
+        meta.accurate = false;
+        meta.pending_null = false;
+        meta.pending_has_move = true;
+        meta.pending_move = mv;
+        meta.pending_mover = board.piece_ids()[mv.from.index()];
+        meta.pending_captured = board.piece_ids()[mv.to.index()];
+        meta.hash = 0;
+    }
+
+    fn push_null(&mut self) {
+        assert!(
+            self.index + 1 < self.meta.len(),
+            "Viridithas NNUE stack exhausted"
+        );
+        let next = self.index + 1;
+        let current_meta = self.meta[self.index];
+        let current_values = self.values[self.index];
+        self.meta[next] = current_meta;
+        self.values[next] = current_values;
+        self.meta[next].pending_has_move = false;
+        self.meta[next].pending_null = true;
+        self.index = next;
+    }
+
+    fn pop(&mut self) {
+        assert!(self.index != 0, "cannot pop the root Viridithas NNUE frame");
+        self.index -= 1;
+    }
+
+    fn clear(&mut self) {
+        self.index = 0;
+        self.meta[0].accurate = false;
+        self.meta[0].pending_null = false;
+    }
+
+    fn ensure_pieces(&mut self, board: &Board, weights: &[i16], biases: &[i16], trusted: bool) {
+        if self.meta[self.index].accurate && self.meta[self.index].pending_null {
+            self.meta[self.index].hash = board.hash;
+            self.meta[self.index].pending_null = false;
+        }
+        if self.meta[self.index].accurate && (trusted || self.meta[self.index].hash == board.hash) {
+            return;
+        }
+        if self.index != 0 && self.meta[self.index - 1].accurate {
+            self.update_from_parent(board, weights, biases);
+        } else {
+            self.refresh(board, weights, biases);
+        }
+    }
+
+    fn refresh(&mut self, board: &Board, weights: &[i16], biases: &[i16]) {
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            refresh_wide_perspective(
+                &mut self.values[self.index][pov],
+                weights,
+                biases,
+                board,
+                kings[pov],
+                side,
+            );
+        }
+        let meta = &mut self.meta[self.index];
+        meta.kings = [kings[0] as u8, kings[1] as u8];
+        meta.hash = board.hash;
+        meta.accurate = true;
+        meta.pending_has_move = false;
+        meta.pending_null = false;
+    }
+
+    fn update_from_parent(&mut self, board: &Board, weights: &[i16], biases: &[i16]) {
+        let current = self.index;
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        let parent_kings = [
+            usize::from(self.meta[current - 1].kings[0]),
+            usize::from(self.meta[current - 1].kings[1]),
+        ];
+        let needs_refresh = [
+            wide_needs_refresh(parent_kings[0], kings[0], Color::White),
+            wide_needs_refresh(parent_kings[1], kings[1], Color::Black),
+        ];
+        let pending_has_move = self.meta[current].pending_has_move;
+        let pending_move = self.meta[current].pending_move;
+        let pending_mover = self.meta[current].pending_mover;
+        let pending_captured = self.meta[current].pending_captured;
+        let parent_values = self.values[current - 1];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            if needs_refresh[pov] {
+                refresh_wide_perspective(
+                    &mut self.values[current][pov],
+                    weights,
+                    biases,
+                    board,
+                    kings[pov],
+                    side,
+                );
+                continue;
+            }
+            if pending_has_move {
+                apply_wide_move_delta_from(
+                    &mut self.values[current][pov],
+                    &parent_values[pov],
+                    weights,
+                    kings[pov],
+                    side,
+                    pending_move,
+                    pending_mover,
+                    pending_captured,
+                );
+            } else {
+                self.values[current][pov] = parent_values[pov];
+            }
+        }
+        let meta = &mut self.meta[current];
+        meta.kings = [kings[0] as u8, kings[1] as u8];
+        meta.hash = board.hash;
+        meta.accurate = true;
+        meta.pending_has_move = false;
+        meta.pending_null = false;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SandhiAuxFrame {
+    values: [[i16; SANDHI_L0]; 2],
+    lists: [AuxFeatureLists; 2],
+    threat_deltas: [ThreatDelta; MAX_DIRTY_THREAT_DELTAS],
+    threat_delta_count: usize,
+    threat_overflowed: bool,
+    pending_threats: Option<ThreatSnapshot>,
+    pending_move: Option<Move>,
+    pawns_before: [u64; 2],
+    kings: [u8; 2],
+    hash: u64,
+    accurate: bool,
+    pending_null: bool,
+}
+
+impl Default for SandhiAuxFrame {
+    fn default() -> Self {
+        Self {
+            values: [[0; SANDHI_L0]; 2],
+            lists: [AuxFeatureLists::default(); 2],
+            threat_deltas: [ThreatDelta::default(); MAX_DIRTY_THREAT_DELTAS],
+            threat_delta_count: 0,
+            threat_overflowed: false,
+            pending_threats: None,
+            pending_move: None,
+            pawns_before: [0; 2],
+            kings: [u8::MAX; 2],
+            hash: 0,
+            accurate: false,
+            pending_null: false,
+        }
+    }
+}
+
+impl ThreatDeltaSink for SandhiAuxFrame {
+    #[inline(always)]
+    fn push_threat_delta(&mut self, delta: ThreatDelta) {
+        if self.threat_delta_count < self.threat_deltas.len() {
+            self.threat_deltas[self.threat_delta_count] = delta;
+            self.threat_delta_count += 1;
+        } else {
+            self.threat_overflowed = true;
+        }
+    }
+}
+
+struct SandhiAuxState {
+    frames: Box<[SandhiAuxFrame]>,
+    index: usize,
+}
+
+impl SandhiAuxState {
+    fn new() -> Self {
+        Self {
+            frames: vec![SandhiAuxFrame::default(); MAX_PLY].into_boxed_slice(),
+            index: 0,
+        }
+    }
+
+    fn push_move(&mut self, board: &Board, mv: Move) {
+        assert!(
+            self.index + 1 < self.frames.len(),
+            "Viridithas Sandhi aux stack exhausted"
+        );
+        self.index += 1;
+        let frame = &mut self.frames[self.index];
+        frame.accurate = false;
+        frame.pending_null = false;
+        frame.hash = 0;
+        frame.threat_delta_count = 0;
+        frame.threat_overflowed = false;
+        frame.pending_move = Some(mv);
+        frame.pawns_before = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
+        frame.pending_threats = Some(ThreatSnapshot::from_board(board));
+    }
+
+    fn push_null(&mut self) {
+        assert!(
+            self.index + 1 < self.frames.len(),
+            "Viridithas Sandhi aux stack exhausted"
+        );
+        let next = self.index + 1;
+        self.frames[next] = self.frames[self.index];
+        self.frames[next].pending_null = true;
+        self.frames[next].pending_threats = None;
+        self.frames[next].pending_move = None;
+        self.index = next;
+    }
+
+    fn pop(&mut self) {
+        assert!(
+            self.index != 0,
+            "cannot pop the root Viridithas Sandhi aux frame"
+        );
+        self.index -= 1;
+    }
+
+    fn clear(&mut self) {
+        self.index = 0;
+        self.frames[0].accurate = false;
+        self.frames[0].pending_null = false;
+    }
+
+    fn ensure(&mut self, board: &Board, net: &SandhiNetwork, trusted: bool) {
+        if self.frames[self.index].accurate && self.frames[self.index].pending_null {
+            self.frames[self.index].hash = board.hash;
+            self.frames[self.index].pending_null = false;
+        }
+        if self.frames[self.index].accurate
+            && (trusted || self.frames[self.index].hash == board.hash)
+        {
+            return;
+        }
+        if self.index != 0 && self.frames[self.index - 1].accurate {
+            self.update_from_parent(board, net);
+        } else {
+            self.refresh(board, net);
+        }
+    }
+
+    fn refresh(&mut self, board: &Board, net: &SandhiNetwork) {
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            self.refresh_pov(board, net, pov, side);
+        }
+        let frame = &mut self.frames[self.index];
+        frame.kings = [kings[0] as u8, kings[1] as u8];
+        frame.hash = board.hash;
+        frame.accurate = true;
+        frame.pending_threats = None;
+        frame.pending_move = None;
+        frame.pending_null = false;
+    }
+
+    fn refresh_pov(&mut self, board: &Board, net: &SandhiNetwork, pov: usize, side: Color) {
+        let lists = collect_aux_feature_lists(board, side.index());
+        let mut aux = [0i16; SANDHI_L0];
+        if lists.overflowed {
+            add_sandhi_aux(net, board, side, &mut aux);
+        } else {
+            apply_sandhi_aux_lists(&mut aux, net, &lists);
+        }
+        self.frames[self.index].values[pov] = aux;
+        self.frames[self.index].lists[pov] = lists;
+    }
+
+    fn update_from_parent(&mut self, board: &Board, net: &SandhiNetwork) {
+        let current = self.index;
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        let parent_kings = [
+            usize::from(self.frames[current - 1].kings[0]),
+            usize::from(self.frames[current - 1].kings[1]),
+        ];
+        let needs_refresh = [
+            wide_needs_refresh(parent_kings[0], kings[0], Color::White),
+            wide_needs_refresh(parent_kings[1], kings[1], Color::Black),
+        ];
+        {
+            let frame = &mut self.frames[current];
+            if let (Some(snapshot), Some(mv)) = (frame.pending_threats.take(), frame.pending_move) {
+                collect_snapshot_move_deltas(frame, snapshot, mv);
+            }
+        }
+        let parent_values = self.frames[current - 1].values;
+        let parent_lists = self.frames[current - 1].lists;
+        let threat_overflowed = self.frames[current].threat_overflowed;
+        let pawns_before = self.frames[current].pawns_before;
+        let pawns_after = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
+        let deltas = self.frames[current].threat_deltas;
+        let delta_count = self.frames[current].threat_delta_count;
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            if needs_refresh[pov] || parent_lists[pov].overflowed || threat_overflowed {
+                self.refresh_pov(board, net, pov, side);
+                continue;
+            }
+            let mut aux = parent_values[pov];
+            for &delta in &deltas[..delta_count] {
+                visit_threat_delta(delta, kings[pov], pov, |feature, sign| {
+                    apply_sandhi_aux_feature(&mut aux, net, feature, sign);
+                });
+            }
+            if pawns_before != pawns_after {
+                let old = collect_pawn_pair_aux(pawns_before, kings[pov], pov);
+                let new = collect_pawn_pair_aux(pawns_after, kings[pov], pov);
+                if old.overflowed || new.overflowed {
+                    self.refresh_pov(board, net, pov, side);
+                    continue;
+                }
+                apply_diff(
+                    &old.pairs[..old.pair_count],
+                    &new.pairs[..new.pair_count],
+                    |feature, sign| apply_sandhi_aux_feature(&mut aux, net, feature, sign),
+                );
+            }
+            self.frames[current].values[pov] = aux;
+            self.frames[current].lists[pov].overflowed = false;
+        }
+        let frame = &mut self.frames[current];
+        frame.kings = [kings[0] as u8, kings[1] as u8];
+        frame.hash = board.hash;
+        frame.accurate = true;
+        frame.pending_move = None;
+        frame.pending_null = false;
+    }
+}
+
+fn wide_needs_refresh(old_king: usize, new_king: usize, pov: Color) -> bool {
+    king_bucket(relative_square(pov, old_king)) != king_bucket(relative_square(pov, new_king))
+        || (old_king % 8 >= 4) != (new_king % 8 >= 4)
+}
+
+fn refresh_wide_perspective<const H: usize>(
+    acc: &mut [i16; H],
+    weights: &[i16],
+    biases: &[i16],
+    board: &Board,
+    king: usize,
+    pov: Color,
+) {
+    acc.copy_from_slice(biases);
+    for piece in Piece::ALL {
+        for color in [Color::White, Color::Black] {
+            let mut bb = board.piece_bb(piece, color);
+            while bb != 0 {
+                let sq = bb.trailing_zeros() as usize;
+                bb &= bb - 1;
+                apply_wide_feature(acc, weights, king, pov, piece, color, sq, 1);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_wide_feature<const H: usize>(
+    acc: &mut [i16; H],
+    weights: &[i16],
+    king: usize,
+    pov: Color,
+    piece: Piece,
+    piece_color: Color,
+    sq: usize,
+    sign: i16,
+) {
+    let bucket = king_bucket(relative_square(pov, king));
+    let feat = bucket * LAYERED_INPUT + feature_index(pov, king, piece, piece_color, sq);
+    super::stockfish_simd::apply_i16_feature_width(acc, weights, feat, sign);
+}
+
+fn wide_feature(king: usize, pov: Color, piece: Piece, piece_color: Color, sq: usize) -> usize {
+    let bucket = king_bucket(relative_square(pov, king));
+    bucket * LAYERED_INPUT + feature_index(pov, king, piece, piece_color, sq)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_wide_move_delta_from<const H: usize>(
+    dst: &mut [i16; H],
+    src: &[i16; H],
+    weights: &[i16],
+    king: usize,
+    side: Color,
+    mv: Move,
+    mover: u8,
+    captured: u8,
+) {
+    debug_assert_ne!(mover, u8::MAX);
+    let mover_piece = Piece::from_index(usize::from(mover) / 2).expect("mover piece is valid");
+    let mover_color = if mover & 1 == 0 {
+        Color::White
+    } else {
+        Color::Black
+    };
+    let resulting = mv.promotion.unwrap_or(mover_piece);
+    let mut adds = [0; 4];
+    let mut subs = [0; 4];
+    let mut add_len = 0;
+    let mut sub_len = 0;
+    subs[sub_len] = wide_feature(king, side, mover_piece, mover_color, mv.from.index());
+    sub_len += 1;
+    adds[add_len] = wide_feature(king, side, resulting, mover_color, mv.to.index());
+    add_len += 1;
+    if mv.is_capture() && mv.flag != MoveFlag::EnPassant {
+        subs[sub_len] = wide_feature(
+            king,
+            side,
+            Piece::from_index(usize::from(captured) / 2).expect("captured piece is valid"),
+            if captured & 1 == 0 {
+                Color::White
+            } else {
+                Color::Black
+            },
+            mv.to.index(),
+        );
+        sub_len += 1;
+    } else if mv.flag == MoveFlag::EnPassant {
+        subs[sub_len] = wide_feature(
+            king,
+            side,
+            Piece::Pawn,
+            mover_color.opponent(),
+            Square::from_file_rank(mv.to.file(), mv.from.rank()).index(),
+        );
+        sub_len += 1;
+    } else if mv.is_castling() {
+        let (rook_from, rook_to) = match (mover_color, mv.flag) {
+            (Color::White, MoveFlag::KingCastle) => (Square::H1.index(), Square::F1.index()),
+            (Color::White, MoveFlag::QueenCastle) => (Square::A1.index(), Square::D1.index()),
+            (Color::Black, MoveFlag::KingCastle) => (Square::H8.index(), Square::F8.index()),
+            (Color::Black, MoveFlag::QueenCastle) => (Square::A8.index(), Square::D8.index()),
+            _ => unreachable!(),
+        };
+        subs[sub_len] = wide_feature(king, side, Piece::Rook, mover_color, rook_from);
+        sub_len += 1;
+        adds[add_len] = wide_feature(king, side, Piece::Rook, mover_color, rook_to);
+        add_len += 1;
+    }
+    super::stockfish_simd::apply_i16_from_width(
+        dst,
+        src,
+        weights,
+        &adds[..add_len],
+        &subs[..sub_len],
+    );
+}
+
 pub(crate) struct ViridithasAccumulatorState {
     simple: Option<SimpleAccumulatorState>,
+    layered: Option<WideAccumulatorState<LAYERED_L1>>,
+    sandhi: Option<WideAccumulatorState<SANDHI_L0>>,
+    sandhi_aux: Option<SandhiAuxState>,
 }
 
 impl ViridithasAccumulatorState {
     pub(crate) fn for_network(network: &ViridithasNetwork) -> Self {
-        Self {
-            simple: match network {
-                ViridithasNetwork::Simple(net) => Some(SimpleAccumulatorState::new(net.hidden)),
-                ViridithasNetwork::Layered(_) | ViridithasNetwork::Sandhi(_) => None,
+        match network {
+            ViridithasNetwork::Simple(net) => Self {
+                simple: Some(SimpleAccumulatorState::new(net.hidden)),
+                layered: None,
+                sandhi: None,
+                sandhi_aux: None,
+            },
+            ViridithasNetwork::Layered(_) => Self {
+                simple: None,
+                layered: Some(WideAccumulatorState::new()),
+                sandhi: None,
+                sandhi_aux: None,
+            },
+            ViridithasNetwork::Sandhi(_) => Self {
+                simple: None,
+                layered: None,
+                sandhi: Some(WideAccumulatorState::new()),
+                sandhi_aux: Some(SandhiAuxState::new()),
             },
         }
     }
@@ -1130,31 +1762,92 @@ impl ViridithasAccumulatorState {
     pub(crate) fn push_move(&mut self, board: &Board, mv: Move) {
         if let Some(state) = &mut self.simple {
             state.push_move(board, mv);
+        } else if let Some(state) = &mut self.layered {
+            state.push_move(board, mv);
+        } else if let Some(state) = &mut self.sandhi {
+            state.push_move(board, mv);
+            self.sandhi_aux
+                .as_mut()
+                .expect("sandhi aux state")
+                .push_move(board, mv);
         }
     }
 
     pub(crate) fn push_null(&mut self) {
         if let Some(state) = &mut self.simple {
             state.push_null();
+        } else if let Some(state) = &mut self.layered {
+            state.push_null();
+        } else if let Some(state) = &mut self.sandhi {
+            state.push_null();
+            self.sandhi_aux
+                .as_mut()
+                .expect("sandhi aux state")
+                .push_null();
         }
     }
 
     pub(crate) fn pop(&mut self) {
         if let Some(state) = &mut self.simple {
             state.pop();
+        } else if let Some(state) = &mut self.layered {
+            state.pop();
+        } else if let Some(state) = &mut self.sandhi {
+            state.pop();
+            self.sandhi_aux.as_mut().expect("sandhi aux state").pop();
         }
     }
 
     pub(crate) fn clear(&mut self) {
         if let Some(state) = &mut self.simple {
             state.clear();
+        } else if let Some(state) = &mut self.layered {
+            state.clear();
+        } else if let Some(state) = &mut self.sandhi {
+            state.clear();
+            self.sandhi_aux.as_mut().expect("sandhi aux state").clear();
         }
     }
 
     pub(crate) fn evaluate(&mut self, board: &Board, network: &ViridithasNetwork) -> i32 {
-        match (network, self.simple.as_mut()) {
-            (ViridithasNetwork::Simple(net), Some(state)) => state.evaluate(board, net),
-            _ => network.evaluate(board),
+        self.evaluate_inner(board, network, false)
+    }
+
+    pub(crate) fn evaluate_search(&mut self, board: &Board, network: &ViridithasNetwork) -> i32 {
+        self.evaluate_inner(board, network, true)
+    }
+
+    fn evaluate_inner(&mut self, board: &Board, network: &ViridithasNetwork, trusted: bool) -> i32 {
+        match network {
+            ViridithasNetwork::Simple(net) => self
+                .simple
+                .as_mut()
+                .expect("simple Viridithas state")
+                .evaluate(board, net),
+            ViridithasNetwork::Layered(net) => {
+                let state = self.layered.as_mut().expect("layered Viridithas state");
+                state.ensure_pieces(board, &net.feature_weights, &net.feature_biases, trusted);
+                finish_layered(
+                    net,
+                    board,
+                    &state.values[state.index][0],
+                    &state.values[state.index][1],
+                )
+            }
+            ViridithasNetwork::Sandhi(net) => {
+                let state = self.sandhi.as_mut().expect("sandhi Viridithas state");
+                let aux = self.sandhi_aux.as_mut().expect("sandhi aux state");
+                state.ensure_pieces(board, &net.feature_weights, &net.feature_biases, trusted);
+                aux.ensure(board, net, trusted);
+                finish_sandhi(
+                    net,
+                    board,
+                    &state.values[state.index][0],
+                    &state.values[state.index][1],
+                    &aux.frames[aux.index].values[0],
+                    &aux.frames[aux.index].values[1],
+                )
+            }
         }
     }
 }
@@ -1446,6 +2139,33 @@ mod tests {
     }
 
     #[test]
+    fn finish_simple_simd_matches_scalar_at_production_width() {
+        let mut us = vec![0i16; HIDDEN];
+        let mut them = vec![0i16; HIDDEN];
+        let mut output_weights = vec![0i16; HIDDEN * 2];
+        for index in 0..HIDDEN {
+            us[index] = (index as i16).wrapping_mul(3).wrapping_sub(400);
+            them[index] = 220_i16.wrapping_sub(index as i16);
+            output_weights[index] = (index % 17) as i16 - 8;
+            output_weights[HIDDEN + index] = (index % 13) as i16 - 6;
+        }
+        let net = SimpleNetwork {
+            hidden: HIDDEN,
+            features_per_bucket: FEATURES,
+            feature_weights: Box::new([]),
+            feature_biases: vec![0i16; HIDDEN].into_boxed_slice(),
+            output_weights: output_weights.into_boxed_slice(),
+            output_bias: 11,
+        };
+        let simd = finish_simple(&net, &us, &them, HIDDEN);
+        let scalar = {
+            let sum = finish_simple_scalar(&net, &us, &them, HIDDEN);
+            (sum / (QA * QA)) * SCALE / 64
+        };
+        assert_eq!(simd, scalar);
+    }
+
+    #[test]
     fn simple_incremental_matches_scratch_after_moves_and_pop() {
         types::init();
         let net = patterned_simple();
@@ -1487,5 +2207,236 @@ mod tests {
         state.push_move(&board, mv);
         board.make_move(mv);
         assert_simple_matches(&mut state, &net, &board);
+    }
+
+    #[test]
+    fn viri_l1_affine_transpose_matches_published_layout() {
+        let inputs = 4;
+        let outputs = 3;
+        let mut src = vec![0i8; inputs * LAYERED_OUTPUT_BUCKETS * outputs];
+        for (index, weight) in src.iter_mut().enumerate() {
+            *weight = (index % 13) as i8 - 6;
+        }
+        let affine = transpose_viri_l1(&src, inputs, outputs);
+        let bucket = 2;
+        let input = 1u8;
+        for output in 0..outputs {
+            let expected = i32::from(input)
+                * i32::from(src[LAYERED_OUTPUT_BUCKETS * outputs + bucket * outputs + output]);
+            let got = i32::from(input)
+                * i32::from(affine[bucket * outputs * inputs + output * inputs + 1]);
+            assert_eq!(got, expected, "output {output}");
+        }
+    }
+
+    #[test]
+    fn simd_add_i16_matches_scalar_wrapping_add() {
+        let mut acc = [3i16; 32];
+        let weights: Vec<i16> = (0..32).map(|i| i as i16 - 16).collect();
+        add_i16(&mut acc, &weights, 0);
+        for i in 0..32 {
+            assert_eq!(acc[i], 3i16.wrapping_add(weights[i]));
+        }
+    }
+
+    fn try_load_layered() -> Option<Box<ViridithasNetwork>> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidates = [
+            workspace.join("nnue/velarised-2-b800.nnue.zst"),
+            workspace.join("dist/nnue/velarised-2-b800.nnue.zst"),
+        ];
+        let path = candidates.iter().find(|path| path.is_file())?;
+        let net = load(path).ok()?;
+        matches!(*net, ViridithasNetwork::Layered(_)).then_some(net)
+    }
+
+    fn try_load_sandhi() -> Option<Box<ViridithasNetwork>> {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidates = [
+            workspace.join("nnue/sandhi-s2-b200.nnue.zst"),
+            workspace.join("nnue/viri_default.nnue.zst"),
+            workspace.join("dist/nnue/viri_default.nnue.zst"),
+        ];
+        for path in candidates {
+            if !path.is_file() {
+                continue;
+            }
+            if let Ok(net) = load(&path)
+                && matches!(*net, ViridithasNetwork::Sandhi(_))
+            {
+                return Some(net);
+            }
+        }
+        None
+    }
+
+    fn assert_wide_matches(
+        state: &mut ViridithasAccumulatorState,
+        net: &ViridithasNetwork,
+        board: &Board,
+    ) {
+        assert_eq!(state.evaluate(board, net), net.evaluate(board));
+        if let ViridithasNetwork::Sandhi(sandhi) = net {
+            let aux = state.sandhi_aux.as_ref().expect("sandhi aux state");
+            for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+                let mut expected = [0i16; SANDHI_L0];
+                add_sandhi_aux(sandhi, board, side, &mut expected);
+                assert_eq!(
+                    aux.frames[aux.index].values[pov], expected,
+                    "sandhi aux mismatch for {side:?}"
+                );
+            }
+        }
+    }
+
+    fn play_and_check(net: &ViridithasNetwork) {
+        let mut state = ViridithasAccumulatorState::for_network(net);
+        let mut board = Board::new();
+        assert_wide_matches(&mut state, net, &board);
+        let mut last_move = None;
+        for uci in ["e2e4", "e7e5", "g1f3", "b8c6"] {
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|mv| mv.to_uci() == uci)
+                .copied()
+                .expect("test move is legal");
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            last_move = Some(mv);
+            assert_wide_matches(&mut state, net, &board);
+        }
+        state.pop();
+        board.unmake_move(last_move.expect("at least one move was made"));
+        assert_wide_matches(&mut state, net, &board);
+    }
+
+    #[test]
+    fn layered_incremental_matches_scratch_after_moves() {
+        types::init();
+        let Some(net) = try_load_layered() else {
+            return;
+        };
+        play_and_check(&net);
+    }
+
+    #[test]
+    fn sandhi_incremental_matches_scratch_after_moves() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        play_and_check(&net);
+    }
+
+    #[test]
+    fn sandhi_incremental_matches_scratch_for_king_and_special_moves() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let cases = [
+            ("4k3/8/8/8/8/8/8/4K3 w - - 0 1", "e1e2"),
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+            ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"),
+        ];
+        for (fen, uci) in cases {
+            let mut state = ViridithasAccumulatorState::for_network(&net);
+            let mut board = Board::from_fen(fen).expect("test FEN is valid");
+            assert_wide_matches(&mut state, &net, &board);
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|candidate| candidate.to_uci() == uci)
+                .copied()
+                .expect("test move is legal");
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            assert_wide_matches(&mut state, &net, &board);
+        }
+    }
+
+    #[test]
+    fn sandhi_null_move_reuses_aux() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board =
+            Board::from_fen("r1bq1rk1/ppp2ppp/2n2n2/2bp4/4P3/2P2N2/PP1N1PPP/R1BQ1RK1 w - - 2 9")
+                .expect("test FEN is valid");
+        assert_wide_matches(&mut state, &net, &board);
+        state.push_null();
+        board.make_null_move();
+        assert_wide_matches(&mut state, &net, &board);
+        state.pop();
+        board.unmake_null_move();
+        assert_wide_matches(&mut state, &net, &board);
+    }
+
+    #[test]
+    fn sandhi_dirty_threat_and_search_eval_match_scratch() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board = Board::new();
+        let first = state.evaluate(&board, &net);
+        assert_eq!(state.evaluate_search(&board, &net), first);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        state.push_move(&board, mv);
+        let aux = state.sandhi_aux.as_ref().expect("sandhi aux");
+        assert!(aux.frames[aux.index].pending_threats.is_some());
+        board.make_move(mv);
+        let incremental = state.evaluate(&board, &net);
+        assert_eq!(state.evaluate_search(&board, &net), incremental);
+        let mut scratch = ViridithasAccumulatorState::for_network(&net);
+        assert_eq!(scratch.evaluate(&board, &net), incremental);
+    }
+
+    #[test]
+    fn sandhi_hot_eval_stays_in_sub_microsecond_band() {
+        if cfg!(debug_assertions) {
+            return;
+        }
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let ViridithasNetwork::Sandhi(sandhi) = net.as_ref() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let board = Board::new();
+        let _ = state.evaluate(&board, &net);
+        let mut checksum = 0i32;
+        let start = std::time::Instant::now();
+        for _ in 0..2_000 {
+            checksum = checksum.wrapping_add(state.evaluate(&board, &net));
+        }
+        let eval_ns = start.elapsed().as_nanos() as f64 / 2_000.0;
+        let aux = state.sandhi_aux.as_ref().expect("sandhi aux");
+        let acc_w = &state.sandhi.as_ref().expect("sandhi").values[0][0];
+        let acc_b = &state.sandhi.as_ref().expect("sandhi").values[0][1];
+        let aux_w = &aux.frames[0].values[0];
+        let aux_b = &aux.frames[0].values[1];
+        let start = std::time::Instant::now();
+        for _ in 0..2_000 {
+            checksum =
+                checksum.wrapping_add(finish_sandhi(sandhi, &board, acc_w, acc_b, aux_w, aux_b));
+        }
+        let finish_ns = start.elapsed().as_nanos() as f64 / 2_000.0;
+        assert_ne!(checksum, i32::MIN);
+        assert!(
+            eval_ns < 1_200.0,
+            "sandhi incremental evaluate is {eval_ns:.1} ns/eval (finish {finish_ns:.1} ns)"
+        );
     }
 }

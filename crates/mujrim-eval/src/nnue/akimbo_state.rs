@@ -196,7 +196,6 @@ impl AkimboAccumulatorState {
     pub(super) fn pop(&mut self) {
         if self.stack_index > 0 {
             self.stack_index -= 1;
-            self.sync_current_from_frame();
         }
     }
 
@@ -218,6 +217,19 @@ impl AkimboAccumulatorState {
 
     pub(super) fn evaluate(&mut self, board: &Board, net: &Network) -> i32 {
         self.ensure_accurate(board, net);
+        self.finish(board, net)
+    }
+
+    pub(super) fn evaluate_search(&mut self, board: &Board, net: &Network) -> i32 {
+        let frame = &self.stack[self.stack_index];
+        if frame.accurate[0] && frame.accurate[1] && !frame.pending_has_move && !frame.pending_null
+        {
+            return self.finish(board, net);
+        }
+        self.evaluate(board, net)
+    }
+
+    fn finish(&self, board: &Board, net: &Network) -> i32 {
         let frame = &self.stack[self.stack_index];
         let (boys, opps) = match board.side_to_move {
             Color::White => (&frame.white, &frame.black),
@@ -248,7 +260,6 @@ impl AkimboAccumulatorState {
             && frame.king_sq[0] == w_king as u8
             && frame.king_sq[1] == b_king as u8
         {
-            self.sync_current_from_frame();
             return;
         }
         self.sync_from_board(board, net);
@@ -269,7 +280,6 @@ impl AkimboAccumulatorState {
         frame.king_sq = king_sq;
         frame.accurate = [true, true];
         frame.pending_null = false;
-        self.sync_current_from_frame();
     }
 
     fn apply_pending_move(&mut self, board: &Board, net: &Network) {
@@ -339,7 +349,6 @@ impl AkimboAccumulatorState {
         frame.king_sq = new_kings;
         frame.accurate = [true, true];
         frame.pending_has_move = false;
-        self.sync_current_from_frame();
     }
 
     fn sync_from_board(&mut self, board: &Board, net: &Network) {
@@ -388,7 +397,6 @@ impl AkimboAccumulatorState {
         frame.accurate = [true, true];
         frame.pending_has_move = false;
         frame.pending_null = false;
-        self.sync_current_from_frame();
     }
 
     fn finny_refresh<const SIDE: usize>(
@@ -419,7 +427,7 @@ impl AkimboAccumulatorState {
     }
 
     #[inline]
-    fn sync_current_from_frame(&mut self) {
+    pub(super) fn sync_current_from_frame(&mut self) {
         let frame = &self.stack[self.stack_index];
         self.current.white = frame.white;
         self.current.black = frame.black;

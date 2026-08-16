@@ -153,6 +153,78 @@ pub(crate) fn apply_i16_feature_width(
     (kernels().apply_i16)(accumulator, row, sign);
 }
 
+/// Copy `src` into `dst` while adding/subtracting feature rows in one pass.
+pub(crate) fn apply_i16_from_width(
+    dst: &mut [i16],
+    src: &[i16],
+    weights: &[i16],
+    adds: &[usize],
+    subs: &[usize],
+) {
+    debug_assert_eq!(dst.len(), src.len());
+    let width = dst.len();
+    if dst.len().is_multiple_of(16) {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if apply_from_uses_avx2() {
+            unsafe {
+                avx2::apply_i16_from(dst, src, weights, adds, subs);
+            }
+            return;
+        }
+    }
+    dst.copy_from_slice(src);
+    for &feature in adds {
+        (kernels().apply_i16)(dst, &weights[feature * width..(feature + 1) * width], 1);
+    }
+    for &feature in subs {
+        (kernels().apply_i16)(dst, &weights[feature * width..(feature + 1) * width], -1);
+    }
+}
+
+/// Pairwise FT on `(first + first_add, second + second_add)` without a full acc copy.
+pub(crate) fn activate_shifted_pair_sum(
+    first: &[i16],
+    first_add: &[i16],
+    second: &[i16],
+    second_add: &[i16],
+    output: &mut [u8],
+) {
+    debug_assert_eq!(first.len(), first_add.len());
+    debug_assert_eq!(second.len(), second_add.len());
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), output.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if first.len().is_multiple_of(16) && shifted_pair_uses_avx2() {
+        unsafe {
+            avx2::activate_shifted_pair_sum(first, first_add, second, second_add, output);
+        }
+        return;
+    }
+    scalar::activate_shifted_pair_sum(first, first_add, second, second_add, output);
+}
+
+/// Stockfish-style `/512` pairwise FT on summed accumulators.
+pub(crate) fn transform_pair_sum(
+    first: &[i16],
+    first_add: &[i16],
+    second: &[i16],
+    second_add: &[i16],
+    output: &mut [u8],
+) {
+    debug_assert_eq!(first.len(), first_add.len());
+    debug_assert_eq!(second.len(), second_add.len());
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), output.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if first.len().is_multiple_of(16) && shifted_pair_uses_avx2() {
+        unsafe {
+            avx2::transform_pair_sum(first, first_add, second, second_add, output);
+        }
+        return;
+    }
+    scalar::transform_pair_sum(first, first_add, second, second_add, output);
+}
+
 #[cfg(feature = "stockfish-nnue")]
 pub(crate) fn apply_i8_feature(
     accumulator: &mut [i16; L1],
@@ -178,6 +250,34 @@ pub(crate) fn transform_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
     debug_assert_eq!(first.len(), second.len());
     debug_assert_eq!(first.len(), output.len());
     (kernels().transform_pair)(first, second, output);
+}
+
+/// Obsidian/PlentyChess pairwise FT: `(clamp(c0,0,255)<<7)*min(c1,255) >> 16`.
+///
+/// This is not Stockfish `transform_pair` (`/512` with both sides clamped to 0).
+pub(crate) fn activate_shifted_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), output.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if first.len().is_multiple_of(16) && shifted_pair_uses_avx2() {
+        // SAFETY: runtime AVX2 check above.
+        unsafe {
+            avx2::activate_shifted_pair(first, second, output);
+        }
+        return;
+    }
+    scalar::activate_shifted_pair(first, second, output);
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn shifted_pair_uses_avx2() -> bool {
+    static AVX2: OnceLock<bool> = OnceLock::new();
+    *AVX2.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn apply_from_uses_avx2() -> bool {
+    shifted_pair_uses_avx2()
 }
 
 pub(crate) fn selected_backend() -> &'static str {
@@ -212,6 +312,48 @@ mod scalar {
 
     pub(super) fn transform_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
         for ((target, &lhs), &rhs) in output.iter_mut().zip(first).zip(second) {
+            let lhs = i32::from(lhs.clamp(0, 255));
+            let rhs = i32::from(rhs.clamp(0, 255));
+            *target = ((lhs * rhs) / 512) as u8;
+        }
+    }
+
+    pub(super) fn activate_shifted_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
+        for ((target, &lhs), &rhs) in output.iter_mut().zip(first).zip(second) {
+            let c0 = i32::from(lhs.clamp(0, 255));
+            let c1 = i32::from(rhs.min(255));
+            let prod = ((c0 << 7) * c1) >> 16;
+            *target = prod.clamp(0, 255) as u8;
+        }
+    }
+
+    pub(super) fn activate_shifted_pair_sum(
+        first: &[i16],
+        first_add: &[i16],
+        second: &[i16],
+        second_add: &[i16],
+        output: &mut [u8],
+    ) {
+        for (index, target) in output.iter_mut().enumerate() {
+            let lhs = first[index].wrapping_add(first_add[index]);
+            let rhs = second[index].wrapping_add(second_add[index]);
+            let c0 = i32::from(lhs.clamp(0, 255));
+            let c1 = i32::from(rhs.min(255));
+            let prod = ((c0 << 7) * c1) >> 16;
+            *target = prod.clamp(0, 255) as u8;
+        }
+    }
+
+    pub(super) fn transform_pair_sum(
+        first: &[i16],
+        first_add: &[i16],
+        second: &[i16],
+        second_add: &[i16],
+        output: &mut [u8],
+    ) {
+        for (index, target) in output.iter_mut().enumerate() {
+            let lhs = first[index].wrapping_add(first_add[index]);
+            let rhs = second[index].wrapping_add(second_add[index]);
             let lhs = i32::from(lhs.clamp(0, 255));
             let rhs = i32::from(rhs.clamp(0, 255));
             *target = ((lhs * rhs) / 512) as u8;
@@ -304,6 +446,131 @@ mod avx2 {
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn apply_i16_from(
+        dst: &mut [i16],
+        src: &[i16],
+        weights: &[i16],
+        adds: &[usize],
+        subs: &[usize],
+    ) {
+        unsafe {
+            let width = dst.len();
+            debug_assert_eq!(src.len(), width);
+            debug_assert_eq!(width % 16, 0);
+            for index in (0..width).step_by(16) {
+                let mut value = _mm256_loadu_si256(src.as_ptr().add(index).cast());
+                for &feature in adds {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    value = _mm256_add_epi16(value, _mm256_loadu_si256(row.cast()));
+                }
+                for &feature in subs {
+                    let row = weights.as_ptr().add(feature * width + index);
+                    value = _mm256_sub_epi16(value, _mm256_loadu_si256(row.cast()));
+                }
+                _mm256_storeu_si256(dst.as_mut_ptr().add(index).cast(), value);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn activate_shifted_pair_sum(
+        first: &[i16],
+        first_add: &[i16],
+        second: &[i16],
+        second_add: &[i16],
+        output: &mut [u8],
+    ) {
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let maximum = _mm256_set1_epi16(255);
+            for index in (0..first.len()).step_by(16) {
+                let lhs = _mm256_max_epi16(
+                    _mm256_min_epi16(
+                        _mm256_add_epi16(
+                            _mm256_loadu_si256(first.as_ptr().add(index).cast()),
+                            _mm256_loadu_si256(first_add.as_ptr().add(index).cast()),
+                        ),
+                        maximum,
+                    ),
+                    zero,
+                );
+                let rhs = _mm256_min_epi16(
+                    _mm256_add_epi16(
+                        _mm256_loadu_si256(second.as_ptr().add(index).cast()),
+                        _mm256_loadu_si256(second_add.as_ptr().add(index).cast()),
+                    ),
+                    maximum,
+                );
+                let lhs_lo =
+                    _mm256_slli_epi32::<7>(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(lhs)));
+                let lhs_hi = _mm256_slli_epi32::<7>(_mm256_cvtepi16_epi32(
+                    _mm256_extracti128_si256::<1>(lhs),
+                ));
+                let rhs_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(rhs));
+                let rhs_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256::<1>(rhs));
+                let prod_lo = _mm256_srai_epi32::<16>(_mm256_mullo_epi32(lhs_lo, rhs_lo));
+                let prod_hi = _mm256_srai_epi32::<16>(_mm256_mullo_epi32(lhs_hi, rhs_hi));
+                let packed16 = _mm256_packus_epi32(prod_lo, prod_hi);
+                let ordered = _mm256_permute4x64_epi64::<0b11_01_10_00>(packed16);
+                let packed8 = _mm_packus_epi16(
+                    _mm256_castsi256_si128(ordered),
+                    _mm256_extracti128_si256::<1>(ordered),
+                );
+                _mm_storeu_si128(output.as_mut_ptr().add(index).cast(), packed8);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn transform_pair_sum(
+        first: &[i16],
+        first_add: &[i16],
+        second: &[i16],
+        second_add: &[i16],
+        output: &mut [u8],
+    ) {
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let maximum = _mm256_set1_epi16(255);
+            for index in (0..first.len()).step_by(16) {
+                let lhs = _mm256_max_epi16(
+                    _mm256_min_epi16(
+                        _mm256_add_epi16(
+                            _mm256_loadu_si256(first.as_ptr().add(index).cast()),
+                            _mm256_loadu_si256(first_add.as_ptr().add(index).cast()),
+                        ),
+                        maximum,
+                    ),
+                    zero,
+                );
+                let rhs = _mm256_max_epi16(
+                    _mm256_min_epi16(
+                        _mm256_add_epi16(
+                            _mm256_loadu_si256(second.as_ptr().add(index).cast()),
+                            _mm256_loadu_si256(second_add.as_ptr().add(index).cast()),
+                        ),
+                        maximum,
+                    ),
+                    zero,
+                );
+                let lhs_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(lhs));
+                let lhs_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256::<1>(lhs));
+                let rhs_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(rhs));
+                let rhs_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256::<1>(rhs));
+                let prod_lo = _mm256_srli_epi32::<9>(_mm256_mullo_epi32(lhs_lo, rhs_lo));
+                let prod_hi = _mm256_srli_epi32::<9>(_mm256_mullo_epi32(lhs_hi, rhs_hi));
+                let packed16 = _mm256_packus_epi32(prod_lo, prod_hi);
+                let ordered = _mm256_permute4x64_epi64::<0b11_01_10_00>(packed16);
+                let packed8 = _mm_packus_epi16(
+                    _mm256_castsi256_si128(ordered),
+                    _mm256_extracti128_si256::<1>(ordered),
+                );
+                _mm_storeu_si128(output.as_mut_ptr().add(index).cast(), packed8);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
     pub(super) unsafe fn apply_i16(accumulator: &mut [i16], row: &[i16], sign: i16) {
         unsafe {
             debug_assert_eq!(accumulator.len() % 16, 0);
@@ -370,6 +637,46 @@ mod avx2 {
                 let rhs_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256::<1>(rhs));
                 let prod_lo = _mm256_srli_epi32::<9>(_mm256_mullo_epi32(lhs_lo, rhs_lo));
                 let prod_hi = _mm256_srli_epi32::<9>(_mm256_mullo_epi32(lhs_hi, rhs_hi));
+                let packed16 = _mm256_packus_epi32(prod_lo, prod_hi);
+                let ordered = _mm256_permute4x64_epi64::<0b11_01_10_00>(packed16);
+                let packed8 = _mm_packus_epi16(
+                    _mm256_castsi256_si128(ordered),
+                    _mm256_extracti128_si256::<1>(ordered),
+                );
+                _mm_storeu_si128(output.as_mut_ptr().add(index).cast(), packed8);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn activate_shifted_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
+        unsafe {
+            debug_assert_eq!(first.len() % 16, 0);
+            debug_assert_eq!(second.len(), first.len());
+            debug_assert_eq!(output.len(), first.len());
+            let zero = _mm256_setzero_si256();
+            let maximum = _mm256_set1_epi16(255);
+            for index in (0..first.len()).step_by(16) {
+                let lhs = _mm256_max_epi16(
+                    _mm256_min_epi16(
+                        _mm256_loadu_si256(first.as_ptr().add(index).cast()),
+                        maximum,
+                    ),
+                    zero,
+                );
+                let rhs = _mm256_min_epi16(
+                    _mm256_loadu_si256(second.as_ptr().add(index).cast()),
+                    maximum,
+                );
+                let lhs_lo =
+                    _mm256_slli_epi32::<7>(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(lhs)));
+                let lhs_hi = _mm256_slli_epi32::<7>(_mm256_cvtepi16_epi32(
+                    _mm256_extracti128_si256::<1>(lhs),
+                ));
+                let rhs_lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(rhs));
+                let rhs_hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256::<1>(rhs));
+                let prod_lo = _mm256_srai_epi32::<16>(_mm256_mullo_epi32(lhs_lo, rhs_lo));
+                let prod_hi = _mm256_srai_epi32::<16>(_mm256_mullo_epi32(lhs_hi, rhs_hi));
                 let packed16 = _mm256_packus_epi32(prod_lo, prod_hi);
                 let ordered = _mm256_permute4x64_epi64::<0b11_01_10_00>(packed16);
                 let packed8 = _mm_packus_epi16(
@@ -678,6 +985,70 @@ mod tests {
         let mut actual = expected;
         scalar::transform_pair(&first, &second, &mut expected);
         transform_pair(&first, &second, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn apply_i16_from_matches_copy_then_apply() {
+        const WIDTH: usize = 1536;
+        let weights = (0..WIDTH * 4)
+            .map(|index| (index as i16).wrapping_mul(17))
+            .collect::<Vec<_>>();
+        let src = (0..WIDTH)
+            .map(|index| (index as i16).wrapping_mul(3))
+            .collect::<Vec<_>>();
+        let mut expected = src.clone();
+        apply_i16_feature_width(&mut expected, &weights, 1, 1);
+        apply_i16_feature_width(&mut expected, &weights, 3, -1);
+        apply_i16_feature_width(&mut expected, &weights, 0, 1);
+        let mut actual = vec![0_i16; WIDTH];
+        apply_i16_from_width(&mut actual, &src, &weights, &[1, 0], &[3]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn activate_pair_sum_matches_add_then_activate() {
+        const WIDTH: usize = 768;
+        let first = (0..WIDTH)
+            .map(|index| index as i16 - 80)
+            .collect::<Vec<_>>();
+        let first_add = (0..WIDTH)
+            .map(|index| (index as i16 % 40) - 10)
+            .collect::<Vec<_>>();
+        let second = (0..WIDTH)
+            .map(|index| 200 - index as i16)
+            .collect::<Vec<_>>();
+        let second_add = (0..WIDTH)
+            .map(|index| (index as i16 % 17) - 4)
+            .collect::<Vec<_>>();
+        let mut summed_first = first.clone();
+        let mut summed_second = second.clone();
+        for (dst, add) in summed_first.iter_mut().zip(&first_add) {
+            *dst = dst.wrapping_add(*add);
+        }
+        for (dst, add) in summed_second.iter_mut().zip(&second_add) {
+            *dst = dst.wrapping_add(*add);
+        }
+        let mut expected = vec![0_u8; WIDTH];
+        let mut actual = vec![0_u8; WIDTH];
+        activate_shifted_pair(&summed_first, &summed_second, &mut expected);
+        activate_shifted_pair_sum(&first, &first_add, &second, &second_add, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn dispatched_shifted_pair_matches_obsidian_plenty_formula() {
+        const WIDTH: usize = 768;
+        let first = (0..WIDTH)
+            .map(|index| index as i16 - 200)
+            .collect::<Vec<_>>();
+        let second = (0..WIDTH)
+            .map(|index| 400 - index as i16)
+            .collect::<Vec<_>>();
+        let mut expected = [0_u8; WIDTH];
+        let mut actual = expected;
+        scalar::activate_shifted_pair(&first, &second, &mut expected);
+        activate_shifted_pair(&first, &second, &mut actual);
         assert_eq!(actual, expected);
     }
 

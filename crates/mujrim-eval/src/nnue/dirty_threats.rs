@@ -4,6 +4,8 @@ use types::board::attack_tables::{
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
 
+pub(super) const MAX_DIRTY_THREAT_DELTAS: usize = 96;
+
 #[derive(Copy, Clone, Default)]
 pub(super) struct ThreatDelta(u32);
 
@@ -52,13 +54,13 @@ pub(super) trait ThreatDeltaSink {
     fn push_threat_delta(&mut self, delta: ThreatDelta);
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct ThreatPosition {
     pieces: [u64; 12],
     piece_at: [u8; 64],
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(super) struct ThreatSnapshot {
     position: ThreatPosition,
     color: usize,

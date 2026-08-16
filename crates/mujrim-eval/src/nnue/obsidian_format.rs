@@ -63,7 +63,13 @@ impl ObsidianNetwork {
         let mut offset = 0;
         let feature_weights = read_i16s(bytes, &mut offset, KING_BUCKETS * 2 * 6 * 64 * L1)?;
         let feature_biases = read_i16s(bytes, &mut offset, L1)?;
-        let l1_weights = read_i8s(bytes, &mut offset, OUTPUT_BUCKETS * L1 * L2)?;
+        let l1_src = read_i8s(bytes, &mut offset, OUTPUT_BUCKETS * L1 * L2)?;
+        let l1_weights = super::layered_forward::pack_nnz_buckets(
+            &transpose_l1_to_affine(&l1_src, OUTPUT_BUCKETS, L1, L2),
+            OUTPUT_BUCKETS,
+            L1,
+            L2,
+        );
         let l1_biases = read_f32s(bytes, &mut offset, OUTPUT_BUCKETS * L2)?;
         let l2_weights = read_f32s(bytes, &mut offset, OUTPUT_BUCKETS * (L2 * 2) * L3)?;
         let l2_biases = read_f32s(bytes, &mut offset, OUTPUT_BUCKETS * L3)?;
@@ -338,19 +344,32 @@ impl ObsidianAccumulatorState {
     }
 
     pub(crate) fn evaluate(&mut self, board: &Board, network: &ObsidianNetwork) -> i32 {
+        self.ensure(board, network, false);
+        let frame = &self.frames[self.index];
+        finish_eval(network, board, &frame.values[0], &frame.values[1])
+    }
+
+    pub(crate) fn evaluate_search(&mut self, board: &Board, network: &ObsidianNetwork) -> i32 {
+        self.ensure(board, network, true);
+        let frame = &self.frames[self.index];
+        finish_eval(network, board, &frame.values[0], &frame.values[1])
+    }
+
+    fn ensure(&mut self, board: &Board, network: &ObsidianNetwork, trusted: bool) {
         if self.frames[self.index].accurate && self.frames[self.index].pending_null {
             self.frames[self.index].hash = board.hash;
             self.frames[self.index].pending_null = false;
         }
-        if !self.frames[self.index].accurate || self.frames[self.index].hash != board.hash {
-            if self.index != 0 && self.frames[self.index - 1].accurate {
-                self.update_from_parent(board, network);
-            } else {
-                self.refresh(board, network);
-            }
+        if self.frames[self.index].accurate
+            && (trusted || self.frames[self.index].hash == board.hash)
+        {
+            return;
         }
-        let frame = &self.frames[self.index];
-        finish_eval(network, board, &frame.values[0], &frame.values[1])
+        if self.index != 0 && self.frames[self.index - 1].accurate {
+            self.update_from_parent(board, network);
+        } else {
+            self.refresh(board, network);
+        }
     }
 
     fn refresh(&mut self, board: &Board, network: &ObsidianNetwork) {
@@ -407,10 +426,10 @@ impl ObsidianAccumulatorState {
             if needs_refresh[pov] {
                 continue;
             }
-            frame.values[pov] = parent.values[pov];
             if pending_has_move {
-                apply_move_delta(
+                apply_move_delta_from(
                     &mut frame.values[pov],
+                    &parent.values[pov],
                     &network.feature_weights,
                     kings[pov],
                     side,
@@ -418,6 +437,8 @@ impl ObsidianAccumulatorState {
                     pending_mover,
                     pending_captured,
                 );
+            } else {
+                frame.values[pov] = parent.values[pov];
             }
         }
         frame.kings = [kings[0] as u8, kings[1] as u8];
@@ -524,15 +545,13 @@ impl Clone for ObsidianFrame {
     }
 }
 
-fn apply_move_delta(
-    acc: &mut [i16; L1],
-    weights: &[i16],
+fn collect_move_features(
     king: usize,
     side: Color,
     mv: Move,
     mover: u8,
     captured: u8,
-) {
+) -> ([usize; 4], [usize; 4], usize, usize) {
     debug_assert_ne!(mover, u8::MAX);
     let mover_piece = Piece::from_index(usize::from(mover) / 2).expect("mover piece is valid");
     let mover_color = if mover & 1 == 0 {
@@ -541,32 +560,17 @@ fn apply_move_delta(
         Color::Black
     };
     let resulting = mv.promotion.unwrap_or(mover_piece);
-    apply_feature(
-        acc,
-        weights,
-        king,
-        side,
-        mover_piece,
-        mover_color,
-        mv.from.index(),
-        -1,
-    );
-    apply_feature(
-        acc,
-        weights,
-        king,
-        side,
-        resulting,
-        mover_color,
-        mv.to.index(),
-        1,
-    );
-
+    let mut adds = [0; 4];
+    let mut subs = [0; 4];
+    let mut add_len = 0;
+    let mut sub_len = 0;
+    subs[sub_len] = feature_index(king, side, mover_piece, mover_color, mv.from.index());
+    sub_len += 1;
+    adds[add_len] = feature_index(king, side, resulting, mover_color, mv.to.index());
+    add_len += 1;
     if mv.is_capture() && mv.flag != MoveFlag::EnPassant {
         debug_assert_ne!(captured, u8::MAX);
-        apply_feature(
-            acc,
-            weights,
+        subs[sub_len] = feature_index(
             king,
             side,
             Piece::from_index(usize::from(captured) / 2).expect("captured piece is valid"),
@@ -576,20 +580,17 @@ fn apply_move_delta(
                 Color::Black
             },
             mv.to.index(),
-            -1,
         );
+        sub_len += 1;
     } else if mv.flag == MoveFlag::EnPassant {
-        let captured_square = Square::from_file_rank(mv.to.file(), mv.from.rank()).index();
-        apply_feature(
-            acc,
-            weights,
+        subs[sub_len] = feature_index(
             king,
             side,
             Piece::Pawn,
             mover_color.opponent(),
-            captured_square,
-            -1,
+            Square::from_file_rank(mv.to.file(), mv.from.rank()).index(),
         );
+        sub_len += 1;
     } else if mv.is_castling() {
         let (rook_from, rook_to) = match (mover_color, mv.flag) {
             (Color::White, MoveFlag::KingCastle) => (Square::H1.index(), Square::F1.index()),
@@ -598,27 +599,33 @@ fn apply_move_delta(
             (Color::Black, MoveFlag::QueenCastle) => (Square::A8.index(), Square::D8.index()),
             _ => unreachable!(),
         };
-        apply_feature(
-            acc,
-            weights,
-            king,
-            side,
-            Piece::Rook,
-            mover_color,
-            rook_from,
-            -1,
-        );
-        apply_feature(
-            acc,
-            weights,
-            king,
-            side,
-            Piece::Rook,
-            mover_color,
-            rook_to,
-            1,
-        );
+        subs[sub_len] = feature_index(king, side, Piece::Rook, mover_color, rook_from);
+        sub_len += 1;
+        adds[add_len] = feature_index(king, side, Piece::Rook, mover_color, rook_to);
+        add_len += 1;
     }
+    (adds, subs, add_len, sub_len)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_move_delta_from(
+    dst: &mut [i16; L1],
+    src: &[i16; L1],
+    weights: &[i16],
+    king: usize,
+    side: Color,
+    mv: Move,
+    mover: u8,
+    captured: u8,
+) {
+    let (adds, subs, add_len, sub_len) = collect_move_features(king, side, mv, mover, captured);
+    super::stockfish_simd::apply_i16_from_width(
+        dst,
+        src,
+        weights,
+        &adds[..add_len],
+        &subs[..sub_len],
+    );
 }
 
 #[inline(always)]
@@ -628,20 +635,23 @@ fn relative_square(side: Color, sq: usize) -> usize {
 
 #[inline(always)]
 fn propagate(net: &ObsidianNetwork, us: &[i16; L1], them: &[i16; L1], bucket: usize) -> i32 {
-    let mut ft_out = [0u8; L1];
-    activate_ft(us, &mut ft_out[..L1 / 2]);
-    activate_ft(them, &mut ft_out[L1 / 2..]);
+    let mut ft_out = super::layered_forward::Align64::new([0u8; L1]);
+    activate_ft(us, &mut ft_out.0[..L1 / 2]);
+    activate_ft(them, &mut ft_out.0[L1 / 2..]);
 
     let scale = 1.0 / ((NETWORK_QA * NETWORK_QA * NETWORK_QB) >> FT_SHIFT) as f32;
     let mut l1 = [0.0f32; L2 * 2];
     let (l1_linear, l1_sqr) = l1.split_at_mut(L2);
-    let l1_weight_base = bucket * L1 * L2;
+    let l1_weight_base = bucket * L2 * L1;
     let l1_bias_base = bucket * L2;
+    let mut sums = [0i32; L2];
+    super::layered_forward::affine_sparse_packed(
+        &ft_out.0,
+        &net.l1_weights[l1_weight_base..l1_weight_base + L2 * L1],
+        &mut sums,
+    );
     for (j, (linear, squared)) in l1_linear.iter_mut().zip(l1_sqr.iter_mut()).enumerate() {
-        let sum = ft_out.iter().enumerate().fold(0i32, |acc, (i, feature)| {
-            acc + i32::from(*feature) * i32::from(net.l1_weights[l1_weight_base + i * L2 + j])
-        });
-        let biased = sum as f32 * scale + net.l1_biases[l1_bias_base + j];
+        let biased = sums[j] as f32 * scale + net.l1_biases[l1_bias_base + j];
         *linear = biased.clamp(0.0, 1.0);
         *squared = (biased * biased).clamp(0.0, 1.0);
     }
@@ -649,22 +659,19 @@ fn propagate(net: &ObsidianNetwork, us: &[i16; L1], them: &[i16; L1], bucket: us
     let mut l2 = [0.0f32; L3];
     let l2_weight_base = bucket * (L2 * 2) * L3;
     let l2_bias_base = bucket * L3;
-    for (j, value) in l2.iter_mut().enumerate() {
-        let sum = l1
-            .iter()
-            .enumerate()
-            .fold(net.l2_biases[l2_bias_base + j], |acc, (i, feature)| {
-                acc + net.l2_weights[l2_weight_base + i * L3 + j] * *feature
-            });
-        *value = sum.clamp(0.0, 1.0);
-    }
+    super::layered_forward::affine_f32(
+        &l1,
+        &net.l2_weights[l2_weight_base..l2_weight_base + (L2 * 2) * L3],
+        &net.l2_biases[l2_bias_base..l2_bias_base + L3],
+        &mut l2,
+    );
+    super::layered_forward::clamp01(&mut l2);
 
-    let l3 = l2
-        .iter()
-        .enumerate()
-        .fold(net.l3_biases[bucket], |acc, (j, feature)| {
-            acc + net.l3_weights[bucket * L3 + j] * *feature
-        });
+    let l3 = super::layered_forward::dot_f32(
+        &l2,
+        &net.l3_weights[bucket * L3..bucket * L3 + L3],
+        net.l3_biases[bucket],
+    );
     (l3 * NETWORK_SCALE as f32) as i32
 }
 
@@ -672,13 +679,20 @@ fn propagate(net: &ObsidianNetwork, us: &[i16; L1], them: &[i16; L1], bucket: us
 fn activate_ft(acc: &[i16], out: &mut [u8]) {
     let half = L1 / 2;
     debug_assert_eq!(out.len(), half);
-    for i in 0..half {
-        let c0 = i32::from(acc[i]).clamp(0, NETWORK_QA);
-        let c1 = i32::from(acc[i + half]).clamp(i32::MIN, NETWORK_QA);
-        let shifted = c0 << (16 - FT_SHIFT);
-        let prod = ((shifted * c1) >> 16).clamp(0, 255);
-        out[i] = prod as u8;
+    super::stockfish_simd::activate_shifted_pair(&acc[..half], &acc[half..], out);
+}
+
+fn transpose_l1_to_affine(src: &[i8], buckets: usize, inputs: usize, outputs: usize) -> Box<[i8]> {
+    let mut dst = vec![0i8; buckets * outputs * inputs].into_boxed_slice();
+    for bucket in 0..buckets {
+        for input in 0..inputs {
+            for output in 0..outputs {
+                dst[bucket * outputs * inputs + output * inputs + input] =
+                    src[bucket * inputs * outputs + input * outputs + output];
+            }
+        }
     }
+    dst
 }
 
 pub fn load(path: &Path) -> Result<Box<ObsidianNetwork>, String> {
@@ -746,6 +760,32 @@ mod tests {
     }
 
     #[test]
+    fn l1_affine_transpose_matches_feature_major_dot() {
+        let mut src = vec![0i8; OUTPUT_BUCKETS * L1 * L2];
+        for (index, weight) in src.iter_mut().enumerate() {
+            *weight = (index % 17) as i8 - 8;
+        }
+        let affine = transpose_l1_to_affine(&src, OUTPUT_BUCKETS, L1, L2);
+        let mut input = [0u8; L1];
+        for (index, value) in input.iter_mut().enumerate() {
+            *value = (index % 9) as u8;
+        }
+        let bucket = 3;
+        let mut sums = [0i32; L2];
+        super::super::stockfish_simd::affine(
+            &input,
+            &affine[bucket * L2 * L1..(bucket + 1) * L2 * L1],
+            &mut sums,
+        );
+        for output in 0..L2 {
+            let expected = input.iter().enumerate().fold(0i32, |acc, (i, feature)| {
+                acc + i32::from(*feature) * i32::from(src[bucket * L1 * L2 + i * L2 + output])
+            });
+            assert_eq!(sums[output], expected, "output {output}");
+        }
+    }
+
+    #[test]
     fn zero_network_evaluates_startpos_to_zero() {
         types::init();
         let net = zero_net();
@@ -782,6 +822,22 @@ mod tests {
         let expected = scratch_accumulators(net, board);
         assert_eq!(state.evaluate(board, net), net.evaluate(board));
         assert_eq!(state.frames[state.index].values, expected);
+    }
+
+    #[test]
+    fn activate_ft_matches_shifted_pair_formula() {
+        let mut acc = [0i16; L1];
+        for (index, value) in acc.iter_mut().enumerate() {
+            *value = (index as i16).wrapping_mul(5).wrapping_sub(400);
+        }
+        let mut out = [0u8; L1 / 2];
+        activate_ft(&acc, &mut out);
+        for (index, &actual) in out.iter().enumerate() {
+            let c0 = i32::from(acc[index]).clamp(0, NETWORK_QA);
+            let c1 = i32::from(acc[index + L1 / 2]).clamp(i32::MIN, NETWORK_QA);
+            let expected = (((c0 << (16 - FT_SHIFT)) * c1) >> 16).clamp(0, 255) as u8;
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

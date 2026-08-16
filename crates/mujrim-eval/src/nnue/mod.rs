@@ -28,7 +28,12 @@ pub mod feature;
 pub mod network;
 pub mod simd;
 
-#[cfg(any(feature = "reckless-nnue", feature = "stockfish-nnue"))]
+#[cfg(any(
+    feature = "reckless-nnue",
+    feature = "stockfish-nnue",
+    feature = "viridithas-nnue",
+    feature = "plentychess-nnue"
+))]
 mod dirty_threats;
 
 #[cfg(feature = "akimbo-nnue")]
@@ -39,6 +44,14 @@ pub mod stockfish_format;
 
 #[cfg(any(feature = "stockfish-nnue", feature = "obsidian-nnue"))]
 mod stockfish_simd;
+
+#[cfg(any(
+    feature = "stockfish-nnue",
+    feature = "obsidian-nnue",
+    feature = "plentychess-nnue",
+    feature = "viridithas-nnue"
+))]
+mod layered_forward;
 
 #[cfg(feature = "reckless-nnue")]
 pub mod reckless_format;

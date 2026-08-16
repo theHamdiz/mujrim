@@ -927,20 +927,32 @@ impl StockfishAccumulatorState {
     }
 
     pub(crate) fn evaluate(&mut self, board: &Board, network: &StockfishNetwork) -> i32 {
+        self.ensure(board, network, false);
+        let frame = &self.frames[self.index];
+        network.evaluate_accumulators(board, &frame.accumulators, &frame.psqt)
+    }
+
+    pub(crate) fn evaluate_search(&mut self, board: &Board, network: &StockfishNetwork) -> i32 {
+        self.ensure(board, network, true);
+        let frame = &self.frames[self.index];
+        network.evaluate_accumulators(board, &frame.accumulators, &frame.psqt)
+    }
+
+    fn ensure(&mut self, board: &Board, network: &StockfishNetwork, trusted: bool) {
         if self.frames[self.index].accurate && self.frames[self.index].pending_null {
             self.frames[self.index].position_hash = board.hash;
             self.frames[self.index].pending_null = false;
         }
-        if !self.frames[self.index].accurate || self.frames[self.index].position_hash != board.hash
+        if self.frames[self.index].accurate
+            && (trusted || self.frames[self.index].position_hash == board.hash)
         {
-            if self.index != 0 && self.frames[self.index - 1].accurate {
-                self.update_from_parent(board, network);
-            } else {
-                self.refresh(board, network);
-            }
+            return;
         }
-        let frame = &self.frames[self.index];
-        network.evaluate_accumulators(board, &frame.accumulators, &frame.psqt)
+        if self.index != 0 && self.frames[self.index - 1].accurate {
+            self.update_from_parent(board, network);
+        } else {
+            self.refresh(board, network);
+        }
     }
 
     fn refresh(&mut self, board: &Board, network: &StockfishNetwork) {
@@ -1226,6 +1238,28 @@ fn apply_piece_move_delta(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(super) fn visit_threat_delta(
+    delta: ThreatDelta,
+    king_square: usize,
+    perspective: usize,
+    mut visit: impl FnMut(usize, i16),
+) {
+    let attacker = delta.attacker();
+    let attacked = delta.attacked();
+    if let Some(feature) = threat_feature_index(
+        attacker / 2,
+        attacker & 1,
+        delta.source(),
+        attacked / 2,
+        attacked & 1,
+        delta.target(),
+        king_square,
+        perspective,
+    ) {
+        visit(feature, if delta.add() { 1 } else { -1 });
+    }
+}
+
 fn apply_threat_deltas(
     accumulator: &mut [i16; L1],
     psqt: &mut [i32; PSQT_BUCKETS],
@@ -1284,6 +1318,47 @@ fn apply_pawn_pair_delta(
             apply_psqt_feature(psqt, &network.threat_and_pair_psqt, feature, sign);
         },
     );
+}
+
+pub(crate) fn collect_pawn_pair_aux(
+    pawns: [u64; 2],
+    king_square: usize,
+    perspective: usize,
+) -> AuxFeatureLists {
+    let mut lists = AuxFeatureLists::default();
+    for first_color in 0..2 {
+        let mut first_pawns = pawns[first_color];
+        while first_pawns != 0 {
+            let first = first_pawns.trailing_zeros() as usize;
+            first_pawns &= first_pawns - 1;
+            for (second_color, &second_pawns) in pawns.iter().enumerate().skip(first_color) {
+                let mut partners = second_pawns & pawn_pair_mask(first);
+                if second_color == first_color {
+                    partners &= !((1_u64 << (first + 1)) - 1);
+                }
+                while partners != 0 {
+                    let second = partners.trailing_zeros() as usize;
+                    partners &= partners - 1;
+                    if lists.pair_count < MAX_AUX_FEATURES {
+                        lists.pairs[lists.pair_count] = pawn_pair_feature_index(
+                            first_color,
+                            first,
+                            second_color,
+                            second,
+                            king_square,
+                            perspective,
+                        ) as u16;
+                        lists.pair_count += 1;
+                    } else {
+                        lists.overflowed = true;
+                        return lists;
+                    }
+                }
+            }
+        }
+    }
+    lists.pairs[..lists.pair_count].sort_unstable();
+    lists
 }
 
 fn collect_pawn_pair_features(
@@ -1347,7 +1422,7 @@ fn apply_threats_and_pairs(
     }
 }
 
-fn apply_diff(old: &[u16], new: &[u16], mut apply: impl FnMut(usize, i16)) {
+pub(crate) fn apply_diff(old: &[u16], new: &[u16], mut apply: impl FnMut(usize, i16)) {
     let (mut old_index, mut new_index) = (0, 0);
     while old_index < old.len() && new_index < new.len() {
         match old[old_index].cmp(&new[new_index]) {
@@ -1640,7 +1715,7 @@ impl ThreatIndexTables {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn threat_feature_index(
+pub(crate) fn threat_feature_index(
     attacker_piece: usize,
     attacker_color: usize,
     mut from: usize,
@@ -1668,6 +1743,54 @@ fn threat_feature_index(
         + attack_number as usize;
     debug_assert!(feature < THREAT_FEATURES);
     Some(feature)
+}
+
+pub(crate) const MAX_AUX_FEATURES: usize = 256;
+
+#[derive(Clone, Copy)]
+pub(crate) struct AuxFeatureLists {
+    pub threats: [u16; MAX_AUX_FEATURES],
+    pub threat_count: usize,
+    pub pairs: [u16; MAX_AUX_FEATURES],
+    pub pair_count: usize,
+    pub overflowed: bool,
+}
+
+impl Default for AuxFeatureLists {
+    fn default() -> Self {
+        Self {
+            threats: [0; MAX_AUX_FEATURES],
+            threat_count: 0,
+            pairs: [0; MAX_AUX_FEATURES],
+            pair_count: 0,
+            overflowed: false,
+        }
+    }
+}
+
+pub(crate) fn collect_aux_feature_lists(board: &Board, perspective: usize) -> AuxFeatureLists {
+    let mut lists = AuxFeatureLists::default();
+    visit_threat_features(board, perspective, |feature| {
+        if lists.threat_count < MAX_AUX_FEATURES {
+            lists.threats[lists.threat_count] = feature as u16;
+            lists.threat_count += 1;
+        } else {
+            lists.overflowed = true;
+        }
+    });
+    visit_pawn_pair_features(board, perspective, |feature| {
+        if lists.pair_count < MAX_AUX_FEATURES {
+            lists.pairs[lists.pair_count] = feature as u16;
+            lists.pair_count += 1;
+        } else {
+            lists.overflowed = true;
+        }
+    });
+    if !lists.overflowed {
+        lists.threats[..lists.threat_count].sort_unstable();
+        lists.pairs[..lists.pair_count].sort_unstable();
+    }
+    lists
 }
 
 pub(crate) fn visit_threat_features(

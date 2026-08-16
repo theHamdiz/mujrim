@@ -128,6 +128,9 @@ pub struct SearchParams {
     // ── Correction history ─────────────────────────────────────────
     /// LMR correction multiplier.
     pub lmr_corr_mul: i32,
+
+    /// ProbCut beta raise (centipawns). Official Viridithas uses 176.
+    pub probcut_margin: i32,
 }
 
 impl SearchParams {
@@ -205,6 +208,7 @@ impl SearchParams {
 
             // Correction history
             lmr_corr_mul: 448,
+            probcut_margin: 200,
         }
     }
 
@@ -250,9 +254,9 @@ impl SearchParams {
             se_margin_mul: 1,
             se_depth_min: 5,
             max_dbl_exts: 10,
-            se_double_ext_margin: 22,
-            ldse_depth_max: 0,
-            ldse_margin: 0,
+            se_double_ext_margin: 18,
+            ldse_depth_max: 6,
+            ldse_margin: 20,
 
             // NMP verification
             nmp_min_verif_depth: 17,
@@ -279,6 +283,7 @@ impl SearchParams {
 
             // Correction history
             lmr_corr_mul: 448,
+            probcut_margin: 200,
         }
     }
 
@@ -330,6 +335,7 @@ impl SearchParams {
             eval_history_max: 324,
             eval_history_depth_limit: 6,
             lmr_corr_mul: 448,
+            probcut_margin: 200,
         }
     }
 
@@ -339,12 +345,18 @@ impl SearchParams {
     /// same NMP base used by the other NNUE stacks (keeps NPS stable).
     pub fn viridithas() -> Self {
         let mut params = Self::stockfish();
-        // RecklessFull LMR finds BK#24 at 5s; softer history pruning keeps
-        // BK#10 Ne5 from being dropped as a late quiet.
-        params.lmr_base = 0.70;
+        // Official viridithas/src/search.rs: LMR 99/260, RFP 65/76, ProbCut 176.
+        params.lmr_base = 0.99;
+        params.lmr_divisor = 2.60;
         params.lmr_cut_node_bonus = 1;
+        params.rfp_mul = 65;
+        params.rfp_improving_bonus = 76;
+        params.futility_base = 86;
+        params.futility_mul = 70;
         params.se_depth_min = 5;
+        params.se_double_ext_margin = 13;
         params.aspiration_window = 12;
+        params.probcut_margin = 176;
         params
     }
 
@@ -358,6 +370,7 @@ impl SearchParams {
         params.ldse_margin = 25;
         params.lmr_cut_node_bonus = 1;
         params.aspiration_window = 12;
+        params.probcut_margin = 180;
         params
     }
 
@@ -368,6 +381,7 @@ impl SearchParams {
         params.lmp_depth_limit = 5;
         params.se_depth_min = 5;
         params.aspiration_window = 12;
+        params.probcut_margin = 190;
         params
     }
 
@@ -685,7 +699,9 @@ mod tests {
         assert_eq!(p.lmp_depth_limit, 5);
         assert_eq!(p.se_depth_min, 5);
         assert_eq!(p.max_qs_ply, 16);
-        assert_eq!(p.se_double_ext_margin, 22);
+        assert_eq!(p.se_double_ext_margin, 18);
+        assert_eq!(p.ldse_depth_max, 6);
+        assert_eq!(p.ldse_margin, 20);
         assert_eq!(p.aspiration_window, 10);
     }
 
@@ -732,7 +748,8 @@ mod tests {
         let lc0 = SearchParams::for_preset("lc0");
         let hce = SearchParams::for_preset("mujrim-hce");
         assert_eq!(viri.lmr_cut_node_bonus, 1);
-        assert_eq!(viri.lmr_base, 0.70);
+        assert_eq!(viri.lmr_base, 0.99);
+        assert_eq!(viri.probcut_margin, 176);
         assert_eq!(viri.se_depth_min, 5);
         assert_eq!(obs.se_depth_min, 4);
         assert_eq!(obs.ldse_depth_max, 7);

@@ -288,6 +288,24 @@ impl LiveTournamentSnapshot {
         matches.saturating_mul(games_per_match(self.encounter_games(games_per_encounter)))
     }
 
+    pub fn schedule_complete(&self, games_per_encounter: u32) -> bool {
+        let planned = self.planned_games(games_per_encounter);
+        planned > 0 && self.unique_played_count() >= planned
+    }
+
+    pub fn progress_count_label(&self, games_per_encounter: u32) -> String {
+        let planned = self.planned_games(games_per_encounter);
+        let played = self.unique_played_count();
+        if planned == 0 {
+            return String::new();
+        }
+        if played >= planned {
+            format!("{played} games")
+        } else {
+            format!("{played} / {planned}")
+        }
+    }
+
     pub fn progress_summary(&self, games_per_encounter: u32, live: usize) -> String {
         let planned = self.planned_games(games_per_encounter);
         let played = self.unique_played_count();
@@ -295,7 +313,11 @@ impl LiveTournamentSnapshot {
         if planned == 0 {
             return "No games scheduled".to_owned();
         }
-        format!("{played}/{planned} played · {left} left · {live} live")
+        if played >= planned {
+            format!("{played} played · 0 left · {live} live")
+        } else {
+            format!("{played}/{planned} played · {left} left · {live} live")
+        }
     }
 
     pub fn remaining_matches(&self) -> usize {
@@ -303,11 +325,11 @@ impl LiveTournamentSnapshot {
     }
 
     pub fn remaining_games(&self, games_per_encounter: u32) -> usize {
-        let planned = self.planned_games(games_per_encounter);
-        let played = self.unique_played_count();
-        if self.finished && !self.cancelled && played >= planned {
+        if self.schedule_complete(games_per_encounter) {
             return 0;
         }
+        let planned = self.planned_games(games_per_encounter);
+        let played = self.unique_played_count();
         planned.saturating_sub(played)
     }
 
@@ -335,7 +357,7 @@ impl LiveTournamentSnapshot {
     pub fn phase_label(&self) -> &'static str {
         if self.cancelled {
             "Stopped"
-        } else if self.finished {
+        } else if self.finished || self.schedule_complete(self.games_per_encounter) {
             "Finished"
         } else if self.paused {
             "Paused"
@@ -362,6 +384,7 @@ impl LiveTournamentSnapshot {
     }
 
     pub fn append_games(&mut self, games: Vec<TournamentGameSnapshot>) {
+        let cap = games_per_match(self.games_per_encounter);
         for game in games {
             let played = PlayedGame::from_snapshot(self.played_games.len(), game);
             if self
@@ -369,6 +392,14 @@ impl LiveTournamentSnapshot {
                 .iter()
                 .any(|existing| played_game_key(existing) == played_game_key(&played))
             {
+                continue;
+            }
+            let directed = self
+                .played_games
+                .iter()
+                .filter(|existing| existing.white == played.white && existing.black == played.black)
+                .count();
+            if directed >= cap {
                 continue;
             }
             self.played_games.push(played);
@@ -730,13 +761,12 @@ pub fn engines_lost_to(engine: &str, games: &[PlayedGame]) -> Vec<(String, usize
     counts
 }
 
-pub fn losses_to_label(engine: &str, games: &[PlayedGame]) -> String {
+pub fn losses_to_items(engine: &str, games: &[PlayedGame]) -> Vec<String> {
     let lost = engines_lost_to(engine, games);
     if lost.is_empty() {
-        return "Undefeated".to_owned();
+        return vec!["Undefeated".to_owned()];
     }
-    let detail = lost
-        .iter()
+    lost.iter()
         .map(|(name, count)| {
             if *count > 1 {
                 format!("{name} ×{count}")
@@ -744,9 +774,15 @@ pub fn losses_to_label(engine: &str, games: &[PlayedGame]) -> String {
                 name.clone()
             }
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("Lost to {detail}")
+        .collect()
+}
+
+pub fn losses_to_label(engine: &str, games: &[PlayedGame]) -> String {
+    let items = losses_to_items(engine, games);
+    if items.first().is_some_and(|item| item == "Undefeated") {
+        return "Undefeated".to_owned();
+    }
+    format!("Lost to {}", items.join(", "))
 }
 
 pub fn standings_from_played(engine_names: &[String], games: &[PlayedGame]) -> Vec<StandingRow> {
@@ -883,6 +919,21 @@ mod tests {
             .collect();
         assert_eq!(snap.remaining_games(1), 0);
         assert_eq!(snap.remaining_games_label(1), "0 games remaining");
+        assert_eq!(snap.progress_count_label(1), "8 games");
+        assert!(snap.schedule_complete(1));
+        snap.played_games.push(PlayedGame {
+            id: 8,
+            match_index: 8,
+            round: 1,
+            white: "A".into(),
+            black: "B".into(),
+            white_score: 0.5,
+            initial_fen: "extra".into(),
+            moves: Vec::new(),
+        });
+        assert_eq!(snap.progress_count_label(1), "9 games");
+        assert_eq!(snap.progress_summary(1, 6), "9 played · 0 left · 6 live");
+        assert_eq!(snap.remaining_games(1), 0);
         assert_eq!(snap.phase_label(), "Finished");
         assert_eq!(score_label(1.5, 0.5), "1.5–0.5");
         assert_eq!(result_label(1.0), "1-0");
@@ -1342,6 +1393,34 @@ mod tests {
             moves: vec!["e2e4".into(), "e7e5".into()],
         }]);
         assert_eq!(snap.played_games.len(), 2);
+        snap.games_per_encounter = 1;
+        snap.append_games(vec![
+            TournamentGameSnapshot {
+                match_index: 2,
+                round: 1,
+                white: "Alpha".into(),
+                black: "Beta".into(),
+                white_score: 0.5,
+                initial_fen: "fen-a".into(),
+                moves: vec!["a2a3".into()],
+            },
+            TournamentGameSnapshot {
+                match_index: 2,
+                round: 1,
+                white: "Alpha".into(),
+                black: "Beta".into(),
+                white_score: 0.0,
+                initial_fen: "fen-b".into(),
+                moves: vec!["a2a4".into()],
+            },
+        ]);
+        assert_eq!(
+            snap.played_games
+                .iter()
+                .filter(|game| game.white == "Alpha" && game.black == "Beta")
+                .count(),
+            2
+        );
     }
 
     #[test]

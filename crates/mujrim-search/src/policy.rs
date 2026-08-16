@@ -359,6 +359,69 @@ impl LmrPolicy for RecklessFullLmrPolicy {
     }
 }
 
+/// Official Viridithas LMR: reduce noisies, keep PV/check lines, cut-node tax.
+#[derive(Default)]
+pub struct ViridithasLmrPolicy;
+
+impl LmrPolicy for ViridithasLmrPolicy {
+    fn reduce_noisy_moves(&self) -> bool {
+        true
+    }
+
+    fn adjust_reduction(&self, base_reduction: i32, ctx: &LmrContext) -> i32 {
+        let mut reduction = StockLikeLmrPolicy.adjust_reduction(base_reduction, ctx);
+        if ctx.is_cut_node && !ctx.tt_was_pv {
+            reduction += 1;
+        }
+        if ctx.gives_check {
+            reduction -= 1;
+        }
+        reduction
+    }
+}
+
+/// Obsidian keeps SF-shaped whole-ply LMR but still reduces later captures.
+#[derive(Default)]
+pub struct ObsidianLmrPolicy;
+
+impl LmrPolicy for ObsidianLmrPolicy {
+    fn reduce_noisy_moves(&self) -> bool {
+        true
+    }
+
+    fn adjust_reduction(&self, base_reduction: i32, ctx: &LmrContext) -> i32 {
+        let mut reduction = StockLikeLmrPolicy.adjust_reduction(base_reduction, ctx);
+        if ctx.is_cut_node {
+            reduction += 1;
+        }
+        reduction
+    }
+}
+
+/// PlentyChess is Stockfish-family LMR with noisy reductions enabled.
+#[derive(Default)]
+pub struct PlentyChessLmrPolicy;
+
+impl LmrPolicy for PlentyChessLmrPolicy {
+    fn reduce_noisy_moves(&self) -> bool {
+        true
+    }
+
+    fn adjust_reduction(&self, base_reduction: i32, ctx: &LmrContext) -> i32 {
+        StockLikeLmrPolicy.adjust_reduction(base_reduction, ctx)
+    }
+}
+
+/// Native Akimbo LMR: whole-ply StockLike curve, no Reckless noisy model.
+#[derive(Default)]
+pub struct AkimboLmrPolicy;
+
+impl LmrPolicy for AkimboLmrPolicy {
+    fn adjust_reduction(&self, base_reduction: i32, ctx: &LmrContext) -> i32 {
+        StockLikeLmrPolicy.adjust_reduction(base_reduction, ctx)
+    }
+}
+
 /// Allocation-free dispatch for production LMR policies, with an explicit
 /// dynamic escape hatch for callers that install a custom implementation.
 #[derive(Clone, Default)]
@@ -367,6 +430,10 @@ pub enum LmrDispatch {
     StockLike,
     Reckless,
     RecklessFull,
+    Viridithas,
+    Obsidian,
+    PlentyChess,
+    Akimbo,
     Custom(Arc<dyn LmrPolicy + Send + Sync>),
 }
 
@@ -377,6 +444,10 @@ impl LmrDispatch {
             Self::StockLike => StockLikeLmrPolicy.reduce_noisy_moves(),
             Self::Reckless => RecklessLmrPolicy.reduce_noisy_moves(),
             Self::RecklessFull => RecklessFullLmrPolicy.reduce_noisy_moves(),
+            Self::Viridithas => ViridithasLmrPolicy.reduce_noisy_moves(),
+            Self::Obsidian => ObsidianLmrPolicy.reduce_noisy_moves(),
+            Self::PlentyChess => PlentyChessLmrPolicy.reduce_noisy_moves(),
+            Self::Akimbo => AkimboLmrPolicy.reduce_noisy_moves(),
             Self::Custom(policy) => policy.reduce_noisy_moves(),
         }
     }
@@ -387,6 +458,10 @@ impl LmrDispatch {
             Self::StockLike => StockLikeLmrPolicy.adjust_reduction(base_reduction, context),
             Self::Reckless => RecklessLmrPolicy.adjust_reduction(base_reduction, context),
             Self::RecklessFull => RecklessFullLmrPolicy.adjust_reduction(base_reduction, context),
+            Self::Viridithas => ViridithasLmrPolicy.adjust_reduction(base_reduction, context),
+            Self::Obsidian => ObsidianLmrPolicy.adjust_reduction(base_reduction, context),
+            Self::PlentyChess => PlentyChessLmrPolicy.adjust_reduction(base_reduction, context),
+            Self::Akimbo => AkimboLmrPolicy.adjust_reduction(base_reduction, context),
             Self::Custom(policy) => policy.adjust_reduction(base_reduction, context),
         }
     }
@@ -453,11 +528,63 @@ impl LmpPolicy for RecklessLmpPolicy {
     }
 }
 
+#[derive(Default)]
+pub struct ViridithasLmpPolicy;
+
+impl LmpPolicy for ViridithasLmpPolicy {
+    fn decision(&self, context: &LmpContext) -> Option<LmpDecision> {
+        let mut context = *context;
+        context.stock_move_threshold = context.stock_move_threshold.saturating_add(2);
+        StockLikeLmpPolicy.decision(&context)
+    }
+}
+
+#[derive(Default)]
+pub struct ObsidianLmpPolicy;
+
+impl LmpPolicy for ObsidianLmpPolicy {
+    fn decision(&self, context: &LmpContext) -> Option<LmpDecision> {
+        StockLikeLmpPolicy.decision(context)
+    }
+}
+
+#[derive(Default)]
+pub struct PlentyChessLmpPolicy;
+
+impl LmpPolicy for PlentyChessLmpPolicy {
+    fn decision(&self, context: &LmpContext) -> Option<LmpDecision> {
+        StockLikeLmpPolicy.decision(context)
+    }
+}
+
+#[derive(Default)]
+pub struct AkimboLmpPolicy;
+
+impl LmpPolicy for AkimboLmpPolicy {
+    fn decision(&self, context: &LmpContext) -> Option<LmpDecision> {
+        let threshold = (context.depth as usize).saturating_mul(context.depth as usize) + 3;
+        (!context.is_root
+            && !context.in_check
+            && context.depth <= context.stock_depth_limit
+            && context.move_count > threshold
+            && context.is_quiet
+            && context.best_score > -29_000 + 100)
+            .then_some(LmpDecision {
+                skip_remaining_quiets: true,
+                prune_current: true,
+            })
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum LmpDispatch {
     #[default]
     StockLike,
     Reckless,
+    Viridithas,
+    Obsidian,
+    PlentyChess,
+    Akimbo,
     Custom(Arc<dyn LmpPolicy + Send + Sync>),
 }
 
@@ -467,6 +594,10 @@ impl LmpDispatch {
         match self {
             Self::StockLike => StockLikeLmpPolicy.decision(context),
             Self::Reckless => RecklessLmpPolicy.decision(context),
+            Self::Viridithas => ViridithasLmpPolicy.decision(context),
+            Self::Obsidian => ObsidianLmpPolicy.decision(context),
+            Self::PlentyChess => PlentyChessLmpPolicy.decision(context),
+            Self::Akimbo => AkimboLmpPolicy.decision(context),
             Self::Custom(policy) => policy.decision(context),
         }
     }
@@ -556,11 +687,78 @@ impl FutilityPolicy for RecklessFutilityPolicy {
     }
 }
 
+#[derive(Default)]
+pub struct ViridithasFutilityPolicy;
+
+impl FutilityPolicy for ViridithasFutilityPolicy {
+    fn requires_direct_check(&self) -> bool {
+        true
+    }
+
+    fn decision(&self, context: &FutilityContext) -> Option<FutilityDecision> {
+        let margin = 86 + 70 * context.depth;
+        (!context.is_pv
+            && !context.in_check
+            && !context.gives_direct_check
+            && context.is_quiet
+            && context.move_count > 1
+            && context.eval + margin <= context.alpha
+            && context.best_score > -29_000 + 100)
+            .then_some(FutilityDecision {
+                skip_remaining_quiets: false,
+                score_floor: None,
+            })
+    }
+}
+
+#[derive(Default)]
+pub struct ObsidianFutilityPolicy;
+
+impl FutilityPolicy for ObsidianFutilityPolicy {
+    fn requires_direct_check(&self) -> bool {
+        true
+    }
+
+    fn decision(&self, context: &FutilityContext) -> Option<FutilityDecision> {
+        StockLikeFutilityPolicy.decision(context)
+    }
+}
+
+#[derive(Default)]
+pub struct PlentyChessFutilityPolicy;
+
+impl FutilityPolicy for PlentyChessFutilityPolicy {
+    fn requires_direct_check(&self) -> bool {
+        true
+    }
+
+    fn decision(&self, context: &FutilityContext) -> Option<FutilityDecision> {
+        StockLikeFutilityPolicy.decision(context)
+    }
+}
+
+#[derive(Default)]
+pub struct AkimboFutilityPolicy;
+
+impl FutilityPolicy for AkimboFutilityPolicy {
+    fn requires_direct_check(&self) -> bool {
+        true
+    }
+
+    fn decision(&self, context: &FutilityContext) -> Option<FutilityDecision> {
+        StockLikeFutilityPolicy.decision(context)
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum FutilityDispatch {
     #[default]
     StockLike,
     Reckless,
+    Viridithas,
+    Obsidian,
+    PlentyChess,
+    Akimbo,
     Custom(Arc<dyn FutilityPolicy + Send + Sync>),
 }
 
@@ -570,6 +768,10 @@ impl FutilityDispatch {
         match self {
             Self::StockLike => StockLikeFutilityPolicy.requires_direct_check(),
             Self::Reckless => RecklessFutilityPolicy.requires_direct_check(),
+            Self::Viridithas => ViridithasFutilityPolicy.requires_direct_check(),
+            Self::Obsidian => ObsidianFutilityPolicy.requires_direct_check(),
+            Self::PlentyChess => PlentyChessFutilityPolicy.requires_direct_check(),
+            Self::Akimbo => AkimboFutilityPolicy.requires_direct_check(),
             Self::Custom(policy) => policy.requires_direct_check(),
         }
     }
@@ -579,6 +781,10 @@ impl FutilityDispatch {
         match self {
             Self::StockLike => StockLikeFutilityPolicy.decision(context),
             Self::Reckless => RecklessFutilityPolicy.decision(context),
+            Self::Viridithas => ViridithasFutilityPolicy.decision(context),
+            Self::Obsidian => ObsidianFutilityPolicy.decision(context),
+            Self::PlentyChess => PlentyChessFutilityPolicy.decision(context),
+            Self::Akimbo => AkimboFutilityPolicy.decision(context),
             Self::Custom(policy) => policy.decision(context),
         }
     }
@@ -709,11 +915,52 @@ impl RfpPolicy for RecklessRfpPolicy {
     }
 }
 
+#[derive(Default)]
+pub struct ViridithasRfpPolicy;
+
+impl RfpPolicy for ViridithasRfpPolicy {
+    fn cutoff_score(&self, eval: i32, beta: i32, context: &RfpContext) -> Option<i32> {
+        let margin = 65 * context.depth - i32::from(context.improving) * 76;
+        (context.depth <= 8 && eval - margin >= beta).then_some(eval)
+    }
+}
+
+#[derive(Default)]
+pub struct ObsidianRfpPolicy;
+
+impl RfpPolicy for ObsidianRfpPolicy {
+    fn cutoff_score(&self, eval: i32, beta: i32, context: &RfpContext) -> Option<i32> {
+        StockLikeRfpPolicy.cutoff_score(eval, beta, context)
+    }
+}
+
+#[derive(Default)]
+pub struct PlentyChessRfpPolicy;
+
+impl RfpPolicy for PlentyChessRfpPolicy {
+    fn cutoff_score(&self, eval: i32, beta: i32, context: &RfpContext) -> Option<i32> {
+        StockLikeRfpPolicy.cutoff_score(eval, beta, context)
+    }
+}
+
+#[derive(Default)]
+pub struct AkimboRfpPolicy;
+
+impl RfpPolicy for AkimboRfpPolicy {
+    fn cutoff_score(&self, eval: i32, beta: i32, context: &RfpContext) -> Option<i32> {
+        StockLikeRfpPolicy.cutoff_score(eval, beta, context)
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum RfpDispatch {
     #[default]
     StockLike,
     Reckless,
+    Viridithas,
+    Obsidian,
+    PlentyChess,
+    Akimbo,
     Custom(Arc<dyn RfpPolicy + Send + Sync>),
 }
 
@@ -723,7 +970,50 @@ impl RfpDispatch {
         match self {
             Self::StockLike => StockLikeRfpPolicy.cutoff_score(eval, beta, context),
             Self::Reckless => RecklessRfpPolicy.cutoff_score(eval, beta, context),
+            Self::Viridithas => ViridithasRfpPolicy.cutoff_score(eval, beta, context),
+            Self::Obsidian => ObsidianRfpPolicy.cutoff_score(eval, beta, context),
+            Self::PlentyChess => PlentyChessRfpPolicy.cutoff_score(eval, beta, context),
+            Self::Akimbo => AkimboRfpPolicy.cutoff_score(eval, beta, context),
             Self::Custom(policy) => policy.cutoff_score(eval, beta, context),
+        }
+    }
+}
+
+/// Soft/hard clock profile. Reckless/v60 flag when the default 1.5× soft cap
+/// spends the increment; Viridithas official TM is more conservative.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TimeManagerProfile {
+    #[default]
+    Default,
+    Reckless,
+    Viridithas,
+    Stockfish,
+}
+
+impl TimeManagerProfile {
+    pub const fn soft_base(self) -> f64 {
+        match self {
+            Self::Default => 0.50,
+            Self::Reckless => 0.55,
+            Self::Viridithas => 0.45,
+            Self::Stockfish => 0.50,
+        }
+    }
+
+    pub const fn soft_min(self) -> f64 {
+        match self {
+            Self::Default => 0.25,
+            Self::Reckless | Self::Viridithas => 0.20,
+            Self::Stockfish => 0.22,
+        }
+    }
+
+    pub const fn soft_max(self) -> f64 {
+        match self {
+            Self::Default => 1.35,
+            Self::Reckless => 1.05,
+            Self::Viridithas => 1.00,
+            Self::Stockfish => 1.15,
         }
     }
 }
@@ -1236,6 +1526,154 @@ mod tests {
         assert_eq!(HistorySeePruning::threshold(false, 5, -1024), 0);
         assert!(
             HistorySeePruning::threshold(false, 8, 0) < HistorySeePruning::threshold(false, 4, 0)
+        );
+    }
+
+    fn sample_lmr_context() -> LmrContext {
+        LmrContext {
+            depth: 8,
+            move_count: 8,
+            is_quiet: true,
+            is_pv: false,
+            improving: true,
+            improvement: 0,
+            alpha_raises: 0,
+            is_killer: false,
+            gives_check: false,
+            is_recapture: false,
+            mv_stat_score: 0,
+            corr_abs: 0,
+            is_cut_node: true,
+            winning_beta: false,
+            tt_was_pv: false,
+            tt_score_above_alpha: false,
+            tt_score_below_alpha: false,
+            tt_depth_sufficient: false,
+            tt_move_missing: false,
+            hist_lmr_div: 8192,
+            lmr_corr_mul: 448,
+            lmr_cut_node_bonus: 1,
+            child_cutoffs: 10,
+        }
+    }
+
+    #[test]
+    fn viridithas_policies_lock_official_rfp_lmr_and_futility() {
+        let rfp = ViridithasRfpPolicy;
+        let context = RfpContext {
+            depth: 4,
+            improving: true,
+            improvement: 0,
+            correction_abs: 0,
+            tt_was_pv: false,
+            own_pieces_threatened: false,
+            stock_margin: 0,
+        };
+        // Official: margin = 65*depth - improving*76 = 260-76 = 184
+        assert_eq!(rfp.cutoff_score(300, 100, &context), Some(300));
+        assert_eq!(rfp.cutoff_score(283, 100, &context), None);
+        assert_eq!(
+            RfpDispatch::Viridithas.cutoff_score(300, 100, &context),
+            Some(300)
+        );
+
+        assert!(ViridithasLmrPolicy.reduce_noisy_moves());
+        let mut lmr = sample_lmr_context();
+        let stock = StockLikeLmrPolicy.adjust_reduction(3, &lmr);
+        assert_eq!(
+            ViridithasLmrPolicy.adjust_reduction(3, &lmr),
+            stock + 1,
+            "cut-node tax"
+        );
+        lmr.gives_check = true;
+        let stock_check = StockLikeLmrPolicy.adjust_reduction(3, &lmr);
+        assert_eq!(
+            ViridithasLmrPolicy.adjust_reduction(3, &lmr),
+            stock_check,
+            "check relief cancels the extra cut-node tax"
+        );
+
+        let futility = FutilityContext {
+            depth: 2,
+            eval: 0,
+            alpha: 300,
+            history: 0,
+            improving: false,
+            is_root: false,
+            is_pv: false,
+            in_check: false,
+            is_quiet: true,
+            move_count: 2,
+            best_score: 0,
+            gives_direct_check: false,
+            stock_depth_limit: 8,
+            stock_margin: 0,
+        };
+        // Official: 86 + 70*depth = 226; 0+226 <= 300
+        assert!(ViridithasFutilityPolicy.decision(&futility).is_some());
+        assert!(FutilityDispatch::Viridithas.decision(&futility).is_some());
+    }
+
+    #[test]
+    fn adapter_lmr_dispatch_reduces_noisies_except_akimbo_and_stocklike() {
+        assert!(LmrDispatch::Viridithas.reduce_noisy_moves());
+        assert!(LmrDispatch::Obsidian.reduce_noisy_moves());
+        assert!(LmrDispatch::PlentyChess.reduce_noisy_moves());
+        assert!(!LmrDispatch::Akimbo.reduce_noisy_moves());
+        assert!(!LmrDispatch::StockLike.reduce_noisy_moves());
+        let context = sample_lmr_context();
+        let stock = StockLikeLmrPolicy.adjust_reduction(4, &context);
+        assert_eq!(
+            LmrDispatch::Obsidian.adjust_reduction(4, &context),
+            stock + 1
+        );
+        assert_eq!(
+            LmrDispatch::PlentyChess.adjust_reduction(4, &context),
+            stock
+        );
+        assert_eq!(LmrDispatch::Akimbo.adjust_reduction(4, &context), stock);
+    }
+
+    #[test]
+    fn akimbo_lmp_uses_quadratic_depth_threshold() {
+        let context = LmpContext {
+            depth: 3,
+            move_count: 13,
+            improvement: 0,
+            improving: false,
+            is_root: false,
+            is_pv: false,
+            in_check: false,
+            is_quiet: true,
+            best_score: 0,
+            stock_depth_limit: 8,
+            stock_move_threshold: 99,
+        };
+        // threshold = 3*3+3 = 12; move_count 13 prunes
+        assert!(AkimboLmpPolicy.decision(&context).is_some());
+        assert!(
+            AkimboLmpPolicy
+                .decision(&LmpContext {
+                    move_count: 12,
+                    ..context
+                })
+                .is_none()
+        );
+        assert_eq!(
+            LmpDispatch::Akimbo.decision(&context),
+            AkimboLmpPolicy.decision(&context)
+        );
+    }
+
+    #[test]
+    fn time_manager_profiles_cap_soft_time() {
+        assert_eq!(TimeManagerProfile::Reckless.soft_max(), 1.05);
+        assert_eq!(TimeManagerProfile::Viridithas.soft_max(), 1.00);
+        assert_eq!(TimeManagerProfile::Stockfish.soft_max(), 1.15);
+        assert_eq!(TimeManagerProfile::Default.soft_max(), 1.35);
+        assert!(TimeManagerProfile::Reckless.soft_max() < TimeManagerProfile::Default.soft_max());
+        assert!(
+            TimeManagerProfile::Viridithas.soft_base() < TimeManagerProfile::Reckless.soft_base()
         );
     }
 }

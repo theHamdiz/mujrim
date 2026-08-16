@@ -1048,6 +1048,7 @@ fn gambit_controls(state: AppState, handles: AppHandles) -> impl IntoView {
 
 fn tournament_sidebar(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
+        finished_results_bar(state, handles.clone()),
         resume_banner(state, handles.clone()),
         tournament_live_card(state, handles.clone()),
         Stack::vertical((
@@ -1183,11 +1184,7 @@ fn tournament_live_card(state: AppState, handles: AppHandles) -> impl IntoView {
                     let snap = state.tournament_snapshot.get();
                     let games =
                         snap.encounter_games(state.tournament_setup.get().games_per_encounter);
-                    let planned = snap.planned_games(games);
-                    if planned == 0 {
-                        return String::new();
-                    }
-                    format!("{} / {planned}", snap.unique_played_count())
+                    snap.progress_count_label(games)
                 })
                 .style(move |s| {
                     s.font_size(theme::TYPE_CAPTION)
@@ -1409,7 +1406,36 @@ fn resume_banner(state: AppState, handles: AppHandles) -> impl IntoView {
             .border(1.0)
             .border_color(theme::rgba(pal.accent))
             .background(theme::rgba(pal.panel));
-        if state.resume_prompt.get().is_some() {
+        if state.resume_prompt.get().is_some() && !tournament_is_complete(state) {
+            s
+        } else {
+            s.display(Display::None)
+        }
+    })
+}
+
+fn tournament_is_complete(state: AppState) -> bool {
+    let snap = state.tournament_snapshot.get();
+    snap.finished || (!snap.running && !snap.paused && !snap.standings.is_empty())
+}
+
+fn finished_results_bar(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::horizontal((
+        widgets::primary_button(state, "Final results", {
+            move || actions::open_tournament_results(state)
+        }),
+        widgets::primary_button(state, "New Tournament", {
+            let handles = handles.clone();
+            move || actions::open_new_tournament_setup(state, &handles)
+        }),
+    ))
+    .style(move |s| {
+        let s = s
+            .width_full()
+            .min_width(0.0)
+            .col_gap(6.0)
+            .flex_wrap(FlexWrap::Wrap);
+        if tournament_is_complete(state) {
             s
         } else {
             s.display(Display::None)
@@ -1422,6 +1448,13 @@ fn tournament_controls(state: AppState, handles: AppHandles) -> impl IntoView {
         widgets::primary_button(state, "Tournament setup", {
             let handles = handles.clone();
             move || actions::open_tournament_setup(state, &handles)
+        })
+        .style(move |s| {
+            if tournament_is_complete(state) {
+                s.display(Display::None)
+            } else {
+                s
+            }
         }),
         widgets::ghost_button(state, "Pause", {
             let handles = handles.clone();
@@ -1899,7 +1932,14 @@ mod tests {
             "display(Display::None)",
             "annotation_tint",
             "resume_banner",
+            "finished_results_bar",
+            "Final results",
+            "New Tournament",
+            "open_new_tournament_setup",
+            "open_tournament_results",
+            "tournament_is_complete",
             "progress_summary",
+            "progress_count_label",
             "Resume event",
             "Start fresh",
             "flex_grow(1.0f32)",

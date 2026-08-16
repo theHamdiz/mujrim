@@ -351,6 +351,96 @@ impl NNUEState {
             .evaluate(board, net)
     }
 
+    /// Search-only evaluate: skip the ply-hash probe when the current frame is
+    /// already accurate. Bench / scratch callers must keep using [`Self::evaluate`].
+    pub fn evaluate_search(&mut self, board: &Board) -> i32 {
+        match self.source.as_ref() {
+            #[cfg(feature = "reckless-nnue")]
+            ActiveNetwork::EmbeddedReckless => {
+                return self
+                    .reckless
+                    .as_mut()
+                    .expect("Reckless source has matching accumulator state")
+                    .evaluate_search(board, super::reckless_format::embedded());
+            }
+            #[cfg(feature = "reckless-nnue")]
+            ActiveNetwork::ExternalReckless { network, .. } => {
+                return self
+                    .reckless
+                    .as_mut()
+                    .expect("Reckless source has matching accumulator state")
+                    .evaluate_search(board, network);
+            }
+            #[cfg(feature = "stockfish-nnue")]
+            ActiveNetwork::EmbeddedStockfish => {
+                return self
+                    .stockfish
+                    .as_mut()
+                    .expect("Stockfish source has matching accumulator state")
+                    .evaluate_search(board, super::stockfish_format::embedded());
+            }
+            #[cfg(feature = "stockfish-nnue")]
+            ActiveNetwork::ExternalStockfish { network, .. } => {
+                return self
+                    .stockfish
+                    .as_mut()
+                    .expect("Stockfish source has matching accumulator state")
+                    .evaluate_search(board, network);
+            }
+            ActiveNetwork::Embedded => {}
+            ActiveNetwork::ExternalAkimbo { .. } => {}
+            #[cfg(feature = "viridithas-nnue")]
+            ActiveNetwork::ExternalViridithas { network, .. } => {
+                return self
+                    .viridithas
+                    .as_mut()
+                    .expect("Viridithas source has matching accumulator state")
+                    .evaluate_search(board, network);
+            }
+            #[cfg(feature = "obsidian-nnue")]
+            ActiveNetwork::ExternalObsidian { network, .. } => {
+                return self
+                    .obsidian
+                    .as_mut()
+                    .expect("Obsidian source has matching accumulator state")
+                    .evaluate_search(board, network);
+            }
+            #[cfg(feature = "plentychess-nnue")]
+            ActiveNetwork::ExternalPlentyChess { network, .. } => {
+                return self
+                    .plentychess
+                    .as_mut()
+                    .expect("PlentyChess source has matching accumulator state")
+                    .evaluate_search(board, network);
+            }
+            #[cfg(feature = "ateed-nnue")]
+            ActiveNetwork::ExternalAteed { network, .. } => {
+                return self
+                    .ateed
+                    .as_mut()
+                    .expect("Ateed source has matching accumulator state")
+                    .evaluate_search(board, network);
+            }
+        }
+
+        let net = match self.source.parameters() {
+            NnueNetworkParameters::Akimbo(net) => net,
+            #[cfg(any(
+                feature = "stockfish-nnue",
+                feature = "reckless-nnue",
+                feature = "viridithas-nnue",
+                feature = "obsidian-nnue",
+                feature = "plentychess-nnue",
+                feature = "ateed-nnue"
+            ))]
+            _ => unreachable!("non-Akimbo backends are handled above"),
+        };
+        self.akimbo
+            .as_mut()
+            .expect("Akimbo source has matching accumulator state")
+            .evaluate_search(board, net)
+    }
+
     /// Score plus a non-negative uncertainty proxy. Only Ateed fills WDL variance;
     /// other evaluators return `0`.
     pub fn evaluate_with_uncertainty(&mut self, board: &Board) -> (i32, i32) {
@@ -364,6 +454,19 @@ impl NNUEState {
             return (eval.score, super::ateed_format::wdl_variance(eval.wdl));
         }
         (self.evaluate(board), 0)
+    }
+
+    pub fn evaluate_with_uncertainty_search(&mut self, board: &Board) -> (i32, i32) {
+        #[cfg(feature = "ateed-nnue")]
+        if let ActiveNetwork::ExternalAteed { network, .. } = self.source.as_ref() {
+            let eval = self
+                .ateed
+                .as_mut()
+                .expect("Ateed source has matching accumulator state")
+                .evaluate_full_search(board, network);
+            return (eval.score, super::ateed_format::wdl_variance(eval.wdl));
+        }
+        (self.evaluate_search(board), 0)
     }
 
     /// Fully recompute the accumulators from a board position.
@@ -473,11 +576,13 @@ impl NNUEState {
     }
 
     /// Get the current accumulator entry for the given king positions.
-    pub fn get_entry(&self, _w_king: usize, _b_king: usize) -> &EvalEntry {
-        self.akimbo
-            .as_ref()
-            .expect("Akimbo source has matching accumulator state")
-            .current_entry()
+    pub fn get_entry(&mut self, _w_king: usize, _b_king: usize) -> &EvalEntry {
+        let state = self
+            .akimbo
+            .as_mut()
+            .expect("Akimbo source has matching accumulator state");
+        state.sync_current_from_frame();
+        state.current_entry()
     }
 }
 

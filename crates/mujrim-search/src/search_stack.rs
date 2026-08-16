@@ -6,7 +6,7 @@ use eval::nnue::NnueSearchProfile;
 
 use crate::policy::{
     BadNoisyFutilityDispatch, FutilityDispatch, LmpDispatch, LmrDispatch, MoveOrderingProfile,
-    RfpDispatch,
+    RfpDispatch, TimeManagerProfile,
 };
 use crate::search_params::SearchParams;
 
@@ -151,10 +151,11 @@ pub struct SearchPolicies {
     pub(crate) bad_noisy_futility: BadNoisyFutilityDispatch,
     pub(crate) rfp: RfpDispatch,
     pub(crate) move_ordering: MoveOrderingProfile,
+    pub(crate) time_manager: TimeManagerProfile,
 }
 
 impl SearchPolicies {
-    fn stock_like() -> Self {
+    pub(crate) fn stock_like() -> Self {
         Self {
             lmr: LmrDispatch::StockLike,
             lmp: LmpDispatch::StockLike,
@@ -162,23 +163,24 @@ impl SearchPolicies {
             bad_noisy_futility: BadNoisyFutilityDispatch::Disabled,
             rfp: RfpDispatch::StockLike,
             move_ordering: MoveOrderingProfile::StockLike,
+            time_manager: TimeManagerProfile::Stockfish,
         }
     }
 
-    /// Akimbo keeps StockLike move ordering (BK-stable) but uses the same
-    /// late-move reduction curve as Reckless so quiet conversions are searched.
-    fn akimbo() -> Self {
+    /// Native Akimbo reductions and MVV ordering — not the Reckless LMR hybrid.
+    pub(crate) fn akimbo() -> Self {
         Self {
-            lmr: LmrDispatch::RecklessFull,
-            lmp: LmpDispatch::StockLike,
-            futility: FutilityDispatch::StockLike,
+            lmr: LmrDispatch::Akimbo,
+            lmp: LmpDispatch::Akimbo,
+            futility: FutilityDispatch::Akimbo,
             bad_noisy_futility: BadNoisyFutilityDispatch::Disabled,
-            rfp: RfpDispatch::StockLike,
+            rfp: RfpDispatch::Akimbo,
             move_ordering: MoveOrderingProfile::StockLike,
+            time_manager: TimeManagerProfile::Default,
         }
     }
 
-    fn reckless() -> Self {
+    pub(crate) fn reckless() -> Self {
         Self {
             lmr: LmrDispatch::RecklessFull,
             lmp: LmpDispatch::Reckless,
@@ -186,7 +188,79 @@ impl SearchPolicies {
             bad_noisy_futility: BadNoisyFutilityDispatch::Reckless,
             rfp: RfpDispatch::Reckless,
             move_ordering: MoveOrderingProfile::Reckless,
+            time_manager: TimeManagerProfile::Reckless,
         }
+    }
+
+    pub(crate) fn viridithas() -> Self {
+        Self {
+            lmr: LmrDispatch::Viridithas,
+            lmp: LmpDispatch::Viridithas,
+            futility: FutilityDispatch::Viridithas,
+            bad_noisy_futility: BadNoisyFutilityDispatch::Disabled,
+            rfp: RfpDispatch::Viridithas,
+            move_ordering: MoveOrderingProfile::StockLike,
+            time_manager: TimeManagerProfile::Viridithas,
+        }
+    }
+
+    pub(crate) fn obsidian() -> Self {
+        Self {
+            lmr: LmrDispatch::Obsidian,
+            lmp: LmpDispatch::Obsidian,
+            futility: FutilityDispatch::Obsidian,
+            bad_noisy_futility: BadNoisyFutilityDispatch::Disabled,
+            rfp: RfpDispatch::Obsidian,
+            move_ordering: MoveOrderingProfile::StockLike,
+            time_manager: TimeManagerProfile::Default,
+        }
+    }
+
+    pub(crate) fn plentychess() -> Self {
+        Self {
+            lmr: LmrDispatch::PlentyChess,
+            lmp: LmpDispatch::PlentyChess,
+            futility: FutilityDispatch::PlentyChess,
+            bad_noisy_futility: BadNoisyFutilityDispatch::Disabled,
+            rfp: RfpDispatch::PlentyChess,
+            move_ordering: MoveOrderingProfile::StockLike,
+            time_manager: TimeManagerProfile::Stockfish,
+        }
+    }
+
+    pub(crate) fn expected_for(eval_mode: EvalMode) -> Self {
+        match eval_mode {
+            EvalMode::MujrimHce | EvalMode::Nnue(NnueSearchProfile::Stockfish) => {
+                Self::stock_like()
+            }
+            EvalMode::Nnue(NnueSearchProfile::Akimbo) => Self::akimbo(),
+            EvalMode::Nnue(NnueSearchProfile::Reckless)
+            | EvalMode::Nnue(NnueSearchProfile::Ateed)
+            | EvalMode::Nnue(NnueSearchProfile::Lc0) => Self::reckless(),
+            EvalMode::Nnue(NnueSearchProfile::Viridithas) => Self::viridithas(),
+            EvalMode::Nnue(NnueSearchProfile::Obsidian) => Self::obsidian(),
+            EvalMode::Nnue(NnueSearchProfile::PlentyChess) => Self::plentychess(),
+        }
+    }
+
+    pub(crate) fn uses_dedicated_loop(&self, eval_mode: EvalMode) -> bool {
+        !matches!(self.lmr, LmrDispatch::Custom(_))
+            && !matches!(self.lmp, LmpDispatch::Custom(_))
+            && !matches!(self.futility, FutilityDispatch::Custom(_))
+            && !matches!(self.bad_noisy_futility, BadNoisyFutilityDispatch::Custom(_))
+            && !matches!(self.rfp, RfpDispatch::Custom(_))
+            && self.same_kind(&Self::expected_for(eval_mode))
+    }
+
+    fn same_kind(&self, other: &Self) -> bool {
+        std::mem::discriminant(&self.lmr) == std::mem::discriminant(&other.lmr)
+            && std::mem::discriminant(&self.lmp) == std::mem::discriminant(&other.lmp)
+            && std::mem::discriminant(&self.futility) == std::mem::discriminant(&other.futility)
+            && std::mem::discriminant(&self.bad_noisy_futility)
+                == std::mem::discriminant(&other.bad_noisy_futility)
+            && std::mem::discriminant(&self.rfp) == std::mem::discriminant(&other.rfp)
+            && self.move_ordering == other.move_ordering
+            && self.time_manager == other.time_manager
     }
 
     fn apply_experiment(&mut self, experiment: SearchExperiment) {
@@ -353,7 +427,7 @@ impl SearchStackProfile for ViridithasSearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::akimbo()
+        SearchPolicies::viridithas()
     }
 }
 
@@ -369,7 +443,7 @@ impl SearchStackProfile for ObsidianSearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::akimbo()
+        SearchPolicies::obsidian()
     }
 }
 
@@ -385,7 +459,7 @@ impl SearchStackProfile for PlentyChessSearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::stock_like()
+        SearchPolicies::plentychess()
     }
 }
 
@@ -458,6 +532,9 @@ mod tests {
         assert!(stack.eval_mode().is_stockfish_nnue());
         assert!(!stack.eval_mode().is_reckless_nnue());
         assert_eq!(stack.params.nmp_base, 5);
+        assert_eq!(stack.params.se_double_ext_margin, 18);
+        assert_eq!(stack.params.ldse_depth_max, 6);
+        assert_eq!(stack.policies.time_manager, TimeManagerProfile::Stockfish);
         assert!(matches!(stack.policies.lmr, LmrDispatch::StockLike));
         assert!(matches!(stack.policies.lmp, LmpDispatch::StockLike));
         assert!(matches!(
@@ -505,22 +582,28 @@ mod tests {
             EvalMode::Nnue(NnueSearchProfile::Viridithas)
         );
         assert_eq!(viri.params.lmr_cut_node_bonus, 1);
-        assert_eq!(viri.params.lmr_base, 0.70);
+        assert_eq!(viri.params.lmr_base, 0.99);
+        assert_eq!(viri.params.probcut_margin, 176);
         assert_eq!(viri.params.se_depth_min, 5);
         assert_eq!(viri.policies.move_ordering, MoveOrderingProfile::StockLike);
-        assert!(matches!(viri.policies.lmr, LmrDispatch::RecklessFull));
+        assert_eq!(viri.policies.time_manager, TimeManagerProfile::Viridithas);
+        assert!(matches!(viri.policies.lmr, LmrDispatch::Viridithas));
+        assert!(matches!(viri.policies.rfp, RfpDispatch::Viridithas));
         assert!(viri.eval_mode().is_viridithas_nnue());
 
         let obs = SearchStack::for_preset_name("obsidian");
         assert_eq!(obs.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Obsidian));
         assert_eq!(obs.params.se_depth_min, 4);
-        assert!(matches!(obs.policies.lmr, LmrDispatch::RecklessFull));
+        assert_eq!(obs.params.probcut_margin, 180);
+        assert!(matches!(obs.policies.lmr, LmrDispatch::Obsidian));
 
         let plenty = SearchStack::for_preset_name("plentychess");
         assert_eq!(
             plenty.eval_mode(),
             EvalMode::Nnue(NnueSearchProfile::PlentyChess)
         );
+        assert_eq!(plenty.params.probcut_margin, 190);
+        assert!(matches!(plenty.policies.lmr, LmrDispatch::PlentyChess));
         let ateed = SearchStack::for_preset_name("ateed");
         assert_eq!(ateed.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Ateed));
         assert!(ateed.eval_mode().is_ateed_nnue());
@@ -558,6 +641,17 @@ mod tests {
         ));
         assert!(matches!(stack.policies.rfp, RfpDispatch::Reckless));
         assert_eq!(stack.policies.move_ordering, MoveOrderingProfile::Reckless);
+        assert_eq!(stack.policies.time_manager, TimeManagerProfile::Reckless);
+        assert_eq!(stack.policies.time_manager.soft_max(), 1.05);
+    }
+
+    #[test]
+    fn akimbo_stack_uses_native_akimbo_dispatch() {
+        let stack = SearchStack::for_network(NnueSearchProfile::Akimbo);
+        assert!(matches!(stack.policies.lmr, LmrDispatch::Akimbo));
+        assert!(matches!(stack.policies.lmp, LmpDispatch::Akimbo));
+        assert!(matches!(stack.policies.rfp, RfpDispatch::Akimbo));
+        assert!(!stack.policies.lmr.reduce_noisy_moves());
     }
 
     #[test]
@@ -580,7 +674,18 @@ mod tests {
         assert_eq!(stack.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Akimbo));
         assert_eq!(stack.params.nmp_base, akimbo_nmp);
         assert!(matches!(stack.policies.lmp, LmpDispatch::Reckless));
-        assert!(matches!(stack.policies.lmr, LmrDispatch::RecklessFull));
+        assert!(matches!(stack.policies.lmr, LmrDispatch::Akimbo));
         assert_eq!(stack.policies.move_ordering, MoveOrderingProfile::StockLike);
+        assert!(!stack.policies.uses_dedicated_loop(stack.eval_mode()));
+    }
+
+    #[test]
+    fn hce_and_ateed_use_dedicated_search_loops() {
+        let hce = MujrimHceSearchProfile.compose();
+        assert!(hce.policies.uses_dedicated_loop(hce.eval_mode()));
+        let ateed = AteedSearchProfile.compose();
+        assert!(ateed.policies.uses_dedicated_loop(ateed.eval_mode()));
+        let stock = StockfishSearchProfile.compose();
+        assert!(stock.policies.uses_dedicated_loop(stock.eval_mode()));
     }
 }

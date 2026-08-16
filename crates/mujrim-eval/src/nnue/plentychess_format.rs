@@ -1,18 +1,25 @@
 //! PlentyChess 0179r NNUE (PSQ + pawn-pair + threat FT → 1024 → 16 → 32 → 1 ×8).
 //!
 //! Published `0179r.bin` files are SLEB128/ULEB128-compressed `tmp` weights from
-//! PlentyChess `process_net` (`infile_is_floats=false`). Evaluation uses that
-//! pre-AVX-packus layout: L1/L2/L3 are transposed into `[bucket][in * out + out]`
-//! for a refresh-from-scratch forward pass. Threat / pawn-pair indices reuse the
-//! Stockfish 59808+4560 scheme already in this crate.
+//! PlentyChess `process_net` (`infile_is_floats=false`). L1 is stored as
+//! `[bucket][output][input]` for the SIMD affine kernel. Search evaluates
+//! through `PlentyChessAccumulatorState` only; scratch `Network::evaluate` is
+//! the bit-exact reference. Threat / pawn-pair indices reuse the Stockfish
+//! 59808+4560 scheme already in this crate.
 
 use std::path::Path;
 
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
 
+use super::dirty_threats::{
+    MAX_DIRTY_THREAT_DELTAS, ThreatDelta, ThreatDeltaSink, ThreatSnapshot,
+    collect_snapshot_move_deltas,
+};
 use super::stockfish_format::{
-    PAIR_FEATURES, THREAT_FEATURES, visit_pawn_pair_features, visit_threat_features,
+    AuxFeatureLists, MAX_AUX_FEATURES, PAIR_FEATURES, THREAT_FEATURES, apply_diff,
+    collect_aux_feature_lists, collect_pawn_pair_aux, visit_pawn_pair_features, visit_threat_delta,
+    visit_threat_features,
 };
 
 pub const L1: usize = 1024;
@@ -73,11 +80,11 @@ impl PlentyChessNetwork {
             ));
         }
 
-        let mut l1_weights = vec![0i8; OUTPUT_BUCKETS * L1 * L2].into_boxed_slice();
+        let mut l1_weights = vec![0i8; OUTPUT_BUCKETS * L2 * L1].into_boxed_slice();
         for bucket in 0..OUTPUT_BUCKETS {
             for l1 in 0..L1 {
                 for l2 in 0..L2 {
-                    l1_weights[bucket * L1 * L2 + l1 * L2 + l2] =
+                    l1_weights[bucket * L2 * L1 + l2 * L1 + l1] =
                         l1_tmp[l1 * OUTPUT_BUCKETS * L2 + bucket * L2 + l2];
                 }
             }
@@ -99,6 +106,9 @@ impl PlentyChessNetwork {
                 l3_weights[bucket * (L3 + 2 * L2) + l3] = l3_tmp[l3 * OUTPUT_BUCKETS + bucket];
             }
         }
+
+        let l1_weights =
+            super::layered_forward::pack_nnz_buckets(&l1_weights, OUTPUT_BUCKETS, L1, L2);
 
         Ok(Self {
             psq_weights,
@@ -239,21 +249,73 @@ fn apply_psq(
     );
 }
 
+fn aux_enabled(net: &PlentyChessNetwork) -> bool {
+    !net.pawn_pair_weights.is_empty() || !net.threat_weights.is_empty()
+}
+
 fn add_aux(net: &PlentyChessNetwork, board: &Board, pov: Color, acc: &mut [i16; L1]) {
     if !net.pawn_pair_weights.is_empty() {
         visit_pawn_pair_features(board, pov.index(), |feature| {
-            super::stockfish_simd::apply_i8_feature_width(
-                acc,
-                &net.pawn_pair_weights,
-                feature - THREAT_FEATURES,
-                1,
-            );
+            apply_aux_pair(acc, net, feature, 1);
         });
     }
     if !net.threat_weights.is_empty() {
         visit_threat_features(board, pov.index(), |feature| {
-            super::stockfish_simd::apply_i8_feature_width(acc, &net.threat_weights, feature, 1);
+            apply_aux_threat(acc, net, feature, 1);
         });
+    }
+}
+
+fn apply_aux_threat(acc: &mut [i16; L1], net: &PlentyChessNetwork, feature: usize, sign: i16) {
+    if net.threat_weights.is_empty() {
+        return;
+    }
+    super::stockfish_simd::apply_i8_feature_width(acc, &net.threat_weights, feature, sign);
+}
+
+fn apply_aux_pair(acc: &mut [i16; L1], net: &PlentyChessNetwork, feature: usize, sign: i16) {
+    if net.pawn_pair_weights.is_empty() {
+        return;
+    }
+    super::stockfish_simd::apply_i8_feature_width(
+        acc,
+        &net.pawn_pair_weights,
+        feature - THREAT_FEATURES,
+        sign,
+    );
+}
+
+fn collect_aux_lists(board: &Board, pov: Color) -> AuxFeatureLists {
+    collect_aux_feature_lists(board, pov.index())
+}
+
+fn apply_aux_lists(acc: &mut [i16; L1], net: &PlentyChessNetwork, lists: &AuxFeatureLists) {
+    if lists.overflowed {
+        return;
+    }
+    for &feature in &lists.threats[..lists.threat_count] {
+        apply_aux_threat(acc, net, usize::from(feature), 1);
+    }
+    for &feature in &lists.pairs[..lists.pair_count] {
+        apply_aux_pair(acc, net, usize::from(feature), 1);
+    }
+}
+
+fn finish_eval_sum(
+    net: &PlentyChessNetwork,
+    board: &Board,
+    acc_white: &[i16; L1],
+    acc_black: &[i16; L1],
+    aux_white: &[i16; L1],
+    aux_black: &[i16; L1],
+) -> i32 {
+    let pieces = board.all_occupancy().count_ones() as i32;
+    let divisor = (32 + OUTPUT_BUCKETS as i32 - 1) / OUTPUT_BUCKETS as i32;
+    let bucket = ((pieces - 2) / divisor).clamp(0, OUTPUT_BUCKETS as i32 - 1) as usize;
+    if board.side_to_move == Color::White {
+        propagate_sum(net, acc_white, acc_black, aux_white, aux_black, bucket)
+    } else {
+        propagate_sum(net, acc_black, acc_white, aux_black, aux_white, bucket)
     }
 }
 
@@ -275,22 +337,37 @@ fn finish_eval(
 
 #[inline(always)]
 fn propagate(net: &PlentyChessNetwork, us: &[i16; L1], them: &[i16; L1], bucket: usize) -> i32 {
-    let mut ft_out = [0u8; L1];
-    activate_ft(us, &mut ft_out[..L1 / 2]);
-    activate_ft(them, &mut ft_out[L1 / 2..]);
+    let mut ft_out = super::layered_forward::Align64::new([0u8; L1]);
+    activate_ft(us, &mut ft_out.0[..L1 / 2]);
+    activate_ft(them, &mut ft_out.0[L1 / 2..]);
 
+    finish_from_ft(net, &ft_out.0, bucket)
+}
+
+#[inline(always)]
+fn propagate_sum(
+    net: &PlentyChessNetwork,
+    us: &[i16; L1],
+    them: &[i16; L1],
+    us_aux: &[i16; L1],
+    them_aux: &[i16; L1],
+    bucket: usize,
+) -> i32 {
+    let mut ft_out = super::layered_forward::Align64::new([0u8; L1]);
+    activate_ft_sum(us, us_aux, &mut ft_out.0[..L1 / 2]);
+    activate_ft_sum(them, them_aux, &mut ft_out.0[L1 / 2..]);
+    finish_from_ft(net, &ft_out.0, bucket)
+}
+
+#[inline(always)]
+fn finish_from_ft(net: &PlentyChessNetwork, ft_out: &[u8; L1], bucket: usize) -> i32 {
     let mut l1_sum = [0i32; L2];
-    let l1_weight_base = bucket * L1 * L2;
-    for (i, feature) in ft_out.iter().enumerate() {
-        if *feature == 0 {
-            continue;
-        }
-        let row = l1_weight_base + i * L2;
-        let value = i32::from(*feature);
-        for (j, sum) in l1_sum.iter_mut().enumerate() {
-            *sum += value * i32::from(net.l1_weights[row + j]);
-        }
-    }
+    let l1_weight_base = bucket * L2 * L1;
+    super::layered_forward::affine_sparse_packed(
+        ft_out,
+        &net.l1_weights[l1_weight_base..l1_weight_base + L2 * L1],
+        &mut l1_sum,
+    );
 
     let mut l1 = [0.0f32; L2 * 2];
     let l1_bias_base = bucket * L2;
@@ -303,40 +380,46 @@ fn propagate(net: &PlentyChessNetwork, us: &[i16; L1], them: &[i16; L1], bucket:
     let mut l2 = [0.0f32; L3];
     let l2_weight_base = bucket * (L2 * 2) * L3;
     let l2_bias_base = bucket * L3;
-    l2.copy_from_slice(&net.l2_biases[l2_bias_base..l2_bias_base + L3]);
-    for (i, feature) in l1.iter().enumerate() {
-        let row = l2_weight_base + i * L3;
-        for (j, value) in l2.iter_mut().enumerate() {
-            *value += net.l2_weights[row + j] * *feature;
-        }
-    }
-    for value in &mut l2 {
-        let activated = value.clamp(0.0, 1.0);
-        *value = activated * activated;
-    }
+    super::layered_forward::affine_f32(
+        &l1,
+        &net.l2_weights[l2_weight_base..l2_weight_base + (L2 * 2) * L3],
+        &net.l2_biases[l2_bias_base..l2_bias_base + L3],
+        &mut l2,
+    );
+    super::layered_forward::square_clamp01(&mut l2);
 
     let l3_base = bucket * (L3 + 2 * L2);
-    let mut result = net.l3_biases[bucket];
-    for (j, feature) in l2.iter().enumerate() {
-        result += net.l3_weights[l3_base + j] * *feature;
-    }
-    for (j, feature) in l1.iter().enumerate() {
-        result += net.l3_weights[l3_base + L3 + j] * *feature;
-    }
-    (result * NETWORK_SCALE as f32) as i32
+    let l2_dot = super::layered_forward::dot_f32(
+        &l2,
+        &net.l3_weights[l3_base..l3_base + L3],
+        net.l3_biases[bucket],
+    );
+    let l1_dot = super::layered_forward::dot_f32(
+        &l1,
+        &net.l3_weights[l3_base + L3..l3_base + L3 + 2 * L2],
+        0.0,
+    );
+    ((l2_dot + l1_dot) * NETWORK_SCALE as f32) as i32
 }
 
 #[inline(always)]
 fn activate_ft(acc: &[i16], out: &mut [u8]) {
     let half = L1 / 2;
     debug_assert_eq!(out.len(), half);
-    for i in 0..half {
-        let c0 = i32::from(acc[i]).clamp(0, NETWORK_QA);
-        let c1 = i32::from(acc[i + half]).min(NETWORK_QA);
-        let shifted = c0 << (16 - FT_SHIFT);
-        let prod = ((shifted * c1) >> 16).clamp(0, 255);
-        out[i] = prod as u8;
-    }
+    super::stockfish_simd::activate_shifted_pair(&acc[..half], &acc[half..], out);
+}
+
+#[inline(always)]
+fn activate_ft_sum(acc: &[i16], aux: &[i16], out: &mut [u8]) {
+    let half = L1 / 2;
+    debug_assert_eq!(out.len(), half);
+    super::stockfish_simd::activate_shifted_pair_sum(
+        &acc[..half],
+        &aux[..half],
+        &acc[half..],
+        &aux[half..],
+        out,
+    );
 }
 
 const MAX_PLY: usize = 256;
@@ -344,6 +427,17 @@ const FINNY_ENTRIES: usize = 2 * 2 * KING_BUCKETS;
 
 struct PlentyChessFrame {
     values: [[i16; L1]; 2],
+    aux: [[i16; L1]; 2],
+    threats: [[u16; MAX_AUX_FEATURES]; 2],
+    threat_count: [usize; 2],
+    pairs: [[u16; MAX_AUX_FEATURES]; 2],
+    pair_count: [usize; 2],
+    aux_overflowed: [bool; 2],
+    threat_deltas: [ThreatDelta; MAX_DIRTY_THREAT_DELTAS],
+    threat_delta_count: usize,
+    threat_overflowed: bool,
+    pending_threats: Option<ThreatSnapshot>,
+    pawns_before: [u64; 2],
     kings: [u8; 2],
     pending_has_move: bool,
     pending_move: Move,
@@ -358,6 +452,17 @@ impl Default for PlentyChessFrame {
     fn default() -> Self {
         Self {
             values: [[0; L1]; 2],
+            aux: [[0; L1]; 2],
+            threats: [[0; MAX_AUX_FEATURES]; 2],
+            threat_count: [0; 2],
+            pairs: [[0; MAX_AUX_FEATURES]; 2],
+            pair_count: [0; 2],
+            aux_overflowed: [false; 2],
+            threat_deltas: [ThreatDelta::default(); MAX_DIRTY_THREAT_DELTAS],
+            threat_delta_count: 0,
+            threat_overflowed: false,
+            pending_threats: None,
+            pawns_before: [0; 2],
             kings: [u8::MAX; 2],
             pending_has_move: false,
             pending_move: Move::quiet(Square::A1, Square::A1),
@@ -377,6 +482,18 @@ impl Clone for PlentyChessFrame {
 }
 
 impl Copy for PlentyChessFrame {}
+
+impl ThreatDeltaSink for PlentyChessFrame {
+    #[inline(always)]
+    fn push_threat_delta(&mut self, delta: ThreatDelta) {
+        if self.threat_delta_count < self.threat_deltas.len() {
+            self.threat_deltas[self.threat_delta_count] = delta;
+            self.threat_delta_count += 1;
+        } else {
+            self.threat_overflowed = true;
+        }
+    }
+}
 
 struct FinnyEntry {
     values: [i16; L1],
@@ -435,6 +552,13 @@ impl PlentyChessAccumulatorState {
         frame.pending_move = mv;
         frame.pending_mover = board.piece_ids()[mv.from.index()];
         frame.pending_captured = board.piece_ids()[mv.to.index()];
+        frame.pawns_before = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
+        frame.threat_delta_count = 0;
+        frame.threat_overflowed = false;
+        frame.pending_threats = Some(ThreatSnapshot::from_board(board));
         frame.hash = 0;
     }
 
@@ -447,6 +571,7 @@ impl PlentyChessAccumulatorState {
         let next = self.index + 1;
         self.frames[next] = self.frames[self.index];
         self.frames[next].pending_has_move = false;
+        self.frames[next].pending_threats = None;
         self.frames[next].pending_null = true;
         self.index = next;
     }
@@ -461,23 +586,46 @@ impl PlentyChessAccumulatorState {
     }
 
     pub(crate) fn evaluate(&mut self, board: &Board, network: &PlentyChessNetwork) -> i32 {
+        self.ensure(board, network, false);
+        self.finish(board, network)
+    }
+
+    pub(crate) fn evaluate_search(&mut self, board: &Board, network: &PlentyChessNetwork) -> i32 {
+        self.ensure(board, network, true);
+        self.finish(board, network)
+    }
+
+    fn finish(&self, board: &Board, network: &PlentyChessNetwork) -> i32 {
+        let frame = &self.frames[self.index];
+        if aux_enabled(network) {
+            finish_eval_sum(
+                network,
+                board,
+                &frame.values[0],
+                &frame.values[1],
+                &frame.aux[0],
+                &frame.aux[1],
+            )
+        } else {
+            finish_eval(network, board, &frame.values[0], &frame.values[1])
+        }
+    }
+
+    fn ensure(&mut self, board: &Board, network: &PlentyChessNetwork, trusted: bool) {
         if self.frames[self.index].accurate && self.frames[self.index].pending_null {
             self.frames[self.index].hash = board.hash;
             self.frames[self.index].pending_null = false;
         }
-        if !self.frames[self.index].accurate || self.frames[self.index].hash != board.hash {
-            if self.index != 0 && self.frames[self.index - 1].accurate {
-                self.update_from_parent(board, network);
-            } else {
-                self.refresh(board, network);
-            }
+        if self.frames[self.index].accurate
+            && (trusted || self.frames[self.index].hash == board.hash)
+        {
+            return;
         }
-        let frame = &self.frames[self.index];
-        let mut acc_white = frame.values[0];
-        let mut acc_black = frame.values[1];
-        add_aux(network, board, Color::White, &mut acc_white);
-        add_aux(network, board, Color::Black, &mut acc_black);
-        finish_eval(network, board, &acc_white, &acc_black)
+        if self.index != 0 && self.frames[self.index - 1].accurate {
+            self.update_from_parent(board, network);
+        } else {
+            self.refresh(board, network);
+        }
     }
 
     fn refresh(&mut self, board: &Board, network: &PlentyChessNetwork) {
@@ -490,12 +638,16 @@ impl PlentyChessAccumulatorState {
             self.finny_refresh(side, kings[pov], &occupancy, network);
             self.frames[self.index].values[pov] = self.finny[finny_index(side, kings[pov])].values;
         }
-        let frame = &mut self.frames[self.index];
-        frame.kings = [kings[0] as u8, kings[1] as u8];
-        frame.hash = board.hash;
-        frame.accurate = true;
-        frame.pending_has_move = false;
-        frame.pending_null = false;
+        {
+            let frame = &mut self.frames[self.index];
+            frame.kings = [kings[0] as u8, kings[1] as u8];
+            frame.hash = board.hash;
+            frame.accurate = true;
+            frame.pending_has_move = false;
+            frame.pending_threats = None;
+            frame.pending_null = false;
+        }
+        self.refresh_aux(board, network);
     }
 
     fn update_from_parent(&mut self, board: &Board, network: &PlentyChessNetwork) {
@@ -522,34 +674,144 @@ impl PlentyChessAccumulatorState {
                 self.frames[current].values[pov] = self.finny[finny_index(side, kings[pov])].values;
             }
         }
+        {
+            let frame = &mut self.frames[current];
+            if let (Some(snapshot), true) = (frame.pending_threats.take(), frame.pending_has_move) {
+                collect_snapshot_move_deltas(frame, snapshot, frame.pending_move);
+            }
+        }
         let pending_has_move = self.frames[current].pending_has_move;
         let pending_move = self.frames[current].pending_move;
         let pending_mover = self.frames[current].pending_mover;
         let pending_captured = self.frames[current].pending_captured;
         let parent_values = self.frames[current - 1].values;
-        let frame = &mut self.frames[current];
+        {
+            let frame = &mut self.frames[current];
+            for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+                if needs_refresh[pov] {
+                    continue;
+                }
+                if pending_has_move {
+                    apply_move_delta_from(
+                        &mut frame.values[pov],
+                        &parent_values[pov],
+                        &network.psq_weights,
+                        kings[pov],
+                        side,
+                        pending_move,
+                        pending_mover,
+                        pending_captured,
+                    );
+                } else {
+                    frame.values[pov] = parent_values[pov];
+                }
+            }
+            frame.kings = [kings[0] as u8, kings[1] as u8];
+            frame.hash = board.hash;
+            frame.accurate = true;
+            frame.pending_has_move = false;
+            frame.pending_null = false;
+        }
+        self.update_aux_from_parent(board, network, needs_refresh);
+    }
+
+    fn store_aux_lists(&mut self, pov: usize, lists: &AuxFeatureLists) {
+        let frame = &mut self.frames[self.index];
+        frame.threats[pov] = lists.threats;
+        frame.threat_count[pov] = lists.threat_count;
+        frame.pairs[pov] = lists.pairs;
+        frame.pair_count[pov] = lists.pair_count;
+        frame.aux_overflowed[pov] = lists.overflowed;
+    }
+
+    fn refresh_aux(&mut self, board: &Board, network: &PlentyChessNetwork) {
+        if !aux_enabled(network) {
+            let frame = &mut self.frames[self.index];
+            frame.aux = [[0; L1]; 2];
+            frame.threat_count = [0; 2];
+            frame.pair_count = [0; 2];
+            frame.aux_overflowed = [false; 2];
+            return;
+        }
         for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
-            if needs_refresh[pov] {
+            self.refresh_aux_pov(board, network, pov, side);
+        }
+    }
+
+    fn refresh_aux_pov(
+        &mut self,
+        board: &Board,
+        network: &PlentyChessNetwork,
+        pov: usize,
+        side: Color,
+    ) {
+        let lists = collect_aux_lists(board, side);
+        let mut aux = [0i16; L1];
+        if lists.overflowed {
+            add_aux(network, board, side, &mut aux);
+        } else {
+            apply_aux_lists(&mut aux, network, &lists);
+        }
+        self.frames[self.index].aux[pov] = aux;
+        self.store_aux_lists(pov, &lists);
+    }
+
+    fn update_aux_from_parent(
+        &mut self,
+        board: &Board,
+        network: &PlentyChessNetwork,
+        needs_refresh: [bool; 2],
+    ) {
+        if !aux_enabled(network) {
+            let frame = &mut self.frames[self.index];
+            frame.aux = [[0; L1]; 2];
+            frame.threat_count = [0; 2];
+            frame.pair_count = [0; 2];
+            frame.aux_overflowed = [false; 2];
+            return;
+        }
+        let current = self.index;
+        let parent_aux = self.frames[current - 1].aux;
+        let parent_overflowed = self.frames[current - 1].aux_overflowed;
+        let threat_overflowed = self.frames[current].threat_overflowed;
+        let pawns_before = self.frames[current].pawns_before;
+        let pawns_after = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
+        let kings = [
+            board.king_square(Color::White).index(),
+            board.king_square(Color::Black).index(),
+        ];
+        let deltas = self.frames[current].threat_deltas;
+        let delta_count = self.frames[current].threat_delta_count;
+        for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+            if needs_refresh[pov] || parent_overflowed[pov] || threat_overflowed {
+                self.refresh_aux_pov(board, network, pov, side);
                 continue;
             }
-            frame.values[pov] = parent_values[pov];
-            if pending_has_move {
-                apply_move_delta(
-                    &mut frame.values[pov],
-                    &network.psq_weights,
-                    kings[pov],
-                    side,
-                    pending_move,
-                    pending_mover,
-                    pending_captured,
+            let mut aux = parent_aux[pov];
+            for &delta in &deltas[..delta_count] {
+                visit_threat_delta(delta, kings[pov], pov, |feature, sign| {
+                    apply_aux_threat(&mut aux, network, feature, sign);
+                });
+            }
+            if pawns_before != pawns_after {
+                let old = collect_pawn_pair_aux(pawns_before, kings[pov], pov);
+                let new = collect_pawn_pair_aux(pawns_after, kings[pov], pov);
+                if old.overflowed || new.overflowed {
+                    self.refresh_aux_pov(board, network, pov, side);
+                    continue;
+                }
+                apply_diff(
+                    &old.pairs[..old.pair_count],
+                    &new.pairs[..new.pair_count],
+                    |feature, sign| apply_aux_pair(&mut aux, network, feature, sign),
                 );
             }
+            self.frames[current].aux[pov] = aux;
+            self.frames[current].aux_overflowed[pov] = false;
         }
-        frame.kings = [kings[0] as u8, kings[1] as u8];
-        frame.hash = board.hash;
-        frame.accurate = true;
-        frame.pending_has_move = false;
-        frame.pending_null = false;
     }
 
     fn finny_refresh(
@@ -621,8 +883,10 @@ impl PlentyChessAccumulatorState {
     }
 }
 
-fn apply_move_delta(
-    acc: &mut [i16; L1],
+#[allow(clippy::too_many_arguments)]
+fn apply_move_delta_from(
+    dst: &mut [i16; L1],
+    src: &[i16; L1],
     weights: &[i16],
     king: usize,
     side: Color,
@@ -638,31 +902,17 @@ fn apply_move_delta(
         Color::Black
     };
     let resulting = mv.promotion.unwrap_or(mover_piece);
-    apply_psq(
-        acc,
-        weights,
-        king,
-        side,
-        mover_piece,
-        mover_color,
-        mv.from.index(),
-        -1,
-    );
-    apply_psq(
-        acc,
-        weights,
-        king,
-        side,
-        resulting,
-        mover_color,
-        mv.to.index(),
-        1,
-    );
+    let mut adds = [0; 4];
+    let mut subs = [0; 4];
+    let mut add_len = 0;
+    let mut sub_len = 0;
+    subs[sub_len] = psq_feature(king, side, mover_piece, mover_color, mv.from.index());
+    sub_len += 1;
+    adds[add_len] = psq_feature(king, side, resulting, mover_color, mv.to.index());
+    add_len += 1;
     if mv.is_capture() && mv.flag != MoveFlag::EnPassant {
         debug_assert_ne!(captured, u8::MAX);
-        apply_psq(
-            acc,
-            weights,
+        subs[sub_len] = psq_feature(
             king,
             side,
             Piece::from_index(usize::from(captured) / 2).expect("captured piece is valid"),
@@ -672,19 +922,17 @@ fn apply_move_delta(
                 Color::Black
             },
             mv.to.index(),
-            -1,
         );
+        sub_len += 1;
     } else if mv.flag == MoveFlag::EnPassant {
-        apply_psq(
-            acc,
-            weights,
+        subs[sub_len] = psq_feature(
             king,
             side,
             Piece::Pawn,
             mover_color.opponent(),
             Square::from_file_rank(mv.to.file(), mv.from.rank()).index(),
-            -1,
         );
+        sub_len += 1;
     } else if mv.is_castling() {
         let (rook_from, rook_to) = match (mover_color, mv.flag) {
             (Color::White, MoveFlag::KingCastle) => (Square::H1.index(), Square::F1.index()),
@@ -693,27 +941,18 @@ fn apply_move_delta(
             (Color::Black, MoveFlag::QueenCastle) => (Square::A8.index(), Square::D8.index()),
             _ => unreachable!(),
         };
-        apply_psq(
-            acc,
-            weights,
-            king,
-            side,
-            Piece::Rook,
-            mover_color,
-            rook_from,
-            -1,
-        );
-        apply_psq(
-            acc,
-            weights,
-            king,
-            side,
-            Piece::Rook,
-            mover_color,
-            rook_to,
-            1,
-        );
+        subs[sub_len] = psq_feature(king, side, Piece::Rook, mover_color, rook_from);
+        sub_len += 1;
+        adds[add_len] = psq_feature(king, side, Piece::Rook, mover_color, rook_to);
+        add_len += 1;
     }
+    super::stockfish_simd::apply_i16_from_width(
+        dst,
+        src,
+        weights,
+        &adds[..add_len],
+        &subs[..sub_len],
+    );
 }
 
 pub fn is_plentychess_path(path: &Path) -> bool {
@@ -848,7 +1087,7 @@ mod tests {
             pawn_pair_weights: Box::new([]),
             threat_weights: Box::new([]),
             feature_biases: vec![0i16; L1].into_boxed_slice(),
-            l1_weights: vec![0i8; OUTPUT_BUCKETS * L1 * L2].into_boxed_slice(),
+            l1_weights: vec![0i8; OUTPUT_BUCKETS * L2 * L1].into_boxed_slice(),
             l1_biases: vec![0.0; OUTPUT_BUCKETS * L2].into_boxed_slice(),
             l2_weights: vec![0.0; OUTPUT_BUCKETS * (L2 * 2) * L3].into_boxed_slice(),
             l2_biases: vec![0.0; OUTPUT_BUCKETS * L3].into_boxed_slice(),
@@ -893,6 +1132,115 @@ mod tests {
     }
 
     #[test]
+    fn activate_ft_matches_shifted_pair_formula() {
+        let mut acc = [0i16; L1];
+        for (index, value) in acc.iter_mut().enumerate() {
+            *value = (index as i16).wrapping_mul(7).wrapping_sub(300);
+        }
+        let mut out = [0u8; L1 / 2];
+        activate_ft(&acc, &mut out);
+        for (index, &actual) in out.iter().enumerate() {
+            let c0 = i32::from(acc[index]).clamp(0, NETWORK_QA);
+            let c1 = i32::from(acc[index + L1 / 2]).min(NETWORK_QA);
+            let expected = (((c0 << (16 - FT_SHIFT)) * c1) >> 16).clamp(0, 255) as u8;
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn aux_feature_diff_reconstructs_child_lists() {
+        types::init();
+        let mut board = Board::new();
+        let parent = collect_aux_lists(&board, Color::White);
+        assert!(!parent.overflowed);
+        assert!(parent.threat_count > 0);
+        assert!(
+            parent.threats[..parent.threat_count]
+                .windows(2)
+                .all(|window| window[0] <= window[1])
+        );
+        assert!(
+            parent.pairs[..parent.pair_count]
+                .windows(2)
+                .all(|window| window[0] <= window[1])
+        );
+
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|mv| mv.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        board.make_move(mv);
+        let child = collect_aux_lists(&board, Color::White);
+        assert!(!child.overflowed);
+
+        let mut reconstructed = parent.threats[..parent.threat_count].to_vec();
+        apply_diff(
+            &parent.threats[..parent.threat_count],
+            &child.threats[..child.threat_count],
+            |feature, sign| {
+                if sign > 0 {
+                    reconstructed.push(feature as u16);
+                } else {
+                    reconstructed.retain(|&existing| existing != feature as u16);
+                }
+            },
+        );
+        reconstructed.sort_unstable();
+        assert_eq!(reconstructed, child.threats[..child.threat_count].to_vec());
+
+        let mut pair_reconstructed = parent.pairs[..parent.pair_count].to_vec();
+        apply_diff(
+            &parent.pairs[..parent.pair_count],
+            &child.pairs[..child.pair_count],
+            |feature, sign| {
+                if sign > 0 {
+                    pair_reconstructed.push(feature as u16);
+                } else {
+                    pair_reconstructed.retain(|&existing| existing != feature as u16);
+                }
+            },
+        );
+        pair_reconstructed.sort_unstable();
+        assert_eq!(pair_reconstructed, child.pairs[..child.pair_count].to_vec());
+    }
+
+    #[test]
+    fn incremental_aux_matches_scratch_on_published_net() {
+        let Some(path) = crate::nnue::adapter::discover_named_network("plenty_default.bin")
+            .or_else(|| crate::nnue::adapter::discover_named_network("0179r.bin"))
+        else {
+            return;
+        };
+        types::init();
+        let bytes = std::fs::read(&path).expect("published PlentyChess net is readable");
+        let net = PlentyChessNetwork::from_compressed_bytes(&bytes)
+            .expect("published PlentyChess net decodes");
+        assert!(aux_enabled(&net));
+        let mut state = PlentyChessAccumulatorState::new();
+        let mut board = Board::new();
+        assert_incremental_matches(&mut state, &net, &board);
+        for uci in ["e2e4", "e7e5", "g1f3", "b8c6"] {
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|candidate| candidate.to_uci() == uci)
+                .copied()
+                .expect("test move is legal");
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            assert_incremental_matches(&mut state, &net, &board);
+            let expected_white = {
+                let mut acc = [0i16; L1];
+                add_aux(&net, &board, Color::White, &mut acc);
+                acc
+            };
+            assert_eq!(state.frames[state.index].aux[0], expected_white);
+        }
+    }
+
+    #[test]
     fn incremental_state_matches_scratch_for_king_and_special_moves() {
         types::init();
         let net = patterned_net();
@@ -915,5 +1263,33 @@ mod tests {
             board.make_move(mv);
             assert_incremental_matches(&mut state, &net, &board);
         }
+    }
+
+    #[test]
+    fn dirty_threat_push_records_snapshot_and_search_eval_skips_hash() {
+        types::init();
+        let net = patterned_net();
+        let mut state = PlentyChessAccumulatorState::new();
+        let mut board = Board::new();
+        let first = state.evaluate(&board, &net);
+        assert_eq!(state.evaluate_search(&board, &net), first);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        state.push_move(&board, mv);
+        assert!(state.frames[state.index].pending_threats.is_some());
+        assert_eq!(
+            state.frames[state.index].pawns_before[0] & (1u64 << 12),
+            1u64 << 12
+        );
+        board.make_move(mv);
+        let incremental = state.evaluate(&board, &net);
+        assert!(state.frames[state.index].pending_threats.is_none());
+        assert_eq!(state.evaluate_search(&board, &net), incremental);
+        let mut scratch = PlentyChessAccumulatorState::new();
+        assert_eq!(scratch.evaluate(&board, &net), incremental);
     }
 }

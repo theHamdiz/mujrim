@@ -12,6 +12,7 @@
 //! - Hardware detection (CPU, SIMD, GPU)
 //! - Optional TUI with live progress (ratatui)
 
+pub mod adapter_gauntlet;
 pub mod compare;
 pub mod engine_info;
 pub mod external;

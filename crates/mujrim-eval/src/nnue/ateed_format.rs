@@ -9,7 +9,9 @@ use std::path::Path;
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
 
-use super::stockfish_format::{PAIR_FEATURES, visit_pawn_pair_features};
+use super::stockfish_format::{
+    PAIR_FEATURES, apply_diff, collect_pawn_pair_aux, visit_pawn_pair_features,
+};
 
 pub const MAGIC: &[u8; 8] = b"ATEED001";
 pub const FORMAT_VERSION: u32 = 1;
@@ -108,6 +110,7 @@ pub struct AteedNetwork {
     feature_weights: Box<[i16]>,
     feature_biases: Box<[i16]>,
     pair_weights: Box<[i8]>,
+    pairs_enabled: bool,
     gate_weights: Box<[i8]>,
     gate_biases: [i32; EXPERTS],
     experts: [AteedExpert; EXPERTS],
@@ -145,10 +148,12 @@ impl AteedNetwork {
             read_expert(bytes, &mut offset).expect("Ateed expert payload is sized")
         });
         debug_assert_eq!(offset, FILE_SIZE);
+        let pairs_enabled = pair_weights.iter().any(|&weight| weight != 0);
         Ok(Self {
             feature_weights,
             feature_biases,
             pair_weights,
+            pairs_enabled,
             gate_weights,
             gate_biases,
             experts,
@@ -454,17 +459,42 @@ fn add_all_pieces(
 }
 
 fn add_pairs(net: &AteedNetwork, board: &Board, pov: Color, acc: &mut [i16; L1]) {
-    if net.pair_weights.iter().all(|&weight| weight == 0) {
+    if !net.pairs_enabled {
         return;
     }
     visit_pawn_pair_features(board, pov.index(), |feature| {
-        super::stockfish_simd::apply_i8_feature_width(
-            acc,
-            &net.pair_weights,
-            feature - super::stockfish_format::THREAT_FEATURES,
-            1,
-        );
+        apply_pair(acc, net, feature, 1);
     });
+}
+
+fn apply_pair(acc: &mut [i16; L1], net: &AteedNetwork, feature: usize, sign: i16) {
+    super::stockfish_simd::apply_i8_feature_width(
+        acc,
+        &net.pair_weights,
+        feature - super::stockfish_format::THREAT_FEATURES,
+        sign,
+    );
+}
+
+fn apply_pair_delta(
+    acc: &mut [i16; L1],
+    net: &AteedNetwork,
+    before: [u64; 2],
+    after: [u64; 2],
+    king: usize,
+    pov: usize,
+) {
+    if !net.pairs_enabled || before == after {
+        return;
+    }
+    let old = collect_pawn_pair_aux(before, king, pov);
+    let new = collect_pawn_pair_aux(after, king, pov);
+    debug_assert!(!old.overflowed && !new.overflowed);
+    apply_diff(
+        &old.pairs[..old.pair_count],
+        &new.pairs[..new.pair_count],
+        |feature, sign| apply_pair(acc, net, feature, sign),
+    );
 }
 
 fn activate(acc: &[i16; L1]) -> [u8; L1] {
@@ -568,6 +598,7 @@ struct AteedFrame {
     pending_move: Move,
     pending_mover: u8,
     pending_captured: u8,
+    pawns_before: [u64; 2],
     hash: u64,
     accurate: bool,
     pending_null: bool,
@@ -582,6 +613,7 @@ impl Default for AteedFrame {
             pending_move: Move::quiet(Square::A1, Square::A1),
             pending_mover: u8::MAX,
             pending_captured: u8::MAX,
+            pawns_before: [0; 2],
             hash: 0,
             accurate: false,
             pending_null: false,
@@ -654,6 +686,10 @@ impl AteedAccumulatorState {
         frame.pending_move = mv;
         frame.pending_mover = board.piece_ids()[mv.from.index()];
         frame.pending_captured = board.piece_ids()[mv.to.index()];
+        frame.pawns_before = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
         frame.hash = 0;
     }
 
@@ -680,12 +716,35 @@ impl AteedAccumulatorState {
         self.evaluate_full(board, network).score
     }
 
+    pub(crate) fn evaluate_search(&mut self, board: &Board, network: &AteedNetwork) -> i32 {
+        self.evaluate_full_inner(board, network, true).score
+    }
+
     pub(crate) fn evaluate_full(&mut self, board: &Board, network: &AteedNetwork) -> AteedEval {
+        self.evaluate_full_inner(board, network, false)
+    }
+
+    pub(crate) fn evaluate_full_search(
+        &mut self,
+        board: &Board,
+        network: &AteedNetwork,
+    ) -> AteedEval {
+        self.evaluate_full_inner(board, network, true)
+    }
+
+    fn evaluate_full_inner(
+        &mut self,
+        board: &Board,
+        network: &AteedNetwork,
+        trusted: bool,
+    ) -> AteedEval {
         if self.frames[self.index].accurate && self.frames[self.index].pending_null {
             self.frames[self.index].hash = board.hash;
             self.frames[self.index].pending_null = false;
         }
-        if !self.frames[self.index].accurate || self.frames[self.index].hash != board.hash {
+        if !(self.frames[self.index].accurate
+            && (trusted || self.frames[self.index].hash == board.hash))
+        {
             if self.index != 0 && self.frames[self.index - 1].accurate {
                 self.update_from_parent(board, network);
             } else {
@@ -693,11 +752,7 @@ impl AteedAccumulatorState {
             }
         }
         let frame = &self.frames[self.index];
-        let mut white = frame.values[0];
-        let mut black = frame.values[1];
-        add_pairs(network, board, Color::White, &mut white);
-        add_pairs(network, board, Color::Black, &mut black);
-        moe_forward(network, board, &white, &black)
+        moe_forward(network, board, &frame.values[0], &frame.values[1])
     }
 
     fn refresh(&mut self, board: &Board, network: &AteedNetwork) {
@@ -710,12 +765,24 @@ impl AteedAccumulatorState {
             self.finny_refresh(side, kings[pov], &occupancy, network);
             self.frames[self.index].values[pov] = self.finny[finny_index(side, kings[pov])].values;
         }
-        let frame = &mut self.frames[self.index];
-        frame.kings = [kings[0] as u8, kings[1] as u8];
-        frame.hash = board.hash;
-        frame.accurate = true;
-        frame.pending_has_move = false;
-        frame.pending_null = false;
+        {
+            let frame = &mut self.frames[self.index];
+            frame.kings = [kings[0] as u8, kings[1] as u8];
+            frame.hash = board.hash;
+            frame.accurate = true;
+            frame.pending_has_move = false;
+            frame.pending_null = false;
+        }
+        if network.pairs_enabled {
+            for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
+                add_pairs(
+                    network,
+                    board,
+                    side,
+                    &mut self.frames[self.index].values[pov],
+                );
+            }
+        }
     }
 
     fn update_from_parent(&mut self, board: &Board, network: &AteedNetwork) {
@@ -746,10 +813,16 @@ impl AteedAccumulatorState {
         let pending_move = self.frames[current].pending_move;
         let pending_mover = self.frames[current].pending_mover;
         let pending_captured = self.frames[current].pending_captured;
+        let pawns_before = self.frames[current].pawns_before;
+        let pawns_after = [
+            board.pieces[0][Piece::Pawn.index()],
+            board.pieces[1][Piece::Pawn.index()],
+        ];
         let parent_values = self.frames[current - 1].values;
         let frame = &mut self.frames[current];
         for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
             if needs_refresh[pov] {
+                add_pairs(network, board, side, &mut frame.values[pov]);
                 continue;
             }
             frame.values[pov] = parent_values[pov];
@@ -764,6 +837,14 @@ impl AteedAccumulatorState {
                     pending_captured,
                 );
             }
+            apply_pair_delta(
+                &mut frame.values[pov],
+                network,
+                pawns_before,
+                pawns_after,
+                kings[pov],
+                pov,
+            );
         }
         frame.kings = [kings[0] as u8, kings[1] as u8];
         frame.hash = board.hash;
@@ -1026,6 +1107,10 @@ mod tests {
         for (index, weight) in net.feature_weights.iter_mut().enumerate() {
             *weight = ((index % 251) as i16).wrapping_sub(125);
         }
+        for (index, weight) in net.pair_weights.iter_mut().enumerate() {
+            *weight = ((index % 11) as i8).wrapping_sub(5);
+        }
+        net.pairs_enabled = net.pair_weights.iter().any(|&weight| weight != 0);
         for (index, weight) in net.gate_weights.iter_mut().enumerate() {
             *weight = ((index % 17) as i8).wrapping_sub(8);
         }
@@ -1049,10 +1134,10 @@ mod tests {
         let expected = net.evaluate_full(board);
         let actual = state.evaluate_full(board, net);
         assert_eq!(actual, expected);
-        assert_eq!(
-            state.frames[state.index].values,
-            scratch_piece_accumulators(net, board)
-        );
+        let [mut white, mut black] = scratch_piece_accumulators(net, board);
+        add_pairs(net, board, Color::White, &mut white);
+        add_pairs(net, board, Color::Black, &mut black);
+        assert_eq!(state.frames[state.index].values, [white, black]);
     }
 
     #[test]
@@ -1224,5 +1309,29 @@ mod tests {
         );
         assert_eq!(last.score, 0);
         assert!(wdl_variance(last.wdl) >= 0);
+    }
+
+    #[test]
+    fn zero_net_skips_pair_scan_and_search_eval_matches() {
+        types::init();
+        let zero = AteedNetwork::zero();
+        assert!(!zero.pairs_enabled);
+        let patterned = patterned_net();
+        assert!(patterned.pairs_enabled);
+        let mut state = AteedAccumulatorState::new();
+        let mut board = Board::new();
+        let first = state.evaluate_full(&board, &patterned);
+        assert_eq!(state.evaluate_full_search(&board, &patterned), first);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        state.push_move(&board, mv);
+        board.make_move(mv);
+        let incremental = state.evaluate_full(&board, &patterned);
+        assert_eq!(state.evaluate_full_search(&board, &patterned), incremental);
+        assert_eq!(incremental, patterned.evaluate_full(&board));
     }
 }

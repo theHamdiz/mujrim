@@ -214,6 +214,25 @@ fn package_directory(engine_id: &str) -> &str {
     }
 }
 
+/// Workspace `dist/<os-arch>/engines` root. Gauntlet and release snapshots use this tree only.
+pub fn dist_engines_root(workspace_root: &Path) -> PathBuf {
+    workspace_root
+        .join("dist")
+        .join(RuntimePlatform::current().directory_name())
+        .join("engines")
+}
+
+/// Packaged binary under an engines root: `<root>/<package>/bin/<os-arch>/<id>`.
+pub fn packaged_engine_path(engines_root: &Path, engine_id: &str) -> PathBuf {
+    let product_id = canonical_engine_id(engine_id);
+    let target = RuntimePlatform::current().directory_name();
+    engines_root
+        .join(package_directory(product_id))
+        .join("bin")
+        .join(&target)
+        .join(packaged_executable_filename(product_id, &target))
+}
+
 fn search_limit_support(engine_id: &str) -> SearchLimitSupport {
     if canonical_engine_id(engine_id) == "ethereal" || engine_id == "ethereal" {
         SearchLimitSupport::DEPTH_ONLY
@@ -703,6 +722,34 @@ mod tests {
         );
         assert_eq!(package_directory("mujrim-plenty"), "mujrim");
         assert_eq!(package_directory("mujrim-ateed"), "mujrim");
+    }
+
+    #[test]
+    fn dist_engines_live_under_arch_scoped_tree() {
+        let dist = dist_engines_root(Path::new("/opt/mujrim"));
+        let target = RuntimePlatform::current().directory_name();
+        assert_eq!(
+            dist,
+            Path::new("/opt/mujrim")
+                .join("dist")
+                .join(&target)
+                .join("engines")
+        );
+        assert!(!dist.ends_with("dist/engines"));
+        assert_eq!(
+            packaged_engine_path(&dist, "mujrim-viri"),
+            dist.join("mujrim")
+                .join("bin")
+                .join(&target)
+                .join(executable_filename("mujrim-viri"))
+        );
+        assert_eq!(
+            packaged_engine_path(&dist, "viridithas"),
+            dist.join("viridithas")
+                .join("bin")
+                .join(&target)
+                .join(executable_filename("viridithas"))
+        );
     }
 
     #[test]

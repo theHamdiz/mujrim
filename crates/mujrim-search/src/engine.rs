@@ -6,13 +6,14 @@
 //! Supports Lazy SMP multi-threaded search via shared transposition table.
 
 use crate::adapters;
+use crate::loops;
 use crate::move_picker::MovePicker;
 use crate::policy::{
-    BadNoisyFutilityContext, BadNoisyFutilityDispatch, FutilityContext, FutilityDispatch,
-    HistorySeePruning, LmpContext, LmpDispatch, LmrContext, LmrDispatch, LmrPolicy,
-    MainThreadPreferredRootSelection, MoveOrderingProfile, RfpContext, RfpDispatch,
+    BadNoisyFutilityContext, FutilityContext, HistorySeePruning, LmpContext, LmrContext,
+    LmrDispatch, LmrPolicy, MainThreadPreferredRootSelection, MoveOrderingProfile, RfpContext,
     RootSelectionPolicy, ThreadOutcome,
 };
+use crate::search_family::SearchFamily;
 use crate::search_params::SearchParams;
 use crate::search_stack::{EvalMode, SearchExperiment, SearchStack};
 use crate::see;
@@ -607,7 +608,7 @@ fn budgeted_check_extension(
 #[inline(always)]
 fn hybrid_eval(board: &Board, state: &mut ThreadState, use_nnue: bool) -> i32 {
     if use_nnue {
-        state.nnue_state.evaluate(board)
+        state.nnue_state.evaluate_search(board)
     } else {
         eval::evaluate_with_hce(board, &state.hce)
     }
@@ -619,7 +620,7 @@ fn hybrid_eval_with_uncertainty(
     use_nnue: bool,
 ) -> (i32, i32) {
     if use_nnue {
-        state.nnue_state.evaluate_with_uncertainty(board)
+        state.nnue_state.evaluate_with_uncertainty_search(board)
     } else {
         (eval::evaluate_with_hce(board, &state.hce), 0)
     }
@@ -864,7 +865,7 @@ fn boxed_zeroed<T>() -> Box<T> {
 ///
 /// Large arrays are heap-allocated via `Box` to stay within default 2MB thread stacks.
 /// This is critical for Lazy SMP (spawned worker threads) and test runners.
-struct ThreadState {
+pub(crate) struct ThreadState {
     nodes: u64,
     /// Deepest ply reached by the current root iteration.
     seldepth: i32,
@@ -1441,11 +1442,7 @@ impl SearchEngine {
                             params: &search_stack.params,
                             lmr_table: search_stack.lmr_table.as_ref(),
                             use_nnue: use_nnue_clone,
-                            lmr_policy: &search_stack.policies.lmr,
-                            lmp_policy: &search_stack.policies.lmp,
-                            futility_policy: &search_stack.policies.futility,
-                            bad_noisy_futility_policy: &search_stack.policies.bad_noisy_futility,
-                            rfp_policy: &search_stack.policies.rfp,
+                            policies: &search_stack.policies,
                             move_ordering,
                             eval_mode: search_stack.eval_mode(),
                             contempt,
@@ -1479,7 +1476,7 @@ impl SearchEngine {
                                 search_stack.eval_mode(),
                             );
 
-                            let s = search_ab(
+                            let s = loops::enter_search(
                                 &mut board_clone,
                                 &mut state,
                                 &context,
@@ -1550,11 +1547,7 @@ impl SearchEngine {
             params: &self.search_stack.params,
             lmr_table: self.search_stack.lmr_table.as_ref(),
             use_nnue: self.use_nnue,
-            lmr_policy: &self.search_stack.policies.lmr,
-            lmp_policy: &self.search_stack.policies.lmp,
-            futility_policy: &self.search_stack.policies.futility,
-            bad_noisy_futility_policy: &self.search_stack.policies.bad_noisy_futility,
-            rfp_policy: &self.search_stack.policies.rfp,
+            policies: &self.search_stack.policies,
             move_ordering: self.search_stack.policies.move_ordering,
             eval_mode: self.search_stack.eval_mode(),
             contempt: self
@@ -1598,7 +1591,7 @@ impl SearchEngine {
                 let mut asp_depth = depth;
 
                 loop {
-                    let s = search_ab(
+                    let s = loops::enter_search(
                         board,
                         state,
                         &context,
@@ -1645,7 +1638,7 @@ impl SearchEngine {
                     break;
                 }
             } else {
-                let s = search_ab(
+                let s = loops::enter_search(
                     board,
                     state,
                     &context,
@@ -1740,8 +1733,8 @@ impl SearchEngine {
             {
                 let elapsed_now = start_time.elapsed();
 
-                // Base soft time: 50% of hard limit
-                let mut soft_mul = 0.50f64;
+                let tm = self.search_stack.policies.time_manager;
+                let mut soft_mul = tm.soft_base();
 
                 // Stability adjustment — stable best move → resolve faster
                 // stability 0 = just changed → 1.0x, stability 10 = very stable → 0.65x
@@ -1782,7 +1775,7 @@ impl SearchEngine {
                     soft_mul *= 1.3; // give 30% more time when best move changes at depth >= 6
                 }
 
-                let soft_limit = tl.mul_f64(soft_mul.clamp(0.25, 1.5));
+                let soft_limit = tl.mul_f64(soft_mul.clamp(tm.soft_min(), tm.soft_max()));
 
                 if elapsed_now >= soft_limit {
                     self.stopped.store(true, Ordering::SeqCst);
@@ -2056,31 +2049,27 @@ fn search_time_exceeded(
 
 /// Immutable resources shared by every node in one search invocation.
 #[derive(Copy, Clone)]
-struct SearchContext<'a> {
-    tt: &'a TranspositionTable,
-    stopped: &'a AtomicBool,
-    time_limit: Option<Duration>,
-    node_limit: Option<u64>,
-    start_time: Instant,
-    params: &'a SearchParams,
-    lmr_table: &'a [[i32; 128]; 128],
-    use_nnue: bool,
-    lmr_policy: &'a LmrDispatch,
-    lmp_policy: &'a LmpDispatch,
-    futility_policy: &'a FutilityDispatch,
-    bad_noisy_futility_policy: &'a BadNoisyFutilityDispatch,
-    rfp_policy: &'a RfpDispatch,
-    move_ordering: MoveOrderingProfile,
-    eval_mode: EvalMode,
-    contempt: i32,
-    syzygy: &'a SyzygyTables,
-    deadline_ms: &'a AtomicU64,
+pub(crate) struct SearchContext<'a> {
+    pub(crate) tt: &'a TranspositionTable,
+    pub(crate) stopped: &'a AtomicBool,
+    pub(crate) time_limit: Option<Duration>,
+    pub(crate) node_limit: Option<u64>,
+    pub(crate) start_time: Instant,
+    pub(crate) params: &'a SearchParams,
+    pub(crate) lmr_table: &'a [[i32; 128]; 128],
+    pub(crate) use_nnue: bool,
+    pub(crate) policies: &'a crate::search_stack::SearchPolicies,
+    pub(crate) move_ordering: MoveOrderingProfile,
+    pub(crate) eval_mode: EvalMode,
+    pub(crate) contempt: i32,
+    pub(crate) syzygy: &'a SyzygyTables,
+    pub(crate) deadline_ms: &'a AtomicU64,
 }
 
 /// Per-node alpha-beta inputs. Keeping these together makes recursive calls
 /// explicit without repeatedly passing the immutable search resources.
 #[derive(Copy, Clone)]
-struct SearchNode {
+pub(crate) struct SearchNode {
     depth: i32,
     alpha: i32,
     beta: i32,
@@ -2107,7 +2096,7 @@ struct QuiescenceNode {
 /// `excluded_move`: if Some, this move is skipped during the move loop.
 /// Used for singular extension verification searches.
 #[inline(never)]
-fn search_ab(
+pub(crate) fn search_ab_for<F: SearchFamily>(
     board: &mut Board,
     state: &mut ThreadState,
     context: &SearchContext<'_>,
@@ -2122,11 +2111,7 @@ fn search_ab(
         params,
         lmr_table,
         use_nnue,
-        lmr_policy,
-        lmp_policy,
-        futility_policy,
-        bad_noisy_futility_policy,
-        rfp_policy,
+        policies,
         move_ordering,
         eval_mode,
         contempt,
@@ -2263,7 +2248,7 @@ fn search_ab(
     }
     // Leaf → quiescence
     if depth <= 0 {
-        return quiescence(
+        return quiescence::<F>(
             board,
             state,
             context,
@@ -2288,6 +2273,10 @@ fn search_ab(
     let (raw_eval, corrected_eval, corr) = if in_check {
         state.eval_variance[ply_usize] = 0;
         (None, 0, 0)
+    } else if excluded_move.is_some() {
+        // Singular verification is the same position as the caller, which
+        // already filled this ply's eval. Skip a second NNUE pass.
+        (None, state.static_evals[ply_usize], 0)
     } else {
         let (raw_eval, variance) = if eval_mode.is_ateed_nnue() {
             hybrid_eval_with_uncertainty(board, state, use_nnue)
@@ -2391,7 +2380,7 @@ fn search_ab(
             stock_margin: params.rfp_margin(depth, improving)
                 + ateed_uncertainty_margin(eval_mode, state.eval_variance[ply_usize]),
         };
-        if let Some(score) = rfp_policy.cutoff_score(static_eval, beta, &rfp_context) {
+        if let Some(score) = F::rfp_cutoff(static_eval, beta, &rfp_context, policies) {
             return score;
         }
 
@@ -2412,7 +2401,7 @@ fn search_ab(
             board.make_null_move();
             state.prev_move[ply_usize] = NULL_MOVE;
             state.prev_piece[ply_usize] = 0;
-            let score = -search_ab(
+            let score = -search_ab_for::<F>(
                 board,
                 state,
                 context,
@@ -2450,7 +2439,7 @@ fn search_ab(
 
                 // Anti-recursion: set min_nmp_ply to prevent cascading verification
                 state.min_nmp_ply = ply_usize + ((depth - r) * params.nmp_verif_frac / 16) as usize;
-                let v_score = search_ab(
+                let v_score = search_ab_for::<F>(
                     board,
                     state,
                     context,
@@ -2479,7 +2468,7 @@ fn search_ab(
         }
 
         // ProbCut with a depth-qualified TT guard.
-        let pb_beta = beta + 200;
+        let pb_beta = beta + context.params.probcut_margin;
         let can_probcut = tt_score.is_none_or(|ts| !(tt_depth >= depth - 3 && ts < pb_beta));
         if depth >= 5 && beta.abs() < MATE_SCORE - 100 && can_probcut {
             let score_capture = |b: &Board, mv: Move| capture_score(b, mv, tt_move, move_ordering);
@@ -2494,7 +2483,7 @@ fn search_ab(
                 make_search_move(board, state, mv);
                 state.prev_move[ply_usize] = mv;
                 state.prev_piece[ply_usize] = moved_piece;
-                let score = -search_ab(
+                let score = -search_ab_for::<F>(
                     board,
                     state,
                     context,
@@ -2703,7 +2692,7 @@ fn search_ab(
         {
             let se_margin = params.se_margin(depth);
             let se_beta = tt_sc - se_margin;
-            let se_score = search_ab(
+            let se_score = search_ab_for::<F>(
                 board,
                 state,
                 context,
@@ -2776,7 +2765,7 @@ fn search_ab(
             stock_depth_limit: params.lmp_depth_limit,
             stock_move_threshold: params.lmp_threshold(depth, improving),
         };
-        if let Some(decision) = lmp_policy.decision(&lmp_context) {
+        if let Some(decision) = F::lmp_decision(&lmp_context, policies) {
             if decision.skip_remaining_quiets {
                 picker.skip_quiets();
             }
@@ -2813,13 +2802,13 @@ fn search_ab(
             move_count: moves_searched + 1,
             best_score,
             gives_direct_check: is_quiet
-                && futility_policy.requires_direct_check()
+                && F::futility_requires_direct_check(policies)
                 && gives_direct_check(board, mv),
             stock_depth_limit: params.futility_depth_limit,
             stock_margin: params.futility_margin(depth, improving)
                 + ateed_uncertainty_margin(eval_mode, state.eval_variance[ply_usize]),
         };
-        if let Some(decision) = futility_policy.decision(&futility_context) {
+        if let Some(decision) = F::futility_decision(&futility_context, policies) {
             if let Some(score_floor) = decision.score_floor {
                 best_score = best_score.max(score_floor);
             }
@@ -2841,10 +2830,10 @@ fn search_ab(
             in_check,
             is_bad_noisy: picker.is_bad_capture_stage(),
             best_score,
-            gives_direct_check: bad_noisy_futility_policy.requires_direct_check()
+            gives_direct_check: F::bad_noisy_requires_direct_check(policies)
                 && gives_direct_check(board, mv),
         };
-        if let Some(score_floor) = bad_noisy_futility_policy.score_floor(&bad_noisy_context) {
+        if let Some(score_floor) = F::bad_noisy_score_floor(&bad_noisy_context, policies) {
             if best_score.abs() < MATE_SCORE - 100 {
                 best_score = best_score.max(score_floor);
             }
@@ -2887,7 +2876,7 @@ fn search_ab(
 
         if moves_searched == 0 {
             // Full window search for the first move
-            score = -search_ab(
+            score = -search_ab_for::<F>(
                 board,
                 state,
                 context,
@@ -2918,7 +2907,7 @@ fn search_ab(
             if !root_quiet_no_lmr
                 && moves_searched >= 1
                 && depth >= 2
-                && ((!mv.is_capture() && !mv.is_promotion()) || lmr_policy.reduce_noisy_moves())
+                && ((!mv.is_capture() && !mv.is_promotion()) || F::reduce_noisy_moves(policies))
             {
                 let d = (depth as usize).min(127);
                 let m = moves_searched.min(127);
@@ -2951,7 +2940,7 @@ fn search_ab(
                     lmr_cut_node_bonus: params.lmr_cut_node_bonus,
                     child_cutoffs: state.cutoffs[(ply_usize + 1).min(MAX_PLY - 1)],
                 };
-                reduction = lmr_policy.adjust_reduction(base, &lmr_ctx)
+                reduction = F::adjust_lmr(base, &lmr_ctx, policies)
                     - ateed_lmr_relief(eval_mode, state.eval_variance[ply_usize]);
                 reduction = if effective_depth <= 1 {
                     0
@@ -2972,7 +2961,7 @@ fn search_ab(
             };
             // PVS null-window search with reduction
             state.reductions[ply_usize] = (effective_depth - reduced_depth).max(0);
-            let mut s = -search_ab(
+            let mut s = -search_ab_for::<F>(
                 board,
                 state,
                 context,
@@ -3027,7 +3016,7 @@ fn search_ab(
                     || is_pv
                     || root_near_miss
                 {
-                    s = -search_ab(
+                    s = -search_ab_for::<F>(
                         board,
                         state,
                         context,
@@ -3357,7 +3346,7 @@ fn qsearch_see_threshold(
 }
 
 #[inline(never)]
-fn quiescence(
+fn quiescence<F: SearchFamily>(
     board: &mut Board,
     state: &mut ThreadState,
     context: &SearchContext<'_>,
@@ -3454,7 +3443,7 @@ fn quiescence(
             entry.node_type,
         ) {
             state.reverse_qsearch = true;
-            let score = search_ab(
+            let score = search_ab_for::<F>(
                 board,
                 state,
                 context,
@@ -3490,7 +3479,7 @@ fn quiescence(
         while let Some(mv) = picker.next(board, &score_capture, &score_quiet) {
             moves_searched += 1;
             make_search_move(board, state, mv);
-            let score = -quiescence(
+            let score = -quiescence::<F>(
                 board,
                 state,
                 context,
@@ -3642,7 +3631,7 @@ fn quiescence(
         }
 
         make_search_move(board, state, mv);
-        let score = -quiescence(
+        let score = -quiescence::<F>(
             board,
             state,
             context,
@@ -3863,12 +3852,11 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    static TEST_LMR_POLICY: LmrDispatch = LmrDispatch::StockLike;
-    static TEST_LMP_POLICY: LmpDispatch = LmpDispatch::StockLike;
-    static TEST_FUTILITY_POLICY: FutilityDispatch = FutilityDispatch::StockLike;
-    static TEST_BAD_NOISY_FUTILITY_POLICY: BadNoisyFutilityDispatch =
-        BadNoisyFutilityDispatch::Disabled;
-    static TEST_RFP_POLICY: RfpDispatch = RfpDispatch::StockLike;
+    fn test_policies() -> &'static crate::search_stack::SearchPolicies {
+        static POLICIES: std::sync::OnceLock<crate::search_stack::SearchPolicies> =
+            std::sync::OnceLock::new();
+        POLICIES.get_or_init(crate::search_stack::SearchPolicies::stock_like)
+    }
 
     fn setup() {
         types::init();
@@ -4286,11 +4274,7 @@ mod tests {
             params,
             lmr_table,
             use_nnue: true,
-            lmr_policy: &TEST_LMR_POLICY,
-            lmp_policy: &TEST_LMP_POLICY,
-            futility_policy: &TEST_FUTILITY_POLICY,
-            bad_noisy_futility_policy: &TEST_BAD_NOISY_FUTILITY_POLICY,
-            rfp_policy: &TEST_RFP_POLICY,
+            policies: test_policies(),
             move_ordering: MoveOrderingProfile::StockLike,
             eval_mode: EvalMode::Nnue(NnueSearchProfile::Stockfish),
             contempt: 0,
@@ -5019,7 +5003,7 @@ mod tests {
         let params = SearchParams::default();
         let lmr_table = params.build_lmr_table();
         let context = test_context(&tt, &stopped, &params, &lmr_table);
-        let score = quiescence(
+        let score = quiescence::<crate::search_family::StockfishFamily>(
             &mut board,
             &mut state,
             &context,
@@ -5045,7 +5029,7 @@ mod tests {
         let params = SearchParams::default();
         let lmr_table = params.build_lmr_table();
         let context = test_context(&tt, &stopped, &params, &lmr_table);
-        let score = quiescence(
+        let score = quiescence::<crate::search_family::StockfishFamily>(
             &mut board,
             &mut state,
             &context,
@@ -5181,6 +5165,20 @@ mod tests {
                 .futility
                 .requires_direct_check()
         );
+    }
+
+    #[test]
+    fn adapter_time_profiles_and_probcut_margins_are_native() {
+        let mut engine = SearchEngine::new(1, 1);
+        engine.set_params_for_preset("viridithas");
+        assert_eq!(engine.search_stack.params.probcut_margin, 176);
+        assert_eq!(engine.search_stack.policies.time_manager.soft_max(), 1.00);
+        engine.set_params_for_preset("reckless");
+        assert_eq!(engine.search_stack.params.probcut_margin, 200);
+        assert_eq!(engine.search_stack.policies.time_manager.soft_max(), 1.05);
+        engine.set_params_for_preset("stockfish");
+        assert_eq!(engine.search_stack.params.probcut_margin, 200);
+        assert_eq!(engine.search_stack.policies.time_manager.soft_max(), 1.15);
     }
 
     #[test]
@@ -5387,7 +5385,7 @@ mod tests {
 
                 assert!(stand_pat_val > 100);
                 let beta = stand_pat_val - 50;
-                let qs_score = quiescence(
+                let qs_score = quiescence::<crate::search_family::StockfishFamily>(
                     &mut board,
                     &mut state,
                     &context,

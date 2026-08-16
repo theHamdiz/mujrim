@@ -161,6 +161,49 @@ enum Commands {
         json: bool,
     },
 
+    /// Isolated adapter eval card and V2-shaped adapter-vs-native matches.
+    Gauntlet {
+        /// Timed evaluations for each adapter preset that has a network.
+        #[arg(long, default_value_t = 8_000)]
+        iterations: u64,
+
+        /// Untimed evaluations used to warm code and network pages.
+        #[arg(long, default_value_t = 200)]
+        warmup: u64,
+
+        /// Optional single preset (`akimbo`, `viridithas`, …). Omit to try every V2 pair.
+        #[arg(long)]
+        preset: Option<String>,
+
+        /// Play nodes-equal and/or 3+2 cards against the native binary.
+        #[arg(long, default_value_t = false)]
+        play: bool,
+
+        /// Color-swapped opening pairs per played card.
+        #[arg(long, default_value_t = 4)]
+        pairs: usize,
+
+        /// Node budget for the nodes-equal card.
+        #[arg(long, default_value_t = 20_000)]
+        nodes: u64,
+
+        /// Skip the nodes-equal card when `--play` is set.
+        #[arg(long, default_value_t = false)]
+        skip_nodes: bool,
+
+        /// Skip the V2 3+2 clock card when `--play` is set.
+        #[arg(long, default_value_t = false)]
+        skip_clock: bool,
+
+        /// Workspace root used to resolve `dist/<os-arch>/engines` binaries.
+        #[arg(long)]
+        root: Option<PathBuf>,
+
+        /// Emit one machine-readable JSON object.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     /// Repeat BK benchmarks until the CCRL 40/15 proxy reaches `--target`, `--min-bk` hits, or limits stop.
     Iterate {
         /// Stop when BK accuracy maps to at least this **approx. CCRL 40/15** (100% BK suite → 3500 on this proxy).
@@ -516,7 +559,7 @@ enum Commands {
     },
 
     /// Run a resource-bounded paired round-robin tournament. With no paths,
-    /// all compatible engines in `dist/engines` are discovered automatically.
+    /// all compatible engines in `dist/<os-arch>/engines` are discovered automatically.
     Tournament {
         /// UCI engine executables. Omit to use the bundled engine catalog.
         #[arg(value_name = "ENGINE", num_args = 0..)]
@@ -596,6 +639,29 @@ fn main() {
             eval_file,
             json,
         } => run_nnue_bench(iterations, warmup, eval_file.as_deref(), json),
+        Commands::Gauntlet {
+            iterations,
+            warmup,
+            preset,
+            play,
+            pairs,
+            nodes,
+            skip_nodes,
+            skip_clock,
+            root,
+            json,
+        } => run_adapter_gauntlet(GauntletRunConfig {
+            iterations,
+            warmup,
+            preset,
+            play,
+            pairs,
+            nodes,
+            play_nodes: !skip_nodes,
+            play_clock: !skip_clock,
+            root,
+            json_output: json,
+        }),
         Commands::Iterate {
             target_elo,
             min_bk,
@@ -859,6 +925,105 @@ fn run_nnue_bench(
         result.suite_ns_per_eval()
     );
     println!("Checksum: {}", result.checksum);
+}
+
+struct GauntletRunConfig {
+    iterations: u64,
+    warmup: u64,
+    preset: Option<String>,
+    play: bool,
+    pairs: usize,
+    nodes: u64,
+    play_nodes: bool,
+    play_clock: bool,
+    root: Option<PathBuf>,
+    json_output: bool,
+}
+
+fn run_adapter_gauntlet(config: GauntletRunConfig) {
+    use mujrim_benchmarker::adapter_gauntlet::{
+        GauntletTargets, ValidationRequest, run_validation,
+    };
+
+    let root = config
+        .root
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let payload = match run_validation(&ValidationRequest {
+        root,
+        preset: config.preset,
+        play: config.play,
+        play_clock: config.play_clock,
+        play_nodes: config.play_nodes,
+        pairs: config.pairs.max(1),
+        nodes: config.nodes.max(1),
+        eval: NnueBenchConfig {
+            iterations: config.iterations,
+            warmup: config.warmup,
+        },
+    }) {
+        Ok(payload) => payload,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    if config.json_output {
+        println!("{payload}");
+        return;
+    }
+
+    let targets = GauntletTargets::v2();
+    println!("Adapter gauntlet targets:");
+    println!(
+        "  NPS ≥ {:.0}% of native · clock H2H ≥ {:.0}% · nodes-equal H2H ≥ {:.0}%",
+        targets.nps_ratio * 100.0,
+        targets.clock_h2h * 100.0,
+        targets.nodes_h2h * 100.0
+    );
+    println!(
+        "  nodes-equal: {} pairs × {} nodes, 128 MB, 1 thread",
+        payload["nodes_equal"]["pairs"], payload["nodes_equal"]["nodes"]
+    );
+    println!(
+        "  clock: {} pairs × 3+2 (+3 after 40), 128 MB, 1 thread",
+        payload["clock"]["pairs"]
+    );
+    if let Some(pairs) = payload["pairs"].as_array() {
+        for pair in pairs {
+            let adapter = pair["adapter_id"].as_str().unwrap_or("?");
+            if let Some(eval) = pair["eval"].as_object() {
+                println!(
+                    "  {:<12} hot {} ns/eval  incr {} ns/eval  ({})",
+                    adapter,
+                    eval["hot_ns_per_eval"],
+                    eval["incremental_ns_per_eval"],
+                    eval["network"]
+                );
+            }
+            if let Some(nodes) = pair["nodes_equal"].as_object() {
+                println!(
+                    "    nodes-equal  {:>5.1}%  nps {:.0}%  met={}",
+                    nodes["score"].as_f64().unwrap_or(0.0) * 100.0,
+                    nodes["nps_ratio"].as_f64().unwrap_or(0.0) * 100.0,
+                    nodes["met"]
+                );
+            }
+            if let Some(clock) = pair["clock"].as_object() {
+                println!(
+                    "    clock        {:>5.1}%  nps {:.0}%  met={}",
+                    clock["score"].as_f64().unwrap_or(0.0) * 100.0,
+                    clock["nps_ratio"].as_f64().unwrap_or(0.0) * 100.0,
+                    clock["met"]
+                );
+            }
+        }
+    }
+    if let Some(errors) = payload["errors"].as_array() {
+        for error in errors {
+            println!("  skipped {error}");
+        }
+    }
 }
 
 fn run_info() {
@@ -1968,6 +2133,68 @@ mod cli_tests {
         assert!(validate_replay_position("start\nquit", &[]).is_err());
         assert!(validate_replay_position("fixture", &["e2e4".to_owned()]).is_ok());
         assert!(validate_replay_position("fixture", &["e2e4\nquit".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn gauntlet_command_defaults_to_eval_card() {
+        let cli =
+            Cli::try_parse_from(["mujrim-benchmarker", "gauntlet", "--preset", "akimbo"]).unwrap();
+        let Commands::Gauntlet {
+            iterations,
+            warmup,
+            preset,
+            play,
+            pairs,
+            nodes,
+            skip_nodes,
+            skip_clock,
+            root,
+            json,
+        } = cli.command
+        else {
+            panic!("expected gauntlet command");
+        };
+        assert_eq!(iterations, 8_000);
+        assert_eq!(warmup, 200);
+        assert_eq!(preset.as_deref(), Some("akimbo"));
+        assert!(!play);
+        assert_eq!(pairs, 4);
+        assert_eq!(nodes, 20_000);
+        assert!(!skip_nodes);
+        assert!(!skip_clock);
+        assert!(root.is_none());
+        assert!(!json);
+    }
+
+    #[test]
+    fn gauntlet_play_flags_select_cards() {
+        let cli = Cli::try_parse_from([
+            "mujrim-benchmarker",
+            "gauntlet",
+            "--play",
+            "--pairs",
+            "1",
+            "--skip-clock",
+            "--preset",
+            "akimbo",
+        ])
+        .unwrap();
+        let Commands::Gauntlet {
+            play,
+            pairs,
+            skip_clock,
+            skip_nodes,
+            preset,
+            ..
+        } = cli.command
+        else {
+            panic!("expected gauntlet command");
+        };
+        assert!(play);
+        assert_eq!(pairs, 1);
+        assert!(skip_clock);
+        assert!(!skip_nodes);
+        assert_eq!(preset.as_deref(), Some("akimbo"));
     }
 
     #[test]

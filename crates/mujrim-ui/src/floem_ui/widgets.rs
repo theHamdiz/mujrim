@@ -558,6 +558,7 @@ pub fn overlay_frame_sized(
                     .background(theme::rgba(pal.panel))
                     .border(1.0)
                     .border_color(theme::rgba(pal.border))
+                    .overflow_x(Overflow::Clip)
             })
             .scroll()
             .style(|s| {

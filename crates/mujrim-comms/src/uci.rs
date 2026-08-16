@@ -1366,19 +1366,18 @@ impl UciHandler {
         // Base allocation: divide remaining time by estimated moves
         let base_alloc = safe_time / moves_left;
 
-        // Add a portion of the increment
-        let inc_bonus = (our_inc * 3) / 4;
+        // Spend half the increment, not the whole bonus, on this move.
+        let inc_bonus = our_inc / 2;
 
         // Total allocation
         let mut alloc = base_alloc + inc_bonus;
 
-        // Never use more than a fraction of remaining time (safety cap)
-        // In sudden death, never use more than 1/3 of remaining time
-        // With movestogo, allow up to 1/2
+        // Never use more than a fraction of remaining time (safety cap).
+        // Sudden death used to spend remaining/3 and flag; cap at remaining/4.
         let max_fraction = if movestogo.is_some() {
             safe_time / 2
         } else {
-            safe_time / 3
+            safe_time / 4
         };
         alloc = alloc.min(max_fraction);
 
@@ -2558,5 +2557,25 @@ mod tests {
         let (win, draw, loss) = wdl_from_score(0);
         assert_eq!(win + draw + loss, 1000);
         assert!(win.abs_diff(loss) <= 2);
+    }
+
+    #[test]
+    fn clock_allocation_spends_half_increment_and_caps_sudden_death() {
+        types::init();
+        let handler = UciHandler::new();
+        let sudden = handler
+            .calculate_time_allocation(Some(60_000), Some(60_000), 2_000, 2_000, None)
+            .expect("sudden-death clock");
+        let safe = 60_000u64.saturating_sub(DEFAULT_MOVE_OVERHEAD_MS);
+        let moves_left = 20 + 32 / 2;
+        let expected = (safe / moves_left + 2_000 / 2).min(safe / 4);
+        assert_eq!(sudden, Duration::from_millis(expected));
+
+        let to_go = handler
+            .calculate_time_allocation(Some(60_000), Some(60_000), 2_000, 2_000, Some(40))
+            .expect("movestogo clock");
+        let expected_mtg = (safe / 40 + 2_000 / 2).min(safe / 2);
+        assert_eq!(to_go, Duration::from_millis(expected_mtg));
+        assert!(to_go < sudden || expected_mtg <= expected);
     }
 }

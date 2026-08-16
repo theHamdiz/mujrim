@@ -9,7 +9,7 @@ use mujrim_study::database::{EngineMetadata, GameQuery, GameSummary, StudyDataba
 use mujrim_study::gambit::OwnedGambit;
 use mujrim_study::game_export::{self, GameExportFormat, GameRecord};
 use mujrim_study::opening::{MoveStatistics, OpeningExplorer, PrepSide, SavedLine};
-use mujrim_study::tournament::{Entrant, TournamentFormat};
+use mujrim_study::tournament::{Entrant, Pairing, TournamentFormat};
 use mujrim_study::tournament_store::{StoredTournament, StoredTournamentGame};
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::TrainingStore;
@@ -1386,17 +1386,20 @@ pub fn discover_event_checkpoints(
 ) -> Vec<mujrim_benchmarker::strength::DuelCheckpoint> {
     let event_dir = tournament_checkpoint_dir(format, tournament_id);
     let format_dir = event_dir.parent().map(PathBuf::from);
-    let mut scanned = Vec::new();
+    let mut event_scanned = Vec::new();
     for (_path, checkpoint) in mujrim_benchmarker::strength::scan_duel_checkpoints(&event_dir) {
-        scanned.push(checkpoint);
+        event_scanned.push(checkpoint);
     }
+    let roster = expand_event_roster_names(format, roster_names, &event_scanned);
+    let mut scanned = event_scanned;
     if let Some(format_dir) = format_dir {
         for (_path, checkpoint) in mujrim_benchmarker::strength::scan_duel_checkpoints(&format_dir)
         {
-            scanned.push(checkpoint);
+            if checkpoint_matches_roster(&checkpoint, roster_names) {
+                scanned.push(checkpoint);
+            }
         }
     }
-    let roster = expand_event_roster_names(format, roster_names, &scanned);
     let mut by_pair = std::collections::BTreeMap::<
         (String, String),
         mujrim_benchmarker::strength::DuelCheckpoint,
@@ -1425,6 +1428,23 @@ pub fn discover_event_checkpoints(
         }
     }
     by_pair.into_values().collect()
+}
+
+fn roster_stem(name: &str) -> String {
+    mujrim_benchmarker::strength::sanitized_engine_stem(name)
+}
+
+fn checkpoint_matches_roster(
+    checkpoint: &mujrim_benchmarker::strength::DuelCheckpoint,
+    roster_names: &[String],
+) -> bool {
+    let [candidate, reference] = checkpoint_engine_stems(checkpoint);
+    roster_names
+        .iter()
+        .any(|name| roster_stem(name) == candidate)
+        && roster_names
+            .iter()
+            .any(|name| roster_stem(name) == reference)
 }
 
 fn checkpoint_engine_stems(
@@ -1480,7 +1500,7 @@ fn event_roster_looks_degraded(
     discovered: usize,
     files: usize,
 ) -> bool {
-    if discovered <= known || known == 0 {
+    if known > 2 || discovered <= known || known == 0 {
         return false;
     }
     let small = mujrim_study::tournament::schedule(known, format).len();
@@ -1553,7 +1573,7 @@ pub fn hydrate_stored_tournament_from_disk(
         return Vec::new();
     }
     let expanded = expand_event_roster_names(stored.format, &roster, &checkpoints);
-    if expanded.len() > roster.len() {
+    if roster.len() <= 2 && expanded.len() > roster.len() {
         roster = expanded;
         stored.entrants = roster
             .iter()
@@ -1595,8 +1615,110 @@ pub fn hydrate_stored_tournament_from_disk(
     } else {
         stored.games = dedupe_stored_games(std::mem::take(&mut stored.games));
     }
+    trim_tournament_to_roster(stored, &roster, games_per_encounter as u32);
+    let from_games = completed_pairings_from_games(
+        &roster,
+        stored.format,
+        &stored.games,
+        tournament_live::games_per_match(games_per_encounter as u32),
+    );
     recover_event_status_from_progress(stored);
-    rebuilt.completed_pairings
+    union_completed_pairings(rebuilt.completed_pairings, from_games)
+}
+
+pub fn trim_tournament_to_roster(
+    stored: &mut StoredTournament,
+    locked_names: &[String],
+    games_per_encounter: u32,
+) {
+    if locked_names.len() < 2 {
+        stored.games = dedupe_stored_games(std::mem::take(&mut stored.games));
+        return;
+    }
+    let allowed = locked_names
+        .iter()
+        .map(|name| roster_stem(name))
+        .collect::<std::collections::BTreeSet<_>>();
+    stored
+        .entrants
+        .retain(|entrant| allowed.contains(&roster_stem(&entrant.name)));
+    for (index, entrant) in stored.entrants.iter_mut().enumerate() {
+        entrant.id = format!("engine-{index}");
+    }
+    let cap = tournament_live::games_per_match(games_per_encounter.max(1));
+    let mut kept = Vec::new();
+    let mut per_pair = std::collections::BTreeMap::<(String, String), usize>::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for mut game in std::mem::take(&mut stored.games) {
+        if !allowed.contains(&roster_stem(&game.white))
+            || !allowed.contains(&roster_stem(&game.black))
+        {
+            continue;
+        }
+        if !seen.insert(stored_game_key(&game)) {
+            continue;
+        }
+        let key = (game.white.clone(), game.black.clone());
+        let count = per_pair.entry(key).or_insert(0);
+        if *count >= cap {
+            continue;
+        }
+        *count += 1;
+        game.game_index = kept.len();
+        kept.push(game);
+    }
+    stored.games = kept;
+    stored.results.retain(|result| {
+        result.pairing.white < stored.entrants.len() && result.pairing.black < stored.entrants.len()
+    });
+}
+
+pub fn completed_pairings_from_games(
+    names: &[String],
+    format: TournamentFormat,
+    games: &[StoredTournamentGame],
+    games_per_directed: usize,
+) -> Vec<Pairing> {
+    if names.len() < 2 || games_per_directed == 0 {
+        return Vec::new();
+    }
+    let mut counts = std::collections::BTreeMap::<(String, String), usize>::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for game in games {
+        if !seen.insert(stored_game_key(game)) {
+            continue;
+        }
+        *counts
+            .entry((roster_stem(&game.white), roster_stem(&game.black)))
+            .or_insert(0) += 1;
+    }
+    mujrim_study::tournament::schedule(names.len(), format)
+        .into_iter()
+        .filter(|pairing| {
+            let Some(white) = names.get(pairing.white) else {
+                return false;
+            };
+            let Some(black) = names.get(pairing.black) else {
+                return false;
+            };
+            counts
+                .get(&(roster_stem(white), roster_stem(black)))
+                .copied()
+                .unwrap_or(0)
+                >= games_per_directed
+        })
+        .collect()
+}
+
+fn union_completed_pairings(left: Vec<Pairing>, right: Vec<Pairing>) -> Vec<Pairing> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for pairing in left.into_iter().chain(right) {
+        if seen.insert((pairing.round, pairing.white, pairing.black)) {
+            out.push(pairing);
+        }
+    }
+    out
 }
 
 pub fn recover_event_status_from_progress(stored: &mut StoredTournament) {
@@ -1606,7 +1728,7 @@ pub fn recover_event_status_from_progress(stored: &mut StoredTournament) {
         stored.status = mujrim_study::tournament_store::STATUS_FINISHED.to_owned();
         return;
     }
-    if played < planned
+    if played * 2 < planned
         && mujrim_study::tournament_store::lifecycle_key(&stored.status)
             == mujrim_study::tournament_store::STATUS_FINISHED
     {
@@ -1690,12 +1812,9 @@ fn games_per_pairing(games: &[StoredTournamentGame], games_per_encounter: u32) -
         if !seen.insert(stored_game_key(game)) {
             continue;
         }
-        let key = if game.white <= game.black {
-            (game.white.clone(), game.black.clone())
-        } else {
-            (game.black.clone(), game.white.clone())
-        };
-        *per_pair.entry(key).or_insert(0) += 1;
+        *per_pair
+            .entry((game.white.clone(), game.black.clone()))
+            .or_insert(0) += 1;
     }
     let mode = per_pair
         .values()
@@ -1725,7 +1844,9 @@ pub fn merge_stored_tournaments(
         return incoming;
     }
     let mut merged = incoming;
-    if existing.entrants.len() > merged.entrants.len() {
+    if (existing.entrants.len() >= 3 && merged.entrants.len() != existing.entrants.len())
+        || existing.entrants.len() > merged.entrants.len()
+    {
         merged.entrants = existing.entrants;
     }
     merged.games = union_unique_stored_games(existing.games, merged.games);
@@ -1811,6 +1932,23 @@ pub fn restore_setup_from_event(
     stored: &mut StoredTournament,
     catalog: &[crate::app_core::engine::QuickTournamentEngine],
 ) {
+    let selected_names = setup
+        .selected_engine_paths
+        .iter()
+        .filter_map(|path| {
+            catalog
+                .iter()
+                .find(|engine| engine_identity_key(&engine.path) == engine_identity_key(path))
+                .map(|engine| engine.name.clone())
+                .or_else(|| {
+                    path.file_stem()
+                        .map(|stem| catalog_display_name(&stem.to_string_lossy(), &[]))
+                })
+        })
+        .collect::<Vec<_>>();
+    if selected_names.len() >= 3 {
+        trim_tournament_to_roster(stored, &selected_names, setup.games_per_encounter);
+    }
     let completed = hydrate_stored_tournament_from_disk(stored, setup.games_per_encounter);
     setup.completed_pairings = completed;
     let names: Vec<String> = stored
@@ -1818,10 +1956,9 @@ pub fn restore_setup_from_event(
         .iter()
         .map(|entrant| entrant.name.clone())
         .collect();
-    let disk_paths =
-        discover_event_engine_paths(stored.format, &stored.id, &names, stored.created_at);
-    let resolved = resolve_engine_paths_for_names(&names, &disk_paths, catalog);
-    if resolved.len() > setup.selected_engine_paths.len() {
+    let resolved = resolve_follow_up_engine_paths(&names, &setup.selected_engine_paths, catalog);
+    if setup.selected_engine_paths.len() <= 2 && resolved.len() > setup.selected_engine_paths.len()
+    {
         setup.selected_engine_paths = resolved;
     }
     let checkpoints =
@@ -2378,10 +2515,16 @@ pub fn persist_live_tournament(
     snap: &tournament_live::LiveTournamentSnapshot,
 ) -> Result<(), String> {
     let incoming = snapshot_to_stored(id, name, format, created_at, snap);
-    let stored = match database.load_tournament(id) {
+    let mut stored = match database.load_tournament(id) {
         Ok(Some(existing)) => merge_stored_tournaments(existing, incoming),
         _ => incoming,
     };
+    trim_tournament_to_roster(
+        &mut stored,
+        &snap.engine_names,
+        snap.games_per_encounter.max(1),
+    );
+    recover_event_status_from_progress(&mut stored);
     database.save_tournament(&stored)
 }
 
@@ -2657,21 +2800,70 @@ mod tests {
         let pairings =
             mujrim_study::tournament::schedule(4, TournamentFormat::DoubleRoundRobin).len();
         assert_eq!(pairings, 12);
-        assert_eq!(planned_tournament_games(&tournament), 48);
+        assert_eq!(planned_tournament_games(&tournament), 24);
         assert_eq!(planned_tournament_games_with(&tournament, 2), 48);
-        assert!(tournament_history_label(&tournament).contains("4/48"));
+        assert!(tournament_history_label(&tournament).contains("4/24"));
         let mut exploded = tournament.clone();
         exploded.games.extend(tournament.games.clone());
         exploded.games.extend(tournament.games.clone());
         assert_eq!(exploded.games.len(), 12);
-        assert_eq!(planned_tournament_games(&exploded), 48);
+        assert_eq!(planned_tournament_games(&exploded), 24);
         assert_eq!(unique_stored_game_count(&exploded.games), 4);
-        assert!(tournament_history_label(&exploded).contains("4/48"));
+        assert!(tournament_history_label(&exploded).contains("4/24"));
         tournament.status = mujrim_study::tournament_store::STATUS_FINISHED.to_owned();
         recover_event_status_from_progress(&mut tournament);
         assert_eq!(
             tournament.status,
             mujrim_study::tournament_store::STATUS_PAUSED
+        );
+    }
+
+    #[test]
+    fn planned_games_do_not_double_count_double_round_robin() {
+        let mut games = Vec::new();
+        for index in 0..4 {
+            games.push(StoredTournamentGame {
+                game_index: index,
+                round: 1,
+                white: "Alpha".into(),
+                black: "Beta".into(),
+                white_score: 0.5,
+                initial_fen: format!("ab-{index}"),
+                moves: vec![format!("m{index}")],
+            });
+            games.push(StoredTournamentGame {
+                game_index: 4 + index,
+                round: 1,
+                white: "Beta".into(),
+                black: "Alpha".into(),
+                white_score: 0.5,
+                initial_fen: format!("ba-{index}"),
+                moves: vec![format!("n{index}")],
+            });
+        }
+        let tournament = StoredTournament {
+            id: "t-drr".into(),
+            name: "Mujrim Tournament V2".into(),
+            format: TournamentFormat::DoubleRoundRobin,
+            created_at: 1,
+            status: "paused".into(),
+            entrants: (0..18)
+                .map(|index| Entrant {
+                    id: format!("e{index}"),
+                    name: format!("E{index}"),
+                    seed_elo: None,
+                })
+                .collect(),
+            results: Vec::new(),
+            games,
+        };
+        assert_eq!(tournament.pairings().len(), 306);
+        assert_eq!(planned_tournament_games(&tournament), 1224);
+        assert_eq!(planned_tournament_games_with(&tournament, 2), 1224);
+        assert!(
+            !tournament_history_label(&tournament).contains("2448"),
+            "{}",
+            tournament_history_label(&tournament)
         );
     }
 
@@ -2792,6 +2984,141 @@ mod tests {
             inferred > 1,
             "simul recovery must not stay at 1 board, got {inferred}"
         );
+    }
+
+    #[test]
+    fn official_roster_does_not_absorb_unselected_engines() {
+        let known = (0..18).map(|index| format!("E{index}")).collect::<Vec<_>>();
+        let mut checkpoints = Vec::new();
+        for window in known.windows(2) {
+            checkpoints.push(mujrim_benchmarker::strength::DuelCheckpoint {
+                candidate_path: PathBuf::from(format!("/engines/{}", window[0])),
+                reference_path: PathBuf::from(format!("/engines/{}", window[1])),
+                pairs: Vec::new(),
+                opening_fingerprint: "fp".into(),
+            });
+        }
+        checkpoints.push(mujrim_benchmarker::strength::DuelCheckpoint {
+            candidate_path: PathBuf::from("/engines/mujrim-ateed"),
+            reference_path: PathBuf::from("/engines/E0"),
+            pairs: Vec::new(),
+            opening_fingerprint: "fp".into(),
+        });
+        let expanded =
+            expand_event_roster_names(TournamentFormat::DoubleRoundRobin, &known, &checkpoints);
+        assert_eq!(expanded, known);
+        assert!(
+            !expanded
+                .iter()
+                .any(|name| name.to_ascii_lowercase().contains("ateed"))
+        );
+    }
+
+    #[test]
+    fn trim_drops_unofficial_engines_and_overplayed_pairings() {
+        let locked = vec!["Alpha".into(), "Beta".into(), "Gamma".into()];
+        let mut stored = StoredTournament {
+            id: "t-trim".into(),
+            name: "V2".into(),
+            format: TournamentFormat::DoubleRoundRobin,
+            created_at: 1,
+            status: "paused".into(),
+            entrants: ["Alpha", "Mujrim Ateed", "Beta", "Gamma"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| Entrant {
+                    id: format!("e{index}"),
+                    name: name.into(),
+                    seed_elo: None,
+                })
+                .collect(),
+            results: Vec::new(),
+            games: (0..8)
+                .map(|index| StoredTournamentGame {
+                    game_index: index,
+                    round: 1,
+                    white: "Alpha".into(),
+                    black: "Beta".into(),
+                    white_score: 0.5,
+                    initial_fen: format!("fen-{index}"),
+                    moves: vec![format!("m{index}")],
+                })
+                .chain(std::iter::once(StoredTournamentGame {
+                    game_index: 8,
+                    round: 1,
+                    white: "Alpha".into(),
+                    black: "Mujrim Ateed".into(),
+                    white_score: 1.0,
+                    initial_fen: mujrim_study::opening::START_FEN.into(),
+                    moves: vec!["e2e4".into()],
+                }))
+                .collect(),
+        };
+        trim_tournament_to_roster(&mut stored, &locked, 2);
+        assert_eq!(
+            stored
+                .entrants
+                .iter()
+                .map(|entrant| entrant.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Alpha", "Beta", "Gamma"]
+        );
+        assert_eq!(stored.games.len(), 4);
+        assert!(
+            stored
+                .games
+                .iter()
+                .all(|game| game.white != "Mujrim Ateed" && game.black != "Mujrim Ateed")
+        );
+        let complete = completed_pairings_from_games(
+            &locked,
+            TournamentFormat::DoubleRoundRobin,
+            &stored.games,
+            4,
+        );
+        assert!(
+            complete
+                .iter()
+                .any(|pairing| pairing.white == 0 && pairing.black == 1)
+        );
+    }
+
+    #[test]
+    fn merge_does_not_grow_a_locked_roster() {
+        let existing = StoredTournament {
+            id: "t-1".into(),
+            name: "V2".into(),
+            format: TournamentFormat::DoubleRoundRobin,
+            created_at: 1,
+            status: "paused".into(),
+            entrants: (0..3)
+                .map(|index| Entrant {
+                    id: format!("e{index}"),
+                    name: format!("E{index}"),
+                    seed_elo: None,
+                })
+                .collect(),
+            results: Vec::new(),
+            games: Vec::new(),
+        };
+        let incoming = StoredTournament {
+            id: "t-1".into(),
+            name: "V2".into(),
+            format: TournamentFormat::DoubleRoundRobin,
+            created_at: 1,
+            status: "paused".into(),
+            entrants: (0..4)
+                .map(|index| Entrant {
+                    id: format!("e{index}"),
+                    name: format!("E{index}"),
+                    seed_elo: None,
+                })
+                .collect(),
+            results: Vec::new(),
+            games: Vec::new(),
+        };
+        let merged = merge_stored_tournaments(existing, incoming);
+        assert_eq!(merged.entrants.len(), 3);
     }
 
     #[test]

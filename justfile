@@ -59,6 +59,14 @@ bench depth="20" threads="" hash="256" time="30":
     @echo "Running Mujrim Benchmark Suite..."
     cargo run --release -p mujrim-benchmarker -- bench -d {{depth}} --hash {{hash}} --time {{time}} {{ if threads != "" { "--threads " + threads } else { "" } }}
 
+# Isolated adapter eval card (V2 NPS / H2H targets printed; match configs are 3+2 and nodes-equal)
+adapter-gauntlet iterations="8000" warmup="200":
+    cargo run --release -p mujrim-benchmarker -- gauntlet --iterations {{iterations}} --warmup {{warmup}} --json
+
+# Phase 4 adapter-vs-native card. Default is 1 pair (2 games) per card; raise pairs for the V2 sample.
+adapter-gauntlet-play pairs="1" nodes="20000" preset="" skip_clock="" skip_nodes="":
+    cargo run --release -p mujrim-benchmarker -- gauntlet --play --pairs {{pairs}} --nodes {{nodes}} --json {{ if preset != "" { "--preset " + preset } else { "" } }} {{ if skip_clock != "" { "--skip-clock" } else { "" } }} {{ if skip_nodes != "" { "--skip-nodes" } else { "" } }}
+
 # Run benchmark and emit machine-readable JSON summary
 bench-json depth="20" threads="" hash="256" time="30":
     @echo "Running Mujrim Benchmark Suite (JSON)..."

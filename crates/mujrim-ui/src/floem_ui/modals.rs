@@ -1,7 +1,7 @@
 //! Options and tournament-setup overlays.
 
 use floem::prelude::*;
-use floem::taffy::style::{Display, FlexWrap};
+use floem::taffy::style::{Display, FlexWrap, Overflow};
 use updater::syzygy::SyzygyPieceSet;
 
 use crate::app_core::arrows::{ArrowColor, ArrowShape, ArrowSize};
@@ -822,14 +822,14 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
 
 pub fn tournament_results_modal(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    widgets::overlay_frame(
+    widgets::overlay_frame_sized(
         state,
         move || state.show_tournament_results.set(false),
         Stack::vertical((
             widgets::curious_title("Tournament results", 30.0),
             Label::derived(move || {
                 let snap = state.tournament_snapshot.get();
-                let games = snap.played_games.len();
+                let games = snap.unique_played_count();
                 let phase = snap.phase_label();
                 format!(
                     "{phase} · {games} games · {}",
@@ -848,12 +848,20 @@ pub fn tournament_results_modal(state: AppState, handles: AppHandles) -> impl In
                 .collect::<Vec<_>>()
                 .into_view()
                 .style(|s| s.width_full().flex_col().row_gap(10.0).min_width(0.0)),
-            follow_up_actions(state, handles),
-            widgets::primary_button(state, "Close", move || {
-                state.show_tournament_results.set(false);
-            }),
+            follow_up_actions(state, handles.clone()),
+            Stack::horizontal((
+                widgets::primary_button(state, "New Tournament", {
+                    let handles = handles.clone();
+                    move || actions::open_new_tournament_setup(state, &handles)
+                }),
+                widgets::primary_button(state, "Close", move || {
+                    state.show_tournament_results.set(false);
+                }),
+            ))
+            .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap).min_width(0.0)),
         ))
         .style(|s| s.width_full().row_gap(16.0).min_width(0.0)),
+        crate::app_core::layout::TOURNAMENT_OVERLAY_MAX_WIDTH,
     )
 }
 
@@ -934,6 +942,81 @@ fn follow_up_choice_button(state: AppState, handles: AppHandles, index: usize) -
     })
 }
 
+fn results_losses_line(state: AppState, index: usize) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    const LOSS_CHIPS: usize = 24;
+    Stack::horizontal((
+        Label::derived(move || {
+            let snap = state.tournament_snapshot.get();
+            let Some(row) = snap.standings.get(index) else {
+                return String::new();
+            };
+            let items =
+                crate::app_core::tournament_live::losses_to_items(&row.name, &snap.played_games);
+            if items.first().is_some_and(|item| item == "Undefeated") {
+                String::new()
+            } else {
+                "Lost to".to_owned()
+            }
+        })
+        .style(move |s| s.font_size(13.0).color(theme::rgba(pal().accent_alt))),
+        (0..LOSS_CHIPS)
+            .map(|chip| {
+                Label::derived(move || {
+                    let snap = state.tournament_snapshot.get();
+                    snap.standings
+                        .get(index)
+                        .and_then(|row| {
+                            crate::app_core::tournament_live::losses_to_items(
+                                &row.name,
+                                &snap.played_games,
+                            )
+                            .get(chip)
+                            .cloned()
+                        })
+                        .unwrap_or_default()
+                })
+                .style(move |s| {
+                    let snap = state.tournament_snapshot.get();
+                    let text = snap
+                        .standings
+                        .get(index)
+                        .and_then(|row| {
+                            crate::app_core::tournament_live::losses_to_items(
+                                &row.name,
+                                &snap.played_games,
+                            )
+                            .get(chip)
+                            .cloned()
+                        })
+                        .unwrap_or_default();
+                    let s = s
+                        .font_size(12.0)
+                        .padding_horiz(8.0)
+                        .padding_vert(3.0)
+                        .border_radius(999.0)
+                        .background(theme::rgba(pal().bg))
+                        .color(theme::rgba(pal().accent_alt));
+                    if text.is_empty() {
+                        s.display(Display::None)
+                    } else {
+                        s
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_view(),
+    ))
+    .style(|s| {
+        s.width_full()
+            .min_width(0.0)
+            .col_gap(6.0)
+            .row_gap(6.0)
+            .flex_wrap(FlexWrap::Wrap)
+            .overflow_x(Overflow::Clip)
+    })
+}
+
 fn results_rank_card(state: AppState, index: usize) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let row = move || {
@@ -984,22 +1067,7 @@ fn results_rank_card(state: AppState, index: usize) -> impl IntoView {
             .style(|s| s.flex_grow(1.0f32).min_width(0.0).row_gap(2.0)),
         ))
         .style(|s| s.width_full().col_gap(10.0).items_center().min_width(0.0)),
-        Label::derived(move || {
-            let snap = state.tournament_snapshot.get();
-            snap.standings
-                .get(index)
-                .map(|row| {
-                    crate::app_core::tournament_live::losses_to_label(&row.name, &snap.played_games)
-                })
-                .unwrap_or_default()
-        })
-        .style(move |s| {
-            s.font_size(13.0)
-                .min_width(0.0)
-                .width_full()
-                .text_wrap()
-                .color(theme::rgba(pal().accent_alt))
-        }),
+        results_losses_line(state, index),
     ))
     .style(move |s| {
         let Some(row) = row() else {
@@ -1012,7 +1080,8 @@ fn results_rank_card(state: AppState, index: usize) -> impl IntoView {
             .border_radius(14.0)
             .border(1.0)
             .border_color(theme::rgba(pal().border))
-            .min_width(0.0);
+            .min_width(0.0)
+            .overflow_x(Overflow::Clip);
         if let Some(podium) = row.podium() {
             let (tr, tg, tb) = podium.rgb();
             s.background(Color::from_rgba8(tr, tg, tb, 32))
@@ -1047,8 +1116,12 @@ mod tests {
             "follow_up_choice_button",
             "follow_up_field",
             "start_follow_up_tournament",
+            "New Tournament",
+            "open_new_tournament_setup",
             "results_rank_card",
-            "losses_to_label",
+            "results_losses_line",
+            "losses_to_items",
+            "overflow_x(Overflow::Clip)",
             "EVENT_ELO_CAPTION",
             "OptionsTab::Display",
             "OptionsTab::Motion",
