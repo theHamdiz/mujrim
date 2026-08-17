@@ -15,8 +15,8 @@ use crate::app_core::ateed_studio::{
     continuing_train_base, datagen_batch_size, datagen_pause_ready, dataset_format_for_path,
     ensure_local_source, evaluate_zero_net, field_help, format_perf, format_strength,
     index_tournament_positions, local_mix, migrate_legacy_datagen_files, monitor_from_progress,
-    parse_count, plan_job, probe_compute, resolve_datagen_output, run_mujrim_cli, signal_live_cli,
-    unlock_ateed, validate_source, validate_weighted_source,
+    parse_count, plan_job, probe_compute, resolve_datagen_output, rewrite_datagen_command,
+    run_mujrim_cli, signal_live_cli, unlock_ateed, validate_source, validate_weighted_source,
 };
 use crate::app_core::layout;
 
@@ -117,7 +117,12 @@ fn resume_ateed_job(state: AppState, handles: &AppHandles) {
     state.ateed.progress.set(0.0);
     reset_telemetry(state, progress_kind_from_command(&job.command));
     push_log(state, &job.summary);
-    spawn_cli(state, handles, job.command, "resumed job complete");
+    spawn_cli(
+        state,
+        handles,
+        rewrite_datagen_command(job.command),
+        "resumed job complete",
+    );
 }
 
 fn discard_ateed_job(state: AppState) {
@@ -1527,6 +1532,7 @@ mod tests {
         assert!(production.contains("continuing_train_base"));
         assert!(production.contains("Batch positions"));
         assert!(production.contains("resolve_datagen_output"));
+        assert!(production.contains("rewrite_datagen_command"));
         assert!(production.contains("migrate_legacy_datagen_files"));
         assert!(production.contains("field_help"));
         assert!(production.contains("stockfish-plain"));

@@ -22,6 +22,26 @@ pub fn position_key(fen: &str) -> String {
     format!("{placement} {stm} {castle} {ep}")
 }
 
+/// FNV-1a so live datagen can store 64-bit keys instead of full FEN strings.
+pub fn position_key_hash(fen: &str) -> u64 {
+    let key = position_key(fen);
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn parse_index_key(raw: &str) -> u64 {
+    if raw.len() == 16
+        && let Ok(hash) = u64::from_str_radix(raw, 16)
+    {
+        return hash;
+    }
+    position_key_hash(raw)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedPosition {
     pub fen: String,
@@ -31,7 +51,7 @@ pub struct IndexedPosition {
 
 #[derive(Debug, Clone, Default)]
 pub struct PositionIndex {
-    pub keys: HashSet<String>,
+    pub keys: HashSet<u64>,
     pub games: HashSet<String>,
     dirty: Vec<String>,
 }
@@ -63,13 +83,13 @@ impl PositionIndex {
     }
 
     pub fn contains_fen(&self, fen: &str) -> bool {
-        self.keys.contains(&position_key(fen))
+        self.keys.contains(&position_key_hash(fen))
     }
 
     pub fn insert_fen(&mut self, fen: &str) -> bool {
-        let key = position_key(fen);
-        if self.keys.insert(key.clone()) {
-            self.dirty.push(format!("pos {key}"));
+        let hash = position_key_hash(fen);
+        if self.keys.insert(hash) {
+            self.dirty.push(format!("pos {hash:016x}"));
             true
         } else {
             false
@@ -101,9 +121,9 @@ impl PositionIndex {
             if let Some(game) = line.strip_prefix("game ") {
                 index.games.insert(game.to_owned());
             } else if let Some(key) = line.strip_prefix("pos ") {
-                index.keys.insert(key.to_owned());
+                index.keys.insert(parse_index_key(key));
             } else {
-                index.keys.insert(line.to_owned());
+                index.keys.insert(parse_index_key(line));
             }
         }
         index
@@ -124,12 +144,10 @@ impl PositionIndex {
             body.push_str(&game);
             body.push('\n');
         }
-        let mut keys: Vec<_> = self.keys.iter().cloned().collect();
-        keys.sort();
+        let mut keys: Vec<_> = self.keys.iter().copied().collect();
+        keys.sort_unstable();
         for key in keys {
-            body.push_str("pos ");
-            body.push_str(&key);
-            body.push('\n');
+            body.push_str(&format!("pos {key:016x}\n"));
         }
         durable::atomic_write_text(path, &body)?;
         self.dirty.clear();
@@ -322,6 +340,10 @@ mod tests {
 
     #[test]
     fn position_key_drops_clocks() {
+        assert_eq!(
+            position_key_hash("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
+            position_key_hash("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 12 40")
+        );
         assert_eq!(
             position_key("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"),
             position_key("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 12 40")

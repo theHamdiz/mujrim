@@ -554,6 +554,26 @@ fn main() {
                                 .default_value("text")
                                 .help("Output encoding"),
                         ),
+                )
+                .subcommand(
+                    Command::new("compact")
+                        .about("Merge datagen text files, drop torn/duplicate boards, write gendata")
+                        .arg(
+                            Arg::new("data")
+                                .short('d')
+                                .long("data")
+                                .value_name("PATH[,PATH]")
+                                .required(true)
+                                .help("Comma-separated datagen text files"),
+                        )
+                        .arg(
+                            Arg::new("output")
+                                .short('o')
+                                .long("output")
+                                .value_name("PATH")
+                                .default_value("gendata/data.txt")
+                                .help("Clean dataset path"),
+                        ),
                 ),
         )
         .subcommand(
@@ -687,10 +707,12 @@ fn main() {
                             .get_one::<String>("depth")
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(6),
-                        output_path: datagen
-                            .get_one::<String>("output")
-                            .cloned()
-                            .unwrap_or_else(|| "gendata/data.txt".to_string()),
+                        output_path: trainer::dataset::relocate_datagen_output(
+                            &datagen
+                                .get_one::<String>("output")
+                                .cloned()
+                                .unwrap_or_else(|| "gendata/data.txt".to_string()),
+                        ),
                         format: datagen
                             .get_one::<String>("format")
                             .cloned()
@@ -865,9 +887,42 @@ fn main() {
                     }
                     println!("merged {} positions to {output}", positions.len());
                 }
+                Some(("compact", compact)) => {
+                    let data = compact.get_one::<String>("data").map_or("", String::as_str);
+                    let output = trainer::dataset::relocate_datagen_output(
+                        compact
+                            .get_one::<String>("output")
+                            .map_or("gendata/data.txt", String::as_str),
+                    );
+                    let inputs: Vec<_> = data
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .map(std::path::Path::new)
+                        .collect();
+                    match trainer::dataset::compact_datagen_files(
+                        &inputs,
+                        std::path::Path::new(&output),
+                    ) {
+                        Ok(report) => println!(
+                            "compacted {} unique / {} read · {} dup · {} bad · W/D/B {}/{}/{} → {output}",
+                            report.written,
+                            report.read,
+                            report.duplicates,
+                            report.invalid,
+                            report.white,
+                            report.draw,
+                            report.black
+                        ),
+                        Err(error) => {
+                            eprintln!("compact failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 _ => {
                     eprintln!(
-                        "usage: mujrim train <emit-ateed|datagen|ateed|fetch|catalog|decode|merge> [options]"
+                        "usage: mujrim train <emit-ateed|datagen|ateed|fetch|catalog|decode|merge|compact> [options]"
                     );
                     std::process::exit(2);
                 }

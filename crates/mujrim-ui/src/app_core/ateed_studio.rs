@@ -432,38 +432,73 @@ pub const GENDATA_DIR: &str = "gendata";
 pub const DEFAULT_DATAGEN_FILE: &str = "data.txt";
 
 pub fn default_datagen_output() -> PathBuf {
-    PathBuf::from(GENDATA_DIR).join(DEFAULT_DATAGEN_FILE)
+    studio_datagen_output()
 }
 
 pub fn default_datagen_output_str() -> String {
     default_datagen_output().to_string_lossy().into_owned()
 }
 
+pub fn studio_root() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn studio_datagen_output() -> PathBuf {
+    datagen_output_beside(&studio_root())
+}
+
+pub fn datagen_output_beside(root: &Path) -> PathBuf {
+    let dir = root.join(GENDATA_DIR);
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(DEFAULT_DATAGEN_FILE)
+}
+
 pub fn is_legacy_datagen_path(path: &str) -> bool {
-    let name = Path::new(path).file_name().and_then(|name| name.to_str());
-    matches!(path, "data.txt" | "./data.txt")
-        || name == Some(DEFAULT_DATAGEN_FILE)
-            && Path::new(path)
-                .parent()
-                .is_none_or(|parent| parent.as_os_str().is_empty() || parent == Path::new("."))
+    let path = Path::new(path);
+    let name = path.file_name().and_then(|name| name.to_str());
+    name == Some(DEFAULT_DATAGEN_FILE)
+        && path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|parent| parent.to_str())
+            != Some(GENDATA_DIR)
 }
 
 pub fn resolve_datagen_output(raw: &str) -> String {
     let path = Path::new(raw);
-    if path.is_absolute() {
-        return raw.to_owned();
-    }
-    if path
-        .components()
-        .next()
-        .is_some_and(|component| component.as_os_str() == GENDATA_DIR)
+    if path.is_absolute()
+        && path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            == Some(GENDATA_DIR)
     {
         return raw.to_owned();
     }
-    if is_legacy_datagen_path(raw) || raw.is_empty() {
-        return default_datagen_output_str();
+    studio_datagen_output().to_string_lossy().into_owned()
+}
+
+pub fn rewrite_datagen_command(command: AteedCliCommand) -> AteedCliCommand {
+    match command {
+        AteedCliCommand::Datagen {
+            games,
+            positions,
+            depth,
+            output,
+            format,
+        } => AteedCliCommand::Datagen {
+            games,
+            positions,
+            depth,
+            output: resolve_datagen_output(&output),
+            format,
+        },
+        other => other,
     }
-    raw.to_owned()
 }
 
 fn datagen_sidecar_names(stem: &str) -> Vec<String> {
@@ -500,10 +535,17 @@ pub fn migrate_datagen_into_gendata(root: &Path) -> Result<Vec<PathBuf>, String>
         if src.starts_with(&dest_dir) {
             continue;
         }
-        let dest = dest_dir.join(&name);
-        if dest.exists() {
-            continue;
-        }
+        let dest = if dest_dir.join(&name).exists() {
+            dest_dir.join(format!(
+                "{name}.stale-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|value| value.as_nanos())
+                    .unwrap_or(0)
+            ))
+        } else {
+            dest_dir.join(&name)
+        };
         if let Err(error) = std::fs::rename(&src, &dest) {
             std::fs::copy(&src, &dest)
                 .and_then(|_| std::fs::remove_file(&src))
@@ -1296,16 +1338,30 @@ mod tests {
         assert_eq!(kind, AteedSourceKind::Http);
         assert!(value.contains("lczero.org"));
         assert_eq!(dataset_format_for_path("games.binpack.gz"), "binpack");
+        let resolved = resolve_datagen_output("data.txt");
+        assert!(resolved.ends_with("gendata/data.txt"), "{resolved}");
+        assert!(Path::new(&resolved).is_absolute(), "{resolved}");
         assert_eq!(
-            resolve_datagen_output("data.txt"),
-            default_datagen_output_str()
-        );
-        assert_eq!(
-            resolve_datagen_output("gendata/data.txt"),
-            "gendata/data.txt"
+            resolve_datagen_output("/tmp/gendata/data.txt"),
+            "/tmp/gendata/data.txt"
         );
         assert!(is_legacy_datagen_path("data.txt"));
+        assert!(is_legacy_datagen_path("/opt/mujrim/data.txt"));
         assert!(!is_legacy_datagen_path("dumps/sf.plain"));
+        assert!(!is_legacy_datagen_path("/tmp/gendata/data.txt"));
+        let rewritten = rewrite_datagen_command(AteedCliCommand::Datagen {
+            games: 8,
+            positions: Some(8),
+            depth: 6,
+            output: "data.txt".into(),
+            format: "text".into(),
+        });
+        match rewritten {
+            AteedCliCommand::Datagen { output, .. } => {
+                assert!(output.ends_with("gendata/data.txt"), "{output}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1327,6 +1383,18 @@ mod tests {
         assert!(!legacy.exists());
         assert!(root.join("gendata").join("data.txt").is_file());
         assert!(root.join("gendata").join("data.txt.job").is_file());
+
+        std::fs::write(root.join("data.txt"), b"fen2|1|1.0\n").expect("second leftover");
+        let relocated = migrate_datagen_into_gendata(&root).expect("relocate leftover");
+        assert!(!root.join("data.txt").exists());
+        assert!(root.join("gendata").join("data.txt").is_file());
+        assert!(
+            relocated.iter().any(|path| path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("data.txt.stale-"))),
+            "{relocated:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

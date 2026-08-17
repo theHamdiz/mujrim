@@ -1,7 +1,9 @@
 //! Text dataset used by datagen and the Ateed trainer: `FEN|score|wdl`.
 
-use std::io;
-use std::path::Path;
+use std::collections::HashSet;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 use crate::datagen::TrainingPosition;
 
@@ -83,11 +85,145 @@ pub fn load_mixed_positions(
 }
 
 pub fn dedupe_positions(positions: Vec<TrainingPosition>) -> Vec<TrainingPosition> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     positions
         .into_iter()
-        .filter(|position| seen.insert(mujrim_study::ateed_index::position_key(&position.fen)))
+        .filter(|position| seen.insert(mujrim_study::ateed_index::position_key_hash(&position.fen)))
         .collect()
+}
+
+pub const GENDATA_DIR: &str = "gendata";
+
+/// Put relative `data.txt` under `./gendata` and make the path absolute when possible.
+pub fn relocate_datagen_output(path: &str) -> String {
+    let raw = Path::new(path);
+    let file_name = raw
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("data.txt");
+    let under_gendata = raw
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        == Some(GENDATA_DIR);
+    let relocated = if raw.is_absolute() && under_gendata {
+        raw.to_path_buf()
+    } else if raw.is_absolute() {
+        raw.parent()
+            .unwrap_or(Path::new("/"))
+            .join(GENDATA_DIR)
+            .join(file_name)
+    } else if raw
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == GENDATA_DIR)
+    {
+        raw.to_path_buf()
+    } else {
+        PathBuf::from(GENDATA_DIR).join(file_name)
+    };
+    std::env::current_dir()
+        .ok()
+        .map(|cwd| {
+            if relocated.is_absolute() {
+                relocated.clone()
+            } else {
+                cwd.join(&relocated)
+            }
+        })
+        .unwrap_or(relocated)
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct CompactReport {
+    pub read: u64,
+    pub written: u64,
+    pub duplicates: u64,
+    pub invalid: u64,
+    pub white: u64,
+    pub draw: u64,
+    pub black: u64,
+}
+
+/// Stream one or more `FEN|score|wdl` files, drop torn/invalid lines, keep the first
+/// unique board (clocks ignored), and write a clean dataset.
+pub fn compact_datagen_files(inputs: &[&Path], output: &Path) -> Result<CompactReport, String> {
+    if inputs.is_empty() {
+        return Err("pass at least one datagen file".into());
+    }
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let staging = output.with_extension("txt.compact");
+    let mut writer = BufWriter::with_capacity(
+        1 << 20,
+        File::create(&staging).map_err(|error| error.to_string())?,
+    );
+    let mut seen = HashSet::new();
+    let estimated_lines = inputs
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|meta| (meta.len() / 72) as usize)
+        .sum::<usize>();
+    if estimated_lines > 0 {
+        seen.reserve(estimated_lines);
+    }
+    let mut report = CompactReport::default();
+    for input in inputs {
+        let file = File::open(input).map_err(|error| format!("{}: {error}", input.display()))?;
+        let reader = BufReader::with_capacity(1 << 20, file);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => {
+                    report.invalid += 1;
+                    continue;
+                }
+            };
+            match parse_training_line(&line) {
+                Ok(None) => {}
+                Ok(Some(position)) => {
+                    report.read += 1;
+                    if !seen.insert(mujrim_study::ateed_index::position_key_hash(&position.fen)) {
+                        report.duplicates += 1;
+                        continue;
+                    }
+                    if position.wdl >= 0.75 {
+                        report.white += 1;
+                    } else if position.wdl <= 0.25 {
+                        report.black += 1;
+                    } else {
+                        report.draw += 1;
+                    }
+                    writeln!(
+                        writer,
+                        "{}|{}|{:.1}",
+                        position.fen, position.score, position.wdl
+                    )
+                    .map_err(|error| error.to_string())?;
+                    report.written += 1;
+                    if report.read % 5_000_000 == 0 {
+                        eprintln!(
+                            "compact progress: {} read / {} unique / {} dup / {} bad",
+                            report.read, report.written, report.duplicates, report.invalid
+                        );
+                    }
+                }
+                Err(_) => report.invalid += 1,
+            }
+        }
+    }
+    writer.flush().map_err(|error| error.to_string())?;
+    drop(writer);
+    fs::rename(&staging, output).map_err(|error| {
+        let _ = fs::remove_file(&staging);
+        error.to_string()
+    })?;
+    Ok(report)
 }
 
 pub fn fetch_catalog_dataset(
@@ -147,6 +283,51 @@ mod tests {
         let out = dedupe_positions(vec![a, b, c]);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].score, 10);
+    }
+
+    #[test]
+    fn relocate_datagen_output_puts_legacy_files_under_gendata() {
+        let relocated = relocate_datagen_output("data.txt");
+        assert!(relocated.ends_with("gendata/data.txt"), "{relocated}");
+        assert!(!relocated.ends_with("/data.txt/data.txt"));
+        let already = relocate_datagen_output("/tmp/gendata/data.txt");
+        assert_eq!(already, "/tmp/gendata/data.txt");
+    }
+
+    #[test]
+    fn compact_datagen_files_drops_duplicates_and_torn_lines() {
+        let dir = std::env::temp_dir().join(format!(
+            "mujrim-compact-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let out = dir.join("gendata").join("data.txt");
+        fs::write(
+            &a,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|10|0.5\nnot-a-line\n",
+        )
+        .unwrap();
+        fs::write(
+            &b,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 12 40|99|1.0\nrnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1|0|0.0\n",
+        )
+        .unwrap();
+        let report = compact_datagen_files(&[&a, &b], &out).expect("compact");
+        assert_eq!(report.written, 2);
+        assert_eq!(report.duplicates, 1);
+        assert_eq!(report.invalid, 1);
+        assert_eq!(report.draw, 1);
+        assert_eq!(report.black, 1);
+        let text = fs::read_to_string(&out).unwrap();
+        assert!(text.contains("|10|0.5"));
+        assert!(!text.contains("|99|1.0"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

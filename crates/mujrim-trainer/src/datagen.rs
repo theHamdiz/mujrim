@@ -157,6 +157,9 @@ fn position_line_bytes(pos: &TrainingPosition) -> u64 {
 ///
 /// Returns the total number of positions generated.
 pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
+    let mut config = config.clone();
+    config.output_path = crate::dataset::relocate_datagen_output(&config.output_path);
+    let config = &config;
     let start = Instant::now();
     let total_positions = AtomicU64::new(0);
     let games_completed = AtomicU64::new(0);
