@@ -9,9 +9,9 @@
 //! Quantization: QA=255 (feature transformer), QB=64 (output layer)
 //! Output formula: (sum / QA + bias) * SCALE / QAB
 
-#[cfg(not(feature = "embedded-networks"))]
+#[cfg(not(all(feature = "embedded-networks", feature = "akimbo-nnue")))]
 use std::io::Read;
-#[cfg(not(feature = "embedded-networks"))]
+#[cfg(not(all(feature = "embedded-networks", feature = "akimbo-nnue")))]
 use std::sync::OnceLock;
 
 /// Hidden layer size (per perspective).
@@ -82,7 +82,7 @@ pub struct Network {
     pub output_bias: i16,
 }
 
-#[cfg(feature = "embedded-networks")]
+#[cfg(all(feature = "embedded-networks", feature = "akimbo-nnue"))]
 static NNUE: Network =
     unsafe { std::mem::transmute(*include_bytes!("../../resources/ak_default.bin")) };
 
@@ -93,11 +93,11 @@ static NNUE: Network =
 /// Get reference to the global NNUE parameters.
 #[inline(always)]
 pub fn net() -> &'static Network {
-    #[cfg(feature = "embedded-networks")]
+    #[cfg(all(feature = "embedded-networks", feature = "akimbo-nnue"))]
     {
         &NNUE
     }
-    #[cfg(not(feature = "embedded-networks"))]
+    #[cfg(not(all(feature = "embedded-networks", feature = "akimbo-nnue")))]
     {
         static NNUE: OnceLock<Box<Network>> = OnceLock::new();
         NNUE.get_or_init(|| {

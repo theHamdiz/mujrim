@@ -8,6 +8,7 @@
 //! 59808+4560 scheme already in this crate.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
@@ -953,6 +954,41 @@ fn apply_move_delta_from(
         &adds[..add_len],
         &subs[..sub_len],
     );
+}
+
+#[cfg(feature = "embedded-networks")]
+const EMBEDDED_BYTES: &[u8] = include_bytes!("../../resources/plenty_default.bin");
+
+#[cfg(feature = "embedded-networks")]
+pub fn embedded_bytes_len() -> u64 {
+    EMBEDDED_BYTES.len() as u64
+}
+
+/// Official PlentyChess 0179r net, compiled in when `embedded-networks` is on.
+pub fn embedded() -> &'static PlentyChessNetwork {
+    static NETWORK: OnceLock<PlentyChessNetwork> = OnceLock::new();
+    NETWORK.get_or_init(|| {
+        #[cfg(feature = "embedded-networks")]
+        {
+            PlentyChessNetwork::from_compressed_bytes(EMBEDDED_BYTES).unwrap_or_else(|error| {
+                panic!("embedded PlentyChess NNUE failed to decode: {error}")
+            })
+        }
+        #[cfg(not(feature = "embedded-networks"))]
+        {
+            let path = super::adapter::discover_named_network("plenty_default.bin")
+                .or_else(|| super::adapter::discover_named_network("0179r.bin"))
+                .unwrap_or_else(|| panic!("PlentyChess NNUE discovery failed"));
+            let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to read PlentyChess NNUE '{}': {error}",
+                    path.display()
+                )
+            });
+            PlentyChessNetwork::from_compressed_bytes(&bytes)
+                .unwrap_or_else(|error| panic!("PlentyChess NNUE load failed: {error}"))
+        }
+    })
 }
 
 pub fn is_plentychess_path(path: &Path) -> bool {

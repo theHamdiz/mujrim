@@ -10,6 +10,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
@@ -1898,6 +1899,34 @@ impl ViridithasAccumulatorState {
             }
         }
     }
+}
+
+#[cfg(feature = "embedded-networks")]
+const EMBEDDED_BYTES: &[u8] = include_bytes!("../../resources/viri_default.nnue.zst");
+
+#[cfg(feature = "embedded-networks")]
+pub fn embedded_bytes_len() -> u64 {
+    EMBEDDED_BYTES.len() as u64
+}
+
+/// Official sandhi net, compiled in when `embedded-networks` is on.
+pub fn embedded() -> &'static ViridithasNetwork {
+    static NETWORK: OnceLock<ViridithasNetwork> = OnceLock::new();
+    NETWORK.get_or_init(|| {
+        #[cfg(feature = "embedded-networks")]
+        {
+            ViridithasNetwork::from_bytes(EMBEDDED_BYTES).unwrap_or_else(|error| {
+                panic!("embedded Viridithas NNUE failed to decode: {error}")
+            })
+        }
+        #[cfg(not(feature = "embedded-networks"))]
+        {
+            let path = super::adapter::discover_named_network("viri_default.nnue.zst")
+                .or_else(|| super::adapter::discover_named_network("sandhi-s2-b200.nnue.zst"))
+                .unwrap_or_else(|| panic!("Viridithas NNUE discovery failed"));
+            *load(&path).unwrap_or_else(|error| panic!("Viridithas NNUE load failed: {error}"))
+        }
+    })
 }
 
 pub fn load(path: &Path) -> Result<Box<ViridithasNetwork>, String> {

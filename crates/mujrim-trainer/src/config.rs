@@ -5,6 +5,8 @@
 pub struct DatagenConfig {
     /// Number of games to play
     pub num_games: u64,
+    /// Stop once this many new positions have been written (append-only).
+    pub num_positions: Option<u64>,
     /// Search depth per move
     pub depth: i32,
     /// Number of threads for parallel games
@@ -35,6 +37,7 @@ impl Default for DatagenConfig {
     fn default() -> Self {
         Self {
             num_games: 10_000,
+            num_positions: None,
             depth: 8,
             threads: std::thread::available_parallelism()
                 .map(|n| n.get())

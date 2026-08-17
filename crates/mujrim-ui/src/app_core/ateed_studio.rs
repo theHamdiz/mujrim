@@ -1,11 +1,13 @@
 //! Ateed studio domain: gate, CLI discovery, job plans, and runtime probes.
 //!
-//! Fetch / train / datagen / evaluate / latency require a `mujrim` CLI beside
-//! the UI (or in `target/{debug,release}`). The GUI never links an engine.
+//! Fetch / train / datagen require a trainer-capable CLI from
+//! `engines/mujrim/` (preferred: `mujrim-train`), then a sibling `mujrim`,
+//! then `target/{debug,release}`. The GUI never links an engine.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::app_core::uci_process::{self, ExternalEngineProtocol, ExternalSearchConfig};
@@ -76,6 +78,8 @@ pub enum AteedCliCommand {
     },
     Datagen {
         games: u64,
+        #[serde(default)]
+        positions: Option<u64>,
         depth: u32,
         output: String,
         format: String,
@@ -387,7 +391,7 @@ pub fn validate_weighted_source(
         }
         AteedSourceKind::Datagen => {
             if value.parse::<u64>().unwrap_or(0) == 0 {
-                return Err("datagen source must be a positive game count".to_string());
+                return Err("datagen source must be a positive position count".to_string());
             }
         }
     }
@@ -419,6 +423,91 @@ pub fn dataset_format_for_path(path: &str) -> &'static str {
     }
 }
 
+pub fn datagen_batch_size(sources: &[AteedDataSource]) -> u64 {
+    sources
+        .iter()
+        .find(|source| source.kind == AteedSourceKind::Datagen)
+        .and_then(|source| source.value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// When the output net already exists, the next train session fine-tunes it.
+pub fn continuing_train_base(output: &str) -> Option<String> {
+    let path = Path::new(output);
+    path.is_file().then(|| output.to_owned())
+}
+
+pub const FIELD_HELP: &[(&str, &str)] = &[
+    (
+        "source",
+        "Queue downloads and local files here. Stockfish / Lc0 / Self-play chips fill a catalog URL. Datagen is a separate Play control — it is not a source chip.",
+    ),
+    (
+        "source_url",
+        "Paste an HTTP(S) file link, then Add source. Catalog chips fill this for you.",
+    ),
+    (
+        "source_path",
+        "Path to a dataset already on this computer, then Add source.",
+    ),
+    (
+        "strategy",
+        "Best path for this net: fetch Stockfish/Lc0 dumps for volume, mix in your own Datagen labels, train heads first on the growing file, then expert0 or moe. Keep the same dataset path and output net every day so sessions continue instead of starting over.",
+    ),
+    (
+        "selfplay",
+        "Self-play catalog = download existing dumped games. Datagen = this engine plays itself and appends new positions. Use the catalog for fast volume; use Datagen when you want labels from this net.",
+    ),
+    (
+        "datagen_when",
+        "Use Datagen to grow the dataset with this engine’s self-play. It never starts on its own. Play begins a batch, Pause freezes the process, Stop ends it and keeps the sidecar so Resume job can continue.",
+    ),
+    (
+        "mix",
+        "How often this source is picked when several files are mixed. A higher number means more of this data in each training pass.",
+    ),
+    (
+        "scope",
+        "What part of the net to teach. heads = only the final “who is winning” numbers (fastest). expert0 = the first specialist plus how it sees the board. moe = whichever specialist the net actually uses for each position (slowest, usually strongest).",
+    ),
+    (
+        "epochs",
+        "How many times to walk through today’s dataset. More passes learn more this session, but too many can memorize the file instead of getting generally stronger.",
+    ),
+    (
+        "lr",
+        "How big each correction is. Higher learns faster but can jump around; lower is slower and steadier. Keep the same value when you continue tomorrow.",
+    ),
+    (
+        "wdl",
+        "How much to care about the real game result (win / draw / loss) versus the numeric score. Raise it if you want the net to think more about “did White win?”.",
+    ),
+    (
+        "dataset",
+        "The growing file of positions. Each Datagen Play batch appends here. Training reads this whole file, so yesterday’s positions stay in the mix.",
+    ),
+    (
+        "output",
+        "The net file (the “brain”). If this file already exists, training starts from it instead of from scratch — so daily sessions continue where you left off.",
+    ),
+    (
+        "positions",
+        "How many new positions to add this Play run (default 1000000000, one billion). Tomorrow, use the same dataset path and this appends another chunk instead of replacing the old ones.",
+    ),
+    (
+        "depth",
+        "How hard the engine thinks while playing itself. Deeper labels are smarter but much slower. 6 is a practical daily default.",
+    ),
+];
+
+pub fn field_help(id: &str) -> &'static str {
+    FIELD_HELP
+        .iter()
+        .find(|(key, _)| *key == id)
+        .map(|(_, text)| *text)
+        .unwrap_or("")
+}
+
 pub fn local_mix(sources: &[AteedDataSource]) -> (String, String) {
     let locals: Vec<&AteedDataSource> = sources
         .iter()
@@ -438,11 +527,23 @@ pub fn local_mix(sources: &[AteedDataSource]) -> (String, String) {
     )
 }
 
+/// Trainer CLIs published under `engines/mujrim/`, preferred first.
+pub const TRAINER_CLI_STEMS: &[&str] =
+    &["mujrim-train", "mujrim", "mujrim-ateed", "mujrim-external"];
+
 pub fn mujrim_cli_name() -> &'static str {
     if cfg!(windows) {
         "mujrim.exe"
     } else {
         "mujrim"
+    }
+}
+
+pub fn cli_filename(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_owned()
     }
 }
 
@@ -463,25 +564,58 @@ pub fn is_runnable_cli(path: &Path) -> bool {
     }
 }
 
-pub fn discover_mujrim_cli(executable: &Path, current_dir: &Path) -> Option<PathBuf> {
-    let name = mujrim_cli_name();
+pub fn mujrim_cli_candidates(executable: &Path, current_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(dir) = executable.parent() {
-        candidates.push(dir.join(name));
-        if let Some(parent) = dir.parent() {
-            candidates.push(parent.join(name));
+    let mut push = |path: PathBuf| {
+        if !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
+        }
+    };
+    for root in mujrim_protocols::catalog::engine_search_roots(executable, current_dir) {
+        let mujrim_dir = root.join(mujrim_protocols::catalog::mujrim_engines_directory());
+        let arch = mujrim_protocols::catalog::RuntimePlatform::current().directory_name();
+        for stem in TRAINER_CLI_STEMS {
+            let name = cli_filename(stem);
+            push(mujrim_dir.join(&name));
+            push(mujrim_dir.join("bin").join(&arch).join(&name));
         }
     }
-    candidates.push(current_dir.join(name));
-    candidates.push(current_dir.join("target").join("release").join(name));
-    candidates.push(current_dir.join("target").join("debug").join(name));
-    candidates.into_iter().find(|path| is_runnable_cli(path))
+    let name = mujrim_cli_name();
+    if let Some(dir) = executable.parent() {
+        push(dir.join(name));
+        if let Some(parent) = dir.parent() {
+            push(parent.join(name));
+        }
+    }
+    push(current_dir.join(name));
+    push(current_dir.join("target").join("release").join(name));
+    push(current_dir.join("target").join("debug").join(name));
+    candidates
+}
+
+pub fn discover_mujrim_cli(executable: &Path, current_dir: &Path) -> Option<PathBuf> {
+    mujrim_cli_candidates(executable, current_dir)
+        .into_iter()
+        .find(|path| is_runnable_cli(path))
+}
+
+pub fn cli_supports_train(path: &Path) -> bool {
+    Command::new(path)
+        .args(["train", "catalog"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub fn discover_mujrim_cli_from_environment() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let cwd = std::env::current_dir().ok()?;
-    discover_mujrim_cli(&exe, &cwd)
+    mujrim_cli_candidates(&exe, &cwd)
+        .into_iter()
+        .find(|path| is_runnable_cli(path) && cli_supports_train(path))
 }
 
 pub fn cli_args(command: &AteedCliCommand) -> Vec<String> {
@@ -536,21 +670,29 @@ pub fn cli_args(command: &AteedCliCommand) -> Vec<String> {
         }
         AteedCliCommand::Datagen {
             games,
+            positions,
             depth,
             output,
             format,
-        } => vec![
-            "train".into(),
-            "datagen".into(),
-            "-g".into(),
-            games.to_string(),
-            "-d".into(),
-            depth.to_string(),
-            "-o".into(),
-            output.clone(),
-            "--format".into(),
-            format.clone(),
-        ],
+        } => {
+            let mut args = vec![
+                "train".into(),
+                "datagen".into(),
+                "-g".into(),
+                games.to_string(),
+                "-d".into(),
+                depth.to_string(),
+                "-o".into(),
+                output.clone(),
+                "--format".into(),
+                format.clone(),
+            ];
+            if let Some(positions) = positions {
+                args.push("--positions".into());
+                args.push(positions.to_string());
+            }
+            args
+        }
         AteedCliCommand::Decode {
             input,
             output,
@@ -607,35 +749,99 @@ pub fn require_cli(cli: Option<&Path>, kind: AteedJobKind) -> Result<(), String>
     }
 }
 
+static LIVE_CLI_PID: AtomicU32 = AtomicU32::new(0);
+static CLI_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliProcessSignal {
+    Pause,
+    Resume,
+    Stop,
+}
+
+pub fn live_cli_pid() -> Option<u32> {
+    match LIVE_CLI_PID.load(Ordering::SeqCst) {
+        0 => None,
+        pid => Some(pid),
+    }
+}
+
+pub fn set_live_cli_pid(pid: Option<u32>) {
+    LIVE_CLI_PID.store(pid.unwrap_or(0), Ordering::SeqCst);
+}
+
+pub fn cli_signal_command(pid: u32, signal: CliProcessSignal) -> (&'static str, Vec<String>) {
+    let flag = match signal {
+        CliProcessSignal::Pause => "-STOP",
+        CliProcessSignal::Resume => "-CONT",
+        CliProcessSignal::Stop => "-TERM",
+    };
+    ("kill", vec![flag.to_owned(), pid.to_string()])
+}
+
+pub fn signal_live_cli(signal: CliProcessSignal) -> Result<(), String> {
+    let pid = live_cli_pid().ok_or_else(|| "no live CLI process".to_string())?;
+    if matches!(signal, CliProcessSignal::Stop) {
+        CLI_STOP_REQUESTED.store(true, Ordering::SeqCst);
+    }
+    #[cfg(unix)]
+    {
+        let (prog, args) = cli_signal_command(pid, signal);
+        let status = Command::new(prog)
+            .args(&args)
+            .status()
+            .map_err(|error| format!("failed to signal CLI: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("kill {pid} failed"))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err("CLI process signals are only available on Unix".to_string())
+    }
+}
+
 pub fn run_mujrim_cli(
     cli: &Path,
     args: &[String],
     mut on_line: impl FnMut(&str),
 ) -> Result<i32, String> {
+    CLI_STOP_REQUESTED.store(false, Ordering::SeqCst);
     let mut child = Command::new(cli)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("failed to start {}: {error}", cli.display()))?;
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines() {
-            let line = line.map_err(|error| error.to_string())?;
-            on_line(&line);
-        }
-    }
-    if let Some(stderr) = child.stderr.take() {
-        for line in BufReader::new(stderr).lines() {
-            let line = line.map_err(|error| error.to_string())?;
-            if !line.is_empty() {
+    set_live_cli_pid(Some(child.id()));
+    let result = (|| {
+        if let Some(stdout) = child.stdout.take() {
+            for line in BufReader::new(stdout).lines() {
+                let line = line.map_err(|error| error.to_string())?;
                 on_line(&line);
             }
         }
-    }
-    let status = child
-        .wait()
-        .map_err(|error| format!("CLI wait failed: {error}"))?;
-    Ok(status.code().unwrap_or(1))
+        if let Some(stderr) = child.stderr.take() {
+            for line in BufReader::new(stderr).lines() {
+                let line = line.map_err(|error| error.to_string())?;
+                if !line.is_empty() {
+                    on_line(&line);
+                }
+            }
+        }
+        let status = child
+            .wait()
+            .map_err(|error| format!("CLI wait failed: {error}"))?;
+        if CLI_STOP_REQUESTED.swap(false, Ordering::SeqCst) {
+            return Ok(0);
+        }
+        Ok(status.code().unwrap_or(1))
+    })();
+    set_live_cli_pid(None);
+    result
 }
 
 pub fn plan_job(
@@ -677,17 +883,15 @@ pub fn plan_job(
             })
         }
         AteedJobKind::Datagen => {
-            let games = sources
-                .iter()
-                .find(|source| source.kind == AteedSourceKind::Datagen)
-                .and_then(|source| source.value.parse::<u64>().ok())
-                .unwrap_or(0);
-            if games == 0 {
-                return Err("add a datagen source with a positive game count".to_string());
+            let positions = datagen_batch_size(sources);
+            if positions == 0 {
+                return Err("set a positive batch size (positions to add this run)".to_string());
             }
             Ok(AteedJobPlan {
                 kind,
-                summary: format!("Generate {games} self-play game(s) via mujrim train datagen"),
+                summary: format!(
+                    "Append about {positions} new self-play position(s) via mujrim train datagen"
+                ),
             })
         }
         AteedJobKind::Decode => {
@@ -858,6 +1062,7 @@ pub fn format_perf(report: &AteedPerfReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn gate_payload_is_base64_and_not_plaintext_in_source() {
@@ -905,9 +1110,34 @@ mod tests {
         assert!(plan_job(AteedJobKind::Train, &local, "nope", 4, true).is_err());
         assert!(plan_job(AteedJobKind::Train, &http, "heads", 4, true).is_err());
         assert!(plan_job(AteedJobKind::Evaluate, &[], "heads", 0, false).is_ok());
-        let datagen = [validate_source(AteedSourceKind::Datagen, "16").unwrap()];
-        assert!(plan_job(AteedJobKind::Datagen, &datagen, "heads", 1, true).is_ok());
+        let datagen = [validate_source(AteedSourceKind::Datagen, "1000000").unwrap()];
+        let plan = plan_job(AteedJobKind::Datagen, &datagen, "heads", 1, true).unwrap();
+        assert!(plan.summary.contains("1000000"));
+        assert!(plan.summary.contains("Append"));
         assert!(plan_job(AteedJobKind::Datagen, &[], "heads", 1, true).is_err());
+        assert_eq!(datagen_batch_size(&datagen), 1_000_000);
+        assert!(field_help("positions").contains("1000000000"));
+        assert!(field_help("strategy").contains("heads first"));
+        assert!(field_help("selfplay").contains("catalog"));
+        assert!(field_help("datagen_when").contains("never starts on its own"));
+        assert!(field_help("source_url").contains("HTTP"));
+        assert!(field_help("output").contains("already exists"));
+        assert_eq!(
+            cli_signal_command(4242, CliProcessSignal::Pause),
+            ("kill", vec!["-STOP".into(), "4242".into()])
+        );
+        assert_eq!(
+            cli_signal_command(4242, CliProcessSignal::Resume),
+            ("kill", vec!["-CONT".into(), "4242".into()])
+        );
+        assert_eq!(
+            cli_signal_command(4242, CliProcessSignal::Stop),
+            ("kill", vec!["-TERM".into(), "4242".into()])
+        );
+        assert_eq!(TRAINER_CLI_STEMS[0], "mujrim-train");
+        let missing = std::env::temp_dir().join("mujrim-missing-ateed-net.bin");
+        let _ = std::fs::remove_file(&missing);
+        assert!(continuing_train_base(&missing.display().to_string()).is_none());
         assert!(plan_job(AteedJobKind::Decode, &local, "heads", 1, true).is_ok());
         assert!(plan_job(AteedJobKind::Merge, &local, "heads", 1, true).is_err());
         let two = [
@@ -934,20 +1164,35 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let cli = root.join(mujrim_cli_name());
-        std::fs::write(&cli, []).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&cli).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&cli, perms).unwrap();
-        }
-        let ui = root.join("elsewhere").join("mujrim-ui");
-        std::fs::create_dir_all(ui.parent().unwrap()).unwrap();
+        let write_cli = |path: &Path| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, []).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(path).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(path, perms).unwrap();
+            }
+        };
+        let sibling = root.join(mujrim_cli_name());
+        write_cli(&sibling);
+        let engines = root
+            .join("engines")
+            .join(mujrim_protocols::catalog::mujrim_engines_directory())
+            .join(cli_filename("mujrim-train"));
+        write_cli(&engines);
+        let ui = root.join("mujrim-ui");
         std::fs::write(&ui, []).unwrap();
-        let found = discover_mujrim_cli(&ui, &root).expect("discover sibling CLI");
-        assert_eq!(found, cli);
+        let found = discover_mujrim_cli(&ui, &root).expect("discover engines CLI");
+        assert_eq!(found, engines);
+        assert!(
+            mujrim_cli_candidates(&ui, &root)
+                .iter()
+                .any(|path| path.ends_with(cli_filename("mujrim-ateed")))
+        );
         let isolated = std::env::temp_dir().join(format!(
             "mujrim-cli-empty-{}-{}",
             std::process::id(),
@@ -988,6 +1233,15 @@ mod tests {
         });
         assert!(merge.contains(&"--mix".to_string()));
         assert!(merge.contains(&"2,1".to_string()));
+        let datagen = cli_args(&AteedCliCommand::Datagen {
+            games: 1_000_000,
+            positions: Some(1_000_000),
+            depth: 6,
+            output: "data.txt".into(),
+            format: "text".into(),
+        });
+        assert!(datagen.contains(&"--positions".to_string()));
+        assert!(datagen.contains(&"1000000".to_string()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

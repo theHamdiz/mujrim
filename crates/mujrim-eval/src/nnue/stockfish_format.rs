@@ -38,7 +38,12 @@ const ARCHITECTURE_HASH: u32 = 0x6333_7116;
 const LEB128_MAGIC: &[u8; 17] = b"COMPRESSED_LEB128";
 
 const HEADER_FIXED_BYTES: usize = 12;
-#[cfg(feature = "embedded-networks")]
+#[cfg(all(
+    feature = "embedded-networks",
+    not(feature = "viridithas-nnue"),
+    not(feature = "plentychess-nnue"),
+    not(feature = "obsidian-nnue")
+))]
 const EMBEDDED_BYTES: &[u8; FILE_SIZE] = include_bytes!("../../resources/nn-ab28990d4ea3.nnue");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,11 +96,21 @@ struct LayerStack {
 
 #[inline]
 pub fn embedded_bytes() -> &'static [u8] {
-    #[cfg(feature = "embedded-networks")]
+    #[cfg(all(
+        feature = "embedded-networks",
+        not(feature = "viridithas-nnue"),
+        not(feature = "plentychess-nnue"),
+        not(feature = "obsidian-nnue")
+    ))]
     {
         EMBEDDED_BYTES
     }
-    #[cfg(not(feature = "embedded-networks"))]
+    #[cfg(any(
+        not(feature = "embedded-networks"),
+        feature = "viridithas-nnue",
+        feature = "plentychess-nnue",
+        feature = "obsidian-nnue"
+    ))]
     {
         static BYTES: OnceLock<Box<[u8]>> = OnceLock::new();
         BYTES.get_or_init(|| {

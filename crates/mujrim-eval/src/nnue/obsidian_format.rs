@@ -4,6 +4,7 @@
 //! Incremental eval uses a per-ply stack and per-perspective Finny cache.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
@@ -693,6 +694,28 @@ fn transpose_l1_to_affine(src: &[i8], buckets: usize, inputs: usize, outputs: us
         }
     }
     dst
+}
+
+#[cfg(feature = "embedded-networks")]
+const EMBEDDED_BYTES: &[u8] = include_bytes!("../../resources/obs_default.bin");
+
+/// Official Obsidian net, compiled in when `embedded-networks` is on.
+pub fn embedded() -> &'static ObsidianNetwork {
+    static NETWORK: OnceLock<ObsidianNetwork> = OnceLock::new();
+    NETWORK.get_or_init(|| {
+        #[cfg(feature = "embedded-networks")]
+        {
+            ObsidianNetwork::from_bytes(EMBEDDED_BYTES)
+                .unwrap_or_else(|error| panic!("embedded Obsidian NNUE failed to decode: {error}"))
+        }
+        #[cfg(not(feature = "embedded-networks"))]
+        {
+            let path = super::adapter::discover_named_network("obs_default.bin")
+                .or_else(|| super::adapter::discover_named_network("net89perm.bin"))
+                .unwrap_or_else(|| panic!("Obsidian NNUE discovery failed"));
+            *load(&path).unwrap_or_else(|error| panic!("Obsidian NNUE load failed: {error}"))
+        }
+    })
 }
 
 pub fn load(path: &Path) -> Result<Box<ObsidianNetwork>, String> {

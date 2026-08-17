@@ -365,6 +365,14 @@ impl NNUEState {
             ActiveNetwork::Embedded => {}
             ActiveNetwork::ExternalAkimbo { .. } => {}
             #[cfg(feature = "viridithas-nnue")]
+            ActiveNetwork::EmbeddedViridithas => {
+                return self
+                    .viridithas
+                    .as_mut()
+                    .expect("Viridithas source has matching accumulator state")
+                    .evaluate(board, super::viridithas_format::embedded());
+            }
+            #[cfg(feature = "viridithas-nnue")]
             ActiveNetwork::ExternalViridithas { network, .. } => {
                 return self
                     .viridithas
@@ -373,12 +381,28 @@ impl NNUEState {
                     .evaluate(board, network);
             }
             #[cfg(feature = "obsidian-nnue")]
+            ActiveNetwork::EmbeddedObsidian => {
+                return self
+                    .obsidian
+                    .as_mut()
+                    .expect("Obsidian source has matching accumulator state")
+                    .evaluate(board, super::obsidian_format::embedded());
+            }
+            #[cfg(feature = "obsidian-nnue")]
             ActiveNetwork::ExternalObsidian { network, .. } => {
                 return self
                     .obsidian
                     .as_mut()
                     .expect("Obsidian source has matching accumulator state")
                     .evaluate(board, network);
+            }
+            #[cfg(feature = "plentychess-nnue")]
+            ActiveNetwork::EmbeddedPlentyChess => {
+                return self
+                    .plentychess
+                    .as_mut()
+                    .expect("PlentyChess source has matching accumulator state")
+                    .evaluate(board, super::plentychess_format::embedded());
             }
             #[cfg(feature = "plentychess-nnue")]
             ActiveNetwork::ExternalPlentyChess { network, .. } => {
@@ -455,6 +479,14 @@ impl NNUEState {
             ActiveNetwork::Embedded => {}
             ActiveNetwork::ExternalAkimbo { .. } => {}
             #[cfg(feature = "viridithas-nnue")]
+            ActiveNetwork::EmbeddedViridithas => {
+                return self
+                    .viridithas
+                    .as_mut()
+                    .expect("Viridithas source has matching accumulator state")
+                    .evaluate_search(board, super::viridithas_format::embedded());
+            }
+            #[cfg(feature = "viridithas-nnue")]
             ActiveNetwork::ExternalViridithas { network, .. } => {
                 return self
                     .viridithas
@@ -463,12 +495,28 @@ impl NNUEState {
                     .evaluate_search(board, network);
             }
             #[cfg(feature = "obsidian-nnue")]
+            ActiveNetwork::EmbeddedObsidian => {
+                return self
+                    .obsidian
+                    .as_mut()
+                    .expect("Obsidian source has matching accumulator state")
+                    .evaluate_search(board, super::obsidian_format::embedded());
+            }
+            #[cfg(feature = "obsidian-nnue")]
             ActiveNetwork::ExternalObsidian { network, .. } => {
                 return self
                     .obsidian
                     .as_mut()
                     .expect("Obsidian source has matching accumulator state")
                     .evaluate_search(board, network);
+            }
+            #[cfg(feature = "plentychess-nnue")]
+            ActiveNetwork::EmbeddedPlentyChess => {
+                return self
+                    .plentychess
+                    .as_mut()
+                    .expect("PlentyChess source has matching accumulator state")
+                    .evaluate_search(board, super::plentychess_format::embedded());
             }
             #[cfg(feature = "plentychess-nnue")]
             ActiveNetwork::ExternalPlentyChess { network, .. } => {
@@ -647,6 +695,16 @@ impl NNUEState {
             }
             ActiveNetwork::Embedded | ActiveNetwork::ExternalAkimbo { .. } => {}
             #[cfg(feature = "viridithas-nnue")]
+            ActiveNetwork::EmbeddedViridithas => {
+                let state = self
+                    .viridithas
+                    .as_mut()
+                    .expect("Viridithas source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, super::viridithas_format::embedded());
+                return;
+            }
+            #[cfg(feature = "viridithas-nnue")]
             ActiveNetwork::ExternalViridithas { network, .. } => {
                 let state = self
                     .viridithas
@@ -657,6 +715,16 @@ impl NNUEState {
                 return;
             }
             #[cfg(feature = "obsidian-nnue")]
+            ActiveNetwork::EmbeddedObsidian => {
+                let state = self
+                    .obsidian
+                    .as_mut()
+                    .expect("Obsidian source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, super::obsidian_format::embedded());
+                return;
+            }
+            #[cfg(feature = "obsidian-nnue")]
             ActiveNetwork::ExternalObsidian { network, .. } => {
                 let state = self
                     .obsidian
@@ -664,6 +732,16 @@ impl NNUEState {
                     .expect("Obsidian source has matching accumulator state");
                 state.clear();
                 let _ = state.evaluate(board, network);
+                return;
+            }
+            #[cfg(feature = "plentychess-nnue")]
+            ActiveNetwork::EmbeddedPlentyChess => {
+                let state = self
+                    .plentychess
+                    .as_mut()
+                    .expect("PlentyChess source has matching accumulator state");
+                state.clear();
+                let _ = state.evaluate(board, super::plentychess_format::embedded());
                 return;
             }
             #[cfg(feature = "plentychess-nnue")]

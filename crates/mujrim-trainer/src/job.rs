@@ -64,8 +64,13 @@ pub fn train_identity(config: &TrainingConfig, scope: AteedTrainScope) -> String
 
 pub fn datagen_identity(config: &DatagenConfig) -> String {
     format!(
-        "datagen|{}|{}|{}|{}|{}",
-        config.depth, config.format, config.output_path, config.random_plies, config.search_preset
+        "datagen|{}|{}|{}|{}|{}|{}",
+        config.depth,
+        config.format,
+        config.output_path,
+        config.random_plies,
+        config.search_preset,
+        config.num_positions.unwrap_or(0)
     )
 }
 
@@ -88,14 +93,14 @@ pub fn train_checkpoint(
     }
 }
 
-pub fn datagen_checkpoint(config: &DatagenConfig, completed: u64) -> JobCheckpoint {
+pub fn datagen_checkpoint(config: &DatagenConfig, completed: u64, positions: u64) -> JobCheckpoint {
     JobCheckpoint {
         kind: "datagen".to_owned(),
         identity: datagen_identity(config),
         completed,
         total: config.num_games,
         output: config.output_path.clone(),
-        extra: BTreeMap::new(),
+        extra: BTreeMap::from([("positions".to_owned(), positions.to_string())]),
     }
 }
 
@@ -121,6 +126,13 @@ pub fn resume_datagen(config: &DatagenConfig) -> u64 {
     JobCheckpoint::load(Path::new(&config.output_path))
         .filter(|job| job.kind == "datagen" && job.matches(&datagen_identity(config)))
         .map(|job| job.completed.min(config.num_games))
+        .unwrap_or(0)
+}
+
+pub fn resume_datagen_positions(config: &DatagenConfig) -> u64 {
+    JobCheckpoint::load(Path::new(&config.output_path))
+        .filter(|job| job.kind == "datagen" && job.matches(&datagen_identity(config)))
+        .and_then(|job| job.extra.get("positions")?.parse().ok())
         .unwrap_or(0)
 }
 
@@ -205,8 +217,9 @@ mod tests {
             num_games: 4,
             ..Default::default()
         };
-        let mut job = datagen_checkpoint(&config, 9);
+        let mut job = datagen_checkpoint(&config, 9, 400);
         job.completed = 9;
         assert_eq!(job.completed.min(config.num_games), 4);
+        assert_eq!(job.extra.get("positions").map(String::as_str), Some("400"));
     }
 }

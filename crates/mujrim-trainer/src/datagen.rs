@@ -177,8 +177,10 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     };
     let mut buffered = Vec::new();
     let completed = crate::job::resume_datagen(config);
+    let resumed_positions = crate::job::resume_datagen_positions(config);
     games_completed.store(completed, Ordering::Relaxed);
-    crate::job::datagen_checkpoint(config, completed)
+    total_positions.store(resumed_positions, Ordering::Relaxed);
+    crate::job::datagen_checkpoint(config, completed, resumed_positions)
         .save()
         .map_err(io::Error::other)?;
     let stats = DatagenStats::new();
@@ -189,7 +191,13 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     let mut index = mujrim_study::ateed_index::PositionIndex::load(&index_path);
 
     for _game_idx in completed..config.num_games {
-        if stopped.load(Ordering::Relaxed) {
+        if stopped.load(Ordering::Relaxed)
+            || datagen_batch_complete(
+                total_positions.load(Ordering::Relaxed),
+                games_completed.load(Ordering::Relaxed),
+                config,
+            )
+        {
             break;
         }
 
@@ -217,10 +225,10 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
         if let Some(writer) = writer.as_mut() {
             writer.flush()?;
         }
-        crate::job::datagen_checkpoint(config, completed)
+        let pos_count = total_positions.load(Ordering::Relaxed);
+        crate::job::datagen_checkpoint(config, completed, pos_count)
             .save()
             .map_err(io::Error::other)?;
-        let pos_count = total_positions.load(Ordering::Relaxed);
         let now = Instant::now();
         if updater::progress::should_report_now(completed, config.num_games, last_emit, now) {
             last_emit = now;
@@ -266,6 +274,14 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     crate::job::JobCheckpoint::clear(std::path::Path::new(&config.output_path));
 
     Ok(total)
+}
+
+/// True when this batch has enough new positions or has hit the game cap.
+pub fn datagen_batch_complete(positions: u64, games: u64, config: &DatagenConfig) -> bool {
+    games >= config.num_games
+        || config
+            .num_positions
+            .is_some_and(|target| positions >= target)
 }
 
 /// Append-only dataset writer so interrupted datagen can resume.
@@ -511,6 +527,18 @@ mod tests {
         assert_eq!(batch.pass, Some(2));
         assert_eq!(batch.drop, Some(5));
         assert_eq!(batch.nps, Some(100));
+    }
+
+    #[test]
+    fn datagen_batch_complete_stops_on_position_target() {
+        let config = DatagenConfig {
+            num_games: 1_000_000,
+            num_positions: Some(1_000_000),
+            ..Default::default()
+        };
+        assert!(!datagen_batch_complete(999_999, 12, &config));
+        assert!(datagen_batch_complete(1_000_000, 12, &config));
+        assert!(datagen_batch_complete(10, 1_000_000, &config));
     }
 
     #[test]

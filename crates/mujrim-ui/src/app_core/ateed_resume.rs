@@ -44,8 +44,14 @@ impl ActiveAteedJob {
                 data,
                 ..
             } => format!("Resume {scope} training for {epochs} epoch(s) on {data}"),
-            AteedCliCommand::Datagen { games, output, .. } => {
-                format!("Resume self-play datagen of {games} game(s) into {output}")
+            AteedCliCommand::Datagen {
+                games,
+                positions,
+                output,
+                ..
+            } => {
+                let amount = positions.unwrap_or(*games);
+                format!("Resume self-play datagen of {amount} position(s) into {output}")
             }
             AteedCliCommand::Decode { input, output, .. } => {
                 format!("Resume decode of {input} into {output}")

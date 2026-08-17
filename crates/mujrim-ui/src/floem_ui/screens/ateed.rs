@@ -8,11 +8,13 @@ use floem::taffy::style::{Display, FlexWrap, Overflow};
 
 use crate::app_core::ateed_studio::{
     AteedCliCommand, AteedJobKind, AteedMonitorTick, AteedPerfReport, AteedSourceKind,
-    AteedStrengthReport, LossRing, MetricRing, catalog_draft, cli_args, dataset_format_for_path,
-    ensure_local_source, evaluate_zero_net, format_perf, format_strength,
-    index_tournament_positions, local_mix, monitor_from_progress, plan_job, probe_compute,
-    run_mujrim_cli, unlock_ateed, validate_source, validate_weighted_source,
+    AteedStrengthReport, CliProcessSignal, LossRing, MetricRing, catalog_draft, cli_args,
+    continuing_train_base, datagen_batch_size, dataset_format_for_path, ensure_local_source,
+    evaluate_zero_net, field_help, format_perf, format_strength, index_tournament_positions,
+    local_mix, monitor_from_progress, plan_job, probe_compute, run_mujrim_cli, signal_live_cli,
+    unlock_ateed, validate_source, validate_weighted_source,
 };
+use crate::app_core::layout;
 
 use super::super::state::{AppHandles, AppState, offer_ateed_index, refresh_ateed_cli};
 use super::super::telemetry_charts;
@@ -248,12 +250,33 @@ fn lock_gate(state: AppState, handles: AppHandles) -> impl IntoView {
 
 fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
-    let sources = widgets::card(state, sources_panel(state, handles.clone()));
-    let train = widgets::card(state, train_panel(state, handles.clone()));
+    let sources = widgets::card(
+        state,
+        widgets::capped_scroll(
+            sources_panel(state, handles.clone()),
+            layout::ATEED_PANEL_SCROLL_PX,
+        ),
+    );
+    let train = widgets::card(
+        state,
+        widgets::capped_scroll(
+            train_panel(state, handles.clone()),
+            layout::ATEED_PANEL_SCROLL_PX,
+        ),
+    );
     let status = widgets::card(state, status_panel(state));
-    let datagen = widgets::card(state, datagen_panel(state));
+    let datagen = widgets::card(state, datagen_panel(state, handles.clone()));
     let trainer = widgets::card(state, trainer_panel(state));
     let strength = widgets::card(state, strength_panel(state, handles.clone()));
+    let strategy = widgets::card(
+        state,
+        Stack::vertical((
+            widgets::section_label("How to train Ateed", pal),
+            widgets::body_copy(field_help("strategy"), pal),
+            widgets::body_copy(field_help("selfplay"), pal),
+        ))
+        .style(|s| s.row_gap(8.0).width_full()),
+    );
     Stack::vertical((
         Stack::horizontal((
             widgets::curious_title("Ateed Control", 28.0)
@@ -276,7 +299,7 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
             if state.ateed.cli_available.get() {
                 format!("CLI ready · {}", state.ateed.cli_path.get())
             } else {
-                "CLI missing · fetch, train, and datagen are disabled until mujrim is beside the UI or in target/debug."
+                "CLI missing · put mujrim-train (or mujrim-ateed) in engines/mujrim/ next to the UI."
                     .to_owned()
             }
         })
@@ -291,17 +314,21 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
                 .width_full()
                 .text_wrap()
         }),
+        strategy,
         Stack::horizontal((
-            Stack::vertical((sources, train))
-                .style(|s| s.row_gap(16.0).flex_grow(1.0f32).min_width(280.0).max_width(560.0)),
-            Stack::vertical((status, datagen, trainer, strength))
-                .style(|s| s.row_gap(16.0).flex_grow(1.0f32).min_width(280.0).max_width(640.0)),
+            sources.style(|s| s.flex_grow(1.0f32).flex_basis(0.0).min_width(0.0)),
+            train.style(|s| s.flex_grow(1.0f32).flex_basis(0.0).min_width(0.0)),
+            widgets::filling_scroll(
+                Stack::vertical((datagen, status, trainer, strength))
+                    .style(|s| s.row_gap(16.0).width_full()),
+            )
+            .style(|s| s.flex_grow(1.4f32).flex_basis(0.0).min_width(0.0)),
         ))
         .style(|s| {
             s.width_full()
+                .flex_grow(1.0f32)
+                .min_height(0.0)
                 .col_gap(16.0)
-                .row_gap(16.0)
-                .flex_wrap(FlexWrap::Wrap)
                 .items_stretch()
         }),
     ))
@@ -310,19 +337,16 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
             .padding(20.0)
             .row_gap(14.0)
             .min_width(0.0)
+            .min_height(0.0)
             .background(theme::rgba(pal().bg))
     })
-    .scroll()
 }
 
 fn sources_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
         widgets::section_label("Data sources", pal),
-        widgets::body_copy(
-            "Queue Stockfish .plain/.plain.gz, Lc0 chunks, self-play dumps, or a game count. Fetch downloads, decompresses, and decodes into the dataset path. Mix weights interleave sources during train.",
-            pal,
-        ),
+        widgets::body_copy(field_help("source"), pal),
         Stack::horizontal((
             catalog_chip(state, "stockfish-plain", "Stockfish"),
             catalog_chip(state, "lc0-training", "Lc0"),
@@ -332,85 +356,59 @@ fn sources_panel(state: AppState, handles: AppHandles) -> impl IntoView {
         Stack::horizontal((
             source_kind_chip(state, "http", "HTTP"),
             source_kind_chip(state, "local", "Local"),
-            source_kind_chip(state, "datagen", "Datagen"),
         ))
         .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
-        TextInput::new(state.ateed.source_value).style(|s| {
-            s.width_full()
-                .height(36.0)
-                .border_radius(10.0)
-        }),
-        labeled_field(state, "Mix weight", state.ateed.source_weight),
+        source_value_field(state),
+        explained_field(state, "Mix weight", "mix", state.ateed.source_weight),
         Stack::horizontal((
             widgets::primary_button(state, "Add source", move || add_source(state)),
-            widgets::primary_button_when(
-                state,
-                "Fetch",
-                move || cli_ready(state),
-                {
-                    let handles = handles.clone();
-                    move || start_fetch(state, &handles)
-                },
-            ),
-            widgets::primary_button_when(
-                state,
-                "Decode",
-                move || cli_ready(state),
-                {
-                    let handles = handles.clone();
-                    move || start_decode(state, &handles)
-                },
-            ),
-            widgets::primary_button_when(
-                state,
-                "Merge",
-                move || cli_ready(state),
-                {
-                    let handles = handles.clone();
-                    move || start_merge(state, &handles)
-                },
-            ),
-            widgets::primary_button_when(
-                state,
-                "Datagen",
-                move || cli_ready(state),
-                {
-                    let handles = handles.clone();
-                    move || start_datagen(state, &handles)
-                },
-            ),
+            widgets::primary_button_when(state, "Fetch", move || cli_ready(state), {
+                let handles = handles.clone();
+                move || start_fetch(state, &handles)
+            }),
+            widgets::primary_button_when(state, "Decode", move || cli_ready(state), {
+                let handles = handles.clone();
+                move || start_decode(state, &handles)
+            }),
+            widgets::primary_button_when(state, "Merge", move || cli_ready(state), {
+                let handles = handles.clone();
+                move || start_merge(state, &handles)
+            }),
             widgets::ghost_button(state, "Clear", move || {
                 state.ateed.sources.set(Vec::new());
                 push_log(state, "cleared sources");
             }),
         ))
         .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
-        Label::derived(move || {
-            let sources = state.ateed.sources.get();
-            if sources.is_empty() {
-                "No sources queued.".to_owned()
-            } else {
-                sources
-                    .iter()
-                    .map(|source| {
-                        format!(
-                            "{} · {} · w={}",
-                            source.kind.label(),
-                            source.value,
-                            source.weight
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        })
-        .style(move |s| {
-            s.font_size(12.0)
-                .color(theme::rgba(pal().text_secondary))
-                .min_width(0.0)
-                .width_full()
-                .text_wrap()
-        }),
+        widgets::capped_scroll(
+            Label::derived(move || {
+                let sources = state.ateed.sources.get();
+                if sources.is_empty() {
+                    "No sources queued.".to_owned()
+                } else {
+                    sources
+                        .iter()
+                        .map(|source| {
+                            format!(
+                                "{} · {} · w={}",
+                                source.kind.label(),
+                                source.value,
+                                source.weight
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+            })
+            .style(move |s| {
+                s.font_size(12.0)
+                    .color(theme::rgba(pal().text_secondary))
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+            }),
+            layout::LIST_SCROLL_PX,
+        ),
     ))
     .style(|s| s.row_gap(10.0).width_full())
 }
@@ -420,15 +418,15 @@ fn train_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::vertical((
         widgets::section_label("Training plan", pal),
         widgets::body_copy(
-            "Scope heads, expert0, or moe. Start trains on every local source using mix weights (interleave, not concat).",
+            "Train on the dataset file after you have data. Training always starts from the output net if that file already exists — it does not wipe the brain and start over. Datagen lives in its own panel and does not start with train.",
             pal,
         ),
-        labeled_field(state, "Scope", state.ateed.scope),
-        labeled_field(state, "Epochs", state.ateed.epochs),
-        labeled_field(state, "Learning rate", state.ateed.lr),
-        labeled_field(state, "WDL weight", state.ateed.wdl_weight),
-        labeled_field(state, "Dataset", state.ateed.data_path),
-        labeled_field(state, "Output net", state.ateed.output_path),
+        explained_field(state, "Scope", "scope", state.ateed.scope),
+        explained_field(state, "Epochs", "epochs", state.ateed.epochs),
+        explained_field(state, "Learning rate", "lr", state.ateed.lr),
+        explained_field(state, "WDL weight", "wdl", state.ateed.wdl_weight),
+        explained_field(state, "Dataset", "dataset", state.ateed.data_path),
+        explained_field(state, "Output net", "output", state.ateed.output_path),
         Stack::horizontal((
             widgets::primary_button_when(
                 state,
@@ -503,10 +501,31 @@ fn status_panel(state: AppState) -> impl IntoView {
     .style(|s| s.row_gap(10.0).width_full())
 }
 
-fn datagen_panel(state: AppState) -> impl IntoView {
+fn datagen_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
         widgets::section_label("Datagen", pal),
+        widgets::body_copy(field_help("datagen_when"), pal),
+        explained_field(
+            state,
+            "Batch positions",
+            "positions",
+            state.ateed.batch_positions,
+        ),
+        explained_field(state, "Self-play depth", "depth", state.ateed.batch_depth),
+        Stack::horizontal((
+            widgets::primary_button_when(state, "Play", move || datagen_can_play(state), {
+                let handles = handles.clone();
+                move || play_or_resume_datagen(state, &handles)
+            }),
+            widgets::primary_button_when(state, "Pause", move || datagen_can_pause(state), {
+                move || pause_datagen(state)
+            }),
+            widgets::primary_button_when(state, "Stop", move || datagen_can_stop(state), {
+                move || stop_datagen(state)
+            }),
+        ))
+        .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
         Stack::horizontal((
             metric_chip(state, "NPS", move || format_u64(state.ateed.nps.get())),
             metric_chip(state, "Positions", move || {
@@ -669,6 +688,44 @@ fn catalog_chip(state: AppState, id: &'static str, label: &'static str) -> impl 
         })
 }
 
+fn source_value_caption(kind: &str) -> (&'static str, &'static str) {
+    match kind {
+        "local" => ("File path", field_help("source_path")),
+        _ => ("Download URL", field_help("source_url")),
+    }
+}
+
+fn source_value_field(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        Label::derived(move || {
+            source_value_caption(&state.ateed.source_kind.get())
+                .0
+                .to_owned()
+        })
+        .style(move |s| s.font_size(11.0).color(theme::rgba(pal().text_secondary))),
+        TextInput::new(state.ateed.source_value)
+            .style(|s| s.width_full().height(36.0).border_radius(10.0)),
+        Label::derived(move || {
+            source_value_caption(&state.ateed.source_kind.get())
+                .1
+                .to_owned()
+        })
+        .style(move |s| {
+            s.font_size(11.0)
+                .color(theme::rgba(pal().text_secondary))
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+        }),
+    ))
+    .style(move |s| {
+        let hide = state.ateed.source_kind.get() == "datagen";
+        let s = s.row_gap(4.0).width_full();
+        if hide { s.display(Display::None) } else { s }
+    })
+}
+
 fn source_kind_chip(state: AppState, kind: &'static str, label: &'static str) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Button::new(label)
@@ -686,12 +743,24 @@ fn source_kind_chip(state: AppState, kind: &'static str, label: &'static str) ->
         })
 }
 
-fn labeled_field(state: AppState, label: &'static str, value: RwSignal<String>) -> impl IntoView {
+fn explained_field(
+    state: AppState,
+    label: &'static str,
+    help_id: &'static str,
+    value: RwSignal<String>,
+) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
         Label::new(label)
             .style(move |s| s.font_size(11.0).color(theme::rgba(pal().text_secondary))),
         TextInput::new(value).style(|s| s.width_full().height(34.0).border_radius(10.0)),
+        Label::new(field_help(help_id)).style(move |s| {
+            s.font_size(11.0)
+                .color(theme::rgba(pal().text_secondary))
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+        }),
     ))
     .style(|s| s.row_gap(4.0).width_full())
 }
@@ -769,6 +838,69 @@ fn try_unlock(state: AppState, handles: &AppHandles) {
 
 fn cli_ready(state: AppState) -> bool {
     state.ateed.cli_available.get() && !state.ateed.running.get()
+}
+
+fn datagen_job_active(state: AppState) -> bool {
+    state.ateed.running.get()
+        && state.ateed.telemetry_kind.get() == Some(updater::progress::JobKind::Datagen)
+}
+
+fn datagen_can_play(state: AppState) -> bool {
+    if state.ateed.datagen_paused.get() {
+        return true;
+    }
+    cli_ready(state)
+}
+
+fn datagen_can_pause(state: AppState) -> bool {
+    datagen_job_active(state) && !state.ateed.datagen_paused.get()
+}
+
+fn datagen_can_stop(state: AppState) -> bool {
+    datagen_job_active(state) || state.ateed.datagen_paused.get()
+}
+
+fn play_or_resume_datagen(state: AppState, handles: &AppHandles) {
+    if state.ateed.datagen_paused.get_untracked() {
+        resume_datagen(state);
+    } else {
+        start_datagen(state, handles);
+    }
+}
+
+fn pause_datagen(state: AppState) {
+    match signal_live_cli(CliProcessSignal::Pause) {
+        Ok(()) => {
+            state.ateed.datagen_paused.set(true);
+            push_log(state, "datagen paused");
+        }
+        Err(error) => push_log(state, &error),
+    }
+}
+
+fn resume_datagen(state: AppState) {
+    match signal_live_cli(CliProcessSignal::Resume) {
+        Ok(()) => {
+            state.ateed.datagen_paused.set(false);
+            state
+                .ateed
+                .last_tick_ms
+                .set(crate::app_core::tournament_live::now_unix_ms());
+            push_log(state, "datagen resumed");
+        }
+        Err(error) => push_log(state, &error),
+    }
+}
+
+fn stop_datagen(state: AppState) {
+    match signal_live_cli(CliProcessSignal::Stop) {
+        Ok(()) => {
+            state.ateed.datagen_paused.set(false);
+            state.ateed.running.set(false);
+            push_log(state, "datagen stopped — sidecar kept for Resume job");
+        }
+        Err(error) => push_log(state, &error),
+    }
 }
 
 fn apply_catalog(state: AppState, id: &'static str) {
@@ -870,18 +1002,26 @@ fn start_train(state: AppState, handles: &AppHandles) {
     } else {
         data
     };
+    let output = state.ateed.output_path.get_untracked();
+    let base = continuing_train_base(&output);
+    if base.is_some() {
+        push_log(
+            state,
+            "continuing from the existing output net — this session will not start from zero",
+        );
+    }
     spawn_cli(
         state,
         handles,
         AteedCliCommand::Train {
             data,
             mix,
-            output: state.ateed.output_path.get_untracked(),
+            output,
             epochs,
             lr: state.ateed.lr.get_untracked(),
             wdl_weight: state.ateed.wdl_weight.get_untracked(),
             scope: state.ateed.scope.get_untracked(),
-            base: None,
+            base,
         },
         "train complete",
     );
@@ -934,20 +1074,22 @@ fn start_datagen(state: AppState, handles: &AppHandles) {
     if !begin_cli_job(state, AteedJobKind::Datagen) {
         return;
     }
-    let games = state
-        .ateed
-        .sources
-        .get_untracked()
-        .iter()
-        .find(|source| source.kind == AteedSourceKind::Datagen)
-        .and_then(|source| source.value.parse().ok())
-        .unwrap_or(0);
+    let positions = datagen_batch_size(&state.ateed.sources.get_untracked()).max(
+        state
+            .ateed
+            .batch_positions
+            .get_untracked()
+            .parse()
+            .unwrap_or(0),
+    );
+    let depth = state.ateed.batch_depth.get_untracked().parse().unwrap_or(6);
     spawn_cli(
         state,
         handles,
         AteedCliCommand::Datagen {
-            games,
-            depth: 6,
+            games: positions.max(1),
+            positions: Some(positions),
+            depth,
             output: state.ateed.data_path.get_untracked(),
             format: dataset_format_for_path(&state.ateed.data_path.get_untracked()).to_owned(),
         },
@@ -994,24 +1136,33 @@ fn pump_cli_events(
                 }
             }
             Ok(StudioEvent::Done(Ok(()))) => {
+                let was_running = state.ateed.running.get_untracked();
                 state.ateed.running.set(false);
-                state.ateed.progress.set(1.0);
-                state.ateed.telemetry_kind.set(None);
-                state.ateed.resume_prompt.set(None);
-                crate::app_core::ateed_resume::ActiveAteedJob::clear();
-                push_log(state, done);
+                state.ateed.datagen_paused.set(false);
+                if was_running {
+                    state.ateed.progress.set(1.0);
+                    state.ateed.telemetry_kind.set(None);
+                    state.ateed.resume_prompt.set(None);
+                    crate::app_core::ateed_resume::ActiveAteedJob::clear();
+                    push_log(state, done);
+                }
                 finished = true;
             }
             Ok(StudioEvent::Done(Err(error))) => {
+                let was_running = state.ateed.running.get_untracked();
                 state.ateed.running.set(false);
-                state.ateed.telemetry_kind.set(None);
-                push_log(state, &error);
+                state.ateed.datagen_paused.set(false);
+                if was_running {
+                    state.ateed.telemetry_kind.set(None);
+                    push_log(state, &error);
+                }
                 finished = true;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => break,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 if state.ateed.running.get_untracked() {
                     state.ateed.running.set(false);
+                    state.ateed.datagen_paused.set(false);
                     state.ateed.telemetry_kind.set(None);
                     push_log(state, "CLI stopped");
                 }
@@ -1129,6 +1280,16 @@ fn begin_planned_job(state: AppState, kind: AteedJobKind, epochs: u32) -> bool {
             sources.push(source);
         }
     }
+    if kind == AteedJobKind::Datagen
+        && sources
+            .iter()
+            .all(|source| source.kind != AteedSourceKind::Datagen)
+    {
+        let batch = state.ateed.batch_positions.get_untracked();
+        if let Ok(source) = validate_source(AteedSourceKind::Datagen, &batch) {
+            sources.push(source);
+        }
+    }
     match plan_job(
         kind,
         &sources,
@@ -1138,6 +1299,7 @@ fn begin_planned_job(state: AppState, kind: AteedJobKind, epochs: u32) -> bool {
     ) {
         Ok(plan) => {
             state.ateed.running.set(true);
+            state.ateed.datagen_paused.set(false);
             state.ateed.progress.set(0.0);
             reset_telemetry(state, progress_kind(kind));
             push_log(state, &plan.summary);
@@ -1189,29 +1351,70 @@ fn reset_telemetry(state: AppState, kind: Option<updater::progress::JobKind>) {
     state.ateed.nps_ring.set(MetricRing::default());
 }
 
+fn telemetry_has_visible_data(state: AppState) -> bool {
+    !state.ateed.log.get().is_empty()
+        || state.ateed.positions.get() > 0
+        || state.ateed.nps.get() > 0
+        || state.ateed.games.get() > 0
+        || state.ateed.progress.get() > 0.0
+        || state.ateed.last_tick_ms.get() > 0
+}
+
 fn telemetry_connected(state: AppState) -> bool {
-    if !state.ateed.running.get() {
-        return false;
+    state.ateed.running.get()
+        || state.ateed.datagen_paused.get()
+        || telemetry_has_visible_data(state)
+}
+
+fn telemetry_status_text(
+    running: bool,
+    paused: bool,
+    kind: Option<updater::progress::JobKind>,
+    has_data: bool,
+) -> String {
+    let job = match kind {
+        Some(updater::progress::JobKind::Datagen) => "datagen",
+        Some(updater::progress::JobKind::Train) => "train",
+        Some(updater::progress::JobKind::Fetch) => "fetch",
+        None => "",
+    };
+    if paused {
+        return if job.is_empty() {
+            "Paused".to_owned()
+        } else {
+            format!("Paused · {job}")
+        };
     }
-    let last = state.ateed.last_tick_ms.get();
-    last > 0 && state.clock_now_ms.get().saturating_sub(last) < 2_000
+    if running {
+        return if job.is_empty() {
+            "Live".to_owned()
+        } else {
+            format!("Live · {job}")
+        };
+    }
+    if has_data {
+        return if job.is_empty() {
+            "Idle · last batch".to_owned()
+        } else {
+            format!("Idle · last {job}")
+        };
+    }
+    "Idle".to_owned()
 }
 
 fn telemetry_status_label(state: AppState) -> String {
-    if telemetry_connected(state) {
-        match state.ateed.telemetry_kind.get() {
-            Some(updater::progress::JobKind::Datagen) => "Connected · datagen".to_owned(),
-            Some(updater::progress::JobKind::Train) => "Connected · train".to_owned(),
-            Some(updater::progress::JobKind::Fetch) => "Connected · fetch".to_owned(),
-            None => "Connected".to_owned(),
-        }
-    } else {
-        "Disconnected / Idle".to_owned()
-    }
+    telemetry_status_text(
+        state.ateed.running.get(),
+        state.ateed.datagen_paused.get(),
+        state.ateed.telemetry_kind.get(),
+        telemetry_has_visible_data(state),
+    )
 }
 
 fn format_u64(value: u64) -> String {
-    if value >= 1_000_000 {
+    if value >= 1_000_000_000 {
+        format!("{:.1}B", value as f64 / 1_000_000_000.0)
+    } else if value >= 1_000_000 {
         format!("{:.1}M", value as f64 / 1_000_000.0)
     } else if value >= 10_000 {
         format!("{:.1}k", value as f64 / 1_000.0)
@@ -1233,6 +1436,8 @@ fn push_log(state: AppState, line: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn ateed_screen_keeps_lock_and_dashboard_mounted() {
         let src = include_str!("ateed.rs");
@@ -1247,16 +1452,61 @@ mod tests {
         assert!(production.contains("ateed_studio"));
         assert!(production.contains("cli_ready"));
         assert!(production.contains("Start train"));
+        assert!(production.contains("engines/mujrim"));
+        assert!(production.contains("continuing_train_base"));
+        assert!(production.contains("Batch positions"));
+        assert!(production.contains("field_help"));
         assert!(production.contains("stockfish-plain"));
         assert!(production.contains("Decode"));
         assert!(production.contains("Merge"));
-        assert!(production.contains("Disconnected / Idle"));
+        assert!(production.contains("Live ·"));
+        assert!(production.contains("Paused ·"));
+        assert!(!production.contains("Disconnected / Idle"));
         assert!(production.contains("Bullet trainer"));
         assert!(production.contains("Datagen"));
+        assert!(production.contains("\"Play\""));
+        assert!(production.contains("\"Pause\""));
+        assert!(production.contains("\"Stop\""));
+        assert!(production.contains("capped_scroll"));
+        assert!(production.contains("filling_scroll"));
+        assert!(production.contains("ATEED_PANEL_SCROLL_PX"));
+        assert!(production.contains("Download URL"));
+        assert!(production.contains("File path"));
+        assert!(!production.contains("primary_button_when(state, \"Datagen\""));
         assert!(production.contains("from_millis(250)"));
         assert!(
             !production.contains("dyn_view"),
             "lock/dashboard must stay mounted"
         );
+    }
+
+    #[test]
+    fn telemetry_status_stays_live_when_metrics_are_visible() {
+        use updater::progress::JobKind;
+        assert_eq!(
+            telemetry_status_text(true, false, Some(JobKind::Datagen), true),
+            "Live · datagen"
+        );
+        assert_eq!(
+            telemetry_status_text(true, true, Some(JobKind::Datagen), true),
+            "Paused · datagen"
+        );
+        assert_eq!(
+            telemetry_status_text(false, false, Some(JobKind::Datagen), true),
+            "Idle · last datagen"
+        );
+        assert_eq!(telemetry_status_text(false, false, None, false), "Idle");
+        assert_ne!(
+            telemetry_status_text(false, false, None, true),
+            "Disconnected / Idle"
+        );
+    }
+
+    #[test]
+    fn format_u64_uses_billions_for_default_chunk() {
+        assert_eq!(format_u64(1_000_000_000), "1.0B");
+        assert_eq!(format_u64(1_000_000), "1.0M");
+        assert_eq!(source_value_caption("http").0, "Download URL");
+        assert_eq!(source_value_caption("local").0, "File path");
     }
 }

@@ -22,6 +22,7 @@ const PRODUCT_ENGINE_STEMS: &[&str] = &[
     "mujrim-external",
     "mujrim-obs",
     "mujrim-plenty",
+    "mujrim-train",
     "mujrim-v60",
     "mujrim-viri",
 ];
@@ -273,6 +274,9 @@ fn build_engines() -> Result<(), String> {
 }
 
 fn build_product_engines() -> Result<(), String> {
+    // Trainer CLI first — later product feature sets overwrite target/release/mujrim.
+    run_dist_cargo(&["build", "--release", "-p", "mujrim"], &[])?;
+    snapshot_engine("mujrim", "mujrim-train")?;
     run_dist_cargo(
         &[
             "build",
@@ -349,7 +353,7 @@ fn build_product_engines() -> Result<(), String> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,viridithas-nnue",
+            "xboard,book,nnue,simd,viridithas-nnue,embedded-networks",
         ],
         &[],
     )?;
@@ -362,7 +366,7 @@ fn build_product_engines() -> Result<(), String> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,obsidian-nnue",
+            "xboard,book,nnue,simd,obsidian-nnue,embedded-networks",
         ],
         &[],
     )?;
@@ -375,7 +379,7 @@ fn build_product_engines() -> Result<(), String> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,plentychess-nnue",
+            "xboard,book,nnue,simd,plentychess-nnue,embedded-networks",
         ],
         &[],
     )?;
@@ -1162,6 +1166,7 @@ mod tests {
             "mujrim-obs",
             "mujrim-plenty",
             "mujrim-ateed",
+            "mujrim-train",
         ] {
             assert!(
                 native.contains(&format!("\"{stem}\"")),
@@ -1304,6 +1309,7 @@ mod tests {
                 "mujrim-external",
                 "mujrim-obs",
                 "mujrim-plenty",
+                "mujrim-train",
                 "mujrim-v60",
                 "mujrim-viri",
             ]
@@ -1322,12 +1328,14 @@ mod tests {
             !obs_features.contains("stockfish-nnue"),
             "mujrim-obs must not compile Stockfish NNUE: {obs_features}"
         );
-        assert!(src.contains("\"xboard,book,nnue,simd,plentychess-nnue\""));
+        assert!(src.contains("\"xboard,book,nnue,simd,plentychess-nnue,embedded-networks\""));
         assert!(
             src.contains("snapshot_engine(\"mujrim\", \"mujrim-plenty\")")
-                && src.contains("\"xboard,book,nnue,simd,plentychess-nnue\""),
+                && src.contains("\"xboard,book,nnue,simd,plentychess-nnue,embedded-networks\""),
             "mujrim-plenty must be built from plentychess-nnue, not copied from another adapter"
         );
+        assert!(src.contains("\"xboard,book,nnue,simd,viridithas-nnue,embedded-networks\""));
+        assert!(src.contains("\"xboard,book,nnue,simd,obsidian-nnue,embedded-networks\""));
         assert!(src.contains("\"xboard,book,nnue,simd,ateed-nnue\""));
         assert!(
             src.contains("snapshot_engine(\"mujrim\", \"mujrim-ateed\")")

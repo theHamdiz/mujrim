@@ -1,26 +1,10 @@
 //! Runtime NNUE network selection.
 
-use std::fmt::{Display, Formatter};
-use std::path::{Path, PathBuf};
-
-#[cfg(any(
-    not(feature = "embedded-networks"),
-    feature = "stockfish-nnue",
-    feature = "reckless-nnue"
-))]
 use sha2::{Digest, Sha256};
-#[cfg(any(
-    not(feature = "embedded-networks"),
-    feature = "stockfish-nnue",
-    feature = "reckless-nnue"
-))]
+use std::fmt::{Display, Formatter};
 use std::fs::File;
-#[cfg(any(
-    not(feature = "embedded-networks"),
-    feature = "stockfish-nnue",
-    feature = "reckless-nnue"
-))]
 use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use super::network::{HIDDEN, NUM_BUCKETS, Network, net};
 #[cfg(feature = "reckless-nnue")]
@@ -137,6 +121,12 @@ pub enum ActiveNetwork {
     EmbeddedStockfish,
     #[cfg(feature = "reckless-nnue")]
     EmbeddedReckless,
+    #[cfg(feature = "viridithas-nnue")]
+    EmbeddedViridithas,
+    #[cfg(feature = "obsidian-nnue")]
+    EmbeddedObsidian,
+    #[cfg(feature = "plentychess-nnue")]
+    EmbeddedPlentyChess,
     ExternalAkimbo {
         network: Box<Network>,
         info: NnueNetworkInfo,
@@ -178,13 +168,46 @@ pub enum ActiveNetwork {
 pub fn default_embedded_network() -> ActiveNetwork {
     #[cfg(feature = "reckless-nnue")]
     {
-        ActiveNetwork::EmbeddedReckless
+        return ActiveNetwork::EmbeddedReckless;
     }
-    #[cfg(all(not(feature = "reckless-nnue"), feature = "stockfish-nnue"))]
+    #[cfg(all(not(feature = "reckless-nnue"), feature = "viridithas-nnue"))]
     {
-        ActiveNetwork::EmbeddedStockfish
+        return ActiveNetwork::EmbeddedViridithas;
     }
-    #[cfg(all(not(feature = "stockfish-nnue"), not(feature = "reckless-nnue")))]
+    #[cfg(all(
+        not(feature = "reckless-nnue"),
+        not(feature = "viridithas-nnue"),
+        feature = "obsidian-nnue"
+    ))]
+    {
+        return ActiveNetwork::EmbeddedObsidian;
+    }
+    #[cfg(all(
+        not(feature = "reckless-nnue"),
+        not(feature = "viridithas-nnue"),
+        not(feature = "obsidian-nnue"),
+        feature = "plentychess-nnue"
+    ))]
+    {
+        return ActiveNetwork::EmbeddedPlentyChess;
+    }
+    #[cfg(all(
+        not(feature = "reckless-nnue"),
+        not(feature = "viridithas-nnue"),
+        not(feature = "obsidian-nnue"),
+        not(feature = "plentychess-nnue"),
+        feature = "stockfish-nnue"
+    ))]
+    {
+        return ActiveNetwork::EmbeddedStockfish;
+    }
+    #[cfg(all(
+        not(feature = "reckless-nnue"),
+        not(feature = "viridithas-nnue"),
+        not(feature = "obsidian-nnue"),
+        not(feature = "plentychess-nnue"),
+        not(feature = "stockfish-nnue")
+    ))]
     {
         ActiveNetwork::Embedded
     }
@@ -203,7 +226,13 @@ pub fn embedded_network_for_preset(preset: &str) -> Option<ActiveNetwork> {
         "stockfish" => Some(ActiveNetwork::EmbeddedStockfish),
         #[cfg(feature = "reckless-nnue")]
         "reckless" => Some(ActiveNetwork::EmbeddedReckless),
-        "viridithas" | "obsidian" | "plentychess" | "ateed" | "lc0" => None,
+        #[cfg(feature = "viridithas-nnue")]
+        "viridithas" => Some(ActiveNetwork::EmbeddedViridithas),
+        #[cfg(feature = "obsidian-nnue")]
+        "obsidian" => Some(ActiveNetwork::EmbeddedObsidian),
+        #[cfg(feature = "plentychess-nnue")]
+        "plentychess" | "plenty" => Some(ActiveNetwork::EmbeddedPlentyChess),
+        "ateed" | "lc0" => None,
         _ => None,
     }
 }
@@ -220,6 +249,18 @@ impl NnueNetworkSource for ActiveNetwork {
             #[cfg(feature = "reckless-nnue")]
             Self::EmbeddedReckless => {
                 NnueNetworkParameters::Reckless(super::reckless_format::embedded())
+            }
+            #[cfg(feature = "viridithas-nnue")]
+            Self::EmbeddedViridithas => {
+                NnueNetworkParameters::Viridithas(super::viridithas_format::embedded())
+            }
+            #[cfg(feature = "obsidian-nnue")]
+            Self::EmbeddedObsidian => {
+                NnueNetworkParameters::Obsidian(super::obsidian_format::embedded())
+            }
+            #[cfg(feature = "plentychess-nnue")]
+            Self::EmbeddedPlentyChess => {
+                NnueNetworkParameters::PlentyChess(super::plentychess_format::embedded())
             }
             Self::ExternalAkimbo { network, .. } => NnueNetworkParameters::Akimbo(network),
             #[cfg(feature = "stockfish-nnue")]
@@ -246,6 +287,12 @@ impl NnueNetworkSource for ActiveNetwork {
             Self::EmbeddedStockfish => embedded_stockfish_info(),
             #[cfg(feature = "reckless-nnue")]
             Self::EmbeddedReckless => embedded_reckless_info(),
+            #[cfg(feature = "viridithas-nnue")]
+            Self::EmbeddedViridithas => embedded_viridithas_info(),
+            #[cfg(feature = "obsidian-nnue")]
+            Self::EmbeddedObsidian => embedded_obsidian_info(),
+            #[cfg(feature = "plentychess-nnue")]
+            Self::EmbeddedPlentyChess => embedded_plentychess_info(),
             Self::ExternalAkimbo { info, .. } => info.clone(),
             #[cfg(feature = "stockfish-nnue")]
             Self::ExternalStockfish { info, .. } => info.clone(),
@@ -274,11 +321,15 @@ impl NnueNetworkSource for ActiveNetwork {
             #[cfg(feature = "reckless-nnue")]
             Self::ExternalReckless { .. } => NnueSearchProfile::Reckless,
             #[cfg(feature = "viridithas-nnue")]
-            Self::ExternalViridithas { .. } => NnueSearchProfile::Viridithas,
+            Self::EmbeddedViridithas | Self::ExternalViridithas { .. } => {
+                NnueSearchProfile::Viridithas
+            }
             #[cfg(feature = "obsidian-nnue")]
-            Self::ExternalObsidian { .. } => NnueSearchProfile::Obsidian,
+            Self::EmbeddedObsidian | Self::ExternalObsidian { .. } => NnueSearchProfile::Obsidian,
             #[cfg(feature = "plentychess-nnue")]
-            Self::ExternalPlentyChess { .. } => NnueSearchProfile::PlentyChess,
+            Self::EmbeddedPlentyChess | Self::ExternalPlentyChess { .. } => {
+                NnueSearchProfile::PlentyChess
+            }
             #[cfg(feature = "ateed-nnue")]
             Self::ExternalAteed { .. } => NnueSearchProfile::Ateed,
         }
@@ -318,6 +369,71 @@ fn embedded_reckless_info() -> NnueNetworkInfo {
         qb: 64,
         scale: 380,
         file_size: RECKLESS_FILE_SIZE,
+    }
+}
+
+#[cfg(feature = "viridithas-nnue")]
+fn embedded_viridithas_info() -> NnueNetworkInfo {
+    NnueNetworkInfo {
+        name: "Embedded Viridithas sandhi-s2-b200".to_string(),
+        format: NetworkFormat::Viridithas,
+        architecture: "sandhi 704×16hm + threats/pairs → 1024 → 32 → 32 → 1 ×8".to_string(),
+        hidden_size: super::viridithas_format::SANDHI_L0,
+        num_buckets: super::viridithas_format::KING_BUCKETS,
+        qa: super::viridithas_format::QA,
+        qb: 64,
+        scale: super::viridithas_format::LAYERED_SCALE,
+        file_size: {
+            #[cfg(feature = "embedded-networks")]
+            {
+                super::viridithas_format::embedded_bytes_len()
+            }
+            #[cfg(not(feature = "embedded-networks"))]
+            {
+                0
+            }
+        },
+    }
+}
+
+#[cfg(feature = "obsidian-nnue")]
+fn embedded_obsidian_info() -> NnueNetworkInfo {
+    NnueNetworkInfo {
+        name: "Embedded Obsidian net89perm".to_string(),
+        format: NetworkFormat::Obsidian,
+        architecture: "768→1536→16→32→1 (13 king buckets, 8 output buckets)".to_string(),
+        hidden_size: super::obsidian_format::L1,
+        num_buckets: super::obsidian_format::KING_BUCKETS,
+        qa: super::obsidian_format::NETWORK_QA,
+        qb: super::obsidian_format::NETWORK_QB,
+        scale: super::obsidian_format::NETWORK_SCALE,
+        file_size: super::obsidian_format::FILE_SIZE,
+    }
+}
+
+#[cfg(feature = "plentychess-nnue")]
+fn embedded_plentychess_info() -> NnueNetworkInfo {
+    NnueNetworkInfo {
+        name: "Embedded PlentyChess 0179r".to_string(),
+        format: NetworkFormat::PlentyChess,
+        architecture:
+            "768×12 + 4560 pawn-pair + 59808 threat → 1024 pairwise-CReLU → 16 → 32 → 1 ×8 (0179r)"
+                .to_string(),
+        hidden_size: super::plentychess_format::L1,
+        num_buckets: super::plentychess_format::KING_BUCKETS,
+        qa: super::plentychess_format::NETWORK_QA,
+        qb: super::plentychess_format::NETWORK_QB,
+        scale: super::plentychess_format::NETWORK_SCALE,
+        file_size: {
+            #[cfg(feature = "embedded-networks")]
+            {
+                super::plentychess_format::embedded_bytes_len()
+            }
+            #[cfg(not(feature = "embedded-networks"))]
+            {
+                0
+            }
+        },
     }
 }
 
@@ -849,7 +965,7 @@ fn candidate_paths(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(paths)
 }
 
-#[cfg(not(feature = "embedded-networks"))]
+#[allow(dead_code)]
 pub(crate) fn discover_network_file(
     expected_size: u64,
     expected_sha256: &str,
@@ -914,7 +1030,7 @@ pub(crate) fn discover_network_file(
     ))
 }
 
-#[cfg(not(feature = "embedded-networks"))]
+#[allow(dead_code)]
 fn collect_network_files(directory: &Path, depth: usize, output: &mut Vec<PathBuf>) {
     const MAX_DEPTH: usize = 3;
     if depth > MAX_DEPTH {
@@ -933,11 +1049,7 @@ fn collect_network_files(directory: &Path, depth: usize, output: &mut Vec<PathBu
     }
 }
 
-#[cfg(any(
-    not(feature = "embedded-networks"),
-    feature = "stockfish-nnue",
-    feature = "reckless-nnue"
-))]
+#[allow(dead_code)]
 fn file_sha256(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();
@@ -1070,6 +1182,19 @@ mod tests {
     }
 
     #[test]
+    fn product_format_modules_embed_their_official_nets() {
+        let viri = include_str!("viridithas_format.rs");
+        let obs = include_str!("obsidian_format.rs");
+        let plenty = include_str!("plentychess_format.rs");
+        assert!(viri.contains("include_bytes!(\"../../resources/viri_default.nnue.zst\")"));
+        assert!(obs.contains("include_bytes!(\"../../resources/obs_default.bin\")"));
+        assert!(plenty.contains("include_bytes!(\"../../resources/plenty_default.bin\")"));
+        assert!(viri.contains("pub fn embedded()"));
+        assert!(obs.contains("pub fn embedded()"));
+        assert!(plenty.contains("pub fn embedded()"));
+    }
+
+    #[test]
     fn embedded_network_for_preset_matches_named_profiles() {
         assert!(matches!(
             embedded_network_for_preset("akimbo"),
@@ -1084,6 +1209,21 @@ mod tests {
         assert!(matches!(
             embedded_network_for_preset("reckless"),
             Some(ActiveNetwork::EmbeddedReckless)
+        ));
+        #[cfg(feature = "viridithas-nnue")]
+        assert!(matches!(
+            embedded_network_for_preset("viridithas"),
+            Some(ActiveNetwork::EmbeddedViridithas)
+        ));
+        #[cfg(feature = "obsidian-nnue")]
+        assert!(matches!(
+            embedded_network_for_preset("obsidian"),
+            Some(ActiveNetwork::EmbeddedObsidian)
+        ));
+        #[cfg(feature = "plentychess-nnue")]
+        assert!(matches!(
+            embedded_network_for_preset("plentychess"),
+            Some(ActiveNetwork::EmbeddedPlentyChess)
         ));
         assert!(embedded_network_for_preset("auto").is_none());
         assert!(embedded_network_for_preset("unknown").is_none());

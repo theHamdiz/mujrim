@@ -20,6 +20,7 @@ pub const DOCK_OPEN_PX: f64 = 248.0;
 pub const DOCK_MIN_PX: f64 = 120.0;
 pub const DOCK_MAX_PX: f64 = 560.0;
 pub const LIST_SCROLL_PX: f64 = 260.0;
+pub const ATEED_PANEL_SCROLL_PX: f64 = 420.0;
 pub const PICKER_SCROLL_PX: f64 = 220.0;
 pub const MODAL_LIST_SCROLL_PX: f64 = 280.0;
 pub const LOW_TIME_MS: u64 = 10_000;
@@ -452,6 +453,7 @@ mod tests {
         const {
             assert!(DOCK_OPEN_PX > DOCK_TAB_BAR_PX);
             assert!(LIST_SCROLL_PX > 180.0);
+            assert!(ATEED_PANEL_SCROLL_PX > LIST_SCROLL_PX);
             assert!(PICKER_SCROLL_PX > 120.0);
             assert!(MODAL_LIST_SCROLL_PX >= LIST_SCROLL_PX);
         }

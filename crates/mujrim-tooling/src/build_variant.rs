@@ -104,7 +104,7 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,viridithas-nnue",
+            "xboard,book,nnue,simd,viridithas-nnue,embedded-networks",
         ],
         BuildVariant::Obsidian => vec![
             "build",
@@ -113,7 +113,7 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,obsidian-nnue",
+            "xboard,book,nnue,simd,obsidian-nnue,embedded-networks",
         ],
         BuildVariant::PlentyChess => vec![
             "build",
@@ -122,7 +122,7 @@ fn variant_args(variant: &BuildVariant) -> Vec<&'static str> {
             "mujrim",
             "--no-default-features",
             "--features",
-            "xboard,book,nnue,simd,plentychess-nnue",
+            "xboard,book,nnue,simd,plentychess-nnue,embedded-networks",
         ],
         BuildVariant::Ateed => vec![
             "build",
@@ -337,7 +337,10 @@ mod tests {
             .windows(2)
             .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
             .unwrap();
-        assert_eq!(features, "xboard,book,nnue,simd,obsidian-nnue");
+        assert_eq!(
+            features,
+            "xboard,book,nnue,simd,obsidian-nnue,embedded-networks"
+        );
         assert!(!features.contains("stockfish-nnue"));
         assert!(!features.contains("reckless-nnue"));
         assert!(!features.contains("akimbo-nnue"));
@@ -349,7 +352,10 @@ mod tests {
             .windows(2)
             .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
             .unwrap();
-        assert_eq!(plenty, "xboard,book,nnue,simd,plentychess-nnue");
+        assert_eq!(
+            plenty,
+            "xboard,book,nnue,simd,plentychess-nnue,embedded-networks"
+        );
         assert!(!plenty.contains("reckless-nnue"));
         assert!(!plenty.contains("obsidian-nnue"));
 
@@ -416,5 +422,20 @@ mod tests {
         assert!(ak.contains("embedded-networks"));
         assert!(!ak.contains("stockfish-nnue"));
         assert!(!ak.contains("reckless-nnue"));
+
+        for variant in [
+            BuildVariant::Viridithas,
+            BuildVariant::Obsidian,
+            BuildVariant::PlentyChess,
+        ] {
+            let features = variant_args(&variant)
+                .windows(2)
+                .find_map(|pair| (pair[0] == "--features").then_some(pair[1]))
+                .unwrap();
+            assert!(
+                features.contains("embedded-networks"),
+                "{variant:?} must embed its own NNUE: {features}"
+            );
+        }
     }
 }

@@ -114,7 +114,15 @@ impl EvalSearchAdapter for ViridithasAdapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(ViridithasSearchProfile.compose());
-        bind_matching_disk_network(engine, "viridithas", NnueSearchProfile::Viridithas);
+        #[cfg(all(feature = "viridithas-nnue", feature = "embedded-networks"))]
+        {
+            engine.set_nnue_network(ActiveNetwork::EmbeddedViridithas);
+            engine.set_use_nnue(true);
+        }
+        #[cfg(not(all(feature = "viridithas-nnue", feature = "embedded-networks")))]
+        {
+            bind_matching_disk_network(engine, "viridithas", NnueSearchProfile::Viridithas);
+        }
     }
 }
 
@@ -129,7 +137,15 @@ impl EvalSearchAdapter for ObsidianAdapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(ObsidianSearchProfile.compose());
-        bind_matching_disk_network(engine, "obsidian", NnueSearchProfile::Obsidian);
+        #[cfg(all(feature = "obsidian-nnue", feature = "embedded-networks"))]
+        {
+            engine.set_nnue_network(ActiveNetwork::EmbeddedObsidian);
+            engine.set_use_nnue(true);
+        }
+        #[cfg(not(all(feature = "obsidian-nnue", feature = "embedded-networks")))]
+        {
+            bind_matching_disk_network(engine, "obsidian", NnueSearchProfile::Obsidian);
+        }
     }
 }
 
@@ -144,7 +160,15 @@ impl EvalSearchAdapter for PlentyChessAdapter {
 
     fn install(&self, engine: &mut SearchEngine) {
         engine.set_search_stack(PlentyChessSearchProfile.compose());
-        bind_matching_disk_network(engine, "plentychess", NnueSearchProfile::PlentyChess);
+        #[cfg(all(feature = "plentychess-nnue", feature = "embedded-networks"))]
+        {
+            engine.set_nnue_network(ActiveNetwork::EmbeddedPlentyChess);
+            engine.set_use_nnue(true);
+        }
+        #[cfg(not(all(feature = "plentychess-nnue", feature = "embedded-networks")))]
+        {
+            bind_matching_disk_network(engine, "plentychess", NnueSearchProfile::PlentyChess);
+        }
     }
 }
 

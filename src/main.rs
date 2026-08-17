@@ -361,7 +361,13 @@ fn main() {
                                 .long("games")
                                 .value_name("N")
                                 .default_value("1")
-                                .help("Number of self-play games"),
+                                .help("Safety cap on self-play games"),
+                        )
+                        .arg(
+                            Arg::new("positions")
+                                .long("positions")
+                                .value_name("N")
+                                .help("Stop after this many new positions (appends to the dataset)"),
                         )
                         .arg(
                             Arg::new("depth")
@@ -674,6 +680,9 @@ fn main() {
                             .get_one::<String>("games")
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(1),
+                        num_positions: datagen
+                            .get_one::<String>("positions")
+                            .and_then(|value| value.parse().ok()),
                         depth: datagen
                             .get_one::<String>("depth")
                             .and_then(|value| value.parse().ok())
