@@ -86,6 +86,7 @@ mod tests {
         let out = tool.call(&json!({})).unwrap();
         let targets = out["targets"].as_array().unwrap();
         assert!(targets.contains(&json!("native")));
+        assert!(targets.contains(&json!("engines")));
         assert!(targets.contains(&json!("full")));
     }
 }

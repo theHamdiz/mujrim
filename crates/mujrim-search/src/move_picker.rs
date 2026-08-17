@@ -24,6 +24,7 @@ pub trait MoveSource {
     fn gen_captures(&self) -> MoveList;
     fn gen_quiets(&self) -> MoveList;
     fn is_legal_move(&self, mv: Move) -> bool;
+    fn hydrate_move(&self, mv: Move) -> Option<Move>;
     fn see_ge(&self, mv: Move, threshold: i32) -> bool;
 }
 
@@ -46,6 +47,11 @@ impl MoveSource for Board {
     #[inline]
     fn is_legal_move(&self, mv: Move) -> bool {
         Board::is_legal_move(self, mv)
+    }
+
+    #[inline]
+    fn hydrate_move(&self, mv: Move) -> Option<Move> {
+        Board::hydrate_move(self, mv)
     }
 
     #[inline]
@@ -76,6 +82,11 @@ impl MoveSource for AkimboPos {
     }
 
     #[inline]
+    fn hydrate_move(&self, mv: Move) -> Option<Move> {
+        AkimboPos::hydrate_move(self, mv)
+    }
+
+    #[inline]
     fn see_ge(&self, mv: Move, threshold: i32) -> bool {
         see::see_ge_pos(self, mv, threshold)
     }
@@ -100,6 +111,11 @@ impl MoveSource for BoardSnapshot {
     #[inline]
     fn is_legal_move(&self, mv: Move) -> bool {
         BoardSnapshot::is_legal_move(self, mv)
+    }
+
+    #[inline]
+    fn hydrate_move(&self, mv: Move) -> Option<Move> {
+        BoardSnapshot::hydrate_move(self, mv)
     }
 
     #[inline]
@@ -217,19 +233,17 @@ impl MovePicker {
     /// Builds a picker without validating moves that search may never consume.
     #[inline]
     pub fn new<P: MoveSource>(
-        pos: &P,
+        _pos: &P,
         tt_move: Option<Move>,
         killers: [Move; 2],
         countermove: Move,
     ) -> Self {
-        let captures = pos.gen_captures();
-
         Self {
             stage: Stage::TtMove,
             tt_move,
             killers,
             countermove,
-            captures,
+            captures: MoveList::new(),
             capture_scores: [MaybeUninit::uninit(); MAX_SCORED],
             capture_good: [MaybeUninit::uninit(); MAX_SCORED],
             capture_idx: 0,
@@ -318,35 +332,6 @@ impl MovePicker {
     }
 
     #[inline]
-    fn find_matching_capture(&self, key: Move) -> Option<Move> {
-        for i in 0..self.captures.len() {
-            let m = self.captures[i];
-            if same_move_key(m, key) {
-                return Some(m);
-            }
-        }
-        None
-    }
-
-    /// Lazily fill the quiet list when it is first needed.
-    fn ensure_quiets<P: MoveSource>(&mut self, pos: &P) {
-        if self.quiets.is_none() {
-            self.quiets = Some(pos.gen_quiets());
-        }
-    }
-
-    fn find_matching_quiet<P: MoveSource>(&mut self, pos: &P, key: Move) -> Option<Move> {
-        self.ensure_quiets(pos);
-        let q = self.quiets.as_ref()?;
-        for i in 0..q.len() {
-            let m = q[i];
-            if same_move_key(m, key) {
-                return Some(m);
-            }
-        }
-        None
-    }
-
     pub fn next<P, FC, FQ>(&mut self, pos: &P, score_capture: &FC, score_quiet: &FQ) -> Option<Move>
     where
         P: MoveSource,
@@ -357,26 +342,21 @@ impl MovePicker {
             match self.stage {
                 Stage::TtMove => {
                     self.stage = Stage::GenerateCaptures;
-                    if let Some(ttm) = self.tt_move {
-                        if let Some(mv) = self.find_matching_capture(ttm)
-                            && pos.is_legal_move(mv)
-                            && (!self.skip_bad_captures || !mv.is_capture() || pos.see_ge(mv, 0))
-                        {
-                            self.tt_yielded = true;
-                            return Some(mv);
-                        }
-                        if !self.skip_quiets
-                            && let Some(mv) = self.find_matching_quiet(pos, ttm)
-                            && pos.is_legal_move(mv)
-                        {
-                            self.tt_yielded = true;
-                            return Some(mv);
-                        }
+                    if let Some(ttm) = self.tt_move.and_then(|mv| pos.hydrate_move(mv))
+                        && !(self.skip_quiets && ttm.is_quiet())
+                        && (!self.skip_bad_captures || !ttm.is_capture() || pos.see_ge(ttm, 0))
+                    {
+                        self.tt_move = Some(ttm);
+                        self.tt_yielded = true;
+                        return Some(ttm);
                     }
                 }
 
                 Stage::GenerateCaptures => {
                     self.stage = Stage::GoodCaptures;
+                    if self.captures.is_empty() {
+                        self.captures = pos.gen_captures();
+                    }
                     let mut write = 0usize;
                     let capture_count = self.captures.len();
 
@@ -428,30 +408,28 @@ impl MovePicker {
                     }
                     if !self.killer0_yielded {
                         self.killer0_yielded = true;
-                        let k = self.killers[0];
-                        if k != NULL_MOVE
+                        if let Some(k) = pos.hydrate_move(self.killers[0])
+                            && k != NULL_MOVE
                             && !self.is_tt_move(k)
                             && !k.is_capture()
                             && !k.is_promotion()
-                            && let Some(mv) = self.find_matching_quiet(pos, k)
-                            && pos.is_legal_move(mv)
                         {
+                            self.killers[0] = k;
                             self.killer0_emitted = true;
-                            return Some(mv);
+                            return Some(k);
                         }
                     }
                     if !self.killer1_yielded {
                         self.killer1_yielded = true;
-                        let k = self.killers[1];
-                        if k != NULL_MOVE
+                        if let Some(k) = pos.hydrate_move(self.killers[1])
+                            && k != NULL_MOVE
                             && !self.is_tt_move(k)
                             && !k.is_capture()
                             && !k.is_promotion()
-                            && let Some(mv) = self.find_matching_quiet(pos, k)
-                            && pos.is_legal_move(mv)
                         {
+                            self.killers[1] = k;
                             self.killer1_emitted = true;
-                            return Some(mv);
+                            return Some(k);
                         }
                     }
                     self.stage = Stage::Countermove;
@@ -465,18 +443,17 @@ impl MovePicker {
                     self.stage = Stage::GenerateQuiets;
                     if !self.cm_yielded {
                         self.cm_yielded = true;
-                        let cm = self.countermove;
-                        if cm != NULL_MOVE
+                        if let Some(cm) = pos.hydrate_move(self.countermove)
+                            && cm != NULL_MOVE
                             && !self.is_tt_move(cm)
                             && !cm.is_capture()
                             && !cm.is_promotion()
                             && !same_move_key(cm, self.killers[0])
                             && !same_move_key(cm, self.killers[1])
-                            && let Some(mv) = self.find_matching_quiet(pos, cm)
-                            && pos.is_legal_move(mv)
                         {
+                            self.countermove = cm;
                             self.cm_emitted = true;
-                            return Some(mv);
+                            return Some(cm);
                         }
                     }
                 }
@@ -643,6 +620,65 @@ mod tests {
             moves.len(),
             legal.len()
         );
+    }
+
+    #[test]
+    fn picker_does_not_yield_king_onto_own_castled_rook() {
+        setup();
+        let board =
+            Board::from_fen("rnbqk2r/ppp1ppbp/5np1/3p4/3P4/2N2N2/PPP1PPPP/R1BQ1RK1 w kq - 2 5")
+                .unwrap();
+        let onto_rook = Move::quiet(Square::G1, Square::F1);
+        let mut picker =
+            MovePicker::new_for_test(&board, Some(onto_rook), [onto_rook, NULL_MOVE], onto_rook);
+        while let Some(mv) = picker.next(&board, &|_, _| 0, &|_, _| 0) {
+            assert_ne!(mv.to_uci(), "g1f1");
+        }
+    }
+
+    #[test]
+    fn picker_hydrates_quiet_flagged_tt_capture_without_generating() {
+        setup();
+        let board =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .unwrap();
+        let raw = Move::quiet(Square::E5, Square::D7);
+        let mut picker = MovePicker::new_for_test(&board, Some(raw), [NULL_MOVE; 2], NULL_MOVE);
+        let first = picker
+            .next(&board, &|_, _| 0, &|_, _| 0)
+            .expect("hydrated tt");
+        assert_eq!(first.to_uci(), "e5d7");
+        assert!(first.is_capture());
+        assert_eq!(picker.captures.len(), 0);
+        assert!(picker.quiets.is_none());
+        let mut child = board.clone();
+        child.make_move(first);
+        assert!(child.piece_on(Square::D7).is_some());
+        assert_eq!(
+            child.piece_on(Square::D7).map(|(piece, _)| piece),
+            Some(Piece::Knight)
+        );
+    }
+
+    #[test]
+    fn picker_defers_capture_and_quiet_gen_until_after_tt_move() {
+        setup();
+        let mut board = Board::new();
+        let tt = board
+            .generate_legal_moves()
+            .iter()
+            .find(|mv| mv.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+        let mut picker = MovePicker::new_for_test(&board, Some(tt), [NULL_MOVE; 2], NULL_MOVE);
+        assert_eq!(picker.captures.len(), 0);
+        assert!(picker.quiets.is_none());
+        let score_cap = |_: &Board, _: Move| 0;
+        let score_quiet = |_: &Board, _: Move| 0;
+        let first = picker.next(&board, &score_cap, &score_quiet).expect("tt");
+        assert_eq!(first.to_uci(), "e2e4");
+        assert_eq!(picker.captures.len(), 0);
+        assert!(picker.quiets.is_none());
     }
 
     #[test]

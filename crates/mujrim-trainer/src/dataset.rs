@@ -74,10 +74,20 @@ pub fn load_mixed_positions(
     for path in &paths {
         sources.push(crate::formats::load_positions_from_path(Path::new(path))?);
     }
-    if sources.len() == 1 {
-        return Ok(sources.remove(0));
-    }
-    crate::merge::merge_weighted(&sources, &weights, seed)
+    let merged = if sources.len() == 1 {
+        sources.remove(0)
+    } else {
+        crate::merge::merge_weighted(&sources, &weights, seed)?
+    };
+    Ok(dedupe_positions(merged))
+}
+
+pub fn dedupe_positions(positions: Vec<TrainingPosition>) -> Vec<TrainingPosition> {
+    let mut seen = std::collections::HashSet::new();
+    positions
+        .into_iter()
+        .filter(|position| seen.insert(mujrim_study::ateed_index::position_key(&position.fen)))
+        .collect()
 }
 
 pub fn fetch_catalog_dataset(
@@ -115,6 +125,28 @@ mod tests {
         assert_eq!(parse_training_line("   ").unwrap(), None);
         assert!(parse_training_line("fen|1|1.5").is_err());
         assert!(parse_training_line("fen|x|0.5").is_err());
+    }
+
+    #[test]
+    fn dedupe_positions_collapses_clock_transpositions() {
+        let a = TrainingPosition {
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".into(),
+            score: 10,
+            wdl: 0.5,
+        };
+        let b = TrainingPosition {
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 5 8".into(),
+            score: 20,
+            wdl: 1.0,
+        };
+        let c = TrainingPosition {
+            fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1".into(),
+            score: 0,
+            wdl: 0.5,
+        };
+        let out = dedupe_positions(vec![a, b, c]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].score, 10);
     }
 
     #[test]
@@ -158,15 +190,18 @@ mod tests {
         .unwrap();
         std::fs::write(
             &b,
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|2|0.0\n",
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1|2|0.0\n",
         )
         .unwrap();
         let mixed =
             load_mixed_positions(&format!("{},{}", a.display(), b.display()), "1,1", 1).unwrap();
+        let same =
+            load_mixed_positions(&format!("{},{}", a.display(), a.display()), "1,1", 1).unwrap();
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
         assert_eq!(mixed.len(), 2);
         let scores: Vec<i32> = mixed.iter().map(|p| p.score).collect();
         assert!(scores.contains(&1) && scores.contains(&2));
+        assert_eq!(same.len(), 1);
     }
 }

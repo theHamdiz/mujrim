@@ -1,17 +1,14 @@
-//! Ateed studio domain: gate, CLI discovery, job plans, and in-memory probes.
+//! Ateed studio domain: gate, CLI discovery, job plans, and runtime probes.
 //!
-//! Fetch / train / datagen require a `mujrim` CLI beside the UI (or in
-//! `target/{debug,release}`). Evaluate and latency probes stay in-process.
+//! Fetch / train / datagen / evaluate / latency require a `mujrim` CLI beside
+//! the UI (or in `target/{debug,release}`). The GUI never links an engine.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use eval::nnue::ateed_format::{L1, L2};
-use eval::nnue::{AteedNetwork, wdl_variance};
-use gpu::{CpuCompute, TrainCompute};
-use types::Board;
+use crate::app_core::uci_process::{self, ExternalEngineProtocol, ExternalSearchConfig};
 
 /// Base64 of the Ateed studio unlock secret. Never store the plaintext here.
 pub const ATEED_GATE_B64: &str = "SkFIQU5BTQ==";
@@ -102,12 +99,196 @@ pub struct AteedJobPlan {
     pub summary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AteedIndexPrompt {
+    pub new_games: usize,
+    pub summary: String,
+}
+
+pub const ATEED_NETWORK_FILENAME: &str = "ateed_default.bin";
+
+pub fn writable_nnue_directory() -> PathBuf {
+    if let Ok(executable) = std::env::current_exe() {
+        for ancestor in executable
+            .parent()
+            .into_iter()
+            .flat_map(|path| path.ancestors())
+            .take(5)
+        {
+            let dir = ancestor.join("nnue");
+            if dir.is_dir() {
+                return dir;
+            }
+        }
+    }
+    let dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("nnue");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn ateed_artifact_path() -> PathBuf {
+    let dir = writable_nnue_directory();
+    let candidate = dir.join(ATEED_NETWORK_FILENAME);
+    if candidate.is_file() {
+        candidate
+    } else {
+        dir.join(ATEED_NETWORK_FILENAME)
+    }
+}
+
+fn ateed_file_size() -> u64 {
+    std::fs::metadata(ateed_artifact_path())
+        .map(|meta| meta.len())
+        .unwrap_or(0)
+}
+
+pub fn scan_tournament_index(
+    db: &mujrim_study::database::StudyDatabase,
+) -> Option<AteedIndexPrompt> {
+    scan_tournament_index_in(db, &writable_nnue_directory())
+}
+
+pub fn scan_tournament_index_in(
+    db: &mujrim_study::database::StudyDatabase,
+    root: &Path,
+) -> Option<AteedIndexPrompt> {
+    let tournaments = db.list_tournaments().ok()?;
+    let index = mujrim_study::ateed_index::PositionIndex::load(
+        &mujrim_study::ateed_index::index_path(root),
+    );
+    let pairs: Vec<_> = tournaments
+        .into_iter()
+        .map(|tournament| (tournament.id, tournament.games))
+        .collect();
+    let scan = mujrim_study::ateed_index::scan_unindexed(&pairs, &index);
+    if scan.new_games == 0 {
+        return None;
+    }
+    Some(AteedIndexPrompt {
+        new_games: scan.new_games,
+        summary: format!(
+            "{} new tournament game(s) can be indexed for Ateed training",
+            scan.new_games
+        ),
+    })
+}
+
+pub fn index_tournament_positions(
+    db: &mujrim_study::database::StudyDatabase,
+) -> Result<(String, String), String> {
+    index_tournament_positions_in(db, &writable_nnue_directory())
+}
+
+pub fn index_tournament_positions_in(
+    db: &mujrim_study::database::StudyDatabase,
+    root: &Path,
+) -> Result<(String, String), String> {
+    let tournaments = db.list_tournaments()?;
+    let index_path = mujrim_study::ateed_index::index_path(root);
+    let dataset = mujrim_study::ateed_index::tournament_dataset_path(root);
+    let mut index = mujrim_study::ateed_index::PositionIndex::load(&index_path);
+    let pairs: Vec<_> = tournaments
+        .into_iter()
+        .map(|tournament| (tournament.id, tournament.games))
+        .collect();
+    let report =
+        mujrim_study::ateed_index::index_games_scored(&pairs, &mut index, &dataset, |_board| 0)?;
+    index.save(&index_path)?;
+    Ok((
+        dataset.to_string_lossy().into_owned(),
+        format!(
+            "indexed {} game(s), {} new positions, {} duplicates skipped",
+            report.games_indexed, report.positions_added, report.positions_skipped
+        ),
+    ))
+}
+
+pub fn ensure_local_source(sources: &mut Vec<AteedDataSource>, path: &str) {
+    if sources.iter().any(|source| source.value == path) {
+        return;
+    }
+    sources.push(AteedDataSource {
+        kind: AteedSourceKind::LocalFile,
+        value: path.to_owned(),
+        weight: 1,
+    });
+}
+
+pub const METRIC_RING_CAP: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MetricRing {
+    buf: [f32; METRIC_RING_CAP],
+    next: usize,
+    filled: usize,
+}
+
+impl Default for MetricRing {
+    fn default() -> Self {
+        Self {
+            buf: [0.0; METRIC_RING_CAP],
+            next: 0,
+            filled: 0,
+        }
+    }
+}
+
+impl MetricRing {
+    pub fn push(&mut self, value: f32) {
+        self.buf[self.next] = value;
+        self.next = (self.next + 1) % METRIC_RING_CAP;
+        if self.filled < METRIC_RING_CAP {
+            self.filled += 1;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.filled
+    }
+
+    pub fn copy_oldest_first(&self, out: &mut [f32]) -> usize {
+        let n = self.filled.min(out.len());
+        if n == 0 {
+            return 0;
+        }
+        let start = if self.filled == METRIC_RING_CAP {
+            self.next
+        } else {
+            0
+        };
+        for (index, slot) in out.iter_mut().enumerate().take(n) {
+            *slot = self.buf[(start + index) % METRIC_RING_CAP];
+        }
+        n
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LossRing {
+    pub train: MetricRing,
+    pub val: MetricRing,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AteedMonitorTick {
+    pub kind: updater::progress::JobKind,
     pub epoch: u32,
     pub progress: f32,
     pub loss: f32,
+    pub val_loss: f32,
     pub expert: usize,
+    pub nps: u64,
+    pub games: u64,
+    pub positions: u64,
+    pub mbps: f32,
+    pub mpos: f32,
+    pub lr: f32,
+    pub wdl: (u64, u64, u64),
+    pub pass: u64,
+    pub drop: u64,
+    pub hist: [u32; updater::progress::HIST_BUCKETS],
     pub message: String,
 }
 
@@ -551,43 +732,81 @@ pub fn dry_run_train(epochs: u32, expert: usize) -> Vec<AteedMonitorTick> {
         .map(|epoch| {
             let progress = epoch as f32 / epochs as f32;
             AteedMonitorTick {
+                kind: updater::progress::JobKind::Train,
                 epoch,
                 progress,
                 loss: (1.0 - progress) * 0.85 + 0.05,
+                val_loss: (1.0 - progress) * 0.9 + 0.08,
                 expert,
+                nps: 0,
+                games: 0,
+                positions: 0,
+                mbps: 0.0,
+                mpos: 1.5,
+                lr: 1.0,
+                wdl: (0, 0, 0),
+                pass: 0,
+                drop: 0,
+                hist: [0; updater::progress::HIST_BUCKETS],
                 message: format!("epoch {epoch}/{epochs} routed expert {expert}"),
             }
         })
         .collect()
 }
 
+fn runtime_engine_probe(
+    depth: i32,
+    movetime: Duration,
+) -> Result<uci_process::ExternalMoveResult, String> {
+    let path = discover_mujrim_cli_from_environment().ok_or_else(|| {
+        "Mujrim engine binary not found. Place mujrim beside the UI or in target/release."
+            .to_owned()
+    })?;
+    let search = ExternalSearchConfig {
+        ponder: false,
+        use_nnue: true,
+        own_book: false,
+        eval_file: None,
+    };
+    uci_process::query_best_move(
+        path.to_str()
+            .ok_or_else(|| "engine path is not UTF-8".to_owned())?,
+        ExternalEngineProtocol::Uci,
+        mujrim_study::opening::START_FEN,
+        depth,
+        movetime,
+        16,
+        1,
+        &search,
+    )
+}
+
 pub fn evaluate_zero_net() -> AteedStrengthReport {
-    types::init();
-    let net = AteedNetwork::zero();
-    let board = Board::new();
-    let eval = net.evaluate_full(&board);
-    AteedStrengthReport {
-        score: eval.score,
-        variance: wdl_variance(eval.wdl),
-        expert: eval.expert,
-        file_size: eval::nnue::ateed_format::FILE_SIZE as u64,
+    let file_size = ateed_file_size();
+    match runtime_engine_probe(1, Duration::from_millis(80)) {
+        Ok(info) => AteedStrengthReport {
+            score: info.score,
+            variance: 0,
+            expert: 0,
+            file_size,
+        },
+        Err(_) => AteedStrengthReport {
+            score: 0,
+            variance: 0,
+            expert: 0,
+            file_size,
+        },
     }
 }
 
 pub fn probe_compute() -> AteedPerfReport {
-    types::init();
-    let matrix = vec![0.25f32; L2 * L1];
-    let vector = vec![0.5f32; L1];
-    let mut out = vec![0.0f32; L2];
     let start = Instant::now();
-    CpuCompute.matvec_f32(&matrix, &vector, L2, L1, &mut out);
-    let matvec_ns = start.elapsed().as_nanos();
-    let net = AteedNetwork::zero();
-    let board = Board::new();
-    let start = Instant::now();
-    let _ = net.evaluate(&board);
+    let ok = runtime_engine_probe(1, Duration::from_millis(80)).is_ok();
     let eval_ns = start.elapsed().as_nanos();
-    AteedPerfReport { matvec_ns, eval_ns }
+    AteedPerfReport {
+        matvec_ns: if ok { eval_ns } else { 0 },
+        eval_ns: if ok { eval_ns } else { 0 },
+    }
 }
 
 pub fn format_strength(report: &AteedStrengthReport) -> String {
@@ -599,10 +818,32 @@ pub fn format_strength(report: &AteedStrengthReport) -> String {
 
 pub fn monitor_from_progress(progress: &updater::progress::JobProgress) -> AteedMonitorTick {
     AteedMonitorTick {
+        kind: progress.kind,
         epoch: progress.epoch.unwrap_or(0),
         progress: (progress.pct / 100.0).clamp(0.0, 1.0),
         loss: progress.loss.unwrap_or(0.0),
+        val_loss: progress.val_loss.unwrap_or(0.0),
         expert: progress.expert.unwrap_or(0),
+        nps: progress.nps.unwrap_or(0),
+        games: progress.game.unwrap_or(progress.games.unwrap_or(0)),
+        positions: progress.positions.unwrap_or(0),
+        mbps: if progress.kind == updater::progress::JobKind::Datagen {
+            progress.throughput.unwrap_or(0.0)
+        } else {
+            0.0
+        },
+        mpos: progress.mpos.unwrap_or(progress.throughput.unwrap_or(0.0)),
+        lr: progress.lr.unwrap_or(0.0),
+        wdl: (
+            progress.white.unwrap_or(0),
+            progress.draw.unwrap_or(0),
+            progress.black.unwrap_or(0),
+        ),
+        pass: progress.pass.unwrap_or(0),
+        drop: progress.drop.unwrap_or(0),
+        hist: progress
+            .hist
+            .unwrap_or([0; updater::progress::HIST_BUCKETS]),
         message: updater::progress::format_progress(progress),
     }
 }
@@ -800,20 +1041,127 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_zero_net_and_perf_probe_stay_in_process() {
+    fn ateed_probes_use_the_dedicated_engine_binary() {
+        let src = include_str!("ateed_studio.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("discover_mujrim_cli"));
+        assert!(production.contains("query_best_move"));
+        assert!(!production.contains("use eval::"));
+        assert!(!production.contains("use gpu::"));
+        assert!(!production.contains("AteedNetwork"));
+        assert!(!production.contains("SearchEngine"));
         let strength = evaluate_zero_net();
-        assert_eq!(strength.score, 0);
-        assert_eq!(
-            strength.file_size,
-            eval::nnue::ateed_format::FILE_SIZE as u64
-        );
         assert!(format_strength(&strength).contains("expert"));
         let perf = probe_compute();
-        assert!(perf.matvec_ns > 0);
-        assert!(perf.eval_ns > 0);
         assert!(format_perf(&perf).contains("matvec"));
         let tick = monitor_from_progress(&updater::progress::JobProgress::train(3, 8, 0.2, 1));
         assert_eq!(tick.epoch, 3);
         assert!((tick.progress - 0.375).abs() < 0.01);
+    }
+
+    #[test]
+    fn metric_ring_wraps_at_capacity() {
+        let mut ring = MetricRing::default();
+        for i in 0..150 {
+            ring.push(i as f32);
+        }
+        assert_eq!(ring.len(), METRIC_RING_CAP);
+        let mut out = [0.0f32; METRIC_RING_CAP];
+        let n = ring.copy_oldest_first(&mut out);
+        assert_eq!(n, METRIC_RING_CAP);
+        assert!((out[0] - 50.0).abs() < f32::EPSILON);
+        assert!((out[99] - 149.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn monitor_from_progress_maps_datagen_and_train_batches() {
+        let mut hist = [0u32; updater::progress::HIST_BUCKETS];
+        hist[2] = 7;
+        let datagen = monitor_from_progress(&updater::progress::JobProgress::datagen_batch(
+            updater::progress::DatagenBatch {
+                game: 4,
+                games: 16,
+                positions: 80,
+                nps: 9_000,
+                throughput: 1.5,
+                white: 2,
+                draw: 1,
+                black: 1,
+                pass: 70,
+                drop: 5,
+                bytes: 2048,
+                hist,
+            },
+        ));
+        assert_eq!(datagen.kind, updater::progress::JobKind::Datagen);
+        assert_eq!(datagen.nps, 9_000);
+        assert!((datagen.mbps - 1.5).abs() < 0.001);
+        assert_eq!(datagen.wdl, (2, 1, 1));
+        assert_eq!(datagen.pass, 70);
+        assert_eq!(datagen.drop, 5);
+        assert_eq!(datagen.hist[2], 7);
+        let train = monitor_from_progress(&updater::progress::JobProgress::train_batch(
+            updater::progress::TrainerBatch {
+                epoch: 3,
+                epochs: 8,
+                loss: 0.2,
+                val_loss: Some(0.3),
+                expert: 1,
+                lr: 0.05,
+                mpos: 2.25,
+            },
+        ));
+        assert_eq!(train.kind, updater::progress::JobKind::Train);
+        assert!((train.loss - 0.2).abs() < 0.001);
+        assert!((train.val_loss - 0.3).abs() < 0.001);
+        assert!((train.lr - 0.05).abs() < 0.0001);
+        assert!((train.mpos - 2.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn tournament_index_scan_indexes_and_dedupes() {
+        types::init();
+        let stamp = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        );
+        let root = std::env::temp_dir().join(format!("mujrim-ateed-studio-{stamp}"));
+        let db_dir = root.join("library");
+        let nnue = root.join("nnue");
+        let mut db = mujrim_study::database::StudyDatabase::open(&db_dir).expect("db");
+        db.save_tournament(&mujrim_study::tournament_store::StoredTournament {
+            id: format!("t-scan-{stamp}"),
+            name: "scan".into(),
+            format: mujrim_study::tournament::TournamentFormat::RoundRobin,
+            created_at: 1,
+            status: "complete".into(),
+            entrants: Vec::new(),
+            results: Vec::new(),
+            games: vec![mujrim_study::tournament_store::StoredTournamentGame {
+                game_index: 0,
+                round: 1,
+                white: "A".into(),
+                black: "B".into(),
+                white_score: 1.0,
+                initial_fen: mujrim_study::opening::START_FEN.into(),
+                moves: vec!["e2e4".into(), "e7e5".into()],
+            }],
+        })
+        .expect("save");
+        let prompt = scan_tournament_index_in(&db, &nnue).expect("new games");
+        assert_eq!(prompt.new_games, 1);
+        let (dataset, summary) = index_tournament_positions_in(&db, &nnue).expect("index");
+        assert!(summary.contains("indexed"));
+        assert!(std::path::Path::new(&dataset).is_file());
+        assert!(scan_tournament_index_in(&db, &nnue).is_none());
+        let mut sources = Vec::new();
+        ensure_local_source(&mut sources, &dataset);
+        ensure_local_source(&mut sources, &dataset);
+        assert_eq!(sources.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

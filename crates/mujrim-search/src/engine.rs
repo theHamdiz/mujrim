@@ -34,6 +34,8 @@ use eval::nnue::{
 
 #[path = "engine_loops/akimbo.rs"]
 pub(crate) mod dedicated_akimbo;
+#[path = "engine_loops/ateed.rs"]
+pub(crate) mod dedicated_ateed;
 #[path = "engine_loops/qs.rs"]
 mod dedicated_qs;
 #[path = "engine_loops/viridithas.rs"]
@@ -638,18 +640,6 @@ fn hybrid_eval(board: &Board, state: &mut ThreadState, use_nnue: bool) -> i32 {
     }
 }
 
-fn hybrid_eval_with_uncertainty(
-    board: &Board,
-    state: &mut ThreadState,
-    use_nnue: bool,
-) -> (i32, i32) {
-    if use_nnue {
-        state.nnue_state.evaluate_with_uncertainty_search(board)
-    } else {
-        (eval::evaluate_with_hce(board, &state.hce), 0)
-    }
-}
-
 /// Widen Ateed pruning when WDL variance is high. `variance` is already ×10_000.
 fn ateed_uncertainty_margin(eval_mode: EvalMode, variance: i32) -> i32 {
     if !eval_mode.is_ateed_nnue() || variance <= 0 {
@@ -658,8 +648,59 @@ fn ateed_uncertainty_margin(eval_mode: EvalMode, variance: i32) -> i32 {
     (variance / 200).clamp(0, 64)
 }
 
-fn ateed_lmr_relief(eval_mode: EvalMode, variance: i32) -> i32 {
-    i32::from(eval_mode.is_ateed_nnue() && variance >= 1_500)
+fn store_ateed_signal(
+    state: &mut ThreadState,
+    ply: usize,
+    variance: i32,
+    expert: usize,
+    draw_mass: i32,
+    gate_margin: i32,
+) {
+    state.eval_variance[ply] = variance;
+    state.eval_expert[ply] = expert as u8;
+    state.eval_draw_mass[ply] = draw_mass;
+    state.eval_gate_margin[ply] = gate_margin;
+}
+
+fn ateed_eval_or_reuse(
+    board: &Board,
+    state: &mut ThreadState,
+    use_nnue: bool,
+    tt_raw_eval: Option<i32>,
+) -> (i32, i32, usize, i32, i32) {
+    if !use_nnue {
+        return (eval::evaluate_with_hce(board, &state.hce), 0, 0, 0, 0);
+    }
+    #[cfg(feature = "ateed-nnue")]
+    {
+        if let Some(raw) = tt_raw_eval
+            && let Some(signal) = state.nnue_state.cached_ateed_search_signal(board)
+            && signal.score == raw
+        {
+            return (
+                raw,
+                signal.variance,
+                signal.expert,
+                signal.draw_mass,
+                signal.gate_margin,
+            );
+        }
+        if let Some(raw) = tt_raw_eval {
+            return (raw, 0, 0, 0, 0);
+        }
+        if let Some(signal) = state.nnue_state.evaluate_ateed_search_signal(board) {
+            return (
+                signal.score,
+                signal.variance,
+                signal.expert,
+                signal.draw_mass,
+                signal.gate_margin,
+            );
+        }
+    }
+    #[cfg(not(feature = "ateed-nnue"))]
+    let _ = tt_raw_eval;
+    (hybrid_eval(board, state, use_nnue), 0, 0, 0, 0)
 }
 
 #[inline(always)]
@@ -747,6 +788,75 @@ fn stockfish_material(board: &Board) -> i32 {
         + 1_292 * queens as i32
 }
 
+const VIRI_SEE_KNIGHT: i32 = 446;
+const VIRI_SEE_BISHOP: i32 = 446;
+const VIRI_SEE_ROOK: i32 = 716;
+const VIRI_SEE_QUEEN: i32 = 1253;
+const VIRI_MATERIAL_SCALE_BASE: i32 = 856;
+const VIRI_OPTIMISM_MAT_BASE: i32 = 1869;
+const VIRI_OPTIMISM_OFFSET: i32 = 196;
+const VIRI_ASPIRATION_EVAL_DIVISOR: i32 = 30_155;
+const VIRI_DELTA_INITIAL: i32 = 12;
+
+/// Official `Board::material`: non-pawn minors/majors, both colours, / 32.
+fn viridithas_material(board: &Board) -> i32 {
+    let knights = board
+        .piece_bb(Piece::Knight, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Knight, types::Color::Black)
+            .count_ones();
+    let bishops = board
+        .piece_bb(Piece::Bishop, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Bishop, types::Color::Black)
+            .count_ones();
+    let rooks = board
+        .piece_bb(Piece::Rook, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Rook, types::Color::Black)
+            .count_ones();
+    let queens = board
+        .piece_bb(Piece::Queen, types::Color::White)
+        .count_ones()
+        + board
+            .piece_bb(Piece::Queen, types::Color::Black)
+            .count_ones();
+    (VIRI_SEE_KNIGHT * knights as i32
+        + VIRI_SEE_BISHOP * bishops as i32
+        + VIRI_SEE_ROOK * rooks as i32
+        + VIRI_SEE_QUEEN * queens as i32)
+        / 32
+}
+
+/// Official `adj_shuffle`: material scale, optimism, then 50-move damp.
+fn viridithas_adj_shuffle(board: &Board, raw_eval: i32, optimism: i32) -> i32 {
+    let material = viridithas_material(board);
+    let mat_mul = VIRI_MATERIAL_SCALE_BASE + material;
+    let opt_mul = VIRI_OPTIMISM_MAT_BASE + material;
+    let scaled = (raw_eval * mat_mul + optimism * opt_mul / 32) / 1024;
+    scaled * (200 - board.halfmove_clock.min(200) as i32) / 200
+}
+
+fn viridithas_aspiration_bounds(average: i32) -> (i32, i32, i32) {
+    let delta = VIRI_DELTA_INITIAL + average * average / VIRI_ASPIRATION_EVAL_DIVISOR;
+    (
+        (average - delta).max(-INF),
+        (average + delta).min(INF),
+        delta,
+    )
+}
+
+fn update_viridithas_root_average(average_score: &mut i32, score: i32, completed_depth: i32) {
+    if completed_depth <= 1 {
+        *average_score = score;
+    } else {
+        *average_score = (2 * score + *average_score) / 3;
+    }
+}
+
 fn corrected_network_eval(
     board: &Board,
     raw_eval: i32,
@@ -762,6 +872,10 @@ fn corrected_network_eval(
         return (value + correction)
             .clamp(-MATE_SCORE + MAX_PLY as i32, MATE_SCORE - MAX_PLY as i32);
     }
+    if eval_mode.is_viridithas_nnue() {
+        return (viridithas_adj_shuffle(board, raw_eval, optimism) + correction)
+            .clamp(-MATE_SCORE + MAX_PLY as i32, MATE_SCORE - MAX_PLY as i32);
+    }
     if !eval_mode.is_reckless_nnue() {
         return raw_eval + correction;
     }
@@ -773,6 +887,42 @@ fn corrected_network_eval(
 }
 
 #[inline(always)]
+fn update_viridithas_optimism(
+    state: &mut ThreadState,
+    side_to_move: types::Color,
+    average_score: i32,
+    depth: i32,
+) {
+    if depth <= 1 {
+        state.optimism = [0; 2];
+        return;
+    }
+    let optimism = 128 * average_score / (average_score.abs() + VIRI_OPTIMISM_OFFSET);
+    state.optimism[side_to_move.index()] = optimism;
+    state.optimism[side_to_move.opponent().index()] = -optimism;
+}
+
+fn update_root_optimism(
+    state: &mut ThreadState,
+    side_to_move: types::Color,
+    average_score: i32,
+    shared_best_stat: u32,
+    eval_mode: EvalMode,
+    depth: i32,
+) {
+    if eval_mode.is_viridithas_nnue() {
+        update_viridithas_optimism(state, side_to_move, average_score, depth);
+        return;
+    }
+    update_reckless_optimism(
+        state,
+        side_to_move,
+        average_score,
+        shared_best_stat,
+        eval_mode,
+    );
+}
+
 fn update_reckless_optimism(
     state: &mut ThreadState,
     side_to_move: types::Color,
@@ -933,6 +1083,12 @@ pub(crate) struct ThreadState {
     static_evals: [i32; MAX_PLY],
     /// Ateed WDL variance at each ply; zero for other evaluators.
     eval_variance: [i32; MAX_PLY],
+    /// Routed Ateed expert id at each ply.
+    eval_expert: [u8; MAX_PLY],
+    /// Ateed softmax draw mass ×10_000 at each ply.
+    eval_draw_mass: [i32; MAX_PLY],
+    /// Winning-gate logit minus runner-up at each ply.
+    eval_gate_margin: [i32; MAX_PLY],
     /// Whether the corresponding static eval is meaningful outside check.
     eval_valid: [bool; MAX_PLY],
     /// NNUE evaluation state.
@@ -1005,6 +1161,9 @@ impl ThreadState {
             countermoves,
             static_evals: [0; MAX_PLY],
             eval_variance: [0; MAX_PLY],
+            eval_expert: [0; MAX_PLY],
+            eval_draw_mass: [0; MAX_PLY],
+            eval_gate_margin: [0; MAX_PLY],
             eval_valid: [false; MAX_PLY],
             nnue_state: NNUEState::with_network(nnue_network),
             pv: boxed_zeroed(),
@@ -1075,6 +1234,9 @@ impl ThreadState {
         self.killers = [[NULL_MOVE; 2]; MAX_PLY];
         self.static_evals.fill(0);
         self.eval_variance.fill(0);
+        self.eval_expert.fill(0);
+        self.eval_draw_mass.fill(0);
+        self.eval_gate_margin.fill(0);
         self.eval_valid = [false; MAX_PLY];
         self.pv_len.fill(0);
         self.prev_move.fill(NULL_MOVE);
@@ -1530,12 +1692,13 @@ impl SearchEngine {
 
                             state.seldepth = 0;
 
-                            update_reckless_optimism(
+                            update_root_optimism(
                                 &mut state,
                                 board_clone.side_to_move,
                                 average_score,
                                 shared_best_stat.load(Ordering::Acquire),
                                 search_stack.eval_mode(),
+                                actual_depth,
                             );
 
                             let s = loops::enter_search(
@@ -1557,7 +1720,15 @@ impl SearchEngine {
                             );
                             if !stopped.load(Ordering::Relaxed) {
                                 best_score = s;
-                                update_root_average(&mut average_score, s);
+                                if search_stack.eval_mode().is_viridithas_nnue() {
+                                    update_viridithas_root_average(
+                                        &mut average_score,
+                                        s,
+                                        actual_depth,
+                                    );
+                                } else {
+                                    update_root_average(&mut average_score, s);
+                                }
                                 shared_best_stat.fetch_max(
                                     root_score_stat(actual_depth, average_score),
                                     Ordering::AcqRel,
@@ -1636,20 +1807,25 @@ impl SearchEngine {
             state.seldepth = 0;
 
             let nodes_before = state.nodes;
-            update_reckless_optimism(
+            update_root_optimism(
                 state,
                 board.side_to_move,
                 average_score,
                 shared_best_stat.load(Ordering::Acquire),
                 self.search_stack.eval_mode(),
+                depth,
             );
 
-            // Aspiration windows after depth 5
-            if depth >= 5 && best_score.abs() < MATE_SCORE - 100 {
-                // 4.8: Eval-based aspiration narrowing (Viridithas)
-                let mut delta = self.search_stack.params.aspiration_window + best_score.abs() / 256;
-                let mut alpha = best_score - delta;
-                let mut beta = best_score + delta;
+            let viri_id = self.search_stack.eval_mode().is_viridithas_nnue();
+            // Official Viridithas aspirates from depth 2; other adapters after 5.
+            if (if viri_id { depth > 1 } else { depth >= 5 }) && best_score.abs() < MATE_SCORE - 100
+            {
+                let (mut alpha, mut beta, mut delta) = if viri_id {
+                    viridithas_aspiration_bounds(average_score)
+                } else {
+                    let delta = self.search_stack.params.aspiration_window + best_score.abs() / 256;
+                    (best_score - delta, best_score + delta, delta)
+                };
                 let mut asp_depth = depth;
 
                 loop {
@@ -1723,7 +1899,11 @@ impl SearchEngine {
                 best_score = s;
             }
 
-            update_root_average(&mut average_score, best_score);
+            if viri_id {
+                update_viridithas_root_average(&mut average_score, best_score, depth);
+            } else {
+                update_root_average(&mut average_score, best_score);
+            }
             shared_best_stat.fetch_max(root_score_stat(depth, average_score), Ordering::AcqRel);
 
             // Use the main thread PV for stable root move selection.
@@ -2553,22 +2733,25 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
     // Checked nodes do not use a static evaluation. Skipping it also avoids an
     // unnecessary NNUE forward pass on tactical check chains.
     let (raw_eval, corrected_eval, corr) = if in_check {
-        state.eval_variance[ply_usize] = 0;
+        store_ateed_signal(state, ply_usize, 0, 0, 0, 0);
         (None, 0, 0)
     } else if excluded_move.is_some() {
         // Singular verification is the same position as the caller, which
         // already filled this ply's eval. Skip a second NNUE pass.
         (None, state.static_evals[ply_usize], 0)
     } else {
-        let (raw_eval, variance) = if eval_mode.is_ateed_nnue() {
-            hybrid_eval_with_uncertainty(board, state, use_nnue)
+        let (raw_eval, variance, expert, draw_mass, gate_margin) = if eval_mode.is_ateed_nnue() {
+            ateed_eval_or_reuse(board, state, use_nnue, tt_raw_eval)
         } else {
             (
                 tt_raw_eval.unwrap_or_else(|| hybrid_eval(board, state, use_nnue)),
                 0,
+                0,
+                0,
+                0,
             )
         };
-        state.eval_variance[ply_usize] = variance;
+        store_ateed_signal(state, ply_usize, variance, expert, draw_mass, gate_margin);
         let corr = state.correction(board, move_ordering);
         let corrected =
             corrected_network_eval(board, raw_eval, corr, state.optimism[us.index()], eval_mode);
@@ -3282,7 +3465,16 @@ pub(crate) fn search_ab_for<F: SearchFamily>(
                     child_cutoffs: state.cutoffs[(ply_usize + 1).min(MAX_PLY - 1)],
                 };
                 reduction = F::adjust_lmr(base, &lmr_ctx, policies)
-                    - ateed_lmr_relief(eval_mode, state.eval_variance[ply_usize]);
+                    - if eval_mode.is_ateed_nnue() {
+                        crate::policy::ateed_moe_lmr_delta(
+                            state.eval_variance[ply_usize],
+                            false,
+                            state.eval_draw_mass[ply_usize],
+                            state.eval_gate_margin[ply_usize],
+                        )
+                    } else {
+                        0
+                    };
                 reduction = if viri_lmr {
                     reduction.max(0)
                 } else if effective_depth <= 1 {
@@ -4233,9 +4425,9 @@ mod tests {
         assert_eq!(ateed_uncertainty_margin(ateed, 0), 0);
         assert_eq!(ateed_uncertainty_margin(ateed, 2_000), 10);
         assert_eq!(ateed_uncertainty_margin(ateed, 20_000), 64);
-        assert_eq!(ateed_lmr_relief(reckless, 2_000), 0);
-        assert_eq!(ateed_lmr_relief(ateed, 1_499), 0);
-        assert_eq!(ateed_lmr_relief(ateed, 1_500), 1);
+        assert_eq!(crate::policy::ateed_moe_lmr_delta(2_000, false, 0, 0), 1);
+        assert_eq!(crate::policy::ateed_moe_lmr_delta(1_499, false, 0, 0), 0);
+        assert_eq!(crate::policy::ateed_moe_lmr_delta(1_500, true, 4_000, 0), 1);
     }
 
     #[cfg(feature = "ateed-nnue")]
@@ -4559,6 +4751,31 @@ mod tests {
         assert_eq!(stock_like_lmr_search_depth(12, 3, true), 10);
         assert_eq!(stock_like_lmr_search_depth(4, 5, false), 1);
         assert_eq!(stock_like_lmr_search_depth(4, 5, true), 2);
+    }
+
+    #[test]
+    fn viridithas_adj_shuffle_matches_official_formula() {
+        types::init();
+        let board = Board::new();
+        assert_eq!(viridithas_material(&board), 279);
+        assert_eq!(viridithas_adj_shuffle(&board, 43, 0), 47);
+        assert_eq!(viridithas_adj_shuffle(&board, -82, 0), -90);
+        assert_eq!(viridithas_aspiration_bounds(88), (76, 100, 12));
+        assert_eq!(
+            corrected_network_eval(
+                &board,
+                43,
+                0,
+                0,
+                EvalMode::Nnue(NnueSearchProfile::Viridithas)
+            ),
+            47
+        );
+        let mut average = 0;
+        update_viridithas_root_average(&mut average, 88, 1);
+        assert_eq!(average, 88);
+        update_viridithas_root_average(&mut average, 44, 2);
+        assert_eq!(average, (2 * 44 + 88) / 3);
     }
 
     #[test]

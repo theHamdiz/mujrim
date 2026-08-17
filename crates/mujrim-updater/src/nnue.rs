@@ -109,7 +109,6 @@ pub struct NnueNetwork {
 /// threat_v60       Threat      threat_v60.nnue       v60-7f587dfb.nnue
 /// sf_current       Stockfish   sf_current.nnue       nn-ab28990d4ea3.nnue
 /// viri_default     Viridithas  viri_default.nnue.zst sandhi-s2-b200.nnue.zst
-/// viri_velarised   Viridithas  viri_velarised.nnue.zst velarised-2-b800.nnue.zst
 /// plenty_default   PlentyChess plenty_default.bin    0179r.bin
 /// ateed_default    Ateed       ateed_default.bin     ateed_default.bin
 /// lc0_bt4          Lc0         lc0_bt4.pb.gz         BT4-1024x15x32h-swa-6147500-policytune-332.pb.gz
@@ -169,18 +168,6 @@ pub const NETWORKS: &[NnueNetwork] = &[
         approx_size: 52_442_657,
         search_preset: "viridithas",
         elo: 3550,
-    },
-    NnueNetwork {
-        id: "viri_velarised",
-        name: "Viridithas v104.1 velarised-2",
-        engine: "Viridithas",
-        architecture: "704×16hm → 2560 pairwise-CReLU → 16 HardSwish6 → 32 SwiGLU → 1 ×8 (velarised-2)",
-        url: "https://github.com/cosmobobak/viridithas-networks/releases/download/v104.1/velarised-2-b800.nnue.zst",
-        filename: "viri_velarised.nnue.zst",
-        upstream_name: "velarised-2-b800.nnue.zst",
-        approx_size: 29_564_785,
-        search_preset: "viridithas",
-        elo: 3350,
     },
     NnueNetwork {
         id: "obs_default",
@@ -710,8 +697,7 @@ mod tests {
         assert_eq!(viri.upstream_name, "sandhi-s2-b200.nnue.zst");
         assert!(viri.architecture.contains("59808"));
         assert!(viri.architecture.contains("4560"));
-        let velarised = find_by_id("viri_velarised").expect("viri_velarised");
-        assert_eq!(velarised.upstream_name, "velarised-2-b800.nnue.zst");
+        assert!(find_by_id("viri_velarised").is_none());
         let obs = find_by_id("obs_default").expect("obs_default");
         assert_eq!(obs.search_preset, "obsidian");
         assert_eq!(obs.upstream_name, "net89perm.bin");

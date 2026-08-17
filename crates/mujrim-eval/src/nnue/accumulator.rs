@@ -215,7 +215,9 @@ impl NNUEState {
     pub fn hint_common_access(&mut self, board: &Board) {
         #[cfg(feature = "viridithas-nnue")]
         self.ensure_viridithas_after_make(board);
-        #[cfg(not(feature = "viridithas-nnue"))]
+        #[cfg(feature = "ateed-nnue")]
+        self.ensure_ateed_after_make(board);
+        #[cfg(not(any(feature = "viridithas-nnue", feature = "ateed-nnue")))]
         let _ = board;
     }
 
@@ -225,6 +227,16 @@ impl NNUEState {
             return;
         };
         if let super::adapter::NnueNetworkParameters::Viridithas(net) = self.source.parameters() {
+            state.ensure_after_make(board, net);
+        }
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    fn ensure_ateed_after_make(&mut self, board: &Board) {
+        let Some(state) = self.ateed.as_mut() else {
+            return;
+        };
+        if let super::adapter::NnueNetworkParameters::Ateed(net) = self.source.parameters() {
             state.ensure_after_make(board, net);
         }
     }
@@ -551,15 +563,43 @@ impl NNUEState {
 
     pub fn evaluate_with_uncertainty_search(&mut self, board: &Board) -> (i32, i32) {
         #[cfg(feature = "ateed-nnue")]
-        if let ActiveNetwork::ExternalAteed { network, .. } = self.source.as_ref() {
-            let eval = self
-                .ateed
-                .as_mut()
-                .expect("Ateed source has matching accumulator state")
-                .evaluate_full_search(board, network);
-            return (eval.score, super::ateed_format::wdl_variance(eval.wdl));
+        if let Some(signal) = self.evaluate_ateed_search_signal(board) {
+            return (signal.score, signal.variance);
         }
         (self.evaluate_search(board), 0)
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    pub fn evaluate_ateed_search_signal(
+        &mut self,
+        board: &Board,
+    ) -> Option<super::ateed_format::AteedSearchSignal> {
+        let ActiveNetwork::ExternalAteed { network, .. } = self.source.as_ref() else {
+            return None;
+        };
+        let eval = self
+            .ateed
+            .as_mut()
+            .expect("Ateed source has matching accumulator state")
+            .evaluate_full_search(board, network);
+        Some(eval.search_signal())
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    pub fn last_ateed_search_signal(&self) -> Option<super::ateed_format::AteedSearchSignal> {
+        self.ateed
+            .as_ref()
+            .map(super::ateed_format::AteedAccumulatorState::last_search_signal)
+    }
+
+    #[cfg(feature = "ateed-nnue")]
+    pub fn cached_ateed_search_signal(
+        &self,
+        board: &Board,
+    ) -> Option<super::ateed_format::AteedSearchSignal> {
+        self.ateed
+            .as_ref()
+            .and_then(|state| state.cached_search_signal(board.hash))
     }
 
     /// Fully recompute the accumulators from a board position.

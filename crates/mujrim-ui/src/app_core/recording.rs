@@ -82,7 +82,7 @@ impl RecordingEngine {
     }
 
     /// Capture a single frame (called from a timer tick).
-    /// Uses xcap to capture the entire screen and crops to the window area.
+    /// Captures the primary display and crops later if needed.
     pub fn capture_frame(&self) -> CaptureOutcome {
         let mut inner = self.lock_inner();
         if inner.state != RecordState::Recording {
@@ -94,7 +94,6 @@ impl RecordingEngine {
             .map(|s| s.elapsed().as_millis() as u64)
             .unwrap_or(0);
 
-        // Use xcap to capture the primary monitor
         let Some(frame) = capture_screen() else {
             return CaptureOutcome::Unavailable;
         };
@@ -173,9 +172,10 @@ fn downscale_capture(frame: RgbaImage) -> RgbaImage {
     )
 }
 
-/// Capture the screen using xcap.
-fn capture_screen() -> Option<RgbaImage> {
-    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+/// Capture the primary display. Linux stays CLI-based so the GUI does not
+/// link GTK/Pipewire through xcap.
+pub fn capture_screen() -> Option<RgbaImage> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         use xcap::Monitor;
 
@@ -185,10 +185,48 @@ fn capture_screen() -> Option<RgbaImage> {
         Some(screenshot)
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        None
+        capture_screen_cli()
     }
+}
+
+fn linux_capture_commands(path: &Path) -> Vec<Vec<String>> {
+    let output = path.to_string_lossy().into_owned();
+    vec![
+        vec!["grim".into(), output.clone()],
+        vec!["maim".into(), output.clone()],
+        vec!["import".into(), "-window".into(), "root".into(), output],
+    ]
+}
+
+fn capture_screen_cli() -> Option<RgbaImage> {
+    let path = std::env::temp_dir().join(format!(
+        "mujrim-cap-{}-{}.png",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis())
+            .unwrap_or(0)
+    ));
+    for command in linux_capture_commands(&path) {
+        let (program, args) = command.split_first()?;
+        let ok = std::process::Command::new(program)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()
+            .is_some_and(|status| status.success())
+            && path.is_file();
+        if ok {
+            let image = image::open(&path).ok().map(|image| image.to_rgba8());
+            let _ = std::fs::remove_file(&path);
+            return image;
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    None
 }
 
 /// Check if ffmpeg is available on the system.
@@ -363,6 +401,36 @@ mod tests {
         assert_eq!(gif_frame_delay(10), 10);
         assert_eq!(gif_frame_delay(25), 4);
         assert_eq!(gif_frame_delay(0), 100);
+    }
+
+    #[test]
+    fn linux_capture_commands_prefer_grim_then_maim() {
+        let path = PathBuf::from("/tmp/mujrim-cap.png");
+        let commands = linux_capture_commands(&path);
+        assert_eq!(commands[0][0], "grim");
+        assert_eq!(commands[1][0], "maim");
+        assert_eq!(
+            commands[2],
+            ["import", "-window", "root", "/tmp/mujrim-cap.png"]
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| command.last() == Some(&"/tmp/mujrim-cap.png".into()))
+        );
+    }
+
+    #[test]
+    fn linux_gui_does_not_link_xcap_from_the_manifest() {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        let production = manifest.split("[target.").next().expect("workspace deps");
+        assert!(
+            !production.contains("xcap"),
+            "xcap must stay off the Linux GUI link line"
+        );
+        assert!(manifest.contains("target_os = \"macos\""));
+        assert!(manifest.contains("target_os = \"windows\""));
+        assert!(manifest.contains("xcap"));
     }
 
     #[test]

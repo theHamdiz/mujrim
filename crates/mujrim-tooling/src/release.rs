@@ -13,7 +13,8 @@ const BINS: &[&str] = &[
     "mujrim-updater",
 ];
 
-/// Dedicated product engines copied into `dist/<os-arch>/engines/mujrim/bin/<os-arch>/`.
+/// Dedicated product engines copied into `dist/<os-arch>/engines/mujrim/`
+/// (flat, GUI discovery) and `dist/<os-arch>/engines/mujrim/bin/<os-arch>/`.
 const PRODUCT_ENGINE_STEMS: &[&str] = &[
     "mujrim-ak",
     "mujrim-ateed",
@@ -46,6 +47,11 @@ const CROSS_EXCLUDE_OTHER: &[&str] = &["mujrim-ui"];
 const DEV_ONLY: &[&str] = &["mujrim-tooling", "mujrim-tests"];
 
 /// Dist / release artifacts always use fat-LTO `[profile.release]`, never `desktop-release`.
+/// mujrim-ui is a Floem shell: no in-process engine, no embedded NNUE nets.
+/// Fat LTO + opt-level 3 (performance, not size). Floem+wgpu is ~33 MB at that
+/// profile; this ceiling exists to catch accidental engine/net unification.
+pub const MUJRIM_UI_MAX_BYTES: u64 = 36_000_000;
+
 const DIST_BUILD_ENV: &[(&str, &str)] = &[
     ("CARGO_BUILD_JOBS", "1"),
     ("CARGO_PROFILE_RELEASE_LTO", "fat"),
@@ -72,6 +78,22 @@ fn run_dist_cargo(args: &[&str], extra_env: &[(&str, &str)]) -> Result<(), Strin
     let mut env = DIST_BUILD_ENV.to_vec();
     env.extend_from_slice(extra_env);
     run("cargo", args, &env)
+}
+
+fn assert_ui_release_size(path: &Path) -> Result<(), String> {
+    let meta = fs::metadata(path).map_err(|error| {
+        format!(
+            "mujrim-ui size check failed for {}: {error}",
+            path.display()
+        )
+    })?;
+    if meta.len() > MUJRIM_UI_MAX_BYTES {
+        return Err(format!(
+            "mujrim-ui is {} bytes (limit {MUJRIM_UI_MAX_BYTES}). Keep fat LTO + strip and never enable embedded-networks on the UI.",
+            meta.len()
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +138,8 @@ const AARCH64_LINUX_TOOLS: &[(&str, &str, &str)] = &[(
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Eq)]
 pub enum ReleaseTarget {
     Native,
+    /// Fat-LTO product engines only, published under `dist/<os-arch>/engines/mujrim/`.
+    Engines,
     Darwin,
     Linux,
     Win,
@@ -131,6 +155,7 @@ impl ToolAction for ReleaseAction {
     fn run(&self) -> Result<(), String> {
         match self.target {
             ReleaseTarget::Native => build_native(),
+            ReleaseTarget::Engines => build_engines(),
             ReleaseTarget::Darwin => build_darwin(),
             ReleaseTarget::Linux => build_linux(),
             ReleaseTarget::Win => build_windows(),
@@ -194,6 +219,9 @@ impl ToolAction for ReleaseAction {
 
 fn build_native() -> Result<(), String> {
     println!("🔨 Building all Mujrim crates (optimized release, runtime ISA dispatch)...");
+    // Build the GUI before any embedded-networks engine so eval is not unified
+    // into a 40 MB payload.
+    build_lean_ui()?;
     run_dist_cargo(
         &[
             "build",
@@ -206,6 +234,45 @@ fn build_native() -> Result<(), String> {
         ],
         &[],
     )?;
+    build_product_engines()?;
+    run_dist_cargo(
+        &[
+            "build",
+            "--release",
+            "-p",
+            "mujrim-installer",
+            "--features",
+            "embed",
+        ],
+        &[],
+    )?;
+    publish_native_dist()?;
+    println!(
+        "✅ Release binaries built in target/release/ and copied to {}",
+        native_dist_root().display()
+    );
+    Ok(())
+}
+
+fn build_engines() -> Result<(), String> {
+    println!("🔨 Building Mujrim product engines (fat LTO)...");
+    build_product_engines()?;
+    let dist = native_dist_root();
+    fs::create_dir_all(&dist)
+        .map_err(|error| format!("failed to create {}: {error}", dist.display()))?;
+    publish_product_engines(
+        &dist,
+        Path::new("target/release"),
+        &RuntimePlatform::current(),
+    )?;
+    println!(
+        "✅ Product engines copied to {}/engines/mujrim/",
+        dist.display()
+    );
+    Ok(())
+}
+
+fn build_product_engines() -> Result<(), String> {
     run_dist_cargo(
         &[
             "build",
@@ -219,7 +286,7 @@ fn build_native() -> Result<(), String> {
     )?;
     snapshot_engine("mujrim-v60", "mujrim-v60-external")?;
     let arch = host_packaging_arch();
-    // Product set: elite / external / v60 / ak / viri / obs
+    // Product set: elite / external / v60 / ak / viri / obs / plenty / ateed
     // Never enable embedded-networks on top of default features — that embeds every net.
     run_dist_cargo(
         &[
@@ -328,23 +395,6 @@ fn build_native() -> Result<(), String> {
     snapshot_engine("mujrim", "mujrim-ateed")?;
     // Leave mujrim.exe as the lean external (no embedded net).
     snapshot_engine("mujrim-external", "mujrim")?;
-    run_dist_cargo(&["build", "--release", "-p", "mujrim-ui"], &[])?;
-    run_dist_cargo(
-        &[
-            "build",
-            "--release",
-            "-p",
-            "mujrim-installer",
-            "--features",
-            "embed",
-        ],
-        &[],
-    )?;
-    publish_native_dist()?;
-    println!(
-        "✅ Release binaries built in target/release/ and copied to {}",
-        native_dist_root().display()
-    );
     Ok(())
 }
 
@@ -352,7 +402,51 @@ fn native_dist_root() -> PathBuf {
     Path::new("dist").join(RuntimePlatform::current().directory_name())
 }
 
+fn ui_release_bin() -> PathBuf {
+    Path::new("target/release").join(format!("mujrim-ui{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn ui_dist_keep_bin() -> PathBuf {
+    Path::new("target/release").join(format!(
+        "mujrim-ui.dist-keep{}",
+        std::env::consts::EXE_SUFFIX
+    ))
+}
+
+fn ui_isolated_bin() -> PathBuf {
+    Path::new("target/ui-dist")
+        .join("release")
+        .join(format!("mujrim-ui{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn build_lean_ui() -> Result<(), String> {
+    // Isolated target dir so eval is never unified with embedded-networks.
+    run_dist_cargo(
+        &["build", "--release", "-p", "mujrim-ui"],
+        &[("CARGO_TARGET_DIR", "target/ui-dist")],
+    )?;
+    let isolated = ui_isolated_bin();
+    assert_ui_release_size(&isolated)?;
+    fs::create_dir_all("target/release")
+        .map_err(|error| format!("failed to create target/release: {error}"))?;
+    fs::copy(&isolated, ui_release_bin())
+        .map_err(|error| format!("failed to publish lean mujrim-ui: {error}"))?;
+    fs::copy(&isolated, ui_dist_keep_bin())
+        .map_err(|error| format!("failed to snapshot lean mujrim-ui: {error}"))?;
+    Ok(())
+}
+
+fn restore_lean_ui() -> Result<(), String> {
+    let keep = ui_dist_keep_bin();
+    if keep.is_file() {
+        fs::copy(&keep, ui_release_bin())
+            .map_err(|error| format!("failed to restore lean mujrim-ui: {error}"))?;
+    }
+    assert_ui_release_size(&ui_release_bin())
+}
+
 fn publish_native_dist() -> Result<(), String> {
+    restore_lean_ui()?;
     let suffix = std::env::consts::EXE_SUFFIX;
     let release = Path::new("target/release");
     let platform = RuntimePlatform::current();
@@ -370,6 +464,9 @@ fn publish_native_dist() -> Result<(), String> {
     for stem in extras {
         let source = release.join(format!("{stem}{suffix}"));
         if source.is_file() {
+            if stem == "mujrim-ui" {
+                assert_ui_release_size(&source)?;
+            }
             fs::copy(&source, dist.join(format!("{stem}{suffix}"))).map_err(|error| {
                 format!(
                     "failed to copy {} into {}: {error}",
@@ -380,11 +477,21 @@ fn publish_native_dist() -> Result<(), String> {
         }
     }
 
-    let packaged = dist
-        .join("engines")
-        .join("mujrim")
-        .join("bin")
-        .join(platform.directory_name());
+    publish_product_engines(&dist, release, &platform)?;
+    publish_nnue_into(&dist)?;
+    Ok(())
+}
+
+fn publish_product_engines(
+    dist: &Path,
+    release: &Path,
+    platform: &RuntimePlatform,
+) -> Result<(), String> {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let mujrim_dir = dist.join("engines").join("mujrim");
+    let packaged = mujrim_dir.join("bin").join(platform.directory_name());
+    fs::create_dir_all(&mujrim_dir)
+        .map_err(|error| format!("failed to create {}: {error}", mujrim_dir.display()))?;
     fs::create_dir_all(&packaged)
         .map_err(|error| format!("failed to create {}: {error}", packaged.display()))?;
     for stem in PRODUCT_ENGINE_STEMS {
@@ -400,15 +507,19 @@ fn publish_native_dist() -> Result<(), String> {
                 source.display()
             ));
         }
-        fs::copy(&source, packaged.join(format!("{stem}{suffix}"))).map_err(|error| {
-            format!(
-                "failed to copy {} into {}: {error}",
-                source.display(),
-                packaged.display()
-            )
-        })?;
+        for dest in [
+            mujrim_dir.join(format!("{stem}{suffix}")),
+            packaged.join(format!("{stem}{suffix}")),
+        ] {
+            fs::copy(&source, &dest).map_err(|error| {
+                format!(
+                    "failed to copy {} into {}: {error}",
+                    source.display(),
+                    dest.display()
+                )
+            })?;
+        }
     }
-    publish_nnue_into(&dist)?;
     Ok(())
 }
 
@@ -987,6 +1098,10 @@ mod tests {
             ReleaseTarget::from_str("full", true),
             Ok(ReleaseTarget::Full)
         );
+        assert_eq!(
+            ReleaseTarget::from_str("engines", true),
+            Ok(ReleaseTarget::Engines)
+        );
     }
 
     #[test]
@@ -1034,10 +1149,10 @@ mod tests {
     fn native_release_snapshots_installer_payload_stems() {
         let src = include_str!("release.rs");
         let native = src
-            .split("fn build_native()")
+            .split("fn build_product_engines()")
             .nth(1)
             .and_then(|rest| rest.split("fn snapshot_engine(").next())
-            .expect("native build");
+            .expect("product engines");
         for stem in [
             "mujrim-external",
             "mujrim-embedded",
@@ -1076,9 +1191,37 @@ mod tests {
         assert!(production.contains("run_dist_cargo"));
         assert!(production.contains("CARGO_PROFILE_RELEASE_LTO"));
         assert!(production.contains("\"fat\""));
+        assert!(production.contains("assert_ui_release_size"));
+        assert!(production.contains("build_lean_ui"));
+        assert!(production.contains("CARGO_TARGET_DIR"));
+        assert!(production.contains("target/ui-dist"));
+        assert!(production.contains("restore_lean_ui"));
+        assert!(production.contains("MUJRIM_UI_MAX_BYTES"));
+        const {
+            assert!(MUJRIM_UI_MAX_BYTES <= 36_000_000);
+        }
+        assert!(
+            production.contains("CARGO_PROFILE_RELEASE_OPT_LEVEL") && production.contains("\"3\""),
+            "dist UI must stay opt-level 3, not size-optimized"
+        );
+        assert!(
+            !production.contains("CARGO_PROFILE_RELEASE_OPT_LEVEL\",\n    \"z\""),
+            "do not size-optimize the GUI with opt-level=z"
+        );
         assert!(
             !production.contains("--profile desktop-release"),
             "dist artifacts must not select the thin-LTO desktop profile"
+        );
+        let ui_manifest = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mujrim-ui/Cargo.toml"
+        ));
+        assert!(
+            !ui_manifest.contains("mujrim-search")
+                && !ui_manifest.contains("mujrim-eval")
+                && !ui_manifest.contains("mujrim-gpu")
+                && !ui_manifest.contains("embedded-networks"),
+            "dist GUI must not link an in-process engine or NNUE crate"
         );
         let cargo_calls = production.matches("run_dist_cargo(").count();
         assert!(
@@ -1127,6 +1270,20 @@ mod tests {
         assert!(
             !publish.contains("PRODUCT_ENGINE_STEMS.iter().chain(extras"),
             "product engines must not be copied to the dist root"
+        );
+        assert!(
+            publish.contains("publish_product_engines"),
+            "product engines must land under dist/<os-arch>/engines/mujrim/"
+        );
+        let publish_engines = src
+            .split("fn publish_product_engines(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn publish_nnue_into(").next())
+            .expect("publish_product_engines");
+        assert!(
+            publish_engines.contains("mujrim_dir.join")
+                && publish_engines.contains("packaged.join"),
+            "publish both flat engines/mujrim/<id> and bin/<os-arch>"
         );
         let root = native_dist_root();
         assert_eq!(

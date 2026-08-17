@@ -684,9 +684,12 @@ pub fn tournament_setup_modal(state: AppState, handles: AppHandles) -> impl Into
                             let cores = std::thread::available_parallelism()
                                 .map(|n| n.get())
                                 .unwrap_or(1);
-                            let safe = crate::app_core::tournament_setup::detected_safe_games();
+                            let setup = state.tournament_setup.get();
+                            let safe = crate::app_core::tournament_setup::max_simultaneous_games(
+                                &setup,
+                            );
                             format!(
-                                "{cores} CPU cores · up to {safe} simultaneous games. Hash/threads are sent only when the engine advertises them. Crashes and missing nets forfeit that game."
+                                "{cores} CPU cores · event allows {safe} simultaneous game(s). Hash/threads are sent only when the engine advertises them. Crashes and missing nets forfeit that game."
                             )
                         },
                         pal,

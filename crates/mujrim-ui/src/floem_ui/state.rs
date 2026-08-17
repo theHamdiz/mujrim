@@ -140,7 +140,22 @@ pub struct AteedStudioState {
     pub progress: RwSignal<f32>,
     pub epoch: RwSignal<u32>,
     pub loss: RwSignal<f32>,
+    pub val_loss: RwSignal<f32>,
     pub expert: RwSignal<usize>,
+    pub telemetry_kind: RwSignal<Option<updater::progress::JobKind>>,
+    pub last_tick_ms: RwSignal<u64>,
+    pub nps: RwSignal<u64>,
+    pub games: RwSignal<u64>,
+    pub positions: RwSignal<u64>,
+    pub mbps: RwSignal<f32>,
+    pub mpos: RwSignal<f32>,
+    pub train_lr: RwSignal<f32>,
+    pub wdl: RwSignal<(u64, u64, u64)>,
+    pub pass: RwSignal<u64>,
+    pub drop: RwSignal<u64>,
+    pub hist: RwSignal<[u32; updater::progress::HIST_BUCKETS]>,
+    pub loss_ring: RwSignal<crate::app_core::ateed_studio::LossRing>,
+    pub nps_ring: RwSignal<crate::app_core::ateed_studio::MetricRing>,
     pub score: RwSignal<i32>,
     pub variance: RwSignal<i32>,
     pub latency: RwSignal<String>,
@@ -151,6 +166,7 @@ pub struct AteedStudioState {
     pub data_path: RwSignal<String>,
     pub output_path: RwSignal<String>,
     pub resume_prompt: RwSignal<Option<crate::app_core::ateed_resume::ActiveAteedJob>>,
+    pub index_prompt: RwSignal<Option<crate::app_core::ateed_studio::AteedIndexPrompt>>,
 }
 
 #[derive(Clone)]
@@ -169,7 +185,7 @@ pub struct AppHandles {
     pub chess_bg: Vec<u8>,
     pub ui_scope: floem::reactive::Scope,
     #[cfg(feature = "book")]
-    pub book: Rc<Option<search::book::OpeningBook>>,
+    pub book: Rc<Option<types::book::OpeningBook>>,
 }
 
 impl AppState {
@@ -293,7 +309,22 @@ impl AppState {
                 progress: RwSignal::new(0.0),
                 epoch: RwSignal::new(0),
                 loss: RwSignal::new(0.0),
+                val_loss: RwSignal::new(0.0),
                 expert: RwSignal::new(0),
+                telemetry_kind: RwSignal::new(None),
+                last_tick_ms: RwSignal::new(0),
+                nps: RwSignal::new(0),
+                games: RwSignal::new(0),
+                positions: RwSignal::new(0),
+                mbps: RwSignal::new(0.0),
+                mpos: RwSignal::new(0.0),
+                train_lr: RwSignal::new(0.0),
+                wdl: RwSignal::new((0, 0, 0)),
+                pass: RwSignal::new(0),
+                drop: RwSignal::new(0),
+                hist: RwSignal::new([0; updater::progress::HIST_BUCKETS]),
+                loss_ring: RwSignal::new(crate::app_core::ateed_studio::LossRing::default()),
+                nps_ring: RwSignal::new(crate::app_core::ateed_studio::MetricRing::default()),
                 score: RwSignal::new(0),
                 variance: RwSignal::new(0),
                 latency: RwSignal::new("idle".to_owned()),
@@ -304,6 +335,7 @@ impl AppState {
                 data_path: RwSignal::new("data.txt".to_owned()),
                 output_path: RwSignal::new("ateed_default.bin".to_owned()),
                 resume_prompt: RwSignal::new(None),
+                index_prompt: RwSignal::new(None),
             },
         };
         let study_path = crate::app_core::logic::study_database_path();
@@ -353,7 +385,7 @@ impl AppState {
             chess_bg: crate::app_core::noise::chess_blur_background(512, 384).bytes,
             ui_scope: floem::reactive::Scope::current(),
             #[cfg(feature = "book")]
-            book: Rc::new(search::book::OpeningBook::load_embedded().ok()),
+            book: Rc::new(types::book::OpeningBook::load_embedded().ok()),
         };
         refresh_ateed_cli(state);
         (state, handles)
@@ -379,4 +411,23 @@ pub fn refresh_ateed_cli(state: AppState) {
             state.ateed.cli_path.set(String::new());
         }
     }
+}
+
+pub fn offer_ateed_index(state: AppState, handles: &AppHandles) {
+    if state.ateed.output_path.get_untracked() == "ateed_default.bin" {
+        state.ateed.output_path.set(
+            crate::app_core::ateed_studio::ateed_artifact_path()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    if !state.ateed.unlocked.get_untracked() {
+        return;
+    }
+    let prompt = handles
+        .study
+        .borrow()
+        .as_ref()
+        .and_then(crate::app_core::ateed_studio::scan_tournament_index);
+    state.ateed.index_prompt.set(prompt);
 }

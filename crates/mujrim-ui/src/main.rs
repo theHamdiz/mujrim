@@ -16,4 +16,13 @@ mod feature_tests {
             assert!(cfg!(feature = "floem-ui"));
         }
     }
+
+    #[test]
+    fn gui_does_not_depend_on_in_process_engines() {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        assert!(!manifest.contains("mujrim-search"));
+        assert!(!manifest.contains("mujrim-eval"));
+        assert!(!manifest.contains("mujrim-gpu"));
+        assert!(!manifest.contains("embedded-networks"));
+    }
 }

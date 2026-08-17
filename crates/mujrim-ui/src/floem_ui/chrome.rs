@@ -11,7 +11,7 @@ use crate::app_core::settings::Screen;
 
 use super::actions;
 use super::icons;
-use super::state::{AppHandles, AppState, refresh_ateed_cli};
+use super::state::{AppHandles, AppState, offer_ateed_index, refresh_ateed_cli};
 use super::theme;
 
 pub fn shell(
@@ -132,6 +132,8 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
                 let handles = handles.clone();
                 move || {
                     actions::ensure_study_board(state, &handles);
+                    actions::index_lichess_downloads(state, &handles);
+                    actions::refresh_studies(state, &handles);
                     state.screen.set(Screen::Study);
                 }
             },
@@ -153,9 +155,13 @@ fn nav_pills(state: AppState, handles: AppHandles) -> impl IntoView {
             icons::FLAME,
             "Ateed",
             move || matches!(state.screen.get(), Screen::Ateed),
-            move || {
-                refresh_ateed_cli(state);
-                state.screen.set(Screen::Ateed);
+            {
+                let handles = handles.clone();
+                move || {
+                    refresh_ateed_cli(state);
+                    offer_ateed_index(state, &handles);
+                    state.screen.set(Screen::Ateed);
+                }
             },
         ),
     ))
@@ -383,6 +389,10 @@ mod tests {
             "Study nav must seed the shared study board"
         );
         assert!(
+            production.contains("index_lichess_downloads"),
+            "opening Study must index Lichess PGNs from Downloads"
+        );
+        assert!(
             !production.contains("\"Learn\""),
             "Learn is a Study tab, not a title-bar pill"
         );
@@ -401,6 +411,10 @@ mod tests {
         assert!(
             production.contains("refresh_ateed_cli"),
             "opening Ateed must rescan the Mujrim CLI"
+        );
+        assert!(
+            production.contains("offer_ateed_index"),
+            "opening Ateed must offer to index new tournament games"
         );
         assert!(
             !production.contains("FlexWrap::Wrap"),

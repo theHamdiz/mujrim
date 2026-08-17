@@ -185,21 +185,45 @@ fn permute_scalar(focus: usize, mailbox: &[u8; 64], ignore: Option<usize>) -> ([
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline(always)]
 fn avx2_ready() -> bool {
-    use std::sync::OnceLock;
-    static READY: OnceLock<bool> = OnceLock::new();
-    *READY.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+    #[cfg(target_feature = "avx2")]
+    {
+        true
+    }
+    #[cfg(not(target_feature = "avx2"))]
+    {
+        use std::sync::OnceLock;
+        static READY: OnceLock<bool> = OnceLock::new();
+        *READY.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline(always)]
 fn avx512_vbmi_ready() -> bool {
-    use std::sync::OnceLock;
-    static READY: OnceLock<bool> = OnceLock::new();
-    *READY.get_or_init(|| {
-        std::arch::is_x86_feature_detected!("avx512f")
-            && std::arch::is_x86_feature_detected!("avx512bw")
-            && std::arch::is_x86_feature_detected!("avx512vbmi")
-    })
+    #[cfg(all(
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vbmi"
+    ))]
+    {
+        true
+    }
+    #[cfg(not(all(
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vbmi"
+    )))]
+    {
+        use std::sync::OnceLock;
+        static READY: OnceLock<bool> = OnceLock::new();
+        *READY.get_or_init(|| {
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vbmi")
+        })
+    }
 }
 
 /// 64-byte VBMI permute of the mailbox, then the official piece-bit LUT.
@@ -611,6 +635,7 @@ pub(super) fn collect_bit_ray_move_deltas(
                 _ => unreachable!(),
             };
             let rook = mailbox[rook_from];
+            debug_assert_ne!(rook, u8::MAX);
             // Official viridithas board::make castle: Sub after each remove, Add after each place.
             clear(&mut mailbox, from);
             on_change(sink, &mailbox, mover, from, false);
@@ -625,6 +650,7 @@ pub(super) fn collect_bit_ray_move_deltas(
             let captured_square =
                 types::Square::from_file_rank(mv.to.file(), mv.from.rank()).index();
             let captured = mailbox[captured_square];
+            debug_assert_ne!(captured, u8::MAX);
             on_change(sink, &mailbox, captured, captured_square, false);
             clear(&mut mailbox, captured_square);
             clear(&mut mailbox, from);
@@ -650,6 +676,7 @@ pub(super) fn collect_bit_ray_move_deltas(
         }
         _ if mv.is_capture() => {
             let captured = mailbox[to];
+            debug_assert_ne!(captured, u8::MAX);
             on_change(sink, &mailbox, mover, from, false);
             on_change(sink, &mailbox, captured, to, false);
             clear(&mut mailbox, from);
@@ -781,6 +808,35 @@ mod tests {
     }
 
     #[test]
+    fn startpos_and_kiwipete_threat_deltas_fit_official_aux_buffer() {
+        types::init();
+        let boards = [
+            Board::new(),
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .expect("kiwipete"),
+        ];
+        let mut max_deltas = 0usize;
+        for mut board in boards {
+            let snap = ThreatSnapshot::from_board(&board);
+            for mv in board.generate_legal_moves().iter() {
+                let mut sink = DeltaList(Vec::new());
+                collect_bit_ray_move_deltas(&mut sink, snap, *mv);
+                max_deltas = max_deltas.max(sink.0.len());
+                assert!(
+                    sink.0.len() <= 96,
+                    "{} emitted {} threat deltas",
+                    mv.to_uci(),
+                    sink.0.len()
+                );
+            }
+        }
+        assert!(
+            max_deltas > 0,
+            "expected at least one non-empty threat delta list"
+        );
+    }
+
+    #[test]
     fn avx512_vbmi_permute_matches_scalar_when_detected() {
         types::init();
         let mailbox = *Board::new().piece_ids();
@@ -835,6 +891,23 @@ mod tests {
             assert_eq!(
                 super::incoming_sliders(&bits, closest).0,
                 super::incoming_sliders_scalar(&bits, closest).0
+            );
+        }
+    }
+
+    #[test]
+    fn compile_time_bit_ray_gates_match_runtime_detection() {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            assert_eq!(
+                super::avx2_ready(),
+                std::arch::is_x86_feature_detected!("avx2")
+            );
+            assert_eq!(
+                super::avx512_vbmi_ready(),
+                std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("avx512vbmi")
             );
         }
     }

@@ -191,6 +191,7 @@ pub(crate) fn apply_i16_from_width(
 }
 
 /// Copy `src` into `dst` while adding/subtracting i8 feature rows in one pass.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn apply_i8_from_width(
     dst: &mut [i16],
     src: &[i16],
@@ -227,6 +228,78 @@ pub(crate) fn apply_i8_from_width(
     }
 }
 
+/// Official sandhi aux apply: `adds`/`subs` are already `row << 10` byte offsets.
+pub(crate) fn apply_i8_from_offsets(
+    dst: &mut [i16],
+    src: &[i16],
+    weights: &[i8],
+    adds: &[u32],
+    subs: &[u32],
+) {
+    debug_assert_eq!(dst.len(), src.len());
+    let width = dst.len();
+    if width.is_multiple_of(32) {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if apply_from_uses_avx512() {
+            unsafe {
+                avx512::apply_i8_from_offsets(dst, src, weights, adds, subs);
+            }
+            return;
+        }
+    }
+    if width.is_multiple_of(16) {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if apply_from_uses_avx2() {
+            unsafe {
+                avx2::apply_i8_from_offsets(dst, src, weights, adds, subs);
+            }
+            return;
+        }
+    }
+    dst.copy_from_slice(src);
+    for &offset in adds {
+        let start = offset as usize;
+        (kernels().apply_i8)(dst, &weights[start..start + width], 1);
+    }
+    for &offset in subs {
+        let start = offset as usize;
+        (kernels().apply_i8)(dst, &weights[start..start + width], -1);
+    }
+}
+
+/// One POV’s dest/src/offset lists for [`apply_i8_from_offsets_pair`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct I8OffsetLane<'a> {
+    pub dst: &'a mut [i16],
+    pub src: &'a [i16],
+    pub adds: &'a [u32],
+    pub subs: &'a [u32],
+}
+
+/// One 1024-wide unroll that updates both sandhi aux POVs from offset lists.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn apply_i8_from_offsets_pair(
+    first: I8OffsetLane<'_>,
+    second: I8OffsetLane<'_>,
+    weights: &[i8],
+) {
+    debug_assert_eq!(first.dst.len(), first.src.len());
+    debug_assert_eq!(second.dst.len(), second.src.len());
+    debug_assert_eq!(first.dst.len(), second.dst.len());
+    let width = first.dst.len();
+    if width == 1024 && width.is_multiple_of(32) {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if apply_from_uses_avx512() {
+            unsafe {
+                avx512::apply_i8_from_offsets_pair(first, second, weights);
+            }
+            return;
+        }
+    }
+    apply_i8_from_offsets(first.dst, first.src, weights, first.adds, first.subs);
+    apply_i8_from_offsets(second.dst, second.src, weights, second.adds, second.subs);
+}
+
 /// Pairwise FT on `(first + first_add, second + second_add)` without a full acc copy.
 pub(crate) fn activate_shifted_pair_sum(
     first: &[i16],
@@ -240,6 +313,13 @@ pub(crate) fn activate_shifted_pair_sum(
     debug_assert_eq!(first.len(), second.len());
     debug_assert_eq!(first.len(), output.len());
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if first.len().is_multiple_of(32) && apply_from_uses_avx512() {
+        unsafe {
+            avx512::activate_shifted_pair_sum(first, first_add, second, second_add, output);
+        }
+        return;
+    }
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if first.len().is_multiple_of(16) && shifted_pair_uses_avx2() {
         unsafe {
             avx2::activate_shifted_pair_sum(first, first_add, second, second_add, output);
@@ -249,7 +329,36 @@ pub(crate) fn activate_shifted_pair_sum(
     scalar::activate_shifted_pair_sum(first, first_add, second, second_add, output);
 }
 
+/// CReLU clamp `0..=qa` used by Ateed's STM-half activation.
+#[inline]
+pub(crate) fn crelu_qa(acc: &[i16], output: &mut [u8], qa: i16) {
+    debug_assert_eq!(acc.len(), output.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if acc.len().is_multiple_of(32) && apply_from_uses_avx512() {
+        unsafe {
+            avx512::crelu_qa(acc, output, qa);
+        }
+        return;
+    }
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if acc.len().is_multiple_of(16) && apply_from_uses_avx2() {
+        unsafe {
+            avx2::crelu_qa(acc, output, qa);
+        }
+        return;
+    }
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
+    if acc.len().is_multiple_of(8) {
+        neon_crelu_qa(acc, output, qa);
+        return;
+    }
+    for (dst, &value) in output.iter_mut().zip(acc) {
+        *dst = value.clamp(0, qa) as u8;
+    }
+}
+
 /// Stockfish-style `/512` pairwise FT on summed accumulators.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn transform_pair_sum(
     first: &[i16],
     first_add: &[i16],
@@ -323,23 +432,40 @@ pub(crate) fn activate_shifted_pair(first: &[i16], second: &[i16], output: &mut 
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline(always)]
 fn shifted_pair_uses_avx2() -> bool {
-    static AVX2: OnceLock<bool> = OnceLock::new();
-    *AVX2.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+    #[cfg(target_feature = "avx2")]
+    {
+        true
+    }
+    #[cfg(not(target_feature = "avx2"))]
+    {
+        static AVX2: OnceLock<bool> = OnceLock::new();
+        *AVX2.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline(always)]
 fn apply_from_uses_avx2() -> bool {
     shifted_pair_uses_avx2()
 }
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline(always)]
 fn apply_from_uses_avx512() -> bool {
-    static AVX512: OnceLock<bool> = OnceLock::new();
-    *AVX512.get_or_init(|| {
-        std::arch::is_x86_feature_detected!("avx512f")
-            && std::arch::is_x86_feature_detected!("avx512bw")
-    })
+    #[cfg(all(target_feature = "avx512f", target_feature = "avx512bw"))]
+    {
+        true
+    }
+    #[cfg(not(all(target_feature = "avx512f", target_feature = "avx512bw")))]
+    {
+        static AVX512: OnceLock<bool> = OnceLock::new();
+        *AVX512.get_or_init(|| {
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
+        })
+    }
 }
 
 pub(crate) fn selected_backend() -> &'static str {
@@ -501,6 +627,11 @@ fn neon_transform_pair(first: &[i16], second: &[i16], output: &mut [u8]) {
     unsafe { neon::transform_pair(first, second, output) }
 }
 
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+fn neon_crelu_qa(acc: &[i16], output: &mut [u8], qa: i16) {
+    unsafe { neon::crelu_qa(acc, output, qa) }
+}
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 mod avx2 {
     #![allow(clippy::undocumented_unsafe_blocks)]
@@ -534,6 +665,7 @@ mod avx2 {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn apply_i8_from(
         dst: &mut [i16],
@@ -555,6 +687,54 @@ mod avx2 {
                 }
                 for &feature in subs {
                     let row = weights.as_ptr().add(feature * width + index);
+                    let delta = _mm256_cvtepi8_epi16(_mm_loadu_si128(row.cast()));
+                    value = _mm256_sub_epi16(value, delta);
+                }
+                _mm256_storeu_si256(dst.as_mut_ptr().add(index).cast(), value);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn crelu_qa(acc: &[i16], output: &mut [u8], qa: i16) {
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let maximum = _mm256_set1_epi16(qa);
+            for index in (0..acc.len()).step_by(16) {
+                let clamped = _mm256_min_epi16(
+                    _mm256_max_epi16(_mm256_loadu_si256(acc.as_ptr().add(index).cast()), zero),
+                    maximum,
+                );
+                let packed = _mm_packus_epi16(
+                    _mm256_castsi256_si128(clamped),
+                    _mm256_extracti128_si256::<1>(clamped),
+                );
+                _mm_storeu_si128(output.as_mut_ptr().add(index).cast(), packed);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn apply_i8_from_offsets(
+        dst: &mut [i16],
+        src: &[i16],
+        weights: &[i8],
+        adds: &[u32],
+        subs: &[u32],
+    ) {
+        unsafe {
+            let width = dst.len();
+            debug_assert_eq!(src.len(), width);
+            debug_assert_eq!(width % 16, 0);
+            for index in (0..width).step_by(16) {
+                let mut value = _mm256_loadu_si256(src.as_ptr().add(index).cast());
+                for &offset in adds {
+                    let row = weights.as_ptr().add(offset as usize + index);
+                    let delta = _mm256_cvtepi8_epi16(_mm_loadu_si128(row.cast()));
+                    value = _mm256_add_epi16(value, delta);
+                }
+                for &offset in subs {
+                    let row = weights.as_ptr().add(offset as usize + index);
                     let delta = _mm256_cvtepi8_epi16(_mm_loadu_si128(row.cast()));
                     value = _mm256_sub_epi16(value, delta);
                 }
@@ -980,6 +1160,7 @@ mod avx512 {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     #[target_feature(enable = "avx512f,avx512bw")]
     pub(super) unsafe fn apply_i8_from(
         dst: &mut [i16],
@@ -1054,6 +1235,197 @@ mod avx512 {
     }
 
     #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i8_from_offsets(
+        dst: &mut [i16],
+        src: &[i16],
+        weights: &[i8],
+        adds: &[u32],
+        subs: &[u32],
+    ) {
+        unsafe {
+            let width = dst.len();
+            debug_assert_eq!(src.len(), width);
+            debug_assert_eq!(width % 32, 0);
+            const REGS: usize = 16;
+            const CHUNK: usize = 32;
+            const UNROLL: usize = CHUNK * REGS;
+            if width.is_multiple_of(UNROLL) {
+                for &offset in adds.iter().chain(subs.iter()) {
+                    let row = weights.as_ptr().add(offset as usize);
+                    let mut line = 0;
+                    while line < width {
+                        _mm_prefetch::<_MM_HINT_T0>(row.add(line).cast::<i8>());
+                        line += 64;
+                    }
+                }
+                for base in (0..width).step_by(UNROLL) {
+                    let mut regs = [_mm512_setzero_si512(); REGS];
+                    for (r_idx, reg) in regs.iter_mut().enumerate() {
+                        *reg = load_i16(src.as_ptr().add(base + r_idx * CHUNK));
+                    }
+                    for &offset in subs {
+                        let row = weights.as_ptr().add(offset as usize + base);
+                        for (r_idx, reg) in regs.iter_mut().enumerate() {
+                            let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                                row.add(r_idx * CHUNK).cast(),
+                            ));
+                            *reg = _mm512_sub_epi16(*reg, delta);
+                        }
+                    }
+                    for &offset in adds {
+                        let row = weights.as_ptr().add(offset as usize + base);
+                        for (r_idx, reg) in regs.iter_mut().enumerate() {
+                            let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                                row.add(r_idx * CHUNK).cast(),
+                            ));
+                            *reg = _mm512_add_epi16(*reg, delta);
+                        }
+                    }
+                    for (r_idx, reg) in regs.iter().enumerate() {
+                        store_i16(dst.as_mut_ptr().add(base + r_idx * CHUNK), *reg);
+                    }
+                }
+                return;
+            }
+            for index in (0..width).step_by(32) {
+                let mut value = load_i16(src.as_ptr().add(index));
+                for &offset in adds {
+                    let row = weights.as_ptr().add(offset as usize + index);
+                    let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.cast()));
+                    value = _mm512_add_epi16(value, delta);
+                }
+                for &offset in subs {
+                    let row = weights.as_ptr().add(offset as usize + index);
+                    let delta = _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.cast()));
+                    value = _mm512_sub_epi16(value, delta);
+                }
+                store_i16(dst.as_mut_ptr().add(index), value);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn apply_i8_from_offsets_pair(
+        first: super::I8OffsetLane<'_>,
+        second: super::I8OffsetLane<'_>,
+        weights: &[i8],
+    ) {
+        unsafe {
+            let width = first.dst.len();
+            debug_assert_eq!(first.src.len(), width);
+            debug_assert_eq!(second.src.len(), width);
+            debug_assert_eq!(second.dst.len(), width);
+            const REGS: usize = 8;
+            const CHUNK: usize = 32;
+            const UNROLL: usize = CHUNK * REGS;
+            debug_assert!(width.is_multiple_of(UNROLL));
+            for &offset in first
+                .adds
+                .iter()
+                .chain(first.subs.iter())
+                .chain(second.adds)
+                .chain(second.subs)
+            {
+                let row = weights.as_ptr().add(offset as usize);
+                let mut line = 0;
+                while line < width {
+                    _mm_prefetch::<_MM_HINT_T0>(row.add(line).cast::<i8>());
+                    line += 64;
+                }
+            }
+            let src0 = first.src.as_ptr();
+            let src1 = second.src.as_ptr();
+            let dst0 = first.dst.as_mut_ptr();
+            let dst1 = second.dst.as_mut_ptr();
+            for base in (0..width).step_by(UNROLL) {
+                let mut regs0 = [_mm512_setzero_si512(); REGS];
+                let mut regs1 = [_mm512_setzero_si512(); REGS];
+                for r_idx in 0..REGS {
+                    let off = base + r_idx * CHUNK;
+                    regs0[r_idx] = load_i16(src0.add(off));
+                    regs1[r_idx] = load_i16(src1.add(off));
+                }
+                for &offset in first.subs {
+                    let row = weights.as_ptr().add(offset as usize + base);
+                    for (r_idx, reg) in regs0.iter_mut().enumerate() {
+                        let delta =
+                            _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.add(r_idx * CHUNK).cast()));
+                        *reg = _mm512_sub_epi16(*reg, delta);
+                    }
+                }
+                for &offset in first.adds {
+                    let row = weights.as_ptr().add(offset as usize + base);
+                    for (r_idx, reg) in regs0.iter_mut().enumerate() {
+                        let delta =
+                            _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.add(r_idx * CHUNK).cast()));
+                        *reg = _mm512_add_epi16(*reg, delta);
+                    }
+                }
+                for &offset in second.subs {
+                    let row = weights.as_ptr().add(offset as usize + base);
+                    for (r_idx, reg) in regs1.iter_mut().enumerate() {
+                        let delta =
+                            _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.add(r_idx * CHUNK).cast()));
+                        *reg = _mm512_sub_epi16(*reg, delta);
+                    }
+                }
+                for &offset in second.adds {
+                    let row = weights.as_ptr().add(offset as usize + base);
+                    for (r_idx, reg) in regs1.iter_mut().enumerate() {
+                        let delta =
+                            _mm512_cvtepi8_epi16(_mm256_loadu_si256(row.add(r_idx * CHUNK).cast()));
+                        *reg = _mm512_add_epi16(*reg, delta);
+                    }
+                }
+                for r_idx in 0..REGS {
+                    let off = base + r_idx * CHUNK;
+                    store_i16(dst0.add(off), regs0[r_idx]);
+                    store_i16(dst1.add(off), regs1[r_idx]);
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn activate_shifted_pair_sum(
+        first: &[i16],
+        first_add: &[i16],
+        second: &[i16],
+        second_add: &[i16],
+        output: &mut [u8],
+    ) {
+        unsafe {
+            let zero = _mm512_setzero_si512();
+            let maximum = _mm512_set1_epi16(255);
+            for index in (0..first.len()).step_by(32) {
+                let lhs = _mm512_max_epi16(
+                    _mm512_min_epi16(
+                        _mm512_add_epi16(
+                            load_i16(first.as_ptr().add(index)),
+                            load_i16(first_add.as_ptr().add(index)),
+                        ),
+                        maximum,
+                    ),
+                    zero,
+                );
+                let rhs = _mm512_min_epi16(
+                    _mm512_add_epi16(
+                        load_i16(second.as_ptr().add(index)),
+                        load_i16(second_add.as_ptr().add(index)),
+                    ),
+                    maximum,
+                );
+                let prod =
+                    _mm512_max_epi16(_mm512_mulhi_epi16(_mm512_slli_epi16::<7>(lhs), rhs), zero);
+                _mm256_storeu_si256(
+                    output.as_mut_ptr().add(index).cast(),
+                    _mm512_cvtusepi16_epi8(prod),
+                );
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
     pub(super) unsafe fn transform_pair_sum(
         first: &[i16],
         first_add: &[i16],
@@ -1120,6 +1492,24 @@ mod avx512 {
             }
         }
     }
+
+    #[target_feature(enable = "avx512f,avx512bw")]
+    pub(super) unsafe fn crelu_qa(acc: &[i16], output: &mut [u8], qa: i16) {
+        unsafe {
+            let zero = _mm512_setzero_si512();
+            let maximum = _mm512_set1_epi16(qa);
+            for index in (0..acc.len()).step_by(32) {
+                let clamped = _mm512_min_epi16(
+                    _mm512_max_epi16(load_i16(acc.as_ptr().add(index)), zero),
+                    maximum,
+                );
+                _mm256_storeu_si256(
+                    output.as_mut_ptr().add(index).cast(),
+                    _mm512_cvtepi16_epi8(clamped),
+                );
+            }
+        }
+    }
 }
 
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
@@ -1152,6 +1542,18 @@ mod neon {
                 for (value, sum) in values.iter_mut().zip(sums) {
                     *value = value.wrapping_add(vaddvq_s32(sum));
                 }
+            }
+        }
+    }
+
+    pub(super) unsafe fn crelu_qa(acc: &[i16], output: &mut [u8], qa: i16) {
+        unsafe {
+            let zero = vdupq_n_s16(0);
+            let maximum = vdupq_n_s16(qa);
+            for index in (0..acc.len()).step_by(8) {
+                let clamped =
+                    vminq_s16(vmaxq_s16(vld1q_s16(acc.as_ptr().add(index)), zero), maximum);
+                vst1_u8(output.as_mut_ptr().add(index), vqmovun_s16(clamped));
             }
         }
     }
@@ -1297,6 +1699,69 @@ mod tests {
     }
 
     #[test]
+    fn apply_i8_from_offsets_matches_row_times_width() {
+        const WIDTH: usize = 1024;
+        let weights = (0..WIDTH * 4)
+            .map(|index| (index as i16).wrapping_mul(13) as i8)
+            .collect::<Vec<_>>();
+        let src = (0..WIDTH)
+            .map(|index| (index as i16).wrapping_mul(5))
+            .collect::<Vec<_>>();
+        let mut expected = vec![0_i16; WIDTH];
+        apply_i8_from_width(&mut expected, &src, &weights, &[1, 0], &[3]);
+        let mut actual = vec![0_i16; WIDTH];
+        apply_i8_from_offsets(
+            &mut actual,
+            &src,
+            &weights,
+            &[WIDTH as u32, 0],
+            &[(3 * WIDTH) as u32],
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn apply_i8_from_offsets_pair_matches_two_sequential_applies() {
+        const WIDTH: usize = 1024;
+        let weights = (0..WIDTH * 5)
+            .map(|index| (index as i16).wrapping_mul(11) as i8)
+            .collect::<Vec<_>>();
+        let src0 = (0..WIDTH)
+            .map(|index| (index as i16).wrapping_mul(3))
+            .collect::<Vec<_>>();
+        let src1 = (0..WIDTH)
+            .map(|index| 200 - (index as i16))
+            .collect::<Vec<_>>();
+        let adds0 = [(2 * WIDTH) as u32];
+        let subs0 = [(4 * WIDTH) as u32];
+        let adds1 = [0, WIDTH as u32];
+        let subs1 = [(3 * WIDTH) as u32];
+        let mut expected0 = vec![0_i16; WIDTH];
+        let mut expected1 = vec![0_i16; WIDTH];
+        apply_i8_from_offsets(&mut expected0, &src0, &weights, &adds0, &subs0);
+        apply_i8_from_offsets(&mut expected1, &src1, &weights, &adds1, &subs1);
+        let mut actual0 = vec![0_i16; WIDTH];
+        let mut actual1 = vec![0_i16; WIDTH];
+        apply_i8_from_offsets_pair(
+            I8OffsetLane {
+                dst: &mut actual0,
+                src: &src0,
+                adds: &adds0,
+                subs: &subs0,
+            },
+            I8OffsetLane {
+                dst: &mut actual1,
+                src: &src1,
+                adds: &adds1,
+                subs: &subs1,
+            },
+            &weights,
+        );
+        assert_eq!(actual0, expected0);
+        assert_eq!(actual1, expected1);
+    }
+
+    #[test]
     fn apply_i16_from_matches_copy_then_apply() {
         const WIDTH: usize = 1536;
         let weights = (0..WIDTH * 4)
@@ -1333,6 +1798,28 @@ mod tests {
         let mut actual = vec![0_u8; WIDTH];
         scalar::transform_pair_sum(&first, &first_add, &second, &second_add, &mut expected);
         transform_pair_sum(&first, &first_add, &second, &second_add, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn activate_pair_sum_matches_scalar_for_sandhi_width() {
+        const WIDTH: usize = 1024;
+        let first = (0..WIDTH)
+            .map(|index| index as i16 - 40)
+            .collect::<Vec<_>>();
+        let first_add = (0..WIDTH)
+            .map(|index| (index as i16 % 11) - 3)
+            .collect::<Vec<_>>();
+        let second = (0..WIDTH)
+            .map(|index| 180 - index as i16)
+            .collect::<Vec<_>>();
+        let second_add = (0..WIDTH)
+            .map(|index| (index as i16 % 7) - 2)
+            .collect::<Vec<_>>();
+        let mut expected = vec![0_u8; WIDTH];
+        let mut actual = vec![0_u8; WIDTH];
+        scalar::activate_shifted_pair_sum(&first, &first_add, &second, &second_add, &mut expected);
+        activate_shifted_pair_sum(&first, &first_add, &second, &second_add, &mut actual);
         assert_eq!(actual, expected);
     }
 
@@ -1404,5 +1891,31 @@ mod tests {
         #[cfg(all(feature = "simd", target_arch = "aarch64"))]
         assert!(name.starts_with("NEON"));
         assert_eq!(name, kind.name());
+    }
+
+    #[test]
+    fn crelu_qa_matches_scalar_clamp() {
+        let acc: Vec<i16> = (0..1024).map(|i| (i as i16) - 200).collect();
+        let mut actual = vec![0u8; 1024];
+        crelu_qa(&acc, &mut actual, 255);
+        for (got, &value) in actual.iter().zip(&acc) {
+            assert_eq!(*got, value.clamp(0, 255) as u8);
+        }
+    }
+
+    #[test]
+    fn compile_time_apply_gates_match_runtime_detection() {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            assert_eq!(
+                apply_from_uses_avx2(),
+                std::arch::is_x86_feature_detected!("avx2")
+            );
+            assert_eq!(
+                apply_from_uses_avx512(),
+                std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("avx512bw")
+            );
+        }
     }
 }

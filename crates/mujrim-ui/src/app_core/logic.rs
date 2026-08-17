@@ -13,7 +13,7 @@ use mujrim_study::tournament::{Entrant, Pairing, TournamentFormat};
 use mujrim_study::tournament_store::{StoredTournament, StoredTournamentGame};
 use mujrim_study::training::Puzzle;
 use mujrim_study::training_store::TrainingStore;
-use search::book::OpeningBook;
+use types::book::OpeningBook;
 
 use super::engine::{GameMode, PlayerConfig, QuickTournamentEngine, bundled_engine_label};
 use super::game::GameState;
@@ -779,12 +779,31 @@ pub fn tournament_engine_roster(
             });
         }
     }
-    roster.sort_by(|left, right| {
-        left.name
-            .to_ascii_lowercase()
-            .cmp(&right.name.to_ascii_lowercase())
-    });
+    sort_engine_roster(&mut roster);
     roster
+}
+
+fn sort_engine_roster(roster: &mut [QuickTournamentEngine]) {
+    roster.sort_by(|left, right| {
+        roster_priority(left)
+            .cmp(&roster_priority(right))
+            .then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+    });
+}
+
+fn roster_priority(engine: &QuickTournamentEngine) -> u8 {
+    let id = engine_identity_key(&engine.path);
+    if id == mujrim_protocols::catalog::DEFAULT_MUJRIM_ENGINE_ID {
+        0
+    } else if mujrim_protocols::catalog::is_mujrim_product(&id) {
+        1
+    } else {
+        2
+    }
 }
 
 pub fn eval_bar_engine_choices(
@@ -2088,9 +2107,21 @@ pub fn analyze_game_at_depth_from(
     depth: i32,
 ) -> Result<Vec<AnalyzedPly>, String> {
     types::init();
+    let engine_path = super::engine::discover_default_engine().ok_or_else(|| {
+        "Mujrim engine binary not found. Place mujrim-v60 under engines/mujrim/ relative to the UI."
+            .to_owned()
+    })?;
+    let engine_path = engine_path
+        .to_str()
+        .ok_or_else(|| "engine path is not UTF-8".to_owned())?;
+    let search = uci_process::ExternalSearchConfig {
+        ponder: false,
+        use_nnue: true,
+        own_book: false,
+        eval_file: None,
+    };
     let mut board = types::Board::from_fen(initial_fen)
         .map_err(|error| format!("invalid initial position: {error}"))?;
-    let mut engine = search::SearchEngine::new(32, 1);
     let mut analysis = Vec::with_capacity(moves.len());
     for (ply, notation) in moves.iter().enumerate() {
         let legal_moves = board.generate_legal_moves();
@@ -2107,18 +2138,34 @@ pub fn analyze_game_at_depth_from(
         let captured_value = board
             .piece_on(played.to)
             .map_or(0, |(piece, _)| piece_value(piece));
-        let mut before = board.clone();
-        let best = engine.search_depth(&mut before, depth.max(1));
-        let is_best_move = best.best_move.from == played.from
-            && best.best_move.to == played.to
-            && best.best_move.promotion == played.promotion;
+        let before_fen = board.to_fen();
+        let best = uci_process::query_best_move(
+            engine_path,
+            ExternalEngineProtocol::Uci,
+            &before_fen,
+            depth.max(1),
+            std::time::Duration::from_millis(250),
+            32,
+            1,
+            &search,
+        )?;
+        let is_best_move = best.best_move == played.to_uci();
         let mut after = board.clone();
         after.make_move(played);
         let can_be_recaptured = after
             .generate_legal_moves()
             .iter()
             .any(|reply| reply.to == played.to && reply.is_capture());
-        let reply = engine.search_depth(&mut after, depth.max(1));
+        let reply = uci_process::query_best_move(
+            engine_path,
+            ExternalEngineProtocol::Uci,
+            &after.to_fen(),
+            depth.max(1),
+            std::time::Duration::from_millis(250),
+            32,
+            1,
+            &search,
+        )?;
         let played_score = reply.score.saturating_neg();
         let annotation = AnnotationContext {
             best_score_cp: best.score,
@@ -2565,7 +2612,7 @@ mod tests {
 
     #[test]
     fn learn_catalog_uses_opening_book_when_present() {
-        let Ok(book) = search::book::OpeningBook::load_embedded() else {
+        let Ok(book) = types::book::OpeningBook::load_embedded() else {
             return;
         };
         let catalog = learn_gambit_catalog(Some(&book));
@@ -3347,6 +3394,35 @@ mod tests {
             black_wins: 2,
         };
         assert_eq!(opening_white_score(&stats), 60);
+    }
+
+    #[test]
+    fn detected_mujrim_roster_defaults_to_v60() {
+        let mut roster = vec![
+            QuickTournamentEngine {
+                name: "Stockfish".into(),
+                path: PathBuf::from("/tmp/engines/stockfish/stockfish"),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            },
+            QuickTournamentEngine {
+                name: "Mujrim Elite".into(),
+                path: PathBuf::from("/tmp/engines/mujrim/mujrim-elite"),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            },
+            QuickTournamentEngine {
+                name: "Mujrim v60".into(),
+                path: PathBuf::from("/tmp/engines/mujrim/mujrim-v60"),
+                search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+            },
+        ];
+        sort_engine_roster(&mut roster);
+        assert!(roster[0].path.ends_with("mujrim-v60"));
+        assert!(roster[1].path.ends_with("mujrim-elite"));
+        assert!(roster[2].path.ends_with("stockfish"));
+        assert!(matches!(
+            engine_player_from_roster(&roster, 0, 16),
+            PlayerConfig::External { ref path, .. } if path.ends_with("mujrim-v60")
+        ));
     }
 
     #[test]

@@ -25,10 +25,10 @@
   },
   "viri_default": {
     "id": "viri_default",
-    "url": "https://github.com/cosmobobak/viridithas-networks/releases/download/v104.1/velarised-2-b800.nnue.zst",
-    "upstream_name": "velarised-2-b800.nnue.zst",
+    "url": "https://github.com/cosmobobak/viridithas-networks/releases/download/v109/sandhi-s2-b200.nnue.zst",
+    "upstream_name": "sandhi-s2-b200.nnue.zst",
     "filename": "viri_default.nnue.zst",
     "downloaded_at": "epoch:1773937035",
-    "file_size": 29564785
+    "file_size": 52442657
   }
 }

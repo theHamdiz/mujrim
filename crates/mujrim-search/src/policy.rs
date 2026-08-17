@@ -360,6 +360,33 @@ impl LmrPolicy for RecklessFullLmrPolicy {
     }
 }
 
+/// MoE-aware LMR: Reckless full model plus expert/WDL corrections.
+#[derive(Default)]
+pub struct AteedLmrPolicy;
+
+impl LmrPolicy for AteedLmrPolicy {
+    fn reduce_noisy_moves(&self) -> bool {
+        true
+    }
+
+    fn adjust_reduction(&self, base_reduction: i32, ctx: &LmrContext) -> i32 {
+        RecklessFullLmrPolicy.adjust_reduction(base_reduction, ctx)
+    }
+}
+
+/// Expert/WDL corrections applied after the Ateed LMR table.
+#[inline]
+pub fn ateed_moe_lmr_delta(
+    variance: i32,
+    expert_changed: bool,
+    draw_mass: i32,
+    gate_margin: i32,
+) -> i32 {
+    i32::from(expert_changed) + i32::from(variance >= 1_500)
+        - i32::from(draw_mass >= 4_000)
+        - i32::from(gate_margin >= 48)
+}
+
 /// Official Viridithas LMR: reduce noisies, keep PV/check lines, cut-node tax.
 #[derive(Default)]
 pub struct ViridithasLmrPolicy;
@@ -460,6 +487,7 @@ pub enum LmrDispatch {
     Obsidian,
     PlentyChess,
     Akimbo,
+    Ateed,
     Custom(Arc<dyn LmrPolicy + Send + Sync>),
 }
 
@@ -474,6 +502,7 @@ impl LmrDispatch {
             Self::Obsidian => ObsidianLmrPolicy.reduce_noisy_moves(),
             Self::PlentyChess => PlentyChessLmrPolicy.reduce_noisy_moves(),
             Self::Akimbo => AkimboLmrPolicy.reduce_noisy_moves(),
+            Self::Ateed => AteedLmrPolicy.reduce_noisy_moves(),
             Self::Custom(policy) => policy.reduce_noisy_moves(),
         }
     }
@@ -488,6 +517,7 @@ impl LmrDispatch {
             Self::Obsidian => ObsidianLmrPolicy.adjust_reduction(base_reduction, context),
             Self::PlentyChess => PlentyChessLmrPolicy.adjust_reduction(base_reduction, context),
             Self::Akimbo => AkimboLmrPolicy.adjust_reduction(base_reduction, context),
+            Self::Ateed => AteedLmrPolicy.adjust_reduction(base_reduction, context),
             Self::Custom(policy) => policy.adjust_reduction(base_reduction, context),
         }
     }
@@ -551,6 +581,16 @@ impl LmpPolicy for RecklessLmpPolicy {
                 skip_remaining_quiets: true,
                 prune_current: false,
             })
+    }
+}
+
+/// Reckless LMP with a MoE-aware move-count hook applied by the Ateed loop.
+#[derive(Default)]
+pub struct AteedLmpPolicy;
+
+impl LmpPolicy for AteedLmpPolicy {
+    fn decision(&self, context: &LmpContext) -> Option<LmpDecision> {
+        RecklessLmpPolicy.decision(context)
     }
 }
 
@@ -624,6 +664,7 @@ pub enum LmpDispatch {
     Obsidian,
     PlentyChess,
     Akimbo,
+    Ateed,
     Custom(Arc<dyn LmpPolicy + Send + Sync>),
 }
 
@@ -636,6 +677,7 @@ impl LmpDispatch {
             Self::Viridithas => ViridithasLmpPolicy.decision(context),
             Self::Obsidian => ObsidianLmpPolicy.decision(context),
             Self::PlentyChess => PlentyChessLmpPolicy.decision(context),
+            Self::Ateed => AteedLmpPolicy.decision(context),
             Self::Akimbo => AkimboLmpPolicy.decision(context),
             Self::Custom(policy) => policy.decision(context),
         }
@@ -726,6 +768,20 @@ impl FutilityPolicy for RecklessFutilityPolicy {
     }
 }
 
+/// Reckless futility; the Ateed loop widens the margin from WDL variance.
+#[derive(Default)]
+pub struct AteedFutilityPolicy;
+
+impl FutilityPolicy for AteedFutilityPolicy {
+    fn requires_direct_check(&self) -> bool {
+        true
+    }
+
+    fn decision(&self, context: &FutilityContext) -> Option<FutilityDecision> {
+        RecklessFutilityPolicy.decision(context)
+    }
+}
+
 #[derive(Default)]
 pub struct ViridithasFutilityPolicy;
 
@@ -800,6 +856,7 @@ pub enum FutilityDispatch {
     Obsidian,
     PlentyChess,
     Akimbo,
+    Ateed,
     Custom(Arc<dyn FutilityPolicy + Send + Sync>),
 }
 
@@ -813,6 +870,7 @@ impl FutilityDispatch {
             Self::Obsidian => ObsidianFutilityPolicy.requires_direct_check(),
             Self::PlentyChess => PlentyChessFutilityPolicy.requires_direct_check(),
             Self::Akimbo => AkimboFutilityPolicy.requires_direct_check(),
+            Self::Ateed => AteedFutilityPolicy.requires_direct_check(),
             Self::Custom(policy) => policy.requires_direct_check(),
         }
     }
@@ -826,6 +884,7 @@ impl FutilityDispatch {
             Self::Obsidian => ObsidianFutilityPolicy.decision(context),
             Self::PlentyChess => PlentyChessFutilityPolicy.decision(context),
             Self::Akimbo => AkimboFutilityPolicy.decision(context),
+            Self::Ateed => AteedFutilityPolicy.decision(context),
             Self::Custom(policy) => policy.decision(context),
         }
     }
@@ -883,11 +942,25 @@ impl BadNoisyFutilityPolicy for RecklessBadNoisyFutilityPolicy {
     }
 }
 
+#[derive(Default)]
+pub struct AteedBadNoisyFutilityPolicy;
+
+impl BadNoisyFutilityPolicy for AteedBadNoisyFutilityPolicy {
+    fn requires_direct_check(&self) -> bool {
+        true
+    }
+
+    fn score_floor(&self, context: &BadNoisyFutilityContext) -> Option<i32> {
+        RecklessBadNoisyFutilityPolicy.score_floor(context)
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum BadNoisyFutilityDispatch {
     #[default]
     Disabled,
     Reckless,
+    Ateed,
     Custom(Arc<dyn BadNoisyFutilityPolicy + Send + Sync>),
 }
 
@@ -897,6 +970,7 @@ impl BadNoisyFutilityDispatch {
         match self {
             Self::Disabled => DisabledBadNoisyFutilityPolicy.requires_direct_check(),
             Self::Reckless => RecklessBadNoisyFutilityPolicy.requires_direct_check(),
+            Self::Ateed => AteedBadNoisyFutilityPolicy.requires_direct_check(),
             Self::Custom(policy) => policy.requires_direct_check(),
         }
     }
@@ -906,6 +980,7 @@ impl BadNoisyFutilityDispatch {
         match self {
             Self::Disabled => DisabledBadNoisyFutilityPolicy.score_floor(context),
             Self::Reckless => RecklessBadNoisyFutilityPolicy.score_floor(context),
+            Self::Ateed => AteedBadNoisyFutilityPolicy.score_floor(context),
             Self::Custom(policy) => policy.score_floor(context),
         }
     }
@@ -953,6 +1028,16 @@ impl RfpPolicy for RecklessRfpPolicy {
             && beta.abs() < 29_000 - 100
             && eval.abs() < 29_000 - 100)
             .then(|| beta + 3055 * (eval - beta) / 10_000)
+    }
+}
+
+/// Reckless RFP; the Ateed loop widens the cutoff from WDL variance.
+#[derive(Default)]
+pub struct AteedRfpPolicy;
+
+impl RfpPolicy for AteedRfpPolicy {
+    fn cutoff_score(&self, eval: i32, beta: i32, context: &RfpContext) -> Option<i32> {
+        RecklessRfpPolicy.cutoff_score(eval, beta, context)
     }
 }
 
@@ -1004,6 +1089,7 @@ pub enum RfpDispatch {
     Obsidian,
     PlentyChess,
     Akimbo,
+    Ateed,
     Custom(Arc<dyn RfpPolicy + Send + Sync>),
 }
 
@@ -1017,6 +1103,7 @@ impl RfpDispatch {
             Self::Obsidian => ObsidianRfpPolicy.cutoff_score(eval, beta, context),
             Self::PlentyChess => PlentyChessRfpPolicy.cutoff_score(eval, beta, context),
             Self::Akimbo => AkimboRfpPolicy.cutoff_score(eval, beta, context),
+            Self::Ateed => AteedRfpPolicy.cutoff_score(eval, beta, context),
             Self::Custom(policy) => policy.cutoff_score(eval, beta, context),
         }
     }
@@ -2084,5 +2171,25 @@ mod tests {
         let budget = TimeManagerProfile::Reckless.allocate(80, 0, None, 10, 1, 0);
         assert_eq!(budget.soft, std::time::Duration::from_millis(10));
         assert_eq!(budget.hard, std::time::Duration::from_millis(20));
+    }
+
+    #[test]
+    fn ateed_moe_lmr_delta_uses_expert_wdl_and_gate() {
+        assert_eq!(ateed_moe_lmr_delta(0, false, 0, 0), 0);
+        assert_eq!(ateed_moe_lmr_delta(1_500, false, 0, 0), 1);
+        assert_eq!(ateed_moe_lmr_delta(0, true, 0, 0), 1);
+        assert_eq!(ateed_moe_lmr_delta(0, false, 4_000, 0), -1);
+        assert_eq!(ateed_moe_lmr_delta(0, false, 0, 48), -1);
+        assert_eq!(ateed_moe_lmr_delta(1_500, true, 4_000, 48), 0);
+        let ctx = sample_lmr_context();
+        assert_eq!(
+            AteedLmrPolicy.adjust_reduction(0, &ctx),
+            RecklessFullLmrPolicy.adjust_reduction(0, &ctx)
+        );
+        assert!(LmrDispatch::Ateed.reduce_noisy_moves());
+        assert_ne!(
+            std::mem::discriminant(&LmrDispatch::Ateed),
+            std::mem::discriminant(&LmrDispatch::RecklessFull)
+        );
     }
 }

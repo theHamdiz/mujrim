@@ -1328,7 +1328,57 @@ pub(crate) fn collect_pawn_pair_aux(
 }
 
 /// Incremental pawn-pawn features for squares that changed occupancy.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn collect_moved_pawn_pair_delta(
+    before: [u64; 2],
+    after: [u64; 2],
+    king_square: usize,
+    perspective: usize,
+    adds: &mut [usize],
+    subs: &mut [usize],
+) -> (usize, usize, bool) {
+    collect_moved_pawn_pair_delta_inner::<false>(
+        before,
+        after,
+        king_square,
+        perspective,
+        adds,
+        subs,
+    )
+}
+
+/// Same delta as [`collect_moved_pawn_pair_delta`], but each value is the
+/// official sandhi weight offset (`pair_row << 10`).
+pub(crate) fn collect_moved_pawn_pair_sandhi_offsets(
+    before: [u64; 2],
+    after: [u64; 2],
+    king_square: usize,
+    perspective: usize,
+    adds: &mut [u32],
+    subs: &mut [u32],
+) -> (usize, usize, bool) {
+    let mut feat_adds = [0usize; 64];
+    let mut feat_subs = [0usize; 64];
+    let add_cap = feat_adds.len().min(adds.len());
+    let sub_cap = feat_subs.len().min(subs.len());
+    let (add_count, sub_count, overflowed) = collect_moved_pawn_pair_delta_inner::<true>(
+        before,
+        after,
+        king_square,
+        perspective,
+        &mut feat_adds[..add_cap],
+        &mut feat_subs[..sub_cap],
+    );
+    for (dst, src) in adds[..add_count].iter_mut().zip(&feat_adds[..add_count]) {
+        *dst = *src as u32;
+    }
+    for (dst, src) in subs[..sub_count].iter_mut().zip(&feat_subs[..sub_count]) {
+        *dst = *src as u32;
+    }
+    (add_count, sub_count, overflowed)
+}
+
+fn collect_moved_pawn_pair_delta_inner<const SANDHI_OFFSET: bool>(
     before: [u64; 2],
     after: [u64; 2],
     king_square: usize,
@@ -1360,13 +1410,18 @@ pub(crate) fn collect_moved_pawn_pair_delta(
             &old.pairs[..old.pair_count],
             &new.pairs[..new.pair_count],
             |feature, sign| {
+                let value = if SANDHI_OFFSET {
+                    (feature - THREAT_FEATURES) << 10
+                } else {
+                    feature
+                };
                 if sign > 0 {
                     if add_count < adds.len() {
-                        adds[add_count] = feature;
+                        adds[add_count] = value;
                         add_count += 1;
                     }
                 } else if sub_count < subs.len() {
-                    subs[sub_count] = feature;
+                    subs[sub_count] = value;
                     sub_count += 1;
                 }
             },
@@ -1385,7 +1440,7 @@ pub(crate) fn collect_moved_pawn_pair_delta(
         while remaining != 0 {
             let square = remaining.trailing_zeros() as usize;
             remaining &= remaining - 1;
-            overflowed |= !push_pairs_touching(
+            overflowed |= !push_pairs_touching::<SANDHI_OFFSET>(
                 before,
                 color,
                 square,
@@ -1399,7 +1454,7 @@ pub(crate) fn collect_moved_pawn_pair_delta(
         while remaining != 0 {
             let square = remaining.trailing_zeros() as usize;
             remaining &= remaining - 1;
-            overflowed |= !push_pairs_touching(
+            overflowed |= !push_pairs_touching::<SANDHI_OFFSET>(
                 after,
                 color,
                 square,
@@ -1413,7 +1468,7 @@ pub(crate) fn collect_moved_pawn_pair_delta(
     (add_count, sub_count, overflowed)
 }
 
-fn push_pairs_touching(
+fn push_pairs_touching<const SANDHI_OFFSET: bool>(
     pawns: [u64; 2],
     color: usize,
     square: usize,
@@ -1425,13 +1480,29 @@ fn push_pairs_touching(
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if pawn_pair_vbmi_ready() {
         return unsafe {
-            push_pairs_touching_vbmi(pawns, color, square, king_square, perspective, out, count)
+            push_pairs_touching_vbmi::<SANDHI_OFFSET>(
+                pawns,
+                color,
+                square,
+                king_square,
+                perspective,
+                out,
+                count,
+            )
         };
     }
-    push_pairs_touching_scalar(pawns, color, square, king_square, perspective, out, count)
+    push_pairs_touching_scalar::<SANDHI_OFFSET>(
+        pawns,
+        color,
+        square,
+        king_square,
+        perspective,
+        out,
+        count,
+    )
 }
 
-fn push_pairs_touching_scalar(
+fn push_pairs_touching_scalar<const SANDHI_OFFSET: bool>(
     pawns: [u64; 2],
     color: usize,
     square: usize,
@@ -1448,7 +1519,7 @@ fn push_pairs_touching_scalar(
             if *count >= out.len() {
                 return false;
             }
-            out[*count] = pawn_pair_feature_index(
+            let feature = pawn_pair_feature_index(
                 color,
                 square,
                 other_color,
@@ -1456,6 +1527,11 @@ fn push_pairs_touching_scalar(
                 king_square,
                 perspective,
             );
+            out[*count] = if SANDHI_OFFSET {
+                (feature - THREAT_FEATURES) << 10
+            } else {
+                feature
+            };
             *count += 1;
         }
     }
@@ -1475,7 +1551,7 @@ fn pawn_pair_vbmi_ready() -> bool {
 /// Official viridithas `add_pawn_pawn_indexes` VBMI triangle for one moved pawn.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
-unsafe fn push_pairs_touching_vbmi(
+unsafe fn push_pairs_touching_vbmi<const SANDHI_OFFSET: bool>(
     pawns: [u64; 2],
     color: usize,
     square: usize,
@@ -1485,9 +1561,10 @@ unsafe fn push_pairs_touching_vbmi(
     count: &mut usize,
 ) -> bool {
     use std::arch::x86_64::{
-        _mm256_loadu_si256, _mm512_add_epi16, _mm512_cvtepu8_epi16, _mm512_loadu_si512,
-        _mm512_maskz_compress_epi8, _mm512_max_epu16, _mm512_min_epu16, _mm512_mullo_epi16,
-        _mm512_set1_epi16, _mm512_srli_epi16, _mm512_storeu_si512, _mm512_sub_epi16,
+        _mm256_loadu_si256, _mm512_add_epi16, _mm512_castsi512_si256, _mm512_cvtepu8_epi16,
+        _mm512_cvtepu16_epi32, _mm512_loadu_si512, _mm512_maskz_compress_epi8, _mm512_max_epu16,
+        _mm512_min_epu16, _mm512_mullo_epi16, _mm512_set1_epi16, _mm512_slli_epi32,
+        _mm512_srli_epi16, _mm512_storeu_si512, _mm512_sub_epi16,
     };
 
     let mask = pawn_pair_mask(square);
@@ -1520,12 +1597,23 @@ unsafe fn push_pairs_touching_vbmi(
                 let lo = _mm512_min_epu16(id_a_v, pids);
                 let prod = _mm512_mullo_epi16(hi, _mm512_sub_epi16(hi, one));
                 let idx = _mm512_add_epi16(_mm512_srli_epi16(prod, 1), lo);
-                let feat = _mm512_add_epi16(idx, base);
-                let mut tmp = [0u16; 16];
-                _mm512_storeu_si512(tmp.as_mut_ptr().cast(), feat);
-                for &feature in &tmp[..chunk] {
-                    out[*count] = usize::from(feature);
-                    *count += 1;
+                if SANDHI_OFFSET {
+                    let offs =
+                        _mm512_slli_epi32::<10>(_mm512_cvtepu16_epi32(_mm512_castsi512_si256(idx)));
+                    let mut tmp = [0u32; 16];
+                    _mm512_storeu_si512(tmp.as_mut_ptr().cast(), offs);
+                    for &weight_offset in &tmp[..chunk] {
+                        out[*count] = weight_offset as usize;
+                        *count += 1;
+                    }
+                } else {
+                    let feat = _mm512_add_epi16(idx, base);
+                    let mut tmp = [0u16; 16];
+                    _mm512_storeu_si512(tmp.as_mut_ptr().cast(), feat);
+                    for &feature in &tmp[..chunk] {
+                        out[*count] = usize::from(feature);
+                        *count += 1;
+                    }
                 }
                 offset += chunk;
             }
@@ -2405,7 +2493,7 @@ mod tests {
                 let mut ss = 0;
                 let mut ac = 0;
                 let mut asub = 0;
-                assert!(push_pairs_touching_scalar(
+                assert!(push_pairs_touching_scalar::<false>(
                     start,
                     0,
                     Square::E2.index(),
@@ -2414,7 +2502,7 @@ mod tests {
                     &mut scalar_subs,
                     &mut ss,
                 ));
-                assert!(push_pairs_touching_scalar(
+                assert!(push_pairs_touching_scalar::<false>(
                     after,
                     0,
                     Square::E4.index(),
@@ -2423,7 +2511,7 @@ mod tests {
                     &mut scalar_adds,
                     &mut sc,
                 ));
-                assert!(push_pairs_touching(
+                assert!(push_pairs_touching::<false>(
                     start,
                     0,
                     Square::E2.index(),
@@ -2432,7 +2520,7 @@ mod tests {
                     &mut simd_subs,
                     &mut asub,
                 ));
-                assert!(push_pairs_touching(
+                assert!(push_pairs_touching::<false>(
                     after,
                     0,
                     Square::E4.index(),
@@ -2542,6 +2630,34 @@ mod tests {
         assert_eq!(got_adds, expected_adds);
         assert_eq!(got_subs, expected_subs);
         assert!(!expected_adds.is_empty() || !expected_subs.is_empty());
+
+        let mut off_adds = [0u32; 64];
+        let mut off_subs = [0u32; 64];
+        let (off_add_count, off_sub_count, off_overflow) = collect_moved_pawn_pair_sandhi_offsets(
+            before,
+            after,
+            king,
+            0,
+            &mut off_adds,
+            &mut off_subs,
+        );
+        assert!(!off_overflow);
+        let mut got_off_adds = off_adds[..off_add_count].to_vec();
+        let mut got_off_subs = off_subs[..off_sub_count].to_vec();
+        got_off_adds.sort_unstable();
+        got_off_subs.sort_unstable();
+        let mut expected_off_adds = expected_adds
+            .iter()
+            .map(|feature| ((feature - THREAT_FEATURES) << 10) as u32)
+            .collect::<Vec<_>>();
+        let mut expected_off_subs = expected_subs
+            .iter()
+            .map(|feature| ((feature - THREAT_FEATURES) << 10) as u32)
+            .collect::<Vec<_>>();
+        expected_off_adds.sort_unstable();
+        expected_off_subs.sort_unstable();
+        assert_eq!(got_off_adds, expected_off_adds);
+        assert_eq!(got_off_subs, expected_off_subs);
     }
 
     #[test]

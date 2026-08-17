@@ -2,7 +2,7 @@
 
 use mujrim_benchmarker::hardware::safe_simultaneous_games;
 use mujrim_benchmarker::strength::{MatchClock, MatchConfig};
-use mujrim_study::tournament::{Pairing, TournamentFormat};
+use mujrim_study::tournament::{Pairing, TournamentFormat, planned_event_games};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ pub struct TournamentSetup {
     pub format: TournamentFormat,
     pub swiss_rounds: u32,
     pub games_per_encounter: u32,
-    /// Simultaneous games; clamped to host-safe cores.
+    /// Simultaneous games; clamped to host-safe cores and event size.
     pub concurrency: u32,
     pub completed_pairings: Vec<Pairing>,
     /// Reserved for paired color-swap UI (always on in runner today).
@@ -40,6 +40,21 @@ pub fn detected_safe_games() -> u32 {
         .map(|n| n.get())
         .unwrap_or(1);
     safe_simultaneous_games(cores) as u32
+}
+
+/// Host-safe cores, but never more boards than the event can actually play.
+pub fn max_simultaneous_games(setup: &TournamentSetup) -> u32 {
+    let engines = setup
+        .selected_engine_paths
+        .len()
+        .max(GUI_TOURNAMENT_DEFAULT_ENGINES);
+    let event = planned_event_games(
+        engines,
+        setup.format,
+        setup.games_per_encounter,
+        setup.swiss_rounds,
+    );
+    detected_safe_games().min(event).max(1)
 }
 pub const GUI_TOURNAMENT_DEFAULT_ENGINES: usize = 2;
 
@@ -122,7 +137,7 @@ impl TournamentSetup {
     }
 
     pub fn sanitize_for_gui(&mut self) {
-        let max_games = detected_safe_games();
+        let max_games = max_simultaneous_games(self);
         self.concurrency = self.concurrency.clamp(1, max_games);
         self.hash_mb = self.hash_mb.clamp(16, GUI_TOURNAMENT_MAX_HASH_MB);
         self.engine_threads = self.engine_threads.clamp(1, GUI_TOURNAMENT_MAX_THREADS);
@@ -254,6 +269,32 @@ mod tests {
         assert_eq!(setup.hash_mb, GUI_TOURNAMENT_MAX_HASH_MB);
         assert_eq!(setup.games_per_encounter, 4);
         assert_eq!(setup.max_plies, 400);
+    }
+
+    #[test]
+    fn simultaneous_games_cannot_exceed_event_size() {
+        let setup = TournamentSetup {
+            selected_engine_paths: vec![PathBuf::from("a"), PathBuf::from("b")],
+            format: TournamentFormat::RoundRobin,
+            games_per_encounter: 4,
+            concurrency: 15,
+            ..TournamentSetup::default()
+        };
+        let cap = 4.min(detected_safe_games());
+        assert_eq!(max_simultaneous_games(&setup), cap);
+        let mut clamped = setup;
+        clamped.sanitize_for_gui();
+        assert_eq!(clamped.concurrency, cap);
+        assert!(clamped.concurrency <= 4);
+
+        let eight = TournamentSetup {
+            selected_engine_paths: vec![PathBuf::from("a"), PathBuf::from("b")],
+            format: TournamentFormat::DoubleRoundRobin,
+            games_per_encounter: 4,
+            concurrency: 15,
+            ..TournamentSetup::default()
+        };
+        assert_eq!(max_simultaneous_games(&eight), 8.min(detected_safe_games()));
     }
 
     #[test]

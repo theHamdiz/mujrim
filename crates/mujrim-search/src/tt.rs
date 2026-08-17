@@ -290,6 +290,7 @@ impl TranspositionTable {
         for _ in 0..num_buckets {
             buckets.push(Bucket::new());
         }
+        advise_huge_pages(&buckets);
 
         Self {
             buckets,
@@ -443,6 +444,27 @@ impl Default for TranspositionTable {
     }
 }
 
+#[inline]
+fn advise_huge_pages(buckets: &[Bucket]) {
+    #[cfg(all(unix, target_os = "linux"))]
+    {
+        const MADV_HUGEPAGE: i32 = 14;
+        unsafe extern "C" {
+            fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+        }
+        let len = buckets.len().saturating_mul(core::mem::size_of::<Bucket>());
+        if len == 0 {
+            return;
+        }
+        let addr = buckets.as_ptr() as *mut core::ffi::c_void;
+        unsafe {
+            let _ = madvise(addr, len, MADV_HUGEPAGE);
+        }
+    }
+    #[cfg(not(all(unix, target_os = "linux")))]
+    let _ = buckets;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +496,19 @@ mod tests {
     fn tt_bucket_is_cacheline_aligned() {
         assert_eq!(std::mem::align_of::<Bucket>(), 64);
         assert!(std::mem::size_of::<Bucket>().is_multiple_of(64));
+    }
+
+    #[test]
+    fn new_tt_survives_huge_page_advice() {
+        let tt = TranspositionTable::new(1);
+        let mv = Move::quiet(Square::E2, Square::E4);
+        tt.store(42, TTData::new(6, 17, NodeType::Exact, mv, false, None));
+        let hit = tt
+            .probe(42)
+            .expect("store must remain readable after madvise");
+        assert_eq!(hit.depth, 6);
+        assert_eq!(hit.score, 17);
+        assert_eq!(hit.best_move, mv);
     }
 
     #[test]

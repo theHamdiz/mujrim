@@ -37,8 +37,8 @@ pub mod windowing;
 #[allow(unused_imports)]
 pub use engine::{
     BundledEngineChoice, EngineConfig, GameMode, PlayerConfig, QuickTournamentEngine,
-    TelemetrySnapshot, apply_search_info, bounded_hash_mb, builtin_analysis_line,
-    builtin_engine_search, bundled_engine_choices, bundled_engine_label, selected_bundled_engine,
+    TelemetrySnapshot, apply_search_info, bounded_hash_mb, bundled_engine_choices,
+    bundled_engine_label, discover_default_engine, resolve_engine_launch, selected_bundled_engine,
 };
 #[allow(unused_imports)]
 pub use palette::{BoardTheme, GuiPalette, Rgba, ThemeColors};

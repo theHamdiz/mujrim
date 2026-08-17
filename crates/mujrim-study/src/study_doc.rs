@@ -8,6 +8,10 @@ pub struct Study {
     pub id: String,
     pub title: String,
     pub chapters: Vec<Chapter>,
+    #[serde(default)]
+    pub source_key: String,
+    #[serde(default)]
+    pub annotator: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17,6 +21,16 @@ pub struct Chapter {
     pub start_fen: String,
     pub tree: MoveTree,
     pub chapter_notes: String,
+    #[serde(default)]
+    pub annotator: String,
+    #[serde(default)]
+    pub eco: String,
+    #[serde(default)]
+    pub opening: String,
+    #[serde(default)]
+    pub chapter_url: String,
+    #[serde(default)]
+    pub orientation: String,
 }
 
 impl Study {
@@ -27,6 +41,8 @@ impl Study {
             id,
             title,
             chapters: vec![Chapter::new("Chapter 1", START_FEN, MoveTree::default())],
+            source_key: String::new(),
+            annotator: String::new(),
         }
     }
 
@@ -42,6 +58,8 @@ impl Study {
             id: hash_id(&title),
             title,
             chapters: vec![Chapter::new(chapter_title, start_fen, tree)],
+            source_key: String::new(),
+            annotator: String::new(),
         })
     }
 }
@@ -56,6 +74,11 @@ impl Chapter {
             start_fen,
             tree,
             chapter_notes: String::new(),
+            annotator: String::new(),
+            eco: String::new(),
+            opening: String::new(),
+            chapter_url: String::new(),
+            orientation: String::new(),
         }
     }
 
@@ -69,7 +92,7 @@ impl Chapter {
     }
 }
 
-fn hash_id(text: &str) -> String {
+pub(crate) fn hash_id(text: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);

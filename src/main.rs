@@ -661,13 +661,12 @@ fn main() {
                     let output = emit
                         .get_one::<String>("output")
                         .map_or("ateed_default.bin", String::as_str);
-                    if let Err(error) =
-                        trainer::ateed::emit_zero_network(std::path::Path::new(output))
-                    {
+                    let output = eval::nnue::resolve_ateed_output_path(output);
+                    if let Err(error) = trainer::ateed::emit_zero_network(&output) {
                         eprintln!("failed to emit Ateed network: {error}");
                         std::process::exit(1);
                     }
-                    println!("wrote Ateed zero network to {output}");
+                    println!("wrote Ateed zero network to {}", output.display());
                 }
                 Some(("datagen", datagen)) => {
                     let config = trainer::config::DatagenConfig {
@@ -700,10 +699,13 @@ fn main() {
                             .get_one::<String>("data")
                             .cloned()
                             .unwrap_or_else(|| "data.txt".to_string()),
-                        output_path: train
-                            .get_one::<String>("output")
-                            .cloned()
-                            .unwrap_or_else(|| "ateed_default.bin".to_string()),
+                        output_path: eval::nnue::resolve_ateed_output_path(
+                            train
+                                .get_one::<String>("output")
+                                .map_or("ateed_default.bin", String::as_str),
+                        )
+                        .to_string_lossy()
+                        .into_owned(),
                         epochs: train
                             .get_one::<String>("epochs")
                             .and_then(|value| value.parse().ok())

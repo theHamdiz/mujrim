@@ -1,14 +1,11 @@
-//! Engine player configuration and built-in search.
+//! Engine player configuration. Search always goes through a dedicated binary.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 use mujrim_protocols::SearchInfo;
-use mujrim_protocols::catalog::{DiscoveredEngine, RuntimeCompatibility};
+use mujrim_protocols::catalog::{DiscoveredEngine, RuntimeCompatibility, preferred_bundled_engine};
 
-use super::uci_process::ExternalEngineProtocol;
+use super::uci_process::{self, ExternalEngineProtocol};
 
 pub const MAX_GUI_HASH_MB: i32 = 512;
 
@@ -179,15 +176,17 @@ pub fn bundled_engine_choices(engines: &[DiscoveredEngine]) -> Vec<BundledEngine
         .collect()
 }
 
+fn external_player(engine: &DiscoveredEngine) -> PlayerConfig {
+    PlayerConfig::External {
+        path: engine.path.to_string_lossy().into_owned(),
+        protocol: ExternalEngineProtocol::Uci,
+    }
+}
+
 pub fn default_engine_player(bundled: &[DiscoveredEngine]) -> PlayerConfig {
-    bundled
-        .first()
-        .map_or(PlayerConfig::BuiltIn { depth: 16 }, |engine| {
-            PlayerConfig::External {
-                path: engine.path.to_string_lossy().into_owned(),
-                protocol: ExternalEngineProtocol::Uci,
-            }
-        })
+    preferred_bundled_engine(bundled)
+        .map(external_player)
+        .unwrap_or(PlayerConfig::BuiltIn { depth: 16 })
 }
 
 pub fn players_for_mode(
@@ -199,13 +198,17 @@ pub fn players_for_mode(
         GameMode::HumanVsEngine => (PlayerConfig::Human, default_engine_player(bundled)),
         GameMode::EngineVsEngine => {
             let white = default_engine_player(bundled);
-            let black = bundled.get(1).map_or_else(
-                || PlayerConfig::BuiltIn { depth: 12 },
-                |engine| PlayerConfig::External {
-                    path: engine.path.to_string_lossy().into_owned(),
-                    protocol: ExternalEngineProtocol::Uci,
-                },
-            );
+            let default_path = match &white {
+                PlayerConfig::External { path, .. } => Some(path.as_str()),
+                _ => None,
+            };
+            let black = bundled
+                .iter()
+                .find(|engine| {
+                    default_path.is_none_or(|path| engine.path != std::path::Path::new(path))
+                })
+                .map(external_player)
+                .unwrap_or(PlayerConfig::BuiltIn { depth: 12 });
             (white, black)
         }
     }
@@ -323,108 +326,35 @@ pub fn apply_search_info(target: &mut TelemetrySnapshot, info: &SearchInfo, pref
     *target = TelemetrySnapshot::from_search_info(info, prefix);
 }
 
-pub fn builtin_analysis_line(fen: &str, depth: i32) -> Result<(String, i32, Vec<String>), String> {
-    types::init();
-    let mut board = types::Board::from_fen(fen)?;
-    let (mv, _info) = builtin_engine_search(
-        &mut board,
-        64,
-        1,
-        true,
-        None,
-        Duration::from_millis(250),
-        depth.max(1),
-    )?;
-    Ok((mv.to_uci(), 0, vec![mv.to_uci()]))
+/// Dedicated Mujrim binary from `engines/mujrim/`. Prefers `mujrim-v60`.
+pub fn discover_default_engine() -> Option<PathBuf> {
+    let engines = mujrim_protocols::catalog::discover_bundled_engines_from_environment().ok()?;
+    preferred_bundled_engine(&engines).map(|engine| engine.path.clone())
 }
 
-pub fn builtin_engine_search(
-    board: &mut types::Board,
-    hash_mb: usize,
-    threads: usize,
-    use_nnue: bool,
-    eval_file: Option<&str>,
-    time: Duration,
-    max_depth: i32,
-) -> Result<(types::Move, String), String> {
-    struct BuiltinCache {
-        hash_mb: usize,
-        threads: usize,
-        use_nnue: bool,
-        eval_file: Option<String>,
-        engine: search::SearchEngine,
+pub fn resolve_engine_launch(
+    player: &PlayerConfig,
+) -> Result<(String, ExternalEngineProtocol), String> {
+    match player {
+        PlayerConfig::Human => Err("No engine selected for this side.".to_owned()),
+        PlayerConfig::External { path, protocol } => Ok((path.clone(), *protocol)),
+        PlayerConfig::BuiltIn { .. } => discover_default_engine()
+            .map(|path| {
+                (
+                    path.to_string_lossy().into_owned(),
+                    ExternalEngineProtocol::Uci,
+                )
+            })
+            .ok_or_else(|| {
+                "Mujrim engine binary not found. Place mujrim-v60 under engines/mujrim/ relative to the UI."
+                    .to_owned()
+            }),
     }
-
-    static CACHE: OnceLock<Mutex<Option<BuiltinCache>>> = OnceLock::new();
-    let token_slot = builtin_stop_slot();
-    let mut guard = CACHE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let needs_rebuild = guard.as_ref().is_none_or(|cached| {
-        cached.hash_mb != hash_mb
-            || cached.threads != threads
-            || cached.use_nnue != use_nnue
-            || cached.eval_file.as_deref() != eval_file
-    });
-
-    if needs_rebuild {
-        let mut engine = search::SearchEngine::new(hash_mb, threads);
-        engine.set_use_nnue(use_nnue);
-        if let Some(path) = eval_file {
-            let net = eval::nnue::load_network(std::path::Path::new(path))
-                .map_err(|err| format!("EvalFile error: {err}"))?;
-            engine.set_nnue_network(net);
-        }
-        *guard = Some(BuiltinCache {
-            hash_mb,
-            threads,
-            use_nnue,
-            eval_file: eval_file.map(str::to_owned),
-            engine,
-        });
-    }
-
-    let cached = guard.as_mut().expect("builtin cache just initialized");
-    let token = cached.engine.stop_token();
-    *token_slot
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&token));
-    let result = cached.engine.search_time(board, time, max_depth);
-    *token_slot
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    let note = eval_file
-        .map(|_| format!(" | net {}", cached.engine.nnue_info().name))
-        .unwrap_or_default();
-    Ok((
-        result.best_move,
-        format!(
-            "depth {} | score {} cp | {} nodes | {:.0} nps{}",
-            result.depth,
-            result.score,
-            result.nodes,
-            result.nodes as f64 / result.elapsed.as_secs_f64().max(0.001),
-            note,
-        ),
-    ))
 }
 
-fn builtin_stop_slot() -> &'static Mutex<Option<Arc<AtomicBool>>> {
-    static SLOT: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
-}
-
-/// Interrupt an in-flight built-in search without waiting on the engine mutex.
+/// Cancel an in-flight GUI engine search (dedicated binary via UCI/XBoard).
 pub fn stop_builtin_search() {
-    if let Some(flag) = builtin_stop_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-    {
-        flag.store(true, Ordering::SeqCst);
-    }
+    uci_process::cancel_all_pondering();
 }
 
 #[cfg(test)]
@@ -467,12 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn builtin_stop_uses_the_search_engine_token() {
+    fn builtin_play_resolves_a_dedicated_engine_binary() {
         let src = include_str!("engine.rs");
         let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("discover_default_engine"));
+        assert!(production.contains("resolve_engine_launch"));
+        assert!(!production.contains("search::SearchEngine"));
         assert!(production.contains("stop_builtin_search"));
-        assert!(production.contains("stop_token"));
-        assert!(production.contains("builtin_stop_slot"));
+        assert!(production.contains("cancel_all_pondering"));
     }
 
     #[test]
@@ -532,5 +464,46 @@ mod tests {
         let (white, black) = players_for_mode(GameMode::EngineVsEngine, &[]);
         assert!(matches!(white, PlayerConfig::BuiltIn { depth: 16 }));
         assert!(matches!(black, PlayerConfig::BuiltIn { depth: 12 }));
+    }
+
+    #[test]
+    fn default_engine_player_prefers_v60_from_detected_variants() {
+        let elite = DiscoveredEngine {
+            id: "mujrim-elite",
+            display_name: "Mujrim Elite",
+            path: PathBuf::from("/opt/mujrim/engines/mujrim/mujrim-elite"),
+            target_directory: "engines/mujrim".to_owned(),
+            compatibility: RuntimeCompatibility::Native,
+            search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+        };
+        let v60 = DiscoveredEngine {
+            id: "mujrim-v60",
+            display_name: "Mujrim v60",
+            path: PathBuf::from("/opt/mujrim/engines/mujrim/mujrim-v60"),
+            target_directory: "engines/mujrim".to_owned(),
+            compatibility: RuntimeCompatibility::Native,
+            search_limits: mujrim_protocols::catalog::SearchLimitSupport::STANDARD,
+        };
+        let (white, black) =
+            players_for_mode(GameMode::EngineVsEngine, &[elite.clone(), v60.clone()]);
+        assert!(matches!(
+            white,
+            PlayerConfig::External { ref path, .. } if path.ends_with("mujrim-v60")
+        ));
+        assert!(matches!(
+            black,
+            PlayerConfig::External { ref path, .. } if path.ends_with("mujrim-elite")
+        ));
+        assert!(matches!(
+            default_engine_player(&[elite, v60]),
+            PlayerConfig::External { ref path, .. } if path.ends_with("mujrim-v60")
+        ));
+        let production = include_str!("engine.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source");
+        assert!(production.contains("preferred_bundled_engine"));
+        assert!(production.contains("engines/mujrim"));
+        assert!(!production.contains("discover_mujrim_cli_from_environment"));
     }
 }

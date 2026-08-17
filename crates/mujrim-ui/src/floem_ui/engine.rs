@@ -8,7 +8,7 @@ use mujrim_protocols::SearchInfo;
 use types::Move;
 
 use crate::app_core::engine::{
-    EngineConfig, PlayerConfig, TelemetrySnapshot, apply_search_info, builtin_engine_search,
+    EngineConfig, PlayerConfig, TelemetrySnapshot, apply_search_info, resolve_engine_launch,
 };
 use crate::app_core::game::GameState;
 use crate::app_core::match_controller::{self, FinishOutcome, MatchAction, MatchSnapshot};
@@ -104,20 +104,8 @@ fn search_side(
     let time = Duration::from_secs(cfg.time_per_move.max(1) as u64);
     match player {
         PlayerConfig::Human => Err("No engine selected for this side.".to_owned()),
-        PlayerConfig::BuiltIn { .. } => {
-            let (mv, info) = builtin_engine_search(
-                board,
-                hash_mb,
-                threads,
-                cfg.use_nnue,
-                cfg.eval_file.as_deref(),
-                time,
-                cfg.max_depth,
-            )?;
-            telemetry.set(TelemetrySnapshot::from_label(info.clone()));
-            Ok((mv, info, None, false))
-        }
-        PlayerConfig::External { path, protocol } => {
+        PlayerConfig::BuiltIn { .. } | PlayerConfig::External { .. } => {
+            let (path, protocol) = resolve_engine_launch(player)?;
             let fen = board.to_fen();
             let legal = board.generate_legal_moves();
             let search = ExternalSearchConfig {
@@ -127,8 +115,8 @@ fn search_side(
                 eval_file: cfg.eval_file.clone(),
             };
             let info = uci_process::query_best_move_streaming(
-                path,
-                *protocol,
+                &path,
+                protocol,
                 &fen,
                 cfg.max_depth,
                 time,

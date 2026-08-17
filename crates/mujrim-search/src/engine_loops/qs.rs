@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use types::chess_move::NULL_MOVE;
 use types::{Board, Move};
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn quiescence(
     board: &mut Board,
     state: &mut ThreadState,
@@ -53,6 +54,7 @@ fn quiescence_ex<const SNAPSHOT: bool>(
         params,
         use_nnue,
         move_ordering,
+        eval_mode,
         deadline_ms,
         ..
     } = *context;
@@ -85,18 +87,9 @@ fn quiescence_ex<const SNAPSHOT: bool>(
     }
 
     let in_check = state.in_check[ply_usize];
-    let mut best_score = if in_check {
-        -INF
-    } else {
-        let raw = hybrid_eval(board, state, use_nnue);
-        let eval = raw + state.correction(board, move_ordering);
-        if eval >= beta {
-            return eval;
-        }
-        alpha = alpha.max(eval);
-        eval
-    };
-
+    let mut raw_eval = None;
+    let mut tt_score = None;
+    let mut tt_bound = None;
     let tt_move = if let Some(entry) = tt.probe(board.tt_hash()) {
         let probed = score_from_tt(entry.score, ply);
         match entry.node_type {
@@ -105,9 +98,48 @@ fn quiescence_ex<const SNAPSHOT: bool>(
             NodeType::UpperBound if probed <= alpha => return probed,
             _ => {}
         }
+        raw_eval = entry.raw_eval;
+        tt_score = Some(probed);
+        tt_bound = Some(entry.node_type);
         usable_tt_move(entry.best_move)
     } else {
         None
+    };
+
+    let mut acc_ready = false;
+    let mut best_score = if in_check {
+        -INF
+    } else {
+        let raw = if let Some(raw) = raw_eval {
+            raw
+        } else {
+            acc_ready = use_nnue;
+            let raw = hybrid_eval(board, state, use_nnue);
+            raw_eval = Some(raw);
+            raw
+        };
+        let eval = super::corrected_network_eval(
+            board,
+            raw,
+            state.correction(board, move_ordering),
+            state.optimism[board.side_to_move.index()],
+            eval_mode,
+        );
+        let stand_pat = if let (Some(ts), Some(bound)) = (tt_score, tt_bound) {
+            let replace = match bound {
+                NodeType::LowerBound => eval <= ts,
+                NodeType::UpperBound => eval >= ts,
+                NodeType::Exact => true,
+            };
+            if replace { ts } else { eval }
+        } else {
+            eval
+        };
+        if stand_pat >= beta {
+            return i32::midpoint(stand_pat, beta);
+        }
+        alpha = alpha.max(stand_pat);
+        stand_pat
     };
     let mut picker = MovePicker::new(board, tt_move, [NULL_MOVE; 2], NULL_MOVE)
         .with_move_ordering(move_ordering);
@@ -123,6 +155,10 @@ fn quiescence_ex<const SNAPSHOT: bool>(
     while let Some(mv) = picker.next(board, &score_capture, &score_quiet) {
         if !in_check && !see::see_ge(board, mv, 1) {
             continue;
+        }
+        if use_nnue && !acc_ready {
+            state.nnue_state.hint_common_access(board);
+            acc_ready = true;
         }
         context.tt.prefetch(board.tt_hash_after(mv));
         let score = if SNAPSHOT {
@@ -167,6 +203,10 @@ fn quiescence_ex<const SNAPSHOT: bool>(
         return -MATE_SCORE + ply;
     }
 
+    if !in_check && best_score > beta {
+        best_score = i32::midpoint(best_score, beta);
+    }
+
     tt.store(
         board.tt_hash(),
         TTData::new(
@@ -175,7 +215,7 @@ fn quiescence_ex<const SNAPSHOT: bool>(
             bound,
             best_move,
             false,
-            None,
+            raw_eval,
         ),
     );
     let _ = params;

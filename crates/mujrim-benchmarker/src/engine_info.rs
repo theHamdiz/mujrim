@@ -299,30 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn from_runtime_maps_viridithas_search_profile() {
-        let info = NnueNetworkInfo {
-            name: "velarised-2".into(),
-            format: NetworkFormat::Viridithas,
-            architecture:
-                "704×16hm → 2560 pairwise-CReLU → 16 HardSwish6 → 32 SwiGLU → 1 ×8 (velarised)"
-                    .into(),
-            hidden_size: 2560,
-            num_buckets: 16,
-            qa: 255,
-            qb: 64,
-            scale: 240,
-            file_size: 58_040_864,
-        };
-        let display = NnueInfo::from_runtime(info);
-        assert_eq!(display.format, "Viridithas");
-        assert_eq!(
-            display.search_profile,
-            eval::nnue::NnueSearchProfile::Viridithas
-        );
-        assert!(display.architecture.contains("velarised"));
-    }
-
-    #[test]
     fn from_runtime_maps_sandhi_viridithas_search_profile() {
         let info = NnueNetworkInfo {
             name: "sandhi-s2-b200".into(),

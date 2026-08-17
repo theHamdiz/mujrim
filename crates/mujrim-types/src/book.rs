@@ -11,8 +11,9 @@
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use types::chess_move::MoveFlag;
-use types::{Board, Color, Move, Piece, Square};
+
+use crate::chess_move::MoveFlag;
+use crate::{Board, Color, Move, Piece, Square};
 
 /// A single entry from a polyglot opening book.
 #[derive(Clone, Copy, Debug)]
@@ -323,16 +324,16 @@ fn polyglot_hash(board: &Board) -> u64 {
     }
 
     // Castling
-    if board.castling_rights & types::board::WHITE_KING_CASTLE != 0 {
+    if board.castling_rights & crate::board::WHITE_KING_CASTLE != 0 {
         hash ^= POLY_RANDOM[768];
     }
-    if board.castling_rights & types::board::WHITE_QUEEN_CASTLE != 0 {
+    if board.castling_rights & crate::board::WHITE_QUEEN_CASTLE != 0 {
         hash ^= POLY_RANDOM[769];
     }
-    if board.castling_rights & types::board::BLACK_KING_CASTLE != 0 {
+    if board.castling_rights & crate::board::BLACK_KING_CASTLE != 0 {
         hash ^= POLY_RANDOM[770];
     }
-    if board.castling_rights & types::board::BLACK_QUEEN_CASTLE != 0 {
+    if board.castling_rights & crate::board::BLACK_QUEEN_CASTLE != 0 {
         hash ^= POLY_RANDOM[771];
     }
 
@@ -391,7 +392,7 @@ mod tests {
     use super::*;
 
     fn setup() {
-        types::init();
+        crate::init();
     }
 
     #[test]

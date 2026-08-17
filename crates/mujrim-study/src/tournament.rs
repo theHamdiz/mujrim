@@ -115,6 +115,32 @@ pub fn schedule(entrant_count: usize, format: TournamentFormat) -> Vec<Pairing> 
     pairings
 }
 
+/// Pairings that will be played for a full event of the given shape.
+pub fn planned_pairings(
+    entrant_count: usize,
+    format: TournamentFormat,
+    swiss_rounds: u32,
+) -> usize {
+    match format {
+        TournamentFormat::Swiss => (swiss_rounds as usize).max(1) * (entrant_count / 2),
+        TournamentFormat::Knockout => entrant_count.saturating_sub(1),
+        other => schedule(entrant_count, other).len(),
+    }
+}
+
+/// Total games in an event: pairings × games per encounter (at least 1).
+pub fn planned_event_games(
+    entrant_count: usize,
+    format: TournamentFormat,
+    games_per_encounter: u32,
+    swiss_rounds: u32,
+) -> u32 {
+    let pairings = planned_pairings(entrant_count, format, swiss_rounds);
+    pairings
+        .saturating_mul(games_per_encounter.max(1) as usize)
+        .max(1) as u32
+}
+
 /// Produce one deterministic Swiss round, grouping equal scores first and
 /// avoiding repeat opponents whenever an alternative remains.
 pub fn swiss_round(
@@ -487,5 +513,23 @@ mod tests {
         let leader = table[0].performance.expect("leader").elo;
         let second = table[1].performance.expect("second").elo;
         assert!(leader >= second, "{leader} vs {second}");
+    }
+
+    #[test]
+    fn planned_event_games_caps_a_two_engine_match() {
+        assert_eq!(
+            planned_event_games(2, TournamentFormat::RoundRobin, 4, 4),
+            4
+        );
+        assert_eq!(
+            planned_event_games(2, TournamentFormat::DoubleRoundRobin, 4, 4),
+            8
+        );
+        assert_eq!(planned_event_games(2, TournamentFormat::Swiss, 2, 3), 6);
+        assert_eq!(planned_event_games(4, TournamentFormat::Knockout, 2, 1), 6);
+        assert_eq!(
+            planned_event_games(4, TournamentFormat::RoundRobin, 1, 1),
+            6
+        );
     }
 }

@@ -1103,6 +1103,28 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_search_uses_official_finny_from_board() {
+        types::init();
+        let net = super::super::network::net();
+        let mut board = Board::new();
+        let mut finny = AkimboAccumulatorState::new();
+        let start = finny.evaluate_search(&board, net);
+        assert_eq!(start, ply_stack_eval(&board, net));
+
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4");
+        board.make_move(mv);
+        assert_eq!(
+            finny.evaluate_search(&board, net),
+            ply_stack_eval(&board, net)
+        );
+    }
+
+    #[test]
     fn evaluate_search_without_ply_matches_pushed_incremental() {
         types::init();
         let net = super::super::network::net();

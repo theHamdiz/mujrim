@@ -146,6 +146,13 @@ impl StudyDatabase {
                  CREATE INDEX IF NOT EXISTS study_chapters_study ON study_chapters(study_id, sort_order);",
             )
             .map_err(|error| format!("failed to initialize study documents: {error}"))?;
+        for sql in [
+            "ALTER TABLE studies ADD COLUMN source_key TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE studies ADD COLUMN annotator TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE study_chapters ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'",
+        ] {
+            let _ = sqlite.execute(sql, []);
+        }
         let mut database = Self {
             root,
             games: BTreeMap::new(),
@@ -365,8 +372,8 @@ impl StudyDatabase {
     pub fn save_study(&mut self, study: &crate::study_doc::Study) -> Result<(), String> {
         self.sqlite
             .execute(
-                "INSERT OR REPLACE INTO studies (id, title) VALUES (?1, ?2)",
-                params![study.id, study.title],
+                "INSERT OR REPLACE INTO studies (id, title, source_key, annotator) VALUES (?1, ?2, ?3, ?4)",
+                params![study.id, study.title, study.source_key, study.annotator],
             )
             .map_err(|error| format!("failed to save study: {error}"))?;
         self.sqlite
@@ -379,8 +386,8 @@ impl StudyDatabase {
             self.sqlite
                 .execute(
                     "INSERT INTO study_chapters
-                     (id, study_id, title, start_fen, tree_json, chapter_notes, sort_order)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     (id, study_id, title, start_fen, tree_json, chapter_notes, sort_order, meta_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         chapter.id,
                         study.id,
@@ -389,6 +396,7 @@ impl StudyDatabase {
                         chapter.tree.encode()?,
                         chapter.chapter_notes,
                         order as i64,
+                        chapter_meta_json(chapter),
                     ],
                 )
                 .map_err(|error| format!("failed to save chapter: {error}"))?;
@@ -414,18 +422,39 @@ impl StudyDatabase {
     }
 
     pub fn load_study(&self, id: &str) -> Result<crate::study_doc::Study, String> {
-        let title = self
+        let (title, source_key, annotator) = self
             .sqlite
-            .query_row("SELECT title FROM studies WHERE id = ?1", [id], |row| {
-                row.get::<_, String>(0)
+            .query_row(
+                "SELECT title, source_key, annotator FROM studies WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, String>(2).unwrap_or_default(),
+                    ))
+                },
+            )
+            .or_else(|_| {
+                self.sqlite
+                    .query_row("SELECT title FROM studies WHERE id = ?1", [id], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map(|title| (title, String::new(), String::new()))
             })
             .map_err(|error| format!("failed to load study: {error}"))?;
         let mut stmt = self
             .sqlite
             .prepare(
-                "SELECT id, title, start_fen, tree_json, chapter_notes
+                "SELECT id, title, start_fen, tree_json, chapter_notes, meta_json
                  FROM study_chapters WHERE study_id = ?1 ORDER BY sort_order ASC",
             )
+            .or_else(|_| {
+                self.sqlite.prepare(
+                    "SELECT id, title, start_fen, tree_json, chapter_notes, '{}'
+                     FROM study_chapters WHERE study_id = ?1 ORDER BY sort_order ASC",
+                )
+            })
             .map_err(|error| format!("failed to list chapters: {error}"))?;
         let chapters = stmt
             .query_map([id], |row| {
@@ -435,6 +464,7 @@ impl StudyDatabase {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5).unwrap_or_else(|_| "{}".into()),
                 ))
             })
             .map_err(|error| format!("failed to read chapters: {error}"))?
@@ -442,20 +472,31 @@ impl StudyDatabase {
             .map_err(|error| format!("invalid chapter row: {error}"))?;
         let chapters = chapters
             .into_iter()
-            .map(|(id, title, start_fen, tree_json, chapter_notes)| {
-                Ok(crate::study_doc::Chapter {
-                    id,
-                    title,
-                    start_fen,
-                    tree: crate::move_tree::MoveTree::decode(&tree_json)?,
-                    chapter_notes,
-                })
-            })
+            .map(
+                |(id, title, start_fen, tree_json, chapter_notes, meta_json)| {
+                    let mut chapter = crate::study_doc::Chapter {
+                        id,
+                        title,
+                        start_fen,
+                        tree: crate::move_tree::MoveTree::decode(&tree_json)?,
+                        chapter_notes,
+                        annotator: String::new(),
+                        eco: String::new(),
+                        opening: String::new(),
+                        chapter_url: String::new(),
+                        orientation: String::new(),
+                    };
+                    apply_chapter_meta(&mut chapter, &meta_json);
+                    Ok(chapter)
+                },
+            )
             .collect::<Result<Vec<_>, String>>()?;
         Ok(crate::study_doc::Study {
             id: id.to_owned(),
             title,
             chapters,
+            source_key,
+            annotator,
         })
     }
 
@@ -667,6 +708,48 @@ impl StudyDatabase {
         }
         Ok(())
     }
+}
+
+fn chapter_meta_json(chapter: &crate::study_doc::Chapter) -> String {
+    serde_json::json!({
+        "annotator": chapter.annotator,
+        "eco": chapter.eco,
+        "opening": chapter.opening,
+        "chapter_url": chapter.chapter_url,
+        "orientation": chapter.orientation,
+    })
+    .to_string()
+}
+
+fn apply_chapter_meta(chapter: &mut crate::study_doc::Chapter, meta_json: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(meta_json) else {
+        return;
+    };
+    chapter.annotator = value
+        .get("annotator")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    chapter.eco = value
+        .get("eco")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    chapter.opening = value
+        .get("opening")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    chapter.chapter_url = value
+        .get("chapter_url")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    chapter.orientation = value
+        .get("orientation")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
 }
 
 fn encode_index_row(id: &str, metadata: &GameMetadata) -> String {
@@ -897,6 +980,39 @@ mod tests {
         assert_eq!(loaded.chapters[0].tree.children[0].children[1].uci, "c7c5");
         database.delete_study(&study.id).unwrap();
         assert!(database.list_studies().unwrap().is_empty());
+        drop(database);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn study_documents_keep_lichess_chapter_meta() {
+        let root = temporary_database();
+        let mut database = StudyDatabase::open(&root).unwrap();
+        let studies = crate::lichess_study::parse_studies(
+            r#"
+[Event "Stafford Gambit Traps: Intro"]
+[StudyName "Stafford Gambit Traps"]
+[ChapterName "Intro"]
+[ChapterURL "https://lichess.org/study/whCVdUeM/1qG3NOtV"]
+[Annotator "https://lichess.org/@/EricRosen"]
+[ECO "C42"]
+[Opening "Petrov's Defense: Stafford Gambit"]
+[Orientation "black"]
+
+{ Welcome. }
+*
+"#,
+        )
+        .unwrap();
+        let mut study = studies.into_iter().next().unwrap();
+        study.source_key = "/tmp/stafford.pgn".into();
+        database.save_study(&study).unwrap();
+        let loaded = database.load_study(&study.id).unwrap();
+        assert_eq!(loaded.source_key, "/tmp/stafford.pgn");
+        assert!(loaded.annotator.contains("EricRosen"));
+        assert_eq!(loaded.chapters[0].eco, "C42");
+        assert_eq!(loaded.chapters[0].orientation, "black");
+        assert!(loaded.chapters[0].chapter_notes.contains("Welcome"));
         drop(database);
         fs::remove_dir_all(&root).unwrap();
     }

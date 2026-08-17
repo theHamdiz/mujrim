@@ -13,14 +13,35 @@ path = "src/lib.rs"
 [[bin]]
 name = "mujrim-benchmarker"
 path = "src/main.rs"
+required-features = ["internal"]
 
 [features]
-default = ["tui", "nnue", "simd", "akimbo-nnue"]
+default = [
+    "tui",
+    "internal",
+    "book",
+    "nnue",
+    "simd",
+    "akimbo-nnue",
+    "stockfish-nnue",
+    "reckless-nnue",
+    "viridithas-nnue",
+    "obsidian-nnue",
+    "plentychess-nnue",
+    "ateed-nnue",
+]
 tui = ["dep:ratatui", "dep:crossterm"]
-nnue = ["eval/nnue"]
-simd = ["eval/simd"]
-akimbo-nnue = ["eval/akimbo-nnue"]
-stockfish-nnue = ["eval/stockfish-nnue"]
+internal = ["dep:search", "dep:eval"]
+book = ["search/book"]
+nnue = ["eval/nnue", "search/nnue"]
+simd = ["eval/simd", "search/simd"]
+akimbo-nnue = ["eval/akimbo-nnue", "search/akimbo-nnue"]
+stockfish-nnue = ["eval/stockfish-nnue", "search/stockfish-nnue"]
+reckless-nnue = ["eval/reckless-nnue", "search/reckless-nnue"]
+viridithas-nnue = ["eval/viridithas-nnue", "search/viridithas-nnue"]
+obsidian-nnue = ["eval/obsidian-nnue", "search/obsidian-nnue"]
+plentychess-nnue = ["eval/plentychess-nnue", "search/plentychess-nnue"]
+ateed-nnue = ["eval/ateed-nnue", "search/ateed-nnue"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -31,7 +52,7 @@ crossterm = { version = "0.28", optional = true }
 
 # Workspace crates
 types = { package = "mujrim-types", path = "../mujrim-types" }
-eval = { package = "mujrim-eval", path = "../mujrim-eval" }
-search = { package = "mujrim-search", path = "../mujrim-search" }
+eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, optional = true }
+search = { package = "mujrim-search", path = "../mujrim-search", default-features = false, optional = true }
 mujrim-protocols = { path = "../mujrim-protocols" }
 mujrim-study = { path = "../mujrim-study" }

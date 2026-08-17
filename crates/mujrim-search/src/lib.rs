@@ -1,6 +1,6 @@
 pub mod adapters;
 #[cfg(feature = "book")]
-pub mod book;
+pub use types::book;
 pub mod conversion;
 pub mod engine;
 pub mod hce_bench;
@@ -55,5 +55,16 @@ mod feature_contract_tests {
             !manifest.contains("default = [\"book\", \"nnue\", \"simd\", \"akimbo-nnue\", \"stockfish-nnue\", \"reckless-nnue\", \"embedded-networks\"]"),
             "embedded-networks must not be part of search defaults"
         );
+    }
+
+    #[cfg(feature = "book")]
+    #[test]
+    fn opening_book_lives_in_types() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("pub use types::book"),
+            "search::book must re-export the types polyglot reader"
+        );
+        assert!(types::book::OpeningBook::from_bytes(&[]).is_ok());
     }
 }

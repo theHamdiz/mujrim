@@ -40,11 +40,8 @@ pub struct AnalysisSnapshot {
     pub status: String,
 }
 
-/// Run sequential multi-engine analysis (any UCI/XBoard engine + optional builtin).
-pub fn run_multi_engine_analysis(
-    request: AnalysisRequest,
-    builtin_search: impl Fn(&str, i32) -> Result<(String, i32, Vec<String>), String>,
-) -> AnalysisSnapshot {
+/// Run sequential multi-engine analysis against dedicated engine binaries.
+pub fn run_multi_engine_analysis(request: AnalysisRequest) -> AnalysisSnapshot {
     let mut analysis = MultiEngineAnalysis::new(request.fen.clone());
     let search = ExternalSearchConfig {
         ponder: false,
@@ -55,26 +52,15 @@ pub fn run_multi_engine_analysis(
     let multipv = request.multipv.max(1);
 
     for (slot, engine) in request.engines.iter().enumerate() {
-        let opinion = if engine.builtin {
-            match builtin_search(&request.fen, request.depth) {
-                Ok((best, score, pv)) => Some(EngineOpinion {
-                    engine_id: engine.id.clone(),
-                    engine_name: engine.name.clone(),
-                    color: color_for_engine_slot(slot),
-                    lines: vec![EngineLine {
-                        multipv: 1,
-                        score_cp: score,
-                        depth: request.depth,
-                        pv: if pv.is_empty() { vec![best] } else { pv },
-                        nodes: 0,
-                        nps: 0,
-                    }],
-                }),
-                Err(_) => None,
-            }
-        } else if let Some(path) = &engine.path {
+        let path = engine.path.clone().or_else(|| {
+            engine
+                .builtin
+                .then(crate::app_core::engine::discover_default_engine)
+                .flatten()
+        });
+        let opinion = if let Some(path) = path {
             match query_analysis_lines(
-                path,
+                &path,
                 engine.protocol,
                 &request.fen,
                 request.depth,
@@ -234,35 +220,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_only_analysis_produces_stepped_arrows() {
-        let snapshot = run_multi_engine_analysis(
-            AnalysisRequest {
-                fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".into(),
-                depth: 6,
-                movetime: Duration::from_millis(50),
-                hash_mb: 16,
-                threads: 1,
+    fn analysis_arrows_step_from_engine_pv() {
+        let mut analysis =
+            MultiEngineAnalysis::new("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        analysis.push_opinion(EngineOpinion {
+            engine_id: "mujrim".into(),
+            engine_name: "Mujrim".into(),
+            color: color_for_engine_slot(0),
+            lines: vec![EngineLine {
                 multipv: 1,
-                engines: vec![AnalysisEngineSpec {
-                    id: "builtin".into(),
-                    name: "Mujrim".into(),
-                    path: None,
-                    protocol: ExternalEngineProtocol::Uci,
-                    builtin: true,
-                }],
-                max_pv_plies: 3,
-            },
-            |_fen, _depth| {
-                Ok((
-                    "e2e4".into(),
-                    25,
-                    vec!["e2e4".into(), "e7e5".into(), "g1f3".into()],
-                ))
-            },
-        );
-        assert_eq!(snapshot.analysis.opinions.len(), 1);
-        assert_eq!(snapshot.arrows.len(), 3);
-        assert_eq!(snapshot.consensus.as_deref(), Some("e2e4"));
-        assert_eq!(snapshot.arrows[0].step, Some(1));
+                score_cp: 25,
+                depth: 6,
+                pv: vec!["e2e4".into(), "e7e5".into(), "g1f3".into()],
+                nodes: 0,
+                nps: 0,
+            }],
+        });
+        let arrows = analysis.all_arrows(3, 1);
+        assert_eq!(arrows.len(), 3);
+        assert_eq!(analysis.consensus_best_move().as_deref(), Some("e2e4"));
+        assert_eq!(arrows[0].step, Some(1));
+    }
+
+    #[test]
+    fn analysis_loads_the_dedicated_engine_binary() {
+        let src = include_str!("analysis.rs");
+        let production = src.split("#[cfg(test)]").next().expect("source");
+        assert!(production.contains("discover_default_engine"));
+        assert!(production.contains("query_analysis_lines"));
+        assert!(!production.contains("search::SearchEngine"));
+        assert!(!production.contains("builtin_search"));
     }
 }

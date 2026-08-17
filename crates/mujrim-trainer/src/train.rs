@@ -494,9 +494,14 @@ pub fn train_ateed_from(
     let lr = config.learning_rate as f32;
     let wdl_weight = config.wdl_weight.clamp(0.0, 1.0) as f32;
     let start_epoch = start_epoch.max(1);
+    let holdout = holdout_len(positions.len());
+    let train_end = positions.len() - holdout;
+    let train_set = &positions[..train_end];
+    let val_set = &positions[train_end..];
     for epoch in start_epoch..=config.epochs {
+        let epoch_start = std::time::Instant::now();
         let mut abs_err = 0.0f32;
-        for position in positions {
+        for position in train_set {
             let board = Board::from_fen(&position.fen)?;
             let target_wdl = stm_wdl(&board, position.wdl);
             let residual = match scope {
@@ -532,17 +537,83 @@ pub fn train_ateed_from(
             };
             abs_err += residual;
         }
-        let loss = abs_err / positions.len() as f32;
-        updater::progress::emit_progress(&updater::progress::JobProgress::train(
+        let train_len = train_set.len().max(1);
+        let loss = abs_err / train_len as f32;
+        let val_loss = if val_set.is_empty() {
+            None
+        } else {
+            Some(mean_residual(&state, val_set, scope, &compute)?)
+        };
+        let elapsed = epoch_start.elapsed().as_secs_f64().max(0.001);
+        let mpos = train_set.len() as f32 / elapsed as f32 / 1_000_000.0;
+        updater::progress::emit_progress(&epoch_progress(
             epoch,
             config.epochs,
             loss,
-            0,
+            val_loss,
+            lr,
+            mpos,
         ));
         snapshot_network(&mut state, scope, &mut net)?;
         on_epoch(epoch, &net)?;
     }
     Ok(net)
+}
+
+/// Last 10% of a dataset is reserved for validation when at least 10 positions exist.
+pub fn holdout_len(len: usize) -> usize {
+    if len < 10 { 0 } else { (len / 10).max(1) }
+}
+
+pub fn epoch_progress(
+    epoch: u32,
+    epochs: u32,
+    loss: f32,
+    val_loss: Option<f32>,
+    lr: f32,
+    mpos: f32,
+) -> updater::progress::JobProgress {
+    updater::progress::JobProgress::train_batch(updater::progress::TrainerBatch {
+        epoch,
+        epochs,
+        loss,
+        val_loss,
+        expert: 0,
+        lr,
+        mpos,
+    })
+}
+
+fn mean_residual(
+    state: &AteedTrainState,
+    positions: &[TrainingPosition],
+    scope: AteedTrainScope,
+    compute: &impl TrainCompute,
+) -> Result<f32, String> {
+    let mut abs_err = 0.0f32;
+    for position in positions {
+        abs_err += residual_of(state, position, scope, compute)?;
+    }
+    Ok(abs_err / positions.len() as f32)
+}
+
+fn residual_of(
+    state: &AteedTrainState,
+    position: &TrainingPosition,
+    scope: AteedTrainScope,
+    compute: &impl TrainCompute,
+) -> Result<f32, String> {
+    let board = Board::from_fen(&position.fen)?;
+    let target = position.score as f32;
+    let pred = match scope {
+        AteedTrainScope::OutputBiases => forward_heads(state).0,
+        AteedTrainScope::Expert0 => forward_expert0(state, &board, compute).score,
+        AteedTrainScope::Moe => {
+            let expert = route_gate(state.gate_b);
+            state.moe_eval_b[expert] * SCORE_SCALE
+        }
+    };
+    Ok((pred - target).abs())
 }
 
 fn load_ateed_network(path: &Path) -> Result<AteedNetwork, String> {
@@ -553,10 +624,14 @@ fn load_ateed_network(path: &Path) -> Result<AteedNetwork, String> {
 }
 
 pub fn train_ateed_to_file(config: &TrainingConfig, scope: AteedTrainScope) -> Result<(), String> {
+    let mut config = config.clone();
+    config.output_path = eval::nnue::resolve_ateed_output_path(&config.output_path)
+        .to_string_lossy()
+        .into_owned();
     let positions = load_mixed_positions(&config.data_path, &config.mix_weights, config.mix_seed)?;
     let output = Path::new(&config.output_path);
     let partial = crate::job::JobCheckpoint::partial_path(output);
-    let completed = crate::job::resume_train(config, scope);
+    let completed = crate::job::resume_train(&config, scope);
     let net = if completed > 0 {
         if partial.exists() {
             load_ateed_network(&partial)?
@@ -567,6 +642,8 @@ pub fn train_ateed_to_file(config: &TrainingConfig, scope: AteedTrainScope) -> R
         }
     } else if let Some(base) = &config.base_network {
         load_ateed_network(Path::new(base))?
+    } else if output.exists() {
+        load_ateed_network(output)?
     } else {
         AteedNetwork::zero()
     };
@@ -577,13 +654,13 @@ pub fn train_ateed_to_file(config: &TrainingConfig, scope: AteedTrainScope) -> R
     }
     let net = train_ateed_from(
         &positions,
-        config,
+        &config,
         scope,
         net,
         completed + 1,
         |epoch, snapshot| {
             crate::ateed::emit_network(&partial, snapshot).map_err(|error| error.to_string())?;
-            crate::job::train_checkpoint(config, scope, epoch).save()
+            crate::job::train_checkpoint(&config, scope, epoch).save()
         },
     )?;
     crate::ateed::emit_network(output, &net).map_err(|error| error.to_string())?;
@@ -698,6 +775,54 @@ mod tests {
     }
 
     #[test]
+    fn train_to_file_continues_from_the_existing_artifact() {
+        types::init();
+        let dir = std::env::temp_dir().join(format!(
+            "mujrim-train-cumulative-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let data = dir.join("data.txt");
+        let output = dir.join("net.bin");
+        std::fs::write(
+            &data,
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|80|0.5\n",
+        )
+        .expect("data");
+        let config = TrainingConfig {
+            data_path: data.display().to_string(),
+            output_path: output.display().to_string(),
+            epochs: 1,
+            learning_rate: 0.05,
+            wdl_weight: 0.0,
+            ..Default::default()
+        };
+        train_ateed_to_file(&config, AteedTrainScope::OutputBiases).expect("first");
+        let first = load_ateed_network(&output).expect("load first");
+        let first_score = first.evaluate(&Board::new());
+        let first_bias = first.expert(0).expect("expert 0").eval_bias();
+        train_ateed_to_file(&config, AteedTrainScope::OutputBiases).expect("second");
+        let second = load_ateed_network(&output).expect("load second");
+        let second_score = second.evaluate(&Board::new());
+        let second_bias = second.expert(0).expect("expert 0").eval_bias();
+        let _ = std::fs::remove_dir_all(dir);
+        assert_ne!(first_score, 0, "first run must leave a trained artifact");
+        assert_ne!(first_bias, 0);
+        assert_ne!(
+            second_bias, first_bias,
+            "a second run must keep training the same artifact"
+        );
+        assert!(
+            (second_score - 80).abs() <= (first_score - 80).abs(),
+            "cumulative train should not move away from the target, first={first_score} second={second_score}"
+        );
+    }
+
+    #[test]
     fn moe_trainer_updates_only_the_routed_expert() {
         types::init();
         let mut base = AteedNetwork::zero();
@@ -783,6 +908,29 @@ mod tests {
         let size = std::fs::metadata(&out).map(|meta| meta.len()).unwrap_or(0);
         let _ = std::fs::remove_file(&out);
         assert!(size > 0);
+    }
+
+    #[test]
+    fn holdout_split_reserves_ten_percent_after_ten_positions() {
+        assert_eq!(holdout_len(1), 0);
+        assert_eq!(holdout_len(9), 0);
+        assert_eq!(holdout_len(10), 1);
+        assert_eq!(holdout_len(100), 10);
+    }
+
+    #[test]
+    fn epoch_progress_includes_val_loss_mpos_and_lr() {
+        let progress = epoch_progress(2, 8, 0.3, Some(0.4), 0.01, 1.5);
+        assert_eq!(progress.epoch, Some(2));
+        assert_eq!(progress.epochs, Some(8));
+        assert!((progress.loss.unwrap() - 0.3).abs() < 0.001);
+        assert!((progress.val_loss.unwrap() - 0.4).abs() < 0.001);
+        assert!((progress.lr.unwrap() - 0.01).abs() < 0.0001);
+        assert!((progress.mpos.unwrap() - 1.5).abs() < 0.001);
+        let line = updater::progress::format_progress(&progress);
+        assert!(line.contains("val_loss="));
+        assert!(line.contains("mpos="));
+        assert!(line.contains("lr="));
     }
 
     #[test]

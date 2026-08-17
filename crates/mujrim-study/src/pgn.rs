@@ -388,6 +388,14 @@ mod tests {
     }
 
     #[test]
+    fn resolves_over_disambiguated_nge2() {
+        let input =
+            "[Event \"Vienna\"]\n\n1. e4 e5 2. Nc3 Nc6 3. Bc4 Bc5 4. Qg4 g6 5. Qf3 Nf6 6. Nge2 *";
+        let games = parse_games(input).unwrap();
+        assert_eq!(games[0].moves.last().map(String::as_str), Some("g1e2"));
+    }
+
+    #[test]
     fn rejects_ambiguous_or_illegal_moves() {
         let input = "[Event \"Broken\"]\n\n1. e5 *";
         assert!(parse_games(input).unwrap_err().contains("cannot resolve"));

@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(setup.hash_mb, 64);
         assert_eq!(setup.engine_threads, 2);
         assert_eq!(setup.games_per_encounter, 2);
-        assert_eq!(setup.concurrency, 3);
+        assert_eq!(setup.concurrency, 2);
         assert_eq!(
             setup.selected_engine_paths,
             [PathBuf::from("x"), PathBuf::from("y")]

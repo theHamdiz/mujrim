@@ -31,6 +31,18 @@ pub(crate) struct Align64Box<T> {
 unsafe impl<T: Send> Send for Align64Box<T> {}
 unsafe impl<T: Sync> Sync for Align64Box<T> {}
 
+impl<T> Align64Box<T> {
+    fn layout(len: usize) -> Layout {
+        let bytes = size_of::<T>() * len;
+        let align = if bytes >= 2 * 1024 * 1024 {
+            2 * 1024 * 1024
+        } else {
+            64.max(align_of::<T>())
+        };
+        Layout::from_size_align(bytes, align).expect("Align64Box layout")
+    }
+}
+
 impl<T: Copy> Align64Box<T> {
     pub(crate) fn from_slice(src: &[T]) -> Self {
         let len = src.len();
@@ -47,16 +59,12 @@ impl<T: Copy> Align64Box<T> {
                 handle_alloc_error(layout);
             }
             raw.cast::<T>().copy_from_nonoverlapping(src.as_ptr(), len);
+            advise_huge_pages(raw, layout.size());
             Self {
                 ptr: NonNull::new_unchecked(raw.cast()),
                 len,
             }
         }
-    }
-
-    fn layout(len: usize) -> Layout {
-        Layout::from_size_align(size_of::<T>() * len, 64.max(align_of::<T>()))
-            .expect("Align64Box layout")
     }
 }
 
@@ -81,8 +89,7 @@ impl<T> Drop for Align64Box<T> {
         if self.len == 0 {
             return;
         }
-        let layout = Layout::from_size_align(size_of::<T>() * self.len, 64.max(align_of::<T>()))
-            .expect("Align64Box layout");
+        let layout = Self::layout(self.len);
         unsafe {
             dealloc(self.ptr.as_ptr().cast(), layout);
         }
@@ -90,9 +97,37 @@ impl<T> Drop for Align64Box<T> {
 }
 
 #[inline]
+fn advise_huge_pages(ptr: *mut u8, len: usize) {
+    #[cfg(all(unix, target_os = "linux"))]
+    {
+        const MADV_HUGEPAGE: i32 = 14;
+        const MADV_WILLNEED: i32 = 3;
+        unsafe extern "C" {
+            fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+        }
+        if len == 0 || ptr.is_null() {
+            return;
+        }
+        unsafe {
+            let addr = ptr.cast::<core::ffi::c_void>();
+            let _ = madvise(addr, len, MADV_HUGEPAGE);
+            let _ = madvise(addr, len, MADV_WILLNEED);
+        }
+    }
+    #[cfg(not(all(unix, target_os = "linux")))]
+    {
+        let _ = (ptr, len);
+    }
+}
+
+#[inline]
 pub(crate) fn find_nnz(ft_out: &[u8], indexes: &mut [u16]) -> usize {
     debug_assert_eq!(ft_out.len() % NNZ_BLOCK, 0);
     debug_assert!(indexes.len() >= ft_out.len() / NNZ_BLOCK);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if uses_avx512_vnni() {
+        return unsafe { avx512::find_nnz(ft_out, indexes) };
+    }
     (kernels().find_nnz)(ft_out, indexes)
 }
 
@@ -212,6 +247,13 @@ pub(crate) fn affine_sparse_packed(input: &[u8], weights: &[i8], output: &mut [i
     if count == 0 {
         return;
     }
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if uses_avx512_vnni() {
+        unsafe {
+            avx512::blocked(input, &nnz[..count], weights, output);
+        }
+        return;
+    }
     (kernels().blocked)(input, &nnz[..count], weights, output);
 }
 
@@ -220,12 +262,23 @@ pub(crate) fn affine_f32(inputs: &[f32], weights: &[f32], biases: &[f32], output
     debug_assert_eq!(outputs.len(), biases.len());
     debug_assert_eq!(weights.len(), inputs.len() * outputs.len());
     outputs.copy_from_slice(biases);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if uses_avx512_vnni() {
+        unsafe {
+            avx512::affine_f32(inputs, weights, outputs);
+        }
+        return;
+    }
     (kernels().affine_f32)(inputs, weights, outputs);
 }
 
 #[inline]
 pub(crate) fn dot_f32(inputs: &[f32], weights: &[f32], bias: f32) -> f32 {
     debug_assert_eq!(inputs.len(), weights.len());
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if uses_avx512_vnni() {
+        return unsafe { avx512::dot_f32(inputs, weights, bias) };
+    }
     (kernels().dot_f32)(inputs, weights, bias)
 }
 
@@ -242,15 +295,11 @@ pub(crate) fn hard_swish6_bias(sums: &[i32], biases: &[f32], scale: f32, out: &m
     debug_assert_eq!(sums.len(), biases.len());
     debug_assert_eq!(sums.len(), out.len());
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    {
-        if std::arch::is_x86_feature_detected!("avx512f")
-            && std::arch::is_x86_feature_detected!("fma")
-        {
-            unsafe {
-                avx512::hard_swish6_bias(sums, biases, scale, out);
-            }
-            return;
+    if uses_avx512_fma() {
+        unsafe {
+            avx512::hard_swish6_bias(sums, biases, scale, out);
         }
+        return;
     }
     for (j, sum) in sums.iter().enumerate() {
         out[j] = hard_swish6((*sum as f32).mul_add(scale, biases[j]));
@@ -263,15 +312,11 @@ pub(crate) fn swiglu_residual(pre: &[f32], residual: &[f32], out: &mut [f32]) {
     debug_assert_eq!(pre.len(), residual.len() * 2);
     debug_assert_eq!(out.len(), residual.len());
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    {
-        if std::arch::is_x86_feature_detected!("avx512f")
-            && std::arch::is_x86_feature_detected!("fma")
-        {
-            unsafe {
-                avx512::swiglu_residual(pre, residual, out);
-            }
-            return;
+    if uses_avx512_fma() {
+        unsafe {
+            avx512::swiglu_residual(pre, residual, out);
         }
+        return;
     }
     let n = residual.len();
     for i in 0..n {
@@ -291,6 +336,52 @@ pub(crate) fn square_clamp01(values: &mut [f32]) {
     for value in values {
         let activated = value.clamp(0.0, 1.0);
         *value = activated * activated;
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline(always)]
+fn uses_avx512_fma() -> bool {
+    #[cfg(all(target_feature = "avx512f", target_feature = "fma"))]
+    {
+        true
+    }
+    #[cfg(not(all(target_feature = "avx512f", target_feature = "fma")))]
+    {
+        static READY: OnceLock<bool> = OnceLock::new();
+        *READY.get_or_init(|| {
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("fma")
+        })
+    }
+}
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[inline(always)]
+fn uses_avx512_vnni() -> bool {
+    #[cfg(all(
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vnni",
+        target_feature = "fma"
+    ))]
+    {
+        true
+    }
+    #[cfg(not(all(
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vnni",
+        target_feature = "fma"
+    )))]
+    {
+        static READY: OnceLock<bool> = OnceLock::new();
+        *READY.get_or_init(|| {
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vnni")
+                && std::arch::is_x86_feature_detected!("fma")
+        })
     }
 }
 
@@ -763,6 +854,14 @@ mod tests {
     }
 
     #[test]
+    fn large_align64_box_uses_two_megabyte_alignment() {
+        let src = vec![7u8; 2 * 1024 * 1024];
+        let boxed = Align64Box::from_slice(&src);
+        assert_eq!(&*boxed, src.as_slice());
+        assert_eq!(boxed.as_ptr() as usize % (2 * 1024 * 1024), 0);
+    }
+
+    #[test]
     fn find_nnz_skips_zero_blocks() {
         let mut input = [0u8; 32];
         input[4] = 3;
@@ -894,6 +993,20 @@ mod tests {
         hard_swish6_bias(&sums, &biases, scale, &mut actual);
         for (got, want) in actual.iter().zip(expected) {
             assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn compile_time_avx512_gates_match_runtime_detection() {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        {
+            let fma = std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("fma");
+            let vnni = fma
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vnni");
+            assert_eq!(uses_avx512_fma(), fma);
+            assert_eq!(uses_avx512_vnni(), vnni);
         }
     }
 

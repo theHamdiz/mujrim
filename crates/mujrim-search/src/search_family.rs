@@ -6,14 +6,16 @@
 
 use crate::policy::{
     AkimboFutilityPolicy, AkimboLmpPolicy, AkimboLmrPolicy, AkimboRfpPolicy,
-    BadNoisyFutilityContext, BadNoisyFutilityPolicy, DisabledBadNoisyFutilityPolicy,
-    FutilityContext, FutilityDecision, FutilityPolicy, LmpContext, LmpDecision, LmpPolicy,
-    LmrContext, LmrPolicy, ObsidianFutilityPolicy, ObsidianLmpPolicy, ObsidianLmrPolicy,
-    ObsidianRfpPolicy, PlentyChessFutilityPolicy, PlentyChessLmpPolicy, PlentyChessLmrPolicy,
-    PlentyChessRfpPolicy, RecklessBadNoisyFutilityPolicy, RecklessFullLmrPolicy,
-    RecklessFutilityPolicy, RecklessLmpPolicy, RecklessRfpPolicy, RfpContext, RfpPolicy,
-    StockLikeFutilityPolicy, StockLikeLmpPolicy, StockLikeLmrPolicy, StockLikeRfpPolicy,
-    ViridithasFutilityPolicy, ViridithasLmpPolicy, ViridithasLmrPolicy, ViridithasRfpPolicy,
+    AteedBadNoisyFutilityPolicy, AteedFutilityPolicy, AteedLmpPolicy, AteedLmrPolicy,
+    AteedRfpPolicy, BadNoisyFutilityContext, BadNoisyFutilityPolicy,
+    DisabledBadNoisyFutilityPolicy, FutilityContext, FutilityDecision, FutilityPolicy, LmpContext,
+    LmpDecision, LmpPolicy, LmrContext, LmrPolicy, ObsidianFutilityPolicy, ObsidianLmpPolicy,
+    ObsidianLmrPolicy, ObsidianRfpPolicy, PlentyChessFutilityPolicy, PlentyChessLmpPolicy,
+    PlentyChessLmrPolicy, PlentyChessRfpPolicy, RecklessBadNoisyFutilityPolicy,
+    RecklessFullLmrPolicy, RecklessFutilityPolicy, RecklessLmpPolicy, RecklessRfpPolicy,
+    RfpContext, RfpPolicy, StockLikeFutilityPolicy, StockLikeLmpPolicy, StockLikeLmrPolicy,
+    StockLikeRfpPolicy, ViridithasFutilityPolicy, ViridithasLmpPolicy, ViridithasLmrPolicy,
+    ViridithasRfpPolicy,
 };
 use crate::search_stack::SearchPolicies;
 
@@ -151,12 +153,13 @@ dedicated_family!(
 );
 dedicated_family!(
     AteedFamily,
-    RecklessFullLmrPolicy,
-    RecklessLmpPolicy,
-    RecklessFutilityPolicy,
-    RecklessBadNoisyFutilityPolicy,
-    RecklessRfpPolicy
+    AteedLmrPolicy,
+    AteedLmpPolicy,
+    AteedFutilityPolicy,
+    AteedBadNoisyFutilityPolicy,
+    AteedRfpPolicy
 );
+const _: AteedFamily = AteedFamily;
 dedicated_family!(
     Lc0Family,
     RecklessFullLmrPolicy,
@@ -242,7 +245,7 @@ mod tests {
         assert!(!StockfishFamily::reduce_noisy_moves(&stock));
         assert!(!HceFamily::reduce_noisy_moves(&stock));
         assert!(RecklessFamily::reduce_noisy_moves(&reckless));
-        assert!(AteedFamily::reduce_noisy_moves(&reckless));
+        assert!(AteedFamily::reduce_noisy_moves(&SearchPolicies::ateed()));
         assert!(ViridithasFamily::reduce_noisy_moves(
             &SearchPolicies::viridithas()
         ));

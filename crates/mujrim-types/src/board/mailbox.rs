@@ -187,6 +187,118 @@ pub trait MailboxPos {
         moves
     }
 
+    /// Geometry + occupancy, not king safety. TT/killer hydration uses this
+    /// so a colliding from/to cannot pass `is_legal_move` and then corrupt make.
+    fn is_pseudo_legal(&self, mv: Move) -> bool {
+        if mv.from == mv.to {
+            return false;
+        }
+        let us = self.side_to_move();
+        let piece = match self.piece_of_color_on(mv.from, us) {
+            Some(piece) => piece,
+            None => return false,
+        };
+        if mv.is_castling() {
+            return piece == Piece::King && self.castling_is_legal_after_move(mv, us);
+        }
+        if self.piece_of_color_on(mv.to, us).is_some() {
+            return false;
+        }
+        let dest_enemy = self.piece_of_color_on(mv.to, us.opponent()).is_some();
+        let from_idx = mv.from.index();
+        let to_bb = mv.to.bitboard();
+        let occ = self.all_occupancy();
+        match piece {
+            Piece::Pawn => {
+                if mv.flag == MoveFlag::EnPassant {
+                    return self.en_passant() == Some(mv.to)
+                        && pawn_attacks(us.index(), from_idx) & to_bb != 0;
+                }
+                if dest_enemy {
+                    pawn_attacks(us.index(), from_idx) & to_bb != 0
+                        && (mv.to.rank() == us.promotion_rank()) == mv.is_promotion()
+                } else if occ & to_bb == 0 {
+                    let one = (from_idx as i32 + us.pawn_direction()) as usize;
+                    if one < 64 && Square::from_index(one) == mv.to {
+                        (mv.to.rank() == us.promotion_rank()) == mv.is_promotion()
+                    } else if mv.flag == MoveFlag::DoublePawn
+                        && mv.from.rank() == us.pawn_start_rank()
+                    {
+                        let mid = (from_idx as i32 + us.pawn_direction()) as usize;
+                        let two = (from_idx as i32 + 2 * us.pawn_direction()) as usize;
+                        two < 64
+                            && Square::from_index(two) == mv.to
+                            && occ & Square::from_index(mid).bitboard() == 0
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            Piece::Knight => knight_attacks(from_idx) & to_bb != 0 && !mv.is_promotion(),
+            Piece::Bishop => bishop_attacks(from_idx, occ) & to_bb != 0 && !mv.is_promotion(),
+            Piece::Rook => rook_attacks(from_idx, occ) & to_bb != 0 && !mv.is_promotion(),
+            Piece::Queen => queen_attacks(from_idx, occ) & to_bb != 0 && !mv.is_promotion(),
+            Piece::King => king_attacks(from_idx) & to_bb != 0 && !mv.is_promotion(),
+        }
+    }
+
+    /// Fill in capture / EP / double-push / castle flags from the current mailbox.
+    /// TT and killer moves are often stored with only from/to.
+    fn hydrate_move(&self, mv: Move) -> Option<Move> {
+        if mv.from == mv.to {
+            return None;
+        }
+        let us = self.side_to_move();
+        let piece = self.piece_of_color_on(mv.from, us)?;
+        if piece == Piece::King {
+            if mv.is_castling() {
+                return self.is_legal_move(mv).then_some(mv);
+            }
+            if !self.chess960() {
+                let castle = match (us, mv.from, mv.to) {
+                    (Color::White, Square::E1, Square::G1)
+                    | (Color::Black, Square::E8, Square::G8) => {
+                        Some(Move::king_castle(mv.from, mv.to))
+                    }
+                    (Color::White, Square::E1, Square::C1)
+                    | (Color::Black, Square::E8, Square::C8) => {
+                        Some(Move::queen_castle(mv.from, mv.to))
+                    }
+                    _ => None,
+                };
+                if let Some(castle) = castle {
+                    return self.is_legal_move(castle).then_some(castle);
+                }
+            } else if self.piece_of_color_on(mv.to, us) == Some(Piece::Rook) {
+                let castle = if mv.to.file() > mv.from.file() {
+                    Move::king_castle(mv.from, mv.to)
+                } else {
+                    Move::queen_castle(mv.from, mv.to)
+                };
+                return self.is_legal_move(castle).then_some(castle);
+            }
+        }
+        let dest_enemy = self.piece_of_color_on(mv.to, us.opponent()).is_some();
+        let resolved = if let Some(promo) = mv.promotion {
+            if dest_enemy {
+                Move::promotion_capture(mv.from, mv.to, promo)
+            } else {
+                Move::promotion(mv.from, mv.to, promo)
+            }
+        } else if piece == Piece::Pawn && self.en_passant() == Some(mv.to) {
+            Move::en_passant(mv.from, mv.to)
+        } else if dest_enemy {
+            Move::capture(mv.from, mv.to)
+        } else if piece == Piece::Pawn && mv.from.rank().abs_diff(mv.to.rank()) == 2 {
+            Move::double_pawn(mv.from, mv.to)
+        } else {
+            Move::quiet(mv.from, mv.to)
+        };
+        (self.is_pseudo_legal(resolved) && self.is_legal_move(resolved)).then_some(resolved)
+    }
+
     #[inline(always)]
     fn is_legal_move(&self, mv: Move) -> bool {
         let us = self.side_to_move();
@@ -198,6 +310,21 @@ pub trait MailboxPos {
 
         if mv.is_castling() {
             return moving_piece == Piece::King && self.castling_is_legal_after_move(mv, us);
+        }
+        if self.piece_of_color_on(mv.to, us).is_some() {
+            return false;
+        }
+        let dest_enemy = self.piece_of_color_on(mv.to, them).is_some();
+        if mv.flag == MoveFlag::EnPassant {
+            if dest_enemy || self.en_passant() != Some(mv.to) {
+                return false;
+            }
+        } else if mv.is_capture() {
+            if !dest_enemy {
+                return false;
+            }
+        } else if dest_enemy {
+            return false;
         }
 
         let removed_attacker = if mv.flag == MoveFlag::EnPassant {
@@ -311,27 +438,14 @@ pub trait MailboxPos {
 
     #[inline(always)]
     fn castling_is_legal_after_move(&self, mv: Move, us: Color) -> bool {
-        let them = us.opponent();
         let kingside = match mv.flag {
             MoveFlag::KingCastle => true,
             MoveFlag::QueenCastle => false,
             _ => return false,
         };
-        let king_to = Board::castling_king_landing(us, kingside);
-        let rook_from = self.castling_rook_from(us, kingside);
-        let rook_to = Board::castling_rook_landing(us, kingside);
-        let transit = rook_to;
-        if self.is_square_attacked_after(mv.from, them, self.all_occupancy(), 0) {
-            return false;
-        }
-        let without_king = self.all_occupancy() & !mv.from.bitboard();
-        let transit_occupancy = without_king | transit.bitboard();
-        if self.is_square_attacked_after(transit, them, transit_occupancy, 0) {
-            return false;
-        }
-        let final_occupancy =
-            (without_king & !rook_from.bitboard()) | rook_to.bitboard() | king_to.bitboard();
-        !self.is_square_attacked_after(king_to, them, final_occupancy, 0)
+        self.can_castle(us, kingside)
+            && self.king_square(us) == mv.from
+            && mv.to == self.castle_uci_to(us, kingside)
     }
 
     fn gen_pawn_moves(&self, color: Color, moves: &mut MoveList) {
@@ -609,68 +723,13 @@ pub trait MailboxPos {
         if self.castling_rights() == 0 {
             return;
         }
-        if self.chess960() {
-            if self.can_castle(color, true) {
-                let from = self.king_square(color);
-                moves.push(Move::king_castle(from, self.castle_uci_to(color, true)));
-            }
-            if self.can_castle(color, false) {
-                let from = self.king_square(color);
-                moves.push(Move::queen_castle(from, self.castle_uci_to(color, false)));
-            }
-            return;
+        if self.can_castle(color, true) {
+            let from = self.king_square(color);
+            moves.push(Move::king_castle(from, self.castle_uci_to(color, true)));
         }
-
-        let occ = self.all_occupancy();
-        let enemy = color.opponent();
-
-        match color {
-            Color::White => {
-                if self.castling_rights() & WHITE_KING_CASTLE != 0 {
-                    let between = Square::F1.bitboard() | Square::G1.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E1, enemy)
-                        && !self.is_square_attacked(Square::F1, enemy)
-                        && !self.is_square_attacked(Square::G1, enemy)
-                    {
-                        moves.push(Move::king_castle(Square::E1, Square::G1));
-                    }
-                }
-                if self.castling_rights() & WHITE_QUEEN_CASTLE != 0 {
-                    let between =
-                        Square::B1.bitboard() | Square::C1.bitboard() | Square::D1.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E1, enemy)
-                        && !self.is_square_attacked(Square::D1, enemy)
-                        && !self.is_square_attacked(Square::C1, enemy)
-                    {
-                        moves.push(Move::queen_castle(Square::E1, Square::C1));
-                    }
-                }
-            }
-            Color::Black => {
-                if self.castling_rights() & BLACK_KING_CASTLE != 0 {
-                    let between = Square::F8.bitboard() | Square::G8.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E8, enemy)
-                        && !self.is_square_attacked(Square::F8, enemy)
-                        && !self.is_square_attacked(Square::G8, enemy)
-                    {
-                        moves.push(Move::king_castle(Square::E8, Square::G8));
-                    }
-                }
-                if self.castling_rights() & BLACK_QUEEN_CASTLE != 0 {
-                    let between =
-                        Square::B8.bitboard() | Square::C8.bitboard() | Square::D8.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E8, enemy)
-                        && !self.is_square_attacked(Square::D8, enemy)
-                        && !self.is_square_attacked(Square::C8, enemy)
-                    {
-                        moves.push(Move::queen_castle(Square::E8, Square::C8));
-                    }
-                }
-            }
+        if self.can_castle(color, false) {
+            let from = self.king_square(color);
+            moves.push(Move::queen_castle(from, self.castle_uci_to(color, false)));
         }
     }
 
@@ -899,6 +958,11 @@ impl Board {
     pub fn is_legal_move(&self, mv: Move) -> bool {
         MailboxPos::is_legal_move(self, mv)
     }
+
+    #[inline]
+    pub fn hydrate_move(&self, mv: Move) -> Option<Move> {
+        MailboxPos::hydrate_move(self, mv)
+    }
 }
 
 impl BoardSnapshot {
@@ -932,6 +996,11 @@ impl BoardSnapshot {
     #[inline(always)]
     pub fn is_legal_move(&self, mv: Move) -> bool {
         MailboxPos::is_legal_move(self, mv)
+    }
+
+    #[inline]
+    pub fn hydrate_move(&self, mv: Move) -> Option<Move> {
+        MailboxPos::hydrate_move(self, mv)
     }
 }
 
@@ -1156,6 +1225,86 @@ mod tests {
         assert_eq!(
             MailboxPos::generate_captures(&board, Color::White).as_slice(),
             board.generate_captures(Color::White).as_slice()
+        );
+    }
+
+    #[test]
+    fn hydrate_move_recovers_capture_ep_and_double_push_flags() {
+        setup();
+        let start = Board::new();
+        let e2e4 = start
+            .hydrate_move(Move::quiet(Square::E2, Square::E4))
+            .expect("e2e4");
+        assert_eq!(e2e4.flag, crate::chess_move::MoveFlag::DoublePawn);
+        assert_eq!(start.snapshot().hydrate_move(e2e4), Some(e2e4));
+
+        let kiwi = Board::from_fen(KIWIPETE).unwrap();
+        let capture = kiwi
+            .hydrate_move(Move::quiet(Square::E5, Square::D7))
+            .expect("Nxd7");
+        assert_eq!(capture.flag, crate::chess_move::MoveFlag::Capture);
+        assert_eq!(kiwi.snapshot().hydrate_move(capture), Some(capture));
+
+        let ep_board = Board::from_fen(EP_POS).unwrap();
+        let ep = ep_board
+            .hydrate_move(Move::quiet(Square::E5, Square::F6))
+            .expect("exf6 ep");
+        assert_eq!(ep.flag, crate::chess_move::MoveFlag::EnPassant);
+        assert_eq!(ep_board.snapshot().hydrate_move(ep), Some(ep));
+        assert!(
+            ep_board
+                .hydrate_move(Move::quiet(Square::A1, Square::A8))
+                .is_none()
+        );
+
+        let castle = kiwi
+            .hydrate_move(Move::quiet(Square::E1, Square::G1))
+            .expect("O-O");
+        assert_eq!(castle.flag, crate::chess_move::MoveFlag::KingCastle);
+    }
+
+    #[test]
+    fn castle_without_rook_is_rejected_even_when_rights_remain() {
+        setup();
+        let board = Board::from_fen("4k3/8/8/8/8/8/8/4K3 b k - 0 1").unwrap();
+        let castle = Move::king_castle(Square::E8, Square::G8);
+        assert!(!board.is_legal_move(castle));
+        assert!(board.hydrate_move(castle).is_none());
+        assert!(
+            board
+                .hydrate_move(Move::quiet(Square::E8, Square::G8))
+                .is_none()
+        );
+        assert!(
+            !board
+                .generate_pseudo_legal_quiets(Color::Black)
+                .as_slice()
+                .iter()
+                .any(|mv| mv.is_castling())
+        );
+        let kiwi = Board::from_fen(KIWIPETE).unwrap();
+        assert!(
+            kiwi.hydrate_move(Move::quiet(Square::E1, Square::G1))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn is_legal_move_rejects_king_onto_own_castled_rook() {
+        setup();
+        let board =
+            Board::from_fen("rnbqk2r/ppp1ppbp/5np1/3p4/3P4/2N2N2/PPP1PPPP/R1BQ1RK1 w kq - 2 5")
+                .unwrap();
+        let onto_rook = Move::quiet(Square::G1, Square::F1);
+        assert!(!board.is_legal_move(onto_rook));
+        assert!(board.hydrate_move(onto_rook).is_none());
+        assert!(!board.snapshot().is_legal_move(onto_rook));
+        assert!(
+            !board
+                .generate_pseudo_legal_quiets(Color::White)
+                .as_slice()
+                .iter()
+                .any(|mv| mv.from == Square::G1 && mv.to == Square::F1)
         );
     }
 }

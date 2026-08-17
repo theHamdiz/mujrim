@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn dedicated_loops_return_legal_root_moves() {
         types::init();
-        for adapter in ["viridithas", "akimbo"] {
+        for adapter in ["viridithas", "akimbo", "ateed"] {
             let mut engine = SearchEngine::new(8, 1);
             assert!(
                 install_adapter(&mut engine, adapter),
@@ -101,6 +101,7 @@ mod tests {
         let uci = result.best_move.to_uci();
         assert_ne!(uci, "a2a3", "Akimbo depth 7 must not collapse to a2a3");
         assert_ne!(uci, "b1c3", "Akimbo depth 7 must not collapse to b1c3");
+        assert_eq!(uci, "e2e4", "Akimbo depth 7 must play e2e4");
         assert_ne!(result.best_move, NULL_MOVE);
         assert_eq!(
             board.hash, start_hash,
@@ -109,9 +110,46 @@ mod tests {
     }
 
     #[test]
+    fn viridithas_depth_2_startpos_plays_nf3() {
+        types::init();
+        if eval::nnue::discover_named_network("sandhi-s2-b200.nnue.zst").is_none()
+            && eval::nnue::discover_named_network("viri_default.nnue.zst").is_none()
+        {
+            return;
+        }
+        let mut engine = SearchEngine::new(16, 1);
+        assert!(install_adapter(&mut engine, "viridithas"));
+        let mut board = Board::new();
+        let result = engine.search_depth(&mut board, 2);
+        assert_eq!(
+            result.best_move.to_uci(),
+            "g1f3",
+            "official Viridithas 20 depth 2 is Nf3, got {} score {}",
+            result.best_move.to_uci(),
+            result.score
+        );
+    }
+
+    #[test]
+    fn viridithas_snapshot_restore_leaves_startpos() {
+        types::init();
+        let mut engine = SearchEngine::new(16, 1);
+        assert!(install_adapter(&mut engine, "viridithas"));
+        let mut board = Board::new();
+        let start_hash = board.hash;
+        let result = engine.search_nodes(&mut board, 2000, 6);
+        assert_ne!(result.best_move, NULL_MOVE);
+        assert_eq!(
+            board.hash, start_hash,
+            "Viridithas snapshot restore must leave startpos"
+        );
+    }
+
+    #[test]
     fn viridithas_and_akimbo_loops_are_not_the_generic_pvs() {
         let viri = include_str!("viridithas.rs");
         let akimbo = include_str!("akimbo.rs");
+        let ateed = include_str!("ateed.rs");
         assert!(
             !viri.contains("search_ab_for<") && !viri.contains("super::run"),
             "Viridithas must run official alpha_beta, not the generic PVS"
@@ -121,12 +159,20 @@ mod tests {
             "Akimbo must run official pvs, not the generic PVS"
         );
         assert!(
+            !ateed.contains("search_ab_for<") && !ateed.contains("super::run"),
+            "Ateed must run the MoE PVS, not the generic Reckless loop"
+        );
+        assert!(
             viri.contains("dedicated_viridithas"),
             "Viridithas loop must call the official alpha_beta"
         );
         assert!(
             akimbo.contains("dedicated_akimbo"),
             "Akimbo loop must call the official pvs"
+        );
+        assert!(
+            ateed.contains("dedicated_ateed"),
+            "Ateed loop must call the MoE PVS"
         );
     }
 
@@ -142,8 +188,12 @@ mod tests {
                 && viri.contains("skip_quiets")
                 && viri.contains("raw_eval")
                 && viri.contains("hint_common_access")
-                && viri.contains("prefetch"),
-            "Viridithas must keep 1024ths LMR, official later-move r=1, skip-quiet LMP, ProbCut, and deferred sandhi ensure"
+                && viri.contains("hint_common_access_once")
+                && viri.contains("resolve_threats")
+                && viri.contains("prefetch")
+                && viri.contains("restore_snapshot")
+                && viri.contains("make_search_move_no_undo"),
+            "Viridithas must keep 1024ths LMR, official later-move r=1, skip-quiet LMP, ProbCut, deferred sandhi ensure, and snapshot restore"
         );
         assert!(
             akimbo.contains("akimbo_probcut_beta")
@@ -152,11 +202,41 @@ mod tests {
                 && akimbo.contains("quiescence_snapshot"),
             "Akimbo must run official ProbCut on snapshot make, prefetch the child TT, and use snapshot QS"
         );
+        let ateed_loop = include_str!("../engine_loops/ateed.rs");
+        assert!(
+            ateed_loop.contains("ateed_moe_lmr_delta")
+                && ateed_loop.contains("evaluate_ateed_search_signal")
+                && ateed_loop.contains("hint_common_access_once")
+                && ateed_loop.contains("resolve_threats")
+                && ateed_loop.contains("prefetch")
+                && ateed_loop.contains("restore_snapshot")
+                && ateed_loop.contains("make_search_move_no_undo")
+                && ateed_loop.contains("quiescence_snapshot")
+                && ateed_loop.contains("AteedLmrPolicy")
+                && ateed_loop.contains("AteedRfpPolicy"),
+            "Ateed must keep MoE LMR, deferred ensure, lazy threats, prefetch, and snapshot QS"
+        );
         let qs = include_str!("../engine_loops/qs.rs");
         assert_eq!(
             qs.matches("tt.probe").count(),
             1,
             "dedicated QS must probe the TT once per node"
+        );
+        let probe_at = qs.find("tt.probe").expect("QS probes the TT");
+        let reuse_at = qs
+            .find("if let Some(raw) = raw_eval")
+            .expect("QS reuses a TT raw_eval for stand-pat");
+        assert!(
+            probe_at < reuse_at,
+            "official QS reuses a TT eval and must probe before stand-pat"
+        );
+        assert!(
+            qs.contains("entry.raw_eval") && qs.contains("hint_common_access"),
+            "QS must reuse TT raw_eval and ensure sandhi only when a child is made"
+        );
+        assert!(
+            include_str!("../engine_loops/viridithas.rs").contains("quiescence_snapshot"),
+            "Viridithas QS must restore snapshots like the official copy-make path"
         );
     }
 }

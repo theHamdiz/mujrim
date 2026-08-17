@@ -392,10 +392,20 @@ impl SearchParams {
         params
     }
 
-    /// Parameters paired with the Ateed MoE network. Starts from Reckless
-    /// until Ateed-specific SPRT tuning exists.
+    /// Parameters paired with the Ateed MoE network.
+    ///
+    /// Wider aspiration and lighter LMR/LMP than Reckless so WDL-noisy
+    /// expert switches are searched instead of pruned.
     pub fn ateed() -> Self {
-        Self::reckless()
+        let mut params = Self::reckless();
+        params.lmr_base = 0.68;
+        params.lmr_cut_node_bonus = 0;
+        params.lmp_depth_limit = 6;
+        params.futility_depth_limit = 5;
+        params.rfp_mul = 88;
+        params.aspiration_window = 16;
+        params.probcut_margin = 220;
+        params
     }
 
     /// Parameters for the in-process Lc0 fallback (official Lc0 is passthrough).
@@ -778,8 +788,10 @@ mod tests {
         assert_eq!(akimbo.lmp_depth_limit, 3);
         assert_eq!(akimbo.lmr_base, 0.30);
         assert_eq!(plenty.lmr_base, 0.62);
-        assert_eq!(ateed.lmr_base, reckless.lmr_base);
-        assert_eq!(ateed.aspiration_window, reckless.aspiration_window);
+        assert_eq!(ateed.lmr_base, 0.68);
+        assert_eq!(ateed.aspiration_window, 16);
+        assert_ne!(ateed.lmr_base, reckless.lmr_base);
+        assert_ne!(ateed.aspiration_window, reckless.aspiration_window);
         assert_eq!(lc0.lmr_base, reckless.lmr_base);
         assert_eq!(lc0.lmr_cut_node_bonus, 0);
         assert_eq!(lc0.nmp_depth_min, 4);

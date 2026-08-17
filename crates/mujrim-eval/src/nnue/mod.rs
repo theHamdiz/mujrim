@@ -7,7 +7,7 @@
 //! - `akimbo-nnue` feature: Load Akimbo-family networks (768→H×2→1)
 //! - `stockfish-nnue` feature: Load Stockfish .nnue files (HalfKAv2_hm)
 //! - `reckless-nnue` feature: Load the Reckless v60 threat-aware raw network
-//! - `viridithas-nnue` feature: Load Viridithas `.nnue.zst` simple and velarised nets
+//! - `viridithas-nnue` feature: Load official Viridithas 20 sandhi `.nnue.zst` nets
 //! - `obsidian-nnue` feature: Load Obsidian layered `net89perm.bin` nets
 //! - `plentychess-nnue` feature: Load PlentyChess SLEB128 `0179r.bin` nets
 //! - `ateed-nnue` feature: Load Ateed MoE nets (`ATEED001`)
@@ -80,12 +80,16 @@ pub mod ateed_format;
 
 pub use accumulator::NNUEState;
 pub use adapter::{
-    ActiveNetwork, LC0_BUNDLED_WEIGHTS_NAME, LC0_WEIGHT_FILENAMES, NetworkFormat, NnueNetworkInfo,
-    NnueNetworkParameters, NnueNetworkSource, NnueSearchProfile, auto_detect_from_search_roots,
-    auto_detect_network, default_embedded_network, discover_lc0_weights, discover_named_network,
+    ATEED_NETWORK_FILENAME, ActiveNetwork, LC0_BUNDLED_WEIGHTS_NAME, LC0_WEIGHT_FILENAMES,
+    NetworkFormat, NnueNetworkInfo, NnueNetworkParameters, NnueNetworkSource, NnueSearchProfile,
+    ateed_artifact_path, auto_detect_from_search_roots, auto_detect_network,
+    default_embedded_network, discover_lc0_weights, discover_named_network,
     embedded_network_for_preset, enabled_network_formats, load_network, load_network_for_preset,
-    nnue_search_directories,
+    nnue_search_directories, resolve_ateed_output_path, writable_nnue_directory,
 };
 #[cfg(feature = "ateed-nnue")]
-pub use ateed_format::{AteedEval, AteedExpert, AteedExpertUpdate, AteedNetwork, wdl_variance};
+pub use ateed_format::{
+    AteedEval, AteedExpert, AteedExpertUpdate, AteedNetwork, AteedSearchSignal, gate_margin,
+    wdl_draw_mass, wdl_variance,
+};
 pub use network::{Accumulator, HIDDEN, NUM_BUCKETS, Network, forward, forward_with_network, net};

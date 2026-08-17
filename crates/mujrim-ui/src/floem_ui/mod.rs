@@ -13,6 +13,7 @@ mod modals;
 mod screens;
 mod state;
 mod svg_cache;
+mod telemetry_charts;
 mod theme;
 mod widgets;
 mod windowing;

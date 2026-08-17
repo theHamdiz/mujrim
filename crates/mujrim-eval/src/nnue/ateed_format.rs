@@ -9,6 +9,7 @@ use std::path::Path;
 use types::chess_move::MoveFlag;
 use types::{Board, Color, Move, Piece, Square};
 
+use super::layered_forward::Align64Box;
 use super::stockfish_format::{
     PAIR_FEATURES, apply_diff, collect_pawn_pair_aux, visit_pawn_pair_features,
 };
@@ -51,7 +52,7 @@ const KING_BUCKET_LAYOUT: [usize; 64] = [
 ];
 
 pub struct AteedExpert {
-    l1_weights: Box<[i8]>,
+    l1_weights: Align64Box<i8>,
     l1_biases: [i32; L2],
     l2_weights: Box<[i8]>,
     l2_biases: [i32; L3],
@@ -107,20 +108,43 @@ impl AteedExpert {
 }
 
 pub struct AteedNetwork {
-    feature_weights: Box<[i16]>,
-    feature_biases: Box<[i16]>,
-    pair_weights: Box<[i8]>,
+    feature_weights: Align64Box<i16>,
+    feature_biases: Align64Box<i16>,
+    pair_weights: Align64Box<i8>,
     pairs_enabled: bool,
-    gate_weights: Box<[i8]>,
+    gate_weights: Align64Box<i8>,
     gate_biases: [i32; EXPERTS],
     experts: [AteedExpert; EXPERTS],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct AteedEval {
     pub score: i32,
     pub expert: usize,
     pub wdl: [i32; WDL_OUTPUTS],
+    pub gate_margin: i32,
+}
+
+impl AteedEval {
+    #[inline]
+    pub fn search_signal(self) -> AteedSearchSignal {
+        AteedSearchSignal {
+            score: self.score,
+            expert: self.expert,
+            variance: wdl_variance(self.wdl),
+            draw_mass: wdl_draw_mass(self.wdl),
+            gate_margin: self.gate_margin,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct AteedSearchSignal {
+    pub score: i32,
+    pub expert: usize,
+    pub variance: i32,
+    pub draw_mass: i32,
+    pub gate_margin: i32,
 }
 
 impl AteedNetwork {
@@ -150,11 +174,11 @@ impl AteedNetwork {
         debug_assert_eq!(offset, FILE_SIZE);
         let pairs_enabled = pair_weights.iter().any(|&weight| weight != 0);
         Ok(Self {
-            feature_weights,
-            feature_biases,
-            pair_weights,
+            feature_weights: Align64Box::from_slice(&feature_weights),
+            feature_biases: Align64Box::from_slice(&feature_biases),
+            pair_weights: Align64Box::from_slice(&pair_weights),
             pairs_enabled,
-            gate_weights,
+            gate_weights: Align64Box::from_slice(&gate_weights),
             gate_biases,
             experts,
         })
@@ -499,9 +523,7 @@ fn apply_pair_delta(
 
 fn activate(acc: &[i16; L1]) -> [u8; L1] {
     let mut out = [0u8; L1];
-    for (dst, &value) in out.iter_mut().zip(acc) {
-        *dst = value.clamp(0, QA as i16) as u8;
-    }
+    super::stockfish_simd::crelu_qa(acc, &mut out, QA as i16);
     out
 }
 
@@ -517,22 +539,28 @@ fn moe_forward(
         (black, white)
     };
     let activated = activate(us);
-    let expert = route_expert(net, &activated);
-    expert_forward(&net.experts[expert], &activated, expert)
+    let (expert, margin) = route_expert(net, &activated);
+    expert_forward(&net.experts[expert], &activated, expert, margin)
 }
 
-fn route_expert(net: &AteedNetwork, activated: &[u8; L1]) -> usize {
+fn route_expert(net: &AteedNetwork, activated: &[u8; L1]) -> (usize, i32) {
     let mut logits = net.gate_biases;
     super::stockfish_simd::affine(activated, &net.gate_weights, &mut logits);
-    logits
+    let expert = logits
         .iter()
         .enumerate()
         .max_by_key(|&(index, value)| (*value, -(index as i32)))
         .map(|(index, _)| index)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    (expert, gate_margin(&logits))
 }
 
-fn expert_forward(expert: &AteedExpert, activated: &[u8; L1], expert_id: usize) -> AteedEval {
+fn expert_forward(
+    expert: &AteedExpert,
+    activated: &[u8; L1],
+    expert_id: usize,
+    gate_margin: i32,
+) -> AteedEval {
     let mut l2 = expert.l1_biases;
     super::stockfish_simd::affine(activated, &expert.l1_weights, &mut l2);
     let mut l2_act = [0u8; L2];
@@ -565,6 +593,7 @@ fn expert_forward(expert: &AteedExpert, activated: &[u8; L1], expert_id: usize) 
         score: ((i64::from(eval) * i64::from(SCALE)) / i64::from(QA * QB)) as i32,
         expert: expert_id,
         wdl,
+        gate_margin,
     }
 }
 
@@ -586,6 +615,39 @@ pub fn wdl_variance(wdl: [i32; WDL_OUTPUTS]) -> i32 {
     let mean = w + 0.5 * d;
     let var = w * (1.0 - mean).powi(2) + d * (0.5 - mean).powi(2) + l * (0.0 - mean).powi(2);
     (var * 10_000.0) as i32
+}
+
+/// Softmax draw probability ×10_000 from raw WDL logits.
+pub fn wdl_draw_mass(wdl: [i32; WDL_OUTPUTS]) -> i32 {
+    let max = wdl.iter().copied().max().unwrap_or(0);
+    let mut exp = [0.0f32; WDL_OUTPUTS];
+    let mut sum = 0.0f32;
+    for (slot, &logit) in exp.iter_mut().zip(&wdl) {
+        *slot = ((logit - max) as f32 / 64.0).exp();
+        sum += *slot;
+    }
+    if sum <= 0.0 {
+        return 0;
+    }
+    (exp[1] / sum * 10_000.0) as i32
+}
+
+/// Gap between the winning expert logit and the runner-up.
+pub fn gate_margin(logits: &[i32; EXPERTS]) -> i32 {
+    let mut best = i32::MIN;
+    let mut second = i32::MIN;
+    for &logit in logits {
+        if logit > best {
+            second = best;
+            best = logit;
+        } else if logit > second {
+            second = logit;
+        }
+    }
+    if second == i32::MIN {
+        return 0;
+    }
+    best.saturating_sub(second)
 }
 
 const MAX_PLY: usize = 256;
@@ -649,6 +711,9 @@ pub(crate) struct AteedAccumulatorState {
     frames: Box<[AteedFrame]>,
     finny: Box<[FinnyEntry]>,
     index: usize,
+    last_signal: AteedSearchSignal,
+    last_eval: AteedEval,
+    last_eval_hash: u64,
 }
 
 impl AteedAccumulatorState {
@@ -660,6 +725,9 @@ impl AteedAccumulatorState {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             index: 0,
+            last_signal: AteedSearchSignal::default(),
+            last_eval: AteedEval::default(),
+            last_eval_hash: 0,
         }
     }
 
@@ -667,6 +735,9 @@ impl AteedAccumulatorState {
         self.index = 0;
         self.frames[0].accurate = false;
         self.frames[0].pending_null = false;
+        self.last_eval_hash = 0;
+        self.last_signal = AteedSearchSignal::default();
+        self.last_eval = AteedEval::default();
         for entry in self.finny.iter_mut() {
             entry.initialized = false;
         }
@@ -738,21 +809,45 @@ impl AteedAccumulatorState {
         network: &AteedNetwork,
         trusted: bool,
     ) -> AteedEval {
+        self.ensure_pieces(board, network, trusted);
+        if self.frames[self.index].accurate && self.last_eval_hash == board.hash {
+            return self.last_eval;
+        }
+        let frame = &self.frames[self.index];
+        let eval = moe_forward(network, board, &frame.values[0], &frame.values[1]);
+        self.last_eval = eval;
+        self.last_eval_hash = board.hash;
+        self.last_signal = eval.search_signal();
+        eval
+    }
+
+    pub(crate) fn last_search_signal(&self) -> AteedSearchSignal {
+        self.last_signal
+    }
+
+    pub(crate) fn cached_search_signal(&self, hash: u64) -> Option<AteedSearchSignal> {
+        (self.last_eval_hash == hash).then_some(self.last_signal)
+    }
+
+    pub(crate) fn ensure_after_make(&mut self, board: &Board, network: &AteedNetwork) {
+        self.ensure_pieces(board, network, true);
+    }
+
+    fn ensure_pieces(&mut self, board: &Board, network: &AteedNetwork, trusted: bool) {
         if self.frames[self.index].accurate && self.frames[self.index].pending_null {
             self.frames[self.index].hash = board.hash;
             self.frames[self.index].pending_null = false;
         }
-        if !(self.frames[self.index].accurate
-            && (trusted || self.frames[self.index].hash == board.hash))
+        if self.frames[self.index].accurate
+            && (trusted || self.frames[self.index].hash == board.hash)
         {
-            if self.index != 0 && self.frames[self.index - 1].accurate {
-                self.update_from_parent(board, network);
-            } else {
-                self.refresh(board, network);
-            }
+            return;
         }
-        let frame = &self.frames[self.index];
-        moe_forward(network, board, &frame.values[0], &frame.values[1])
+        if self.index != 0 && self.frames[self.index - 1].accurate {
+            self.update_from_parent(board, network);
+        } else {
+            self.refresh(board, network);
+        }
     }
 
     fn refresh(&mut self, board: &Board, network: &AteedNetwork) {
@@ -1032,7 +1127,7 @@ pub fn looks_like_ateed(path: &Path, bytes: &[u8]) -> bool {
 
 fn read_expert(bytes: &[u8], offset: &mut usize) -> Result<AteedExpert, String> {
     Ok(AteedExpert {
-        l1_weights: read_i8s(bytes, offset, L1 * L2)?,
+        l1_weights: Align64Box::from_slice(&read_i8s(bytes, offset, L1 * L2)?),
         l1_biases: read_i32_array::<L2>(bytes, offset)?,
         l2_weights: read_i8s(bytes, offset, L2 * L3)?,
         l2_biases: read_i32_array::<L3>(bytes, offset)?,
@@ -1333,5 +1428,39 @@ mod tests {
         let incremental = state.evaluate_full(&board, &patterned);
         assert_eq!(state.evaluate_full_search(&board, &patterned), incremental);
         assert_eq!(incremental, patterned.evaluate_full(&board));
+    }
+
+    #[test]
+    fn moe_search_signals_and_aligned_weights() {
+        types::init();
+        let net = patterned_net();
+        assert_eq!(net.feature_weights.as_ptr() as usize % 64, 0);
+        assert_eq!(net.gate_weights.as_ptr() as usize % 64, 0);
+        assert_eq!(net.experts[0].l1_weights.as_ptr() as usize % 64, 0);
+        let eval = net.evaluate_full(&Board::new());
+        let signal = eval.search_signal();
+        assert_eq!(signal.score, eval.score);
+        assert_eq!(signal.expert, eval.expert);
+        assert_eq!(signal.variance, wdl_variance(eval.wdl));
+        assert_eq!(signal.draw_mass, wdl_draw_mass(eval.wdl));
+        assert!(signal.gate_margin >= 0);
+        assert_eq!(gate_margin(&[1, 4, 2, 0]), 2);
+        assert!(wdl_draw_mass([0, 64, 0]) > wdl_draw_mass([64, 0, 0]));
+        let mut state = AteedAccumulatorState::new();
+        let mut board = Board::new();
+        let before = state.evaluate_full(&board, &net);
+        let mv = board
+            .generate_legal_moves()
+            .iter()
+            .find(|candidate| candidate.to_uci() == "e2e4")
+            .copied()
+            .expect("e2e4 is legal");
+        state.push_move(&board, mv);
+        board.make_move(mv);
+        state.ensure_after_make(&board, &net);
+        assert!(state.frames[state.index].accurate);
+        assert_eq!(state.last_search_signal().score, before.score);
+        let after = state.evaluate_full(&board, &net);
+        assert_eq!(state.last_search_signal(), after.search_signal());
     }
 }

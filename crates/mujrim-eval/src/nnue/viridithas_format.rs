@@ -1,14 +1,12 @@
 //! Viridithas NNUE loader (zstd `.nnue.zst`).
 //!
-//! Published layouts evaluated in-process; Mujrim's alpha-beta stays on the
-//! Viridithas search profile either way.
+//! Official Viridithas 20 uses the v109 sandhi net. Synthetic simple nets stay
+//! for unit tests.
 //!
-//! - Simple: `16×768→H×2→1` SCReLU (early piece-feature nets).
-//! - Layered velarised: `704×16hm → 2560` pairwise-CReLU → `16` HardSwish6 →
-//!   `32` SwiGLU → `1`, eight output buckets.
-//! - Sandhi threat transformer: `704×16hm + (59808+4560)hm → 1024` pairwise-CReLU
-//!   → `32` HardSwish6 → `32` SwiGLU → `1` ×8. Piece planes reuse the velarised
-//!   704-index; aux planes use the in-crate SFNNv12 threat / pawn-pair indices.
+//! - Simple: `16×768→H×2→1` SCReLU (test-only piece-feature nets).
+//! - Sandhi: `704×16hm + (59808+4560)hm → 1024` pairwise-CReLU
+//!   → `32` HardSwish6 → `32` SwiGLU → `1` ×8. Piece planes use the 704-index;
+//!   aux planes use the in-crate SFNNv12 threat / pawn-pair indices.
 
 use std::io::Read;
 use std::path::Path;
@@ -20,7 +18,7 @@ use super::bit_rays::collect_bit_ray_move_deltas;
 use super::dirty_threats::{MAX_DIRTY_THREAT_DELTAS, ThreatDelta, ThreatDeltaSink, ThreatSnapshot};
 use super::stockfish_format::{
     AuxFeatureLists, PAIR_FEATURES, THREAT_FEATURES, collect_aux_feature_lists,
-    collect_moved_pawn_pair_delta, visit_pawn_pair_features, visit_threat_delta,
+    collect_moved_pawn_pair_sandhi_offsets, visit_pawn_pair_features, visit_threat_delta,
     visit_threat_features,
 };
 
@@ -32,14 +30,10 @@ pub const SCALE: i32 = 400;
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 pub const LAYERED_INPUT: usize = 704;
-pub const LAYERED_L1: usize = 2560;
-pub const LAYERED_L2: usize = 16;
-pub const LAYERED_L3: usize = 32;
 pub const LAYERED_OUTPUT_BUCKETS: usize = 8;
 pub const LAYERED_SCALE: i32 = 240;
 const LAYERED_QB: i32 = 64;
 const FT_SHIFT: i32 = 9;
-const SWISH_K: f32 = 6.0;
 const L1_MUL: f32 = (1 << FT_SHIFT) as f32 / ((QA * QA * LAYERED_QB) as f32);
 
 pub const SANDHI_L0: usize = 1024;
@@ -51,17 +45,6 @@ pub const FILE_SIZE: u64 = simple_size(HIDDEN) as u64;
 
 pub const fn simple_size(hidden: usize) -> usize {
     KING_BUCKETS * FEATURES * hidden * 2 + hidden * 2 + 2 * hidden * 2 + 4
-}
-
-pub const fn layered_velarised_size() -> usize {
-    KING_BUCKETS * LAYERED_INPUT * LAYERED_L1 * 2
-        + LAYERED_L1 * 2
-        + LAYERED_L1 * LAYERED_OUTPUT_BUCKETS * LAYERED_L2
-        + LAYERED_OUTPUT_BUCKETS * LAYERED_L2 * 4
-        + LAYERED_L2 * LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2) * 4
-        + LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2) * 4
-        + LAYERED_L3 * LAYERED_OUTPUT_BUCKETS * 4
-        + LAYERED_OUTPUT_BUCKETS * 4
 }
 
 pub const fn sandhi_size() -> usize {
@@ -90,7 +73,6 @@ const HALF_BUCKET_MAP: [usize; 32] = [
 
 pub enum ViridithasNetwork {
     Simple(SimpleNetwork),
-    Layered(Box<LayeredNetwork>),
     Sandhi(Box<SandhiNetwork>),
 }
 
@@ -101,17 +83,6 @@ pub struct SimpleNetwork {
     feature_biases: Box<[i16]>,
     output_weights: Box<[i16]>,
     output_bias: i32,
-}
-
-pub struct LayeredNetwork {
-    feature_weights: Box<[i16]>,
-    feature_biases: Box<[i16]>,
-    l1_weights: Box<[i8]>,
-    l1_biases: Box<[f32]>,
-    l2_weights: Box<[f32]>,
-    l2_biases: Box<[f32]>,
-    l3_weights: Box<[f32]>,
-    l3_biases: Box<[f32]>,
 }
 
 pub struct SandhiNetwork {
@@ -134,17 +105,13 @@ impl ViridithasNetwork {
                 return parse_simple(&decoded, hidden, FEATURES).map(Self::Simple);
             }
         }
-        if decoded.len() == layered_velarised_size() {
-            return parse_layered(&decoded).map(|net| Self::Layered(Box::new(net)));
-        }
         if decoded.len() == sandhi_size() {
             return parse_sandhi(&decoded).map(|net| Self::Sandhi(Box::new(net)));
         }
         Err(format!(
-            "Viridithas NNUE size {} is not a supported layout (simple H=1024 is {}, velarised layered is {}, sandhi is {})",
+            "Viridithas NNUE size {} is not a supported layout (simple H=1024 is {}, sandhi is {})",
             decoded.len(),
             simple_size(HIDDEN),
-            layered_velarised_size(),
             sandhi_size()
         ))
     }
@@ -153,7 +120,6 @@ impl ViridithasNetwork {
     pub fn features_per_bucket(&self) -> usize {
         match self {
             Self::Simple(net) => net.features_per_bucket,
-            Self::Layered(_) => LAYERED_INPUT,
             Self::Sandhi(_) => LAYERED_INPUT,
         }
     }
@@ -162,7 +128,6 @@ impl ViridithasNetwork {
     pub fn hidden(&self) -> usize {
         match self {
             Self::Simple(net) => net.hidden,
-            Self::Layered(_) => LAYERED_L1,
             Self::Sandhi(_) => SANDHI_L0,
         }
     }
@@ -171,7 +136,7 @@ impl ViridithasNetwork {
     pub fn scale(&self) -> i32 {
         match self {
             Self::Simple(_) => SCALE,
-            Self::Layered(_) | Self::Sandhi(_) => LAYERED_SCALE,
+            Self::Sandhi(_) => LAYERED_SCALE,
         }
     }
 
@@ -182,10 +147,6 @@ impl ViridithasNetwork {
                 "16×{}→{}×2→1 SCReLU (Viridithas piece features)",
                 net.features_per_bucket, net.hidden
             ),
-            Self::Layered(_) => {
-                "704×16hm → 2560 pairwise-CReLU → 16 HardSwish6 → 32 SwiGLU → 1 ×8 (velarised)"
-                    .to_string()
-            }
             Self::Sandhi(_) => {
                 "704×16hm + (59808+4560)hm → 1024 pairwise-CReLU → 32 HardSwish6 → 32 SwiGLU → 1 ×8 (sandhi)"
                     .to_string()
@@ -203,7 +164,6 @@ impl ViridithasNetwork {
                 256 => evaluate_simple::<256>(net, board),
                 hidden => evaluate_simple_capped(net, board, hidden),
             },
-            Self::Layered(net) => evaluate_layered(net, board),
             Self::Sandhi(net) => evaluate_sandhi(net, board),
         }
     }
@@ -286,49 +246,6 @@ fn accumulate_simple<const H: usize>(
     acc
 }
 
-fn evaluate_layered(net: &LayeredNetwork, board: &Board) -> i32 {
-    let mut acc_white = [0i16; LAYERED_L1];
-    let mut acc_black = [0i16; LAYERED_L1];
-    acc_white.copy_from_slice(&net.feature_biases);
-    acc_black.copy_from_slice(&net.feature_biases);
-    accumulate_layered(net, board, Color::White, &mut acc_white);
-    accumulate_layered(net, board, Color::Black, &mut acc_black);
-    finish_layered(net, board, &acc_white, &acc_black)
-}
-
-fn finish_layered(
-    net: &LayeredNetwork,
-    board: &Board,
-    acc_white: &[i16; LAYERED_L1],
-    acc_black: &[i16; LAYERED_L1],
-) -> i32 {
-    let (us, them) = if board.side_to_move == Color::White {
-        (acc_white, acc_black)
-    } else {
-        (acc_black, acc_white)
-    };
-
-    let mut ft = [0u8; LAYERED_L1];
-    activate_pairwise(us, &mut ft[..LAYERED_L1 / 2]);
-    activate_pairwise(them, &mut ft[LAYERED_L1 / 2..]);
-
-    let pieces = board.all_occupancy().count_ones() as usize;
-    let bucket = ((pieces - 2) / 4).min(LAYERED_OUTPUT_BUCKETS - 1);
-
-    let mut l1 = [0.0f32; LAYERED_L2];
-    propagate_l1(net, &ft, bucket, &mut l1);
-
-    let mut l2 = [0.0f32; LAYERED_L3];
-    propagate_l2(net, &l1, bucket, &mut l2);
-
-    let l3 = super::layered_forward::dot_f32(
-        &l2,
-        &net.l3_weights[bucket * LAYERED_L3..bucket * LAYERED_L3 + LAYERED_L3],
-        net.l3_biases[bucket],
-    );
-    (l3 * LAYERED_SCALE as f32) as i32
-}
-
 fn evaluate_sandhi(net: &SandhiNetwork, board: &Board) -> i32 {
     let mut acc_white = [0i16; SANDHI_L0];
     let mut acc_black = [0i16; SANDHI_L0];
@@ -357,7 +274,7 @@ fn finish_sandhi(
         (acc_black, acc_white, aux_black, aux_white)
     };
 
-    // Official `activate_ft_and_propagate_l1`: pairwise CReLU, sparse L1, then
+    // Official `activate_ft_and_propagate_l1`: CReLU×clip mulhi, sparse L1, then
     // HardSwish6 while the 1024-byte activation stays in cache.
     let mut ft = super::layered_forward::Align64::new([0u8; SANDHI_L0]);
     activate_pairwise_sandhi_sum(us, us_aux, &mut ft.0[..SANDHI_L0 / 2]);
@@ -451,6 +368,11 @@ fn sandhi_aux_row(feature: usize) -> usize {
     }
 }
 
+#[inline]
+fn sandhi_aux_offset(feature: usize) -> u32 {
+    (sandhi_aux_row(feature) as u32) << 10
+}
+
 fn apply_sandhi_aux_feature(
     acc: &mut [i16; SANDHI_L0],
     net: &SandhiNetwork,
@@ -468,8 +390,8 @@ fn apply_sandhi_aux_feature(
 const MAX_SANDHI_AUX_DELTA: usize = 192;
 
 struct SandhiAuxDelta {
-    adds: [usize; MAX_SANDHI_AUX_DELTA],
-    subs: [usize; MAX_SANDHI_AUX_DELTA],
+    adds: [u32; MAX_SANDHI_AUX_DELTA],
+    subs: [u32; MAX_SANDHI_AUX_DELTA],
     add_count: usize,
     sub_count: usize,
     overflowed: bool,
@@ -487,20 +409,33 @@ impl SandhiAuxDelta {
     }
 
     fn push(&mut self, feature: usize, sign: i16) {
-        let row = sandhi_aux_row(feature);
+        self.push_offset(sandhi_aux_offset(feature), sign);
+    }
+
+    fn push_offset(&mut self, offset: u32, sign: i16) {
         if sign > 0 {
             if self.add_count < MAX_SANDHI_AUX_DELTA {
-                self.adds[self.add_count] = row;
+                self.adds[self.add_count] = offset;
                 self.add_count += 1;
             } else {
                 self.overflowed = true;
             }
         } else if self.sub_count < MAX_SANDHI_AUX_DELTA {
-            self.subs[self.sub_count] = row;
+            self.subs[self.sub_count] = offset;
             self.sub_count += 1;
         } else {
             self.overflowed = true;
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.add_count == 0 && self.sub_count == 0
+    }
+
+    fn clear(&mut self) {
+        self.add_count = 0;
+        self.sub_count = 0;
+        self.overflowed = false;
     }
 }
 
@@ -529,7 +464,7 @@ fn apply_sandhi_aux_lists(
         return;
     }
     let zeros = [0i16; SANDHI_L0];
-    super::stockfish_simd::apply_i8_from_width(
+    super::stockfish_simd::apply_i8_from_offsets(
         acc,
         &zeros,
         &net.aux_weights,
@@ -542,87 +477,13 @@ fn apply_sandhi_aux_lists(
 fn activate_pairwise_sandhi_sum(acc: &[i16; SANDHI_L0], aux: &[i16; SANDHI_L0], out: &mut [u8]) {
     let half = SANDHI_L0 / 2;
     debug_assert_eq!(out.len(), half);
-    super::stockfish_simd::transform_pair_sum(
+    super::stockfish_simd::activate_shifted_pair_sum(
         &acc[..half],
         &aux[..half],
         &acc[half..],
         &aux[half..],
         out,
     );
-}
-
-fn accumulate_layered(
-    net: &LayeredNetwork,
-    board: &Board,
-    perspective: Color,
-    acc: &mut [i16; LAYERED_L1],
-) {
-    let king = board.king_square(perspective).index();
-    let bucket = king_bucket(relative_square(perspective, king));
-    let ft_base = bucket * LAYERED_INPUT * LAYERED_L1;
-    for piece in Piece::ALL {
-        for color in [Color::White, Color::Black] {
-            let mut bb = board.piece_bb(piece, color);
-            while bb != 0 {
-                let sq = bb.trailing_zeros() as usize;
-                bb &= bb - 1;
-                let feat = feature_index(perspective, king, piece, color, sq);
-                add_i16(acc, &net.feature_weights, ft_base + feat * LAYERED_L1);
-            }
-        }
-    }
-}
-
-#[inline]
-fn activate_pairwise(acc: &[i16; LAYERED_L1], out: &mut [u8]) {
-    let half = LAYERED_L1 / 2;
-    debug_assert_eq!(out.len(), half);
-    super::stockfish_simd::transform_pair(&acc[..half], &acc[half..], out);
-}
-
-fn propagate_l1(
-    net: &LayeredNetwork,
-    inputs: &[u8; LAYERED_L1],
-    bucket: usize,
-    out: &mut [f32; LAYERED_L2],
-) {
-    let mut sums = [0i32; LAYERED_L2];
-    let l1_base = bucket * LAYERED_L2 * LAYERED_L1;
-    super::layered_forward::affine_sparse_packed(
-        inputs,
-        &net.l1_weights[l1_base..l1_base + LAYERED_L2 * LAYERED_L1],
-        &mut sums,
-    );
-    let bias = bucket * LAYERED_L2;
-    for (j, sum) in sums.iter().enumerate() {
-        let pre = (*sum as f32).mul_add(L1_MUL, net.l1_biases[bias + j]);
-        out[j] = hard_swish6(pre);
-    }
-}
-
-fn propagate_l2(
-    net: &LayeredNetwork,
-    inputs: &[f32; LAYERED_L2],
-    bucket: usize,
-    out: &mut [f32; LAYERED_L3],
-) {
-    let mut sums = [0.0f32; LAYERED_L3 * 2];
-    let weight_base = bucket * LAYERED_L2 * (LAYERED_L3 * 2);
-    let bias = bucket * LAYERED_L3 * 2;
-    super::layered_forward::affine_f32(
-        inputs,
-        &net.l2_weights[weight_base..weight_base + LAYERED_L2 * (LAYERED_L3 * 2)],
-        &net.l2_biases[bias..bias + LAYERED_L3 * 2],
-        &mut sums,
-    );
-    for i in 0..LAYERED_L3 {
-        out[i] = hard_swish6(sums[i]) * sums[i + LAYERED_L3];
-    }
-}
-
-#[inline]
-fn hard_swish6(value: f32) -> f32 {
-    value * (value + SWISH_K * 0.5).clamp(0.0, SWISH_K) / SWISH_K
 }
 
 #[inline]
@@ -754,14 +615,6 @@ fn screlu(value: i16) -> i32 {
     clipped * clipped
 }
 
-pub const fn wide_ft_size(hidden: usize, features_per_bucket: usize) -> usize {
-    KING_BUCKETS * features_per_bucket * hidden * 2
-}
-
-pub const fn one_layer_head_size(hidden: usize) -> usize {
-    hidden * 2 + hidden * 2 * 2 + 4
-}
-
 fn parse_simple(
     bytes: &[u8],
     hidden: usize,
@@ -780,61 +633,6 @@ fn parse_simple(
         feature_biases,
         output_weights,
         output_bias,
-    })
-}
-
-fn parse_layered(bytes: &[u8]) -> Result<LayeredNetwork, String> {
-    let mut offset = 0;
-    let feature_weights = read_i16s(
-        bytes,
-        &mut offset,
-        KING_BUCKETS * LAYERED_INPUT * LAYERED_L1,
-    )?;
-    let feature_biases = read_i16s(bytes, &mut offset, LAYERED_L1)?;
-    let l1_src = read_i8s(
-        bytes,
-        &mut offset,
-        LAYERED_L1 * LAYERED_OUTPUT_BUCKETS * LAYERED_L2,
-    )?;
-    let l1_weights = super::layered_forward::pack_nnz_buckets(
-        &transpose_viri_l1(&l1_src, LAYERED_L1, LAYERED_L2),
-        LAYERED_OUTPUT_BUCKETS,
-        LAYERED_L1,
-        LAYERED_L2,
-    );
-    let l1_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS * LAYERED_L2)?;
-    let l2_weights = super::layered_forward::pack_f32_buckets(
-        &read_f32s(
-            bytes,
-            &mut offset,
-            LAYERED_L2 * LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2),
-        )?,
-        LAYERED_OUTPUT_BUCKETS,
-        LAYERED_L2,
-        LAYERED_L3 * 2,
-    );
-    let l2_biases = read_f32s(
-        bytes,
-        &mut offset,
-        LAYERED_OUTPUT_BUCKETS * (LAYERED_L3 * 2),
-    )?;
-    let l3_weights = super::layered_forward::pack_f32_buckets(
-        &read_f32s(bytes, &mut offset, LAYERED_L3 * LAYERED_OUTPUT_BUCKETS)?,
-        LAYERED_OUTPUT_BUCKETS,
-        LAYERED_L3,
-        1,
-    );
-    let l3_biases = read_f32s(bytes, &mut offset, LAYERED_OUTPUT_BUCKETS)?;
-    debug_assert_eq!(offset, layered_velarised_size());
-    Ok(LayeredNetwork {
-        feature_weights,
-        feature_biases,
-        l1_weights,
-        l1_biases,
-        l2_weights,
-        l2_biases,
-        l3_weights,
-        l3_biases,
     })
 }
 
@@ -1640,6 +1438,7 @@ impl ThreatDeltaSink for SandhiAuxFrame {
 struct SandhiAuxState {
     frames: Box<[SandhiAuxFrame]>,
     index: usize,
+    scratch: [SandhiAuxDelta; 2],
 }
 
 impl SandhiAuxState {
@@ -1647,6 +1446,7 @@ impl SandhiAuxState {
         Self {
             frames: vec![SandhiAuxFrame::default(); MAX_PLY].into_boxed_slice(),
             index: 0,
+            scratch: [SandhiAuxDelta::new(), SandhiAuxDelta::new()],
         }
     }
 
@@ -1782,75 +1582,86 @@ impl SandhiAuxState {
         let deltas = self.frames[current].threat_deltas;
         let delta_count = self.frames[current].threat_delta_count;
         let mut apply = [false; 2];
-        let mut pov_deltas = [SandhiAuxDelta::new(), SandhiAuxDelta::new()];
         for (pov, side) in [Color::White, Color::Black].into_iter().enumerate() {
             if needs_refresh[pov] || parent_overflowed[pov] || threat_overflowed {
                 self.refresh_pov(board, net, pov, side);
                 continue;
             }
-            let delta = &mut pov_deltas[pov];
-            for &threat in &deltas[..delta_count] {
-                visit_threat_delta(threat, kings[pov], pov, |feature, sign| {
-                    delta.push(feature, sign);
-                });
+            self.scratch[pov].clear();
+            let mut overflowed = false;
+            {
+                let delta = &mut self.scratch[pov];
+                for &threat in &deltas[..delta_count] {
+                    visit_threat_delta(threat, kings[pov], pov, |feature, sign| {
+                        delta.push(feature, sign);
+                    });
+                }
+                if pawns_before != pawns_after {
+                    let mut pair_adds = [0u32; 64];
+                    let mut pair_subs = [0u32; 64];
+                    let (add_count, sub_count, pairs_overflowed) =
+                        collect_moved_pawn_pair_sandhi_offsets(
+                            pawns_before,
+                            pawns_after,
+                            kings[pov],
+                            pov,
+                            &mut pair_adds,
+                            &mut pair_subs,
+                        );
+                    if pairs_overflowed {
+                        overflowed = true;
+                    } else {
+                        for &offset in &pair_adds[..add_count] {
+                            delta.push_offset(offset, 1);
+                        }
+                        for &offset in &pair_subs[..sub_count] {
+                            delta.push_offset(offset, -1);
+                        }
+                    }
+                }
+                overflowed |= delta.overflowed;
             }
-            if pawns_before != pawns_after {
-                let mut pair_adds = [0usize; 64];
-                let mut pair_subs = [0usize; 64];
-                let (add_count, sub_count, overflowed) = collect_moved_pawn_pair_delta(
-                    pawns_before,
-                    pawns_after,
-                    kings[pov],
-                    pov,
-                    &mut pair_adds,
-                    &mut pair_subs,
-                );
-                if overflowed {
-                    self.refresh_pov(board, net, pov, side);
-                    continue;
-                }
-                for &feature in &pair_adds[..add_count] {
-                    delta.push(feature, 1);
-                }
-                for &feature in &pair_subs[..sub_count] {
-                    delta.push(feature, -1);
-                }
-            }
-            if delta.overflowed {
+            if overflowed {
                 self.refresh_pov(board, net, pov, side);
                 continue;
             }
             apply[pov] = true;
         }
-        if apply.iter().any(|&yes| yes) {
-            let (parents, children) = self.frames.split_at_mut(current);
-            let parent = &parents[current - 1];
-            let child = &mut children[0];
-            for (pov, should_apply) in apply.into_iter().enumerate() {
-                if !should_apply {
-                    continue;
-                }
-                let delta = &pov_deltas[pov];
-                if delta.add_count == 0 && delta.sub_count == 0 {
-                    child.values[pov] = parent.values[pov];
-                } else {
-                    super::stockfish_simd::apply_i8_from_width(
-                        &mut child.values[pov],
-                        &parent.values[pov],
-                        &net.aux_weights,
-                        &delta.adds[..delta.add_count],
-                        &delta.subs[..delta.sub_count],
-                    );
-                }
-                child.lists[pov].overflowed = false;
-            }
-        }
+        self.apply_aux_deltas(current, apply, net);
         let frame = &mut self.frames[current];
         frame.kings = [kings[0] as u8, kings[1] as u8];
         frame.hash = board.hash;
         frame.accurate = true;
         frame.pending_move = None;
         frame.pending_null = false;
+    }
+
+    fn apply_aux_deltas(&mut self, current: usize, apply: [bool; 2], net: &SandhiNetwork) {
+        if !apply.iter().any(|&yes| yes) {
+            return;
+        }
+        let (parents, children) = self.frames.split_at_mut(current);
+        let parent = &parents[current - 1];
+        let child = &mut children[0];
+        let scratch = &self.scratch;
+        for (pov, should_apply) in apply.into_iter().enumerate() {
+            if !should_apply {
+                continue;
+            }
+            let delta = &scratch[pov];
+            if delta.is_empty() {
+                child.values[pov] = parent.values[pov];
+            } else {
+                super::stockfish_simd::apply_i8_from_offsets(
+                    &mut child.values[pov],
+                    &parent.values[pov],
+                    &net.aux_weights,
+                    &delta.adds[..delta.add_count],
+                    &delta.subs[..delta.sub_count],
+                );
+            }
+            child.lists[pov].overflowed = false;
+        }
     }
 }
 
@@ -1974,7 +1785,6 @@ fn apply_wide_move_delta_from<const H: usize>(
 
 pub(crate) struct ViridithasAccumulatorState {
     simple: Option<SimpleAccumulatorState>,
-    layered: Option<WideAccumulatorState<LAYERED_L1>>,
     sandhi: Option<WideAccumulatorState<SANDHI_L0>>,
     sandhi_aux: Option<SandhiAuxState>,
 }
@@ -1984,19 +1794,11 @@ impl ViridithasAccumulatorState {
         match network {
             ViridithasNetwork::Simple(net) => Self {
                 simple: Some(SimpleAccumulatorState::new(net.hidden)),
-                layered: None,
-                sandhi: None,
-                sandhi_aux: None,
-            },
-            ViridithasNetwork::Layered(_) => Self {
-                simple: None,
-                layered: Some(WideAccumulatorState::new()),
                 sandhi: None,
                 sandhi_aux: None,
             },
             ViridithasNetwork::Sandhi(_) => Self {
                 simple: None,
-                layered: None,
                 sandhi: Some(WideAccumulatorState::new()),
                 sandhi_aux: Some(SandhiAuxState::new()),
             },
@@ -2005,8 +1807,6 @@ impl ViridithasAccumulatorState {
 
     pub(crate) fn push_move(&mut self, board: &Board, mv: Move) {
         if let Some(state) = &mut self.simple {
-            state.push_move(board, mv);
-        } else if let Some(state) = &mut self.layered {
             state.push_move(board, mv);
         } else if let Some(state) = &mut self.sandhi {
             state.push_move(board, mv);
@@ -2020,8 +1820,6 @@ impl ViridithasAccumulatorState {
     pub(crate) fn push_null(&mut self) {
         if let Some(state) = &mut self.simple {
             state.push_null();
-        } else if let Some(state) = &mut self.layered {
-            state.push_null();
         } else if let Some(state) = &mut self.sandhi {
             state.push_null();
             self.sandhi_aux
@@ -2034,8 +1832,6 @@ impl ViridithasAccumulatorState {
     pub(crate) fn pop(&mut self) {
         if let Some(state) = &mut self.simple {
             state.pop();
-        } else if let Some(state) = &mut self.layered {
-            state.pop();
         } else if let Some(state) = &mut self.sandhi {
             state.pop();
             self.sandhi_aux.as_mut().expect("sandhi aux state").pop();
@@ -2044,8 +1840,6 @@ impl ViridithasAccumulatorState {
 
     pub(crate) fn clear(&mut self) {
         if let Some(state) = &mut self.simple {
-            state.clear();
-        } else if let Some(state) = &mut self.layered {
             state.clear();
         } else if let Some(state) = &mut self.sandhi {
             state.clear();
@@ -2065,12 +1859,6 @@ impl ViridithasAccumulatorState {
     pub(crate) fn ensure_after_make(&mut self, board: &Board, network: &ViridithasNetwork) {
         match network {
             ViridithasNetwork::Simple(_) => {}
-            ViridithasNetwork::Layered(net) => {
-                self.layered
-                    .as_mut()
-                    .expect("layered Viridithas state")
-                    .ensure_pieces(board, &net.feature_weights, &net.feature_biases, true);
-            }
             ViridithasNetwork::Sandhi(net) => {
                 self.sandhi
                     .as_mut()
@@ -2093,16 +1881,6 @@ impl ViridithasAccumulatorState {
                 } else {
                     state.evaluate(board, net)
                 }
-            }
-            ViridithasNetwork::Layered(net) => {
-                let state = self.layered.as_mut().expect("layered Viridithas state");
-                state.ensure_pieces(board, &net.feature_weights, &net.feature_biases, trusted);
-                finish_layered(
-                    net,
-                    board,
-                    &state.values[state.index][0],
-                    &state.values[state.index][1],
-                )
             }
             ViridithasNetwork::Sandhi(net) => {
                 let state = self.sandhi.as_mut().expect("sandhi Viridithas state");
@@ -2139,7 +1917,6 @@ pub fn looks_like_viridithas(path: &Path, bytes: &[u8]) -> bool {
         .unwrap_or_default()
         .to_ascii_lowercase();
     name.contains("viri")
-        || name.contains("velarised")
         || name.contains("sandhi")
         || name.ends_with(".nnue.zst")
         || name.ends_with(".zst")
@@ -2191,16 +1968,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simple_and_layered_sizes_are_stable() {
+    fn simple_and_sandhi_sizes_are_stable() {
         assert_eq!(simple_size(1024), 25_171_972);
         assert_eq!(simple_size(256), 6_292_996);
-        assert_eq!(layered_velarised_size(), 58_040_864);
         assert_eq!(sandhi_size(), 89_315_360);
         assert_eq!(SANDHI_AUX, 64_368);
-        assert_eq!(
-            wide_ft_size(1024, 1770) + one_layer_head_size(1024),
-            58_005_508
-        );
     }
 
     #[test]
@@ -2224,6 +1996,7 @@ mod tests {
 
     #[test]
     fn hard_swish6_matches_x_times_clamped_linear_gate() {
+        use super::super::layered_forward::hard_swish6;
         assert_eq!(hard_swish6(0.0), 0.0);
         assert_eq!(hard_swish6(-4.0), 0.0);
         assert!((hard_swish6(3.0) - 3.0).abs() < f32::EPSILON);
@@ -2258,47 +2031,12 @@ mod tests {
     }
 
     #[test]
-    fn downloaded_velarised_file_evaluates_in_opening_range() {
-        types::init();
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let candidates = [
-            workspace.join("nnue/velarised-2-b800.nnue.zst"),
-            workspace.join("dist/nnue/velarised-2-b800.nnue.zst"),
-        ];
-        let Some(path) = candidates.iter().find(|path| path.is_file()) else {
-            return;
-        };
-        let net = load(path).expect("velarised-2 layered layout");
-        assert!(matches!(*net, ViridithasNetwork::Layered(_)));
-        assert_eq!(net.features_per_bucket(), LAYERED_INPUT);
-        let startpos = net.evaluate(&Board::new());
-        assert!(
-            startpos.abs() < 250,
-            "velarised-2 startpos should be a quiet opening score, got {startpos}"
-        );
-        let white_mates =
-            Board::from_fen("4k3/8/8/8/8/8/8/4KQ2 w - - 0 1").expect("KQ vs k is valid");
-        let black_to_move =
-            Board::from_fen("4k3/8/8/8/8/8/8/4KQ2 b - - 0 1").expect("KQ vs k is valid");
-        let white_score = net.evaluate(&white_mates);
-        let black_score = net.evaluate(&black_to_move);
-        assert!(
-            white_score > 300,
-            "velarised-2 must prefer White in KQ vs k, got {white_score}"
-        );
-        assert!(
-            black_score < -300,
-            "velarised-2 must flip with side-to-move, got {black_score}"
-        );
-    }
-
-    #[test]
     fn unknown_sizes_still_name_the_supported_layouts() {
         let Err(err) = ViridithasNetwork::from_bytes(&[0u8; 64]) else {
             panic!("tiny buffers must not parse as a Viridithas net");
         };
         assert!(err.contains("sandhi"), "{err}");
-        assert!(err.contains("velarised"), "{err}");
+        assert!(!err.contains("velarised"), "{err}");
     }
 
     #[test]
@@ -2319,11 +2057,17 @@ mod tests {
             Err(_) => return,
         };
         assert_eq!(net.hidden(), SANDHI_L0);
+        // Official Viridithas 20.0.0 `eval-stats` on the embedded v109 net.
         let startpos = net.evaluate(&Board::new());
-        assert!(
-            startpos.abs() < 250,
-            "sandhi startpos should be a quiet opening score, got {startpos}"
-        );
+        assert_eq!(startpos, 43, "official v20 startpos eval");
+        let after_e2e4 =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")
+                .expect("e2e4 fen");
+        assert_eq!(net.evaluate(&after_e2e4), -38, "official v20 after e2e4");
+        let kiwipete =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .expect("kiwipete");
+        assert_eq!(net.evaluate(&kiwipete), -372, "official v20 kiwipete");
         let white_mates =
             Board::from_fen("4k3/8/8/8/8/8/8/4KQ2 w - - 0 1").expect("KQ vs k is valid");
         let black_to_move =
@@ -2509,17 +2253,6 @@ mod tests {
         }
     }
 
-    fn try_load_layered() -> Option<Box<ViridithasNetwork>> {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let candidates = [
-            workspace.join("nnue/velarised-2-b800.nnue.zst"),
-            workspace.join("dist/nnue/velarised-2-b800.nnue.zst"),
-        ];
-        let path = candidates.iter().find(|path| path.is_file())?;
-        let net = load(path).ok()?;
-        matches!(*net, ViridithasNetwork::Layered(_)).then_some(net)
-    }
-
     fn try_load_sandhi() -> Option<Box<ViridithasNetwork>> {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let candidates = [
@@ -2586,15 +2319,6 @@ mod tests {
         state.pop();
         board.unmake_move(last_move.expect("at least one move was made"));
         assert_wide_matches(&mut state, net, &board);
-    }
-
-    #[test]
-    fn layered_incremental_matches_scratch_after_moves() {
-        types::init();
-        let Some(net) = try_load_layered() else {
-            return;
-        };
-        play_and_check(&net);
     }
 
     #[test]
@@ -2756,6 +2480,34 @@ mod tests {
         assert_eq!(state.evaluate_search(&board, &net), incremental);
         let mut scratch = ViridithasAccumulatorState::for_network(&net);
         assert_eq!(scratch.evaluate(&board, &net), incremental);
+    }
+
+    #[test]
+    fn sandhi_fused_aux_pair_matches_scratch_after_two_quiet_pawns() {
+        types::init();
+        let Some(net) = try_load_sandhi() else {
+            return;
+        };
+        let mut state = ViridithasAccumulatorState::for_network(&net);
+        let mut board = Board::new();
+        let _ = state.evaluate(&board, &net);
+        for uci in ["e2e4", "e7e5"] {
+            let mv = board
+                .generate_legal_moves()
+                .iter()
+                .find(|candidate| candidate.to_uci() == uci)
+                .copied()
+                .unwrap_or_else(|| panic!("{uci} is legal"));
+            state.push_move(&board, mv);
+            board.make_move(mv);
+            let incremental = state.evaluate_search(&board, &net);
+            let mut scratch = ViridithasAccumulatorState::for_network(&net);
+            assert_eq!(
+                scratch.evaluate(&board, &net),
+                incremental,
+                "{uci} fused aux diverged from scratch"
+            );
+        }
     }
 
     #[test]
@@ -2981,6 +2733,26 @@ mod tests {
             sandhi_aux_row(THREAT_FEATURES + PAIR_FEATURES - 1),
             PAIR_FEATURES - 1
         );
+    }
+
+    #[test]
+    fn sandhi_aux_offset_is_row_shifted_by_l0() {
+        assert_eq!(sandhi_aux_offset(0), (PAIR_FEATURES as u32) << 10);
+        assert_eq!(
+            sandhi_aux_offset(THREAT_FEATURES - 1),
+            ((SANDHI_AUX - 1) as u32) << 10
+        );
+        assert_eq!(sandhi_aux_offset(THREAT_FEATURES), 0);
+        assert_eq!(
+            sandhi_aux_offset(THREAT_FEATURES + PAIR_FEATURES - 1),
+            ((PAIR_FEATURES - 1) as u32) << 10
+        );
+        let mut delta = SandhiAuxDelta::new();
+        delta.push(0, 1);
+        delta.push(THREAT_FEATURES, 1);
+        delta.push(THREAT_FEATURES + 3, -1);
+        assert_eq!(delta.adds[..delta.add_count], [sandhi_aux_offset(0), 0]);
+        assert_eq!(delta.subs[..delta.sub_count], [3u32 << 10]);
     }
 
     fn stm_score_after(net: &ViridithasNetwork, fen: &str, uci: &str) -> i32 {

@@ -114,7 +114,7 @@ fn studies_panel(state: AppState, handles: AppHandles) -> impl IntoView {
         Stack::vertical((
             widgets::section_label("Studies", pal),
             widgets::body_copy(
-                "Create a study, add chapters, and fork sidelines by playing a different move.",
+                "Chapters, comments, and arrows like Lichess Study. Import a study PGN or index Downloads.",
                 pal,
             ),
             TextInput::new(state.study_title).style(|s| {
@@ -141,6 +141,18 @@ fn studies_panel(state: AppState, handles: AppHandles) -> impl IntoView {
                 widgets::ghost_button(state, "Save chapter line", {
                     let handles = handles.clone();
                     move || actions::save_chapter_from_board(state, &handles)
+                }),
+                widgets::ghost_button(state, "Import study", {
+                    let handles = handles.clone();
+                    move || actions::import_lichess_study(state, &handles)
+                }),
+                widgets::ghost_button(state, "Export study", {
+                    let handles = handles.clone();
+                    move || actions::export_lichess_study(state, &handles)
+                }),
+                widgets::ghost_button(state, "Index Downloads", {
+                    let handles = handles.clone();
+                    move || actions::index_lichess_downloads(state, &handles)
                 }),
             ))
             .style(|s| s.col_gap(6.0).flex_wrap(FlexWrap::Wrap)),
@@ -176,6 +188,81 @@ fn studies_panel(state: AppState, handles: AppHandles) -> impl IntoView {
                                         .min_width(0.0)
                                         .width_full()
                                         .text_wrap()
+                                }),
+                                Label::new(if study.annotator.is_empty() {
+                                    String::new()
+                                } else {
+                                    study
+                                        .annotator
+                                        .rsplit('/')
+                                        .next()
+                                        .unwrap_or(study.annotator.as_str())
+                                        .to_owned()
+                                })
+                                .style(move |s| {
+                                    s.font_size(11.0)
+                                        .min_width(0.0)
+                                        .width_full()
+                                        .text_wrap()
+                                        .color(theme::rgba(pal().text_secondary))
+                                }),
+                                dyn_view({
+                                    let handles = handles.clone();
+                                    let study_id = id.clone();
+                                    let chapters = study.chapters.clone();
+                                    move || {
+                                        if state.active_study_id.get().as_deref() != Some(study_id.as_str())
+                                        {
+                                            return Empty::new().into_any();
+                                        }
+                                        chapters
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(index, chapter)| {
+                                                let handles = handles.clone();
+                                                let chapter_id = chapter.id.clone();
+                                                let label = format!(
+                                                    "{}. {}",
+                                                    index + 1,
+                                                    chapter.title
+                                                );
+                                                let selected = state
+                                                    .active_chapter_id
+                                                    .get()
+                                                    .as_deref()
+                                                    == Some(chapter_id.as_str());
+                                                Button::new(label).action(move || {
+                                                    actions::load_study_chapter(
+                                                        state,
+                                                        &handles,
+                                                        chapter_id.clone(),
+                                                    )
+                                                })
+                                                .style(move |s| {
+                                                    let pal = pal();
+                                                    s.width_full()
+                                                        .min_width(0.0)
+                                                        .padding(8.0)
+                                                        .border(0.0)
+                                                        .border_radius(8.0)
+                                                        .font_size(12.0)
+                                                        .font_bold()
+                                                        .background(theme::rgba(if selected {
+                                                            pal.accent
+                                                        } else {
+                                                            pal.bg
+                                                        }))
+                                                })
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .into_view()
+                                            .style(|s| {
+                                                s.width_full()
+                                                    .row_gap(4.0)
+                                                    .flex_col()
+                                            })
+                                            .into_any()
+                                    }
                                 }),
                                 Stack::horizontal((
                                     widgets::ghost_button(state, "Open", {
@@ -239,11 +326,26 @@ fn variation_tree_card(state: AppState, handles: AppHandles) -> impl IntoView {
     widgets::card(
         state,
         Stack::vertical((
-            widgets::section_label("Lines", pal),
-            widgets::body_copy(
-                "Click a move to jump. Playing off-book forks a new variation in the active chapter.",
-                pal,
-            ),
+            widgets::section_label("Moves", pal),
+            Label::derived(move || {
+                let note = state.move_note.get();
+                if note.is_empty() {
+                    "Click a move to read its comment. Arrows and circles follow the chapter shapes."
+                        .to_owned()
+                } else {
+                    note
+                }
+            })
+            .style(move |s| {
+                s.font_size(12.0)
+                    .min_width(0.0)
+                    .width_full()
+                    .text_wrap()
+                    .padding(8.0)
+                    .border_radius(8.0)
+                    .background(theme::rgba(pal().bg))
+                    .color(theme::rgba(pal().text_secondary))
+            }),
             dyn_view({
                 let handles = handles.clone();
                 move || {
@@ -263,6 +365,7 @@ fn variation_tree_card(state: AppState, handles: AppHandles) -> impl IntoView {
                         .into_iter()
                         .map(|(path, label)| {
                             let handles = handles.clone();
+                            let selected = state.study_path.get() == path;
                             Button::new(label)
                                 .action(move || {
                                     actions::jump_study_path(state, &handles, path.clone())
@@ -271,11 +374,15 @@ fn variation_tree_card(state: AppState, handles: AppHandles) -> impl IntoView {
                                     let pal = pal();
                                     s.width_full()
                                         .min_width(0.0)
-                                        .padding(8.0)
+                                        .padding(6.0)
                                         .border(0.0)
-                                        .border_radius(8.0)
+                                        .border_radius(6.0)
                                         .font_size(12.0)
-                                        .background(theme::rgba(pal.bg))
+                                        .background(theme::rgba(if selected {
+                                            pal.accent
+                                        } else {
+                                            pal.bg
+                                        }))
                                 })
                         })
                         .collect::<Vec<_>>()
@@ -1158,6 +1265,11 @@ mod tests {
             "game_io_bar",
             "library_sidebar",
             "New study",
+            "Import study",
+            "Export study",
+            "Index Downloads",
+            "load_study_chapter",
+            "chapter shapes",
             "Train this line",
             "Studies",
             "study_tab_bar",

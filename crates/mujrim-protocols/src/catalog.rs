@@ -2,7 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// Product engines shipped beside the UI under `engines/mujrim/bin/<os-arch>/`:
+/// Default play/analysis engine when multiple Mujrim variants are present.
+pub const DEFAULT_MUJRIM_ENGINE_ID: &str = "mujrim-v60";
+
+/// Product engines shipped under `engines/mujrim/` (flat) and
+/// `engines/mujrim/bin/<os-arch>/`:
 /// - `mujrim-elite` — Stockfish NNUE embedded
 /// - `mujrim-external` — loads/discovers NNUE at runtime
 /// - `mujrim-v60` — Reckless NNUE embedded
@@ -214,6 +218,32 @@ fn package_directory(engine_id: &str) -> &str {
     }
 }
 
+/// True for dedicated Mujrim product binaries (not upstream Stockfish/Lc0/…).
+pub fn is_mujrim_product(engine_id: &str) -> bool {
+    package_directory(engine_id) == "mujrim"
+}
+
+/// Relative directory that holds every Mujrim product binary.
+pub fn mujrim_engines_directory() -> &'static str {
+    "mujrim"
+}
+
+/// Flat packaged path: `<engines_root>/mujrim/<id>`.
+pub fn flat_mujrim_engine_path(engines_root: &Path, engine_id: &str) -> PathBuf {
+    engines_root
+        .join(mujrim_engines_directory())
+        .join(executable_filename(engine_id))
+}
+
+/// Prefer `mujrim-v60`, then any other Mujrim product, then the first discovery.
+pub fn preferred_bundled_engine(engines: &[DiscoveredEngine]) -> Option<&DiscoveredEngine> {
+    engines
+        .iter()
+        .find(|engine| engine.id == DEFAULT_MUJRIM_ENGINE_ID)
+        .or_else(|| engines.iter().find(|engine| is_mujrim_product(engine.id)))
+        .or_else(|| engines.first())
+}
+
 /// Workspace `dist/<os-arch>/engines` root. Gauntlet and release snapshots use this tree only.
 pub fn dist_engines_root(workspace_root: &Path) -> PathBuf {
     workspace_root
@@ -339,48 +369,63 @@ fn legacy_filename_aliases(engine_id: &str) -> Vec<String> {
     }
 }
 
-/// Candidate locations in priority order. An explicit path always wins,
-/// followed by host-native packaged builds (never emulated ISA folders).
-pub fn engine_candidate_details(
-    engine_id: &str,
+fn push_adjacent_candidates(
+    candidates: &mut Vec<EngineCandidate>,
     executable: &Path,
-    current_dir: &Path,
-    explicit: Option<&Path>,
-) -> Vec<EngineCandidate> {
-    let product_id = canonical_engine_id(engine_id);
-    let flat_filename = executable_filename(product_id);
-    let mut candidates = Vec::with_capacity(24);
-    if let Some(path) = explicit {
+    product_id: &str,
+    flat_filename: &str,
+) {
+    let Some(executable_dir) = executable.parent() else {
+        return;
+    };
+    push_candidate(
+        candidates,
+        EngineCandidate {
+            path: executable_dir.join(flat_filename),
+            target_directory: "adjacent".to_owned(),
+            compatibility: RuntimeCompatibility::Native,
+        },
+    );
+    for alias in legacy_filename_aliases(product_id) {
         push_candidate(
-            &mut candidates,
+            candidates,
             EngineCandidate {
-                path: path.to_path_buf(),
-                target_directory: "explicit".to_owned(),
-                compatibility: RuntimeCompatibility::Native,
-            },
-        );
-    }
-    if let Some(executable_dir) = executable.parent() {
-        push_candidate(
-            &mut candidates,
-            EngineCandidate {
-                path: executable_dir.join(&flat_filename),
+                path: executable_dir.join(alias),
                 target_directory: "adjacent".to_owned(),
                 compatibility: RuntimeCompatibility::Native,
             },
         );
-        for alias in legacy_filename_aliases(product_id) {
+    }
+}
+
+fn push_packaged_candidates(
+    candidates: &mut Vec<EngineCandidate>,
+    executable: &Path,
+    current_dir: &Path,
+    product_id: &str,
+) {
+    let mujrim_product = is_mujrim_product(product_id);
+    for root in engine_search_roots(executable, current_dir) {
+        if mujrim_product {
             push_candidate(
-                &mut candidates,
+                candidates,
                 EngineCandidate {
-                    path: executable_dir.join(alias),
-                    target_directory: "adjacent".to_owned(),
+                    path: flat_mujrim_engine_path(&root, product_id),
+                    target_directory: "engines/mujrim".to_owned(),
                     compatibility: RuntimeCompatibility::Native,
                 },
             );
+            for alias in legacy_filename_aliases(product_id) {
+                push_candidate(
+                    candidates,
+                    EngineCandidate {
+                        path: root.join(mujrim_engines_directory()).join(alias),
+                        target_directory: "engines/mujrim".to_owned(),
+                        compatibility: RuntimeCompatibility::Native,
+                    },
+                );
+            }
         }
-    }
-    for root in engine_search_roots(executable, current_dir) {
         for (target_directory, compatibility) in runtime_targets() {
             let filename = packaged_executable_filename(product_id, &target_directory);
             let path = root
@@ -389,7 +434,7 @@ pub fn engine_candidate_details(
                 .join(&target_directory)
                 .join(filename);
             push_candidate(
-                &mut candidates,
+                candidates,
                 EngineCandidate {
                     path,
                     target_directory: target_directory.clone(),
@@ -398,7 +443,7 @@ pub fn engine_candidate_details(
             );
             for alias in legacy_filename_aliases(product_id) {
                 push_candidate(
-                    &mut candidates,
+                    candidates,
                     EngineCandidate {
                         path: root
                             .join(package_directory(product_id))
@@ -411,6 +456,37 @@ pub fn engine_candidate_details(
                 );
             }
         }
+    }
+}
+
+/// Candidate locations in priority order. An explicit path always wins.
+/// Mujrim products prefer `<engines>/mujrim/<id>` over a binary beside the UI.
+pub fn engine_candidate_details(
+    engine_id: &str,
+    executable: &Path,
+    current_dir: &Path,
+    explicit: Option<&Path>,
+) -> Vec<EngineCandidate> {
+    let product_id = canonical_engine_id(engine_id);
+    let flat_filename = executable_filename(product_id);
+    let mujrim_product = is_mujrim_product(product_id);
+    let mut candidates = Vec::with_capacity(32);
+    if let Some(path) = explicit {
+        push_candidate(
+            &mut candidates,
+            EngineCandidate {
+                path: path.to_path_buf(),
+                target_directory: "explicit".to_owned(),
+                compatibility: RuntimeCompatibility::Native,
+            },
+        );
+    }
+    if !mujrim_product {
+        push_adjacent_candidates(&mut candidates, executable, product_id, &flat_filename);
+    }
+    push_packaged_candidates(&mut candidates, executable, current_dir, product_id);
+    if mujrim_product {
+        push_adjacent_candidates(&mut candidates, executable, product_id, &flat_filename);
     }
     candidates
 }
@@ -511,10 +587,10 @@ mod tests {
     }
 
     #[test]
-    fn flat_installer_layout_finds_adjacent_engine() {
+    fn mujrim_products_prefer_engines_mujrim_over_adjacent_ui() {
         let candidates = engine_candidate_details(
             "mujrim-v60",
-            Path::new("C:/Program Files/Mujrim/bin/mujrim.exe"),
+            Path::new("C:/Program Files/Mujrim/bin/mujrim-ui.exe"),
             Path::new("D:/unrelated"),
             None,
         );
@@ -522,10 +598,21 @@ mod tests {
             candidates.first().unwrap(),
             &EngineCandidate {
                 path: Path::new("C:/Program Files/Mujrim/bin")
+                    .join("engines")
+                    .join("mujrim")
                     .join(executable_filename("mujrim-v60")),
-                target_directory: "adjacent".to_owned(),
+                target_directory: "engines/mujrim".to_owned(),
                 compatibility: RuntimeCompatibility::Native,
             }
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.target_directory == "adjacent"
+                    && candidate.path
+                        == Path::new("C:/Program Files/Mujrim/bin")
+                            .join(executable_filename("mujrim-v60"))),
+            "adjacent remains a last-resort fallback: {candidates:?}"
         );
     }
 
@@ -587,15 +674,28 @@ mod tests {
                 Path::new("D:/src/mujrim"),
                 None,
             );
-            let expected = Path::new("C:/Mujrim")
+            let flat = Path::new("C:/Mujrim")
+                .join("engines")
+                .join("mujrim")
+                .join(with_exe_suffix(product));
+            let packaged = Path::new("C:/Mujrim")
                 .join("engines")
                 .join("mujrim")
                 .join("bin")
                 .join(&target)
                 .join(with_exe_suffix(product));
             assert!(
-                candidates.contains(&expected),
-                "missing {expected:?} in {candidates:?}"
+                candidates.contains(&flat),
+                "missing flat {flat:?} in {candidates:?}"
+            );
+            assert!(
+                candidates.contains(&packaged),
+                "missing packaged {packaged:?} in {candidates:?}"
+            );
+            assert!(
+                candidates.iter().position(|path| path == &flat)
+                    < candidates.iter().position(|path| path == &packaged),
+                "flat engines/mujrim/{product} must rank above bin/<os-arch>"
             );
         }
     }
@@ -744,6 +844,13 @@ mod tests {
                 .join(executable_filename("mujrim-viri"))
         );
         assert_eq!(
+            flat_mujrim_engine_path(&dist, "mujrim-v60"),
+            dist.join("mujrim").join(executable_filename("mujrim-v60"))
+        );
+        assert_eq!(DEFAULT_MUJRIM_ENGINE_ID, "mujrim-v60");
+        assert!(is_mujrim_product("mujrim-v60"));
+        assert!(!is_mujrim_product("stockfish"));
+        assert_eq!(
             packaged_engine_path(&dist, "viridithas"),
             dist.join("viridithas")
                 .join("bin")
@@ -879,6 +986,101 @@ mod tests {
                 .any(|(_, display)| display.to_ascii_lowercase().contains("native"))
         );
         assert_eq!(MUJRIM_HCE_DISPLAY_NAME, "Mujrim HCE");
+        assert_eq!(DEFAULT_MUJRIM_ENGINE_ID, "mujrim-v60");
+    }
+
+    #[test]
+    fn preferred_bundled_engine_selects_v60_when_present() {
+        let elite = DiscoveredEngine {
+            id: "mujrim-elite",
+            display_name: "Mujrim Elite",
+            path: PathBuf::from("/engines/mujrim/mujrim-elite"),
+            target_directory: "engines/mujrim".to_owned(),
+            compatibility: RuntimeCompatibility::Native,
+            search_limits: SearchLimitSupport::STANDARD,
+        };
+        let v60 = DiscoveredEngine {
+            id: "mujrim-v60",
+            display_name: "Mujrim v60",
+            path: PathBuf::from("/engines/mujrim/mujrim-v60"),
+            target_directory: "engines/mujrim".to_owned(),
+            compatibility: RuntimeCompatibility::Native,
+            search_limits: SearchLimitSupport::STANDARD,
+        };
+        let stockfish = DiscoveredEngine {
+            id: "stockfish",
+            display_name: "Stockfish",
+            path: PathBuf::from("/engines/stockfish/stockfish"),
+            target_directory: "linux-x86_64".to_owned(),
+            compatibility: RuntimeCompatibility::Native,
+            search_limits: SearchLimitSupport::STANDARD,
+        };
+        assert_eq!(
+            preferred_bundled_engine(&[elite.clone(), v60.clone(), stockfish.clone()])
+                .map(|engine| engine.id),
+            Some("mujrim-v60")
+        );
+        assert_eq!(
+            preferred_bundled_engine(&[stockfish.clone(), elite.clone()]).map(|engine| engine.id),
+            Some("mujrim-elite")
+        );
+        assert_eq!(
+            preferred_bundled_engine(std::slice::from_ref(&stockfish)).map(|engine| engine.id),
+            Some("stockfish")
+        );
+        assert!(preferred_bundled_engine(&[]).is_none());
+    }
+
+    #[test]
+    fn discover_bundled_engines_finds_flat_mujrim_variants() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-catalog-flat-{}-{}",
+            std::process::id(),
+            stamp
+        ));
+        let mujrim_dir = root.join("engines").join("mujrim");
+        std::fs::create_dir_all(&mujrim_dir).unwrap();
+        let native_machine = match crate::binary_arch::BinaryArch::host() {
+            crate::binary_arch::BinaryArch::Aarch64 => 0xB7,
+            _ => 0x3E,
+        };
+        for id in ["mujrim-elite", "mujrim-v60", "mujrim-ak"] {
+            let engine = mujrim_dir.join(executable_filename(id));
+            std::fs::write(
+                &engine,
+                crate::binary_arch::synthetic_elf_bytes(native_machine),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&engine).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&engine, perms).unwrap();
+            }
+        }
+        let ui = root.join("mujrim-ui");
+        std::fs::write(&ui, []).unwrap();
+        let found = discover_bundled_engines(&ui, &root);
+        let ids: Vec<&str> = found.iter().map(|engine| engine.id).collect();
+        assert!(ids.contains(&"mujrim-v60"), "detected {ids:?}");
+        assert!(ids.contains(&"mujrim-elite"), "detected {ids:?}");
+        assert!(ids.contains(&"mujrim-ak"), "detected {ids:?}");
+        assert_eq!(
+            preferred_bundled_engine(&found).map(|engine| engine.id),
+            Some("mujrim-v60")
+        );
+        assert!(
+            found
+                .iter()
+                .all(|engine| engine.target_directory == "engines/mujrim"),
+            "flat engines/mujrim/ must win over adjacent UI: {found:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

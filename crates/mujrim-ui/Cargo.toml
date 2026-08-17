@@ -7,9 +7,8 @@ description = "Floem GUI for the Mujrim chess engine"
 license = "MIT"
 
 [features]
-default = ["floem-ui", "book", "nnue"]
-book = ["search/book"]
-nnue = ["search/nnue"]
+default = ["floem-ui", "book"]
+book = []
 floem-ui = []
 
 [[bin]]
@@ -17,21 +16,16 @@ name = "mujrim-ui"
 path = "src/main.rs"
 
 [dependencies]
-floem = { git = "https://github.com/lapce/floem", rev = "778bb5f2aa08429e579ee2e6ac97e84fbf18b618", features = ["tokio", "default-image-formats", "vger"] }
+floem = { git = "https://github.com/lapce/floem", rev = "778bb5f2aa08429e579ee2e6ac97e84fbf18b618", features = ["tokio", "vger"] }
 usvg = "0.46"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 types = { package = "mujrim-types", path = "../mujrim-types" }
-search = { package = "mujrim-search", path = "../mujrim-search" }
-# GUI loads nets from dist/nnue at runtime — do not unify embedded-networks into the workspace.
-eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false, features = ["nnue", "simd", "akimbo-nnue", "stockfish-nnue", "reckless-nnue", "ateed-nnue"] }
-gpu = { package = "mujrim-gpu", path = "../mujrim-gpu" }
 rfd = "0.17"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rand = "0.9"
 arboard = "3.6.1"
-rodio = "0.20"
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
 gif = "0.13"
-xcap = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
@@ -39,6 +33,12 @@ updater = { package = "mujrim-updater", path = "../mujrim-updater" }
 mujrim-protocols = { path = "../mujrim-protocols" }
 mujrim-study = { path = "../mujrim-study" }
 mujrim-benchmarker = { path = "../mujrim-benchmarker", default-features = false }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+xcap = "0.9"
+
+[dev-dependencies]
+types = { package = "mujrim-types", path = "../mujrim-types" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

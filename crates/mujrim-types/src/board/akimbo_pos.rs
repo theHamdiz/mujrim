@@ -309,6 +309,107 @@ impl AkimboPos {
         lines & (self.piece_bb(Piece::Rook, by) | self.piece_bb(Piece::Queen, by)) != 0
     }
 
+    fn is_pseudo_legal(&self, mv: Move) -> bool {
+        if mv.from == mv.to {
+            return false;
+        }
+        let us = self.stm;
+        let piece = match self.piece_of_color_on(mv.from, us) {
+            Some(piece) => piece,
+            None => return false,
+        };
+        if mv.is_castling() {
+            return piece == Piece::King;
+        }
+        if self.piece_of_color_on(mv.to, us).is_some() {
+            return false;
+        }
+        let dest_enemy = self.piece_of_color_on(mv.to, us.opponent()).is_some();
+        let from_idx = mv.from.index();
+        let to_bb = mv.to.bitboard();
+        let occ = self.all_occupancy();
+        match piece {
+            Piece::Pawn => {
+                if mv.flag == MoveFlag::EnPassant {
+                    return self.ep < NONE_EP
+                        && Square::from_index(self.ep as usize) == mv.to
+                        && pawn_attacks(us.index(), from_idx) & to_bb != 0;
+                }
+                if dest_enemy {
+                    pawn_attacks(us.index(), from_idx) & to_bb != 0
+                        && (mv.to.rank() == us.promotion_rank()) == mv.is_promotion()
+                } else if occ & to_bb == 0 {
+                    let one = (from_idx as i32 + us.pawn_direction()) as usize;
+                    if one < 64 && Square::from_index(one) == mv.to {
+                        (mv.to.rank() == us.promotion_rank()) == mv.is_promotion()
+                    } else if mv.flag == MoveFlag::DoublePawn
+                        && mv.from.rank() == us.pawn_start_rank()
+                    {
+                        let mid = (from_idx as i32 + us.pawn_direction()) as usize;
+                        let two = (from_idx as i32 + 2 * us.pawn_direction()) as usize;
+                        two < 64
+                            && Square::from_index(two) == mv.to
+                            && occ & Square::from_index(mid).bitboard() == 0
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            Piece::Knight => knight_attacks(from_idx) & to_bb != 0 && !mv.is_promotion(),
+            Piece::Bishop => bishop_attacks(from_idx, occ) & to_bb != 0 && !mv.is_promotion(),
+            Piece::Rook => rook_attacks(from_idx, occ) & to_bb != 0 && !mv.is_promotion(),
+            Piece::Queen => queen_attacks(from_idx, occ) & to_bb != 0 && !mv.is_promotion(),
+            Piece::King => king_attacks(from_idx) & to_bb != 0 && !mv.is_promotion(),
+        }
+    }
+
+    pub fn hydrate_move(&self, mv: Move) -> Option<Move> {
+        if mv.from == mv.to {
+            return None;
+        }
+        let us = self.stm;
+        let piece = self.piece_of_color_on(mv.from, us)?;
+        if piece == Piece::King {
+            if mv.is_castling() {
+                return self.is_legal_move(mv).then_some(mv);
+            }
+            let castle = match (us, mv.from, mv.to) {
+                (Color::White, Square::E1, Square::G1) | (Color::Black, Square::E8, Square::G8) => {
+                    Some(Move::king_castle(mv.from, mv.to))
+                }
+                (Color::White, Square::E1, Square::C1) | (Color::Black, Square::E8, Square::C8) => {
+                    Some(Move::queen_castle(mv.from, mv.to))
+                }
+                _ => None,
+            };
+            if let Some(castle) = castle {
+                return self.is_legal_move(castle).then_some(castle);
+            }
+        }
+        let dest_enemy = self.piece_of_color_on(mv.to, us.opponent()).is_some();
+        let resolved = if let Some(promo) = mv.promotion {
+            if dest_enemy {
+                Move::promotion_capture(mv.from, mv.to, promo)
+            } else {
+                Move::promotion(mv.from, mv.to, promo)
+            }
+        } else if piece == Piece::Pawn
+            && self.ep < NONE_EP
+            && Square::from_index(self.ep as usize) == mv.to
+        {
+            Move::en_passant(mv.from, mv.to)
+        } else if dest_enemy {
+            Move::capture(mv.from, mv.to)
+        } else if piece == Piece::Pawn && mv.from.rank().abs_diff(mv.to.rank()) == 2 {
+            Move::double_pawn(mv.from, mv.to)
+        } else {
+            Move::quiet(mv.from, mv.to)
+        };
+        (self.is_pseudo_legal(resolved) && self.is_legal_move(resolved)).then_some(resolved)
+    }
+
     #[inline]
     pub fn is_legal_move(&self, mv: Move) -> bool {
         let us = self.stm;
@@ -318,7 +419,23 @@ impl AkimboPos {
             None => return false,
         };
         if mv.is_castling() {
-            return moving_piece == Piece::King;
+            let kingside = mv.flag == MoveFlag::KingCastle;
+            return moving_piece == Piece::King && self.can_castle(us, kingside);
+        }
+        if self.piece_of_color_on(mv.to, us).is_some() {
+            return false;
+        }
+        let dest_enemy = self.piece_of_color_on(mv.to, them).is_some();
+        if mv.flag == MoveFlag::EnPassant {
+            if dest_enemy || self.ep >= NONE_EP || Square::from_index(self.ep as usize) != mv.to {
+                return false;
+            }
+        } else if mv.is_capture() {
+            if !dest_enemy {
+                return false;
+            }
+        } else if dest_enemy {
+            return false;
         }
         let removed_attacker = if mv.flag == MoveFlag::EnPassant {
             Square::from_file_rank(mv.to.file(), mv.from.rank()).bitboard()
@@ -578,59 +695,94 @@ impl AkimboPos {
         }
     }
 
+    fn can_castle(&self, color: Color, kingside: bool) -> bool {
+        let right = match (color, kingside) {
+            (Color::White, true) => WHITE_KING_CASTLE,
+            (Color::White, false) => WHITE_QUEEN_CASTLE,
+            (Color::Black, true) => BLACK_KING_CASTLE,
+            (Color::Black, false) => BLACK_QUEEN_CASTLE,
+        };
+        if self.rights & right == 0 {
+            return false;
+        }
+        let (king, rook, between) = match (color, kingside) {
+            (Color::White, true) => (
+                Square::E1,
+                Square::H1,
+                Square::F1.bitboard() | Square::G1.bitboard(),
+            ),
+            (Color::White, false) => (
+                Square::E1,
+                Square::A1,
+                Square::B1.bitboard() | Square::C1.bitboard() | Square::D1.bitboard(),
+            ),
+            (Color::Black, true) => (
+                Square::E8,
+                Square::H8,
+                Square::F8.bitboard() | Square::G8.bitboard(),
+            ),
+            (Color::Black, false) => (
+                Square::E8,
+                Square::A8,
+                Square::B8.bitboard() | Square::C8.bitboard() | Square::D8.bitboard(),
+            ),
+        };
+        if self.piece_of_color_on(rook, color) != Some(Piece::Rook) {
+            return false;
+        }
+        if self.all_occupancy() & between != 0 {
+            return false;
+        }
+        let enemy = color.opponent();
+        let path = if kingside {
+            [
+                king,
+                Square::from_file_rank(5, king.rank()),
+                Square::from_file_rank(6, king.rank()),
+            ]
+        } else {
+            [
+                king,
+                Square::from_file_rank(3, king.rank()),
+                Square::from_file_rank(2, king.rank()),
+            ]
+        };
+        path.iter().all(|sq| !self.is_square_attacked(*sq, enemy))
+    }
+
     fn gen_castling(&self, color: Color, moves: &mut MoveList) {
         if self.rights == 0 {
             return;
         }
-        let occ = self.all_occupancy();
-        let enemy = color.opponent();
-        match color {
-            Color::White => {
-                if self.rights & WHITE_KING_CASTLE != 0 {
-                    let between = Square::F1.bitboard() | Square::G1.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E1, enemy)
-                        && !self.is_square_attacked(Square::F1, enemy)
-                        && !self.is_square_attacked(Square::G1, enemy)
-                    {
-                        moves.push(Move::king_castle(Square::E1, Square::G1));
-                    }
-                }
-                if self.rights & WHITE_QUEEN_CASTLE != 0 {
-                    let between =
-                        Square::B1.bitboard() | Square::C1.bitboard() | Square::D1.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E1, enemy)
-                        && !self.is_square_attacked(Square::D1, enemy)
-                        && !self.is_square_attacked(Square::C1, enemy)
-                    {
-                        moves.push(Move::queen_castle(Square::E1, Square::C1));
-                    }
-                }
-            }
-            Color::Black => {
-                if self.rights & BLACK_KING_CASTLE != 0 {
-                    let between = Square::F8.bitboard() | Square::G8.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E8, enemy)
-                        && !self.is_square_attacked(Square::F8, enemy)
-                        && !self.is_square_attacked(Square::G8, enemy)
-                    {
-                        moves.push(Move::king_castle(Square::E8, Square::G8));
-                    }
-                }
-                if self.rights & BLACK_QUEEN_CASTLE != 0 {
-                    let between =
-                        Square::B8.bitboard() | Square::C8.bitboard() | Square::D8.bitboard();
-                    if occ & between == 0
-                        && !self.is_square_attacked(Square::E8, enemy)
-                        && !self.is_square_attacked(Square::D8, enemy)
-                        && !self.is_square_attacked(Square::C8, enemy)
-                    {
-                        moves.push(Move::queen_castle(Square::E8, Square::C8));
-                    }
-                }
-            }
+        if self.can_castle(color, true) {
+            let from = if color == Color::White {
+                Square::E1
+            } else {
+                Square::E8
+            };
+            moves.push(Move::king_castle(
+                from,
+                if color == Color::White {
+                    Square::G1
+                } else {
+                    Square::G8
+                },
+            ));
+        }
+        if self.can_castle(color, false) {
+            let from = if color == Color::White {
+                Square::E1
+            } else {
+                Square::E8
+            };
+            moves.push(Move::queen_castle(
+                from,
+                if color == Color::White {
+                    Square::C1
+                } else {
+                    Square::C8
+                },
+            ));
         }
     }
 }
@@ -777,5 +929,43 @@ mod tests {
                 "legal {fen}"
             );
         }
+    }
+
+    #[test]
+    fn hydrate_move_recovers_capture_ep_and_double_push_flags() {
+        crate::init();
+        let start = AkimboPos::from_board(&Board::new());
+        let e2e4 = start
+            .hydrate_move(Move::quiet(Square::E2, Square::E4))
+            .expect("e2e4");
+        assert_eq!(e2e4.flag, MoveFlag::DoublePawn);
+
+        let kiwi = AkimboPos::from_board(
+            &Board::from_fen(
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            )
+            .unwrap(),
+        );
+        let capture = kiwi
+            .hydrate_move(Move::quiet(Square::E5, Square::D7))
+            .expect("Nxd7");
+        assert_eq!(capture.flag, MoveFlag::Capture);
+
+        let ep = AkimboPos::from_board(
+            &Board::from_fen("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3")
+                .unwrap(),
+        )
+        .hydrate_move(Move::quiet(Square::E5, Square::F6))
+        .expect("exf6 ep");
+        assert_eq!(ep.flag, MoveFlag::EnPassant);
+
+        let castle = kiwi
+            .hydrate_move(Move::quiet(Square::E1, Square::G1))
+            .expect("O-O");
+        assert_eq!(castle.flag, MoveFlag::KingCastle);
+        assert!(
+            kiwi.hydrate_move(Move::quiet(Square::A1, Square::A8))
+                .is_none()
+        );
     }
 }

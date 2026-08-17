@@ -18,6 +18,10 @@ release:
 # Dist artifacts always use Cargo's fat-LTO [profile.release], never desktop-release.
 dist: release
 
+# Fat-LTO product engines into dist/<os-arch>/engines/mujrim/.
+dist-engines:
+    {{dist_cargo_env}} cargo run --release -p mujrim-tooling -- release engines
+
 # Release build for macOS (aarch64 + x86_64)
 release-darwin:
     {{dist_cargo_env}} cargo run --release -p mujrim-tooling -- release darwin
@@ -99,9 +103,9 @@ nps:
 # Build and run the GUI application (Floem default)
 ui:
     @echo "Building Mujrim GUI..."
-    CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-ui
+    {{dist_cargo_env}} CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/ui-dist cargo build --release -p mujrim-ui
     @echo "Launching Mujrim Chess GUI..."
-    cargo run --release -p mujrim-ui
+    {{dist_cargo_env}} CARGO_TARGET_DIR=target/ui-dist cargo run --release -p mujrim-ui
 
 # Package dual-arch Windows dist trees (windows-aarch64 + windows-x86_64)
 # Build + assemble dist/windows-aarch64 and dist/windows-x86_64 replicas.
@@ -221,11 +225,11 @@ uninstall:
 # Build the installer (builds workspace first, then embeds binaries)
 installer:
     @echo "Building engine and updater in maximal release mode..."
-    CARGO_BUILD_JOBS=1 cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-installer
+    {{dist_cargo_env}} CARGO_BUILD_JOBS=1 cargo build --release --workspace --exclude mujrim-ui --exclude mujrim-installer
     @echo "Building desktop clients with maximal fat LTO..."
-    CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-ui
+    {{dist_cargo_env}} CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=target/ui-dist cargo build --release -p mujrim-ui
     @echo "Building installer with embedded binaries..."
-    CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-installer --features embed
+    {{dist_cargo_env}} CARGO_BUILD_JOBS=1 cargo build --release -p mujrim-installer --features embed
 
 # Run the installer GUI
 run-installer:

@@ -10,7 +10,7 @@ use crate::app_core::settings::Screen;
 use crate::app_core::uci_process::ExternalEngineProtocol;
 
 use super::super::actions;
-use super::super::state::{AppHandles, AppState, refresh_ateed_cli};
+use super::super::state::{AppHandles, AppState, offer_ateed_index, refresh_ateed_cli};
 use super::super::theme;
 use super::super::widgets;
 
@@ -64,9 +64,13 @@ pub fn menu(state: AppState, handles: AppHandles) -> impl IntoView {
                     actions::open_tournaments_screen(state, &handles);
                 }
             }),
-            widgets::ghost_button(state, "Ateed Studio", move || {
-                refresh_ateed_cli(state);
-                state.screen.set(Screen::Ateed);
+            widgets::ghost_button(state, "Ateed Studio", {
+                let handles = handles.clone();
+                move || {
+                    refresh_ateed_cli(state);
+                    offer_ateed_index(state, &handles);
+                    state.screen.set(Screen::Ateed);
+                }
             }),
         ))
         .style(|s| s.col_gap(10.0).flex_wrap(FlexWrap::Wrap).justify_center()),

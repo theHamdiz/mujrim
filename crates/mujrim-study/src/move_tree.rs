@@ -156,12 +156,105 @@ impl MoveTree {
     }
 
     pub fn encode(&self) -> Result<String, String> {
-        serde_json::to_string(self).map_err(|error| format!("failed to encode study tree: {error}"))
+        serde_json::to_string(&flatten_tree(self))
+            .map_err(|error| format!("failed to encode study tree: {error}"))
     }
 
     pub fn decode(text: &str) -> Result<Self, String> {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+            && value.get("nodes").is_some()
+        {
+            let flat = serde_json::from_value::<FlatTree>(value)
+                .map_err(|error| format!("failed to decode study tree: {error}"))?;
+            return unflatten_tree(flat);
+        }
         serde_json::from_str(text).map_err(|error| format!("failed to decode study tree: {error}"))
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FlatTree {
+    start_fen: String,
+    nodes: Vec<FlatNode>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FlatNode {
+    parent: Option<u32>,
+    uci: String,
+    san: String,
+    #[serde(default)]
+    comment: String,
+    #[serde(default)]
+    nag: Option<u8>,
+    #[serde(default)]
+    glyphs: String,
+    #[serde(default)]
+    shapes: Vec<String>,
+}
+
+fn flatten_tree(tree: &MoveTree) -> FlatTree {
+    let mut nodes = Vec::new();
+    fn walk(children: &[MoveNode], parent: Option<u32>, nodes: &mut Vec<FlatNode>) {
+        for child in children {
+            let index = nodes.len() as u32;
+            nodes.push(FlatNode {
+                parent,
+                uci: child.uci.clone(),
+                san: child.san.clone(),
+                comment: child.comment.clone(),
+                nag: child.nag,
+                glyphs: child.glyphs.clone(),
+                shapes: child.shapes.clone(),
+            });
+            walk(&child.children, Some(index), nodes);
+        }
+    }
+    walk(&tree.children, None, &mut nodes);
+    FlatTree {
+        start_fen: tree.start_fen.clone(),
+        nodes,
+    }
+}
+
+fn unflatten_tree(flat: FlatTree) -> Result<MoveTree, String> {
+    let mut children_of: Vec<Vec<usize>> = vec![Vec::new(); flat.nodes.len()];
+    let mut roots = Vec::new();
+    for (index, node) in flat.nodes.iter().enumerate() {
+        match node.parent {
+            Some(parent) => {
+                let parent = parent as usize;
+                if parent >= flat.nodes.len() {
+                    return Err("study tree parent is out of range".to_owned());
+                }
+                children_of[parent].push(index);
+            }
+            None => roots.push(index),
+        }
+    }
+    fn build(index: usize, flat: &FlatTree, children_of: &[Vec<usize>]) -> MoveNode {
+        let node = &flat.nodes[index];
+        MoveNode {
+            uci: node.uci.clone(),
+            san: node.san.clone(),
+            comment: node.comment.clone(),
+            nag: node.nag,
+            glyphs: node.glyphs.clone(),
+            shapes: node.shapes.clone(),
+            children: children_of[index]
+                .iter()
+                .map(|&child| build(child, flat, children_of))
+                .collect(),
+        }
+    }
+    let children = roots
+        .into_iter()
+        .map(|index| build(index, &flat, &children_of))
+        .collect();
+    Ok(MoveTree {
+        start_fen: flat.start_fen,
+        children,
+    })
 }
 
 fn write_children(children: &[MoveNode], out: &mut String, ply: usize, first: bool) {
@@ -198,12 +291,94 @@ fn append_annots(node: &MoveNode, out: &mut String) {
     if let Some(nag) = node.nag {
         out.push_str(&format!(" ${nag}"));
     }
-    if !node.glyphs.is_empty() {
+    if !node.glyphs.is_empty() && node.nag.is_none() {
         out.push_str(&node.glyphs);
     }
-    if !node.comment.is_empty() {
-        out.push_str(&format!(" {{{}}}", node.comment.replace('}', "\\}")));
+    let mut comment = node.comment.clone();
+    if !node.shapes.is_empty() {
+        let shapes = format_shape_comment(&node.shapes);
+        if !shapes.is_empty() {
+            if !comment.is_empty() {
+                comment.push(' ');
+            }
+            comment.push_str(&shapes);
+        }
     }
+    if !comment.is_empty() {
+        out.push_str(&format!(" {{{}}}", comment.replace('}', "\\}")));
+    }
+}
+
+pub fn extract_comment_shapes(comment: &str) -> (String, Vec<String>) {
+    let mut prose = String::new();
+    let mut shapes = Vec::new();
+    let chars: Vec<char> = comment.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' && i + 1 < chars.len() && chars[i + 1] == '%' {
+            let start = i;
+            i += 2;
+            while i < chars.len() && chars[i] != ']' {
+                i += 1;
+            }
+            if i >= chars.len() {
+                prose.push_str(&chars[start..].iter().collect::<String>());
+                break;
+            }
+            let body: String = chars[start + 2..i].iter().collect();
+            i += 1;
+            if let Some(rest) = body.strip_prefix("cal ") {
+                for token in rest.split(',') {
+                    let token = token.trim();
+                    if token.len() >= 5 {
+                        shapes.push(format!("cal:{token}"));
+                    }
+                }
+            } else if let Some(rest) = body.strip_prefix("csl ") {
+                for token in rest.split(',') {
+                    let token = token.trim();
+                    if token.len() >= 3 {
+                        shapes.push(format!("csl:{token}"));
+                    }
+                }
+            } else {
+                if !prose.is_empty() {
+                    prose.push(' ');
+                }
+                prose.push('[');
+                prose.push('%');
+                prose.push_str(&body);
+                prose.push(']');
+            }
+        } else {
+            prose.push(chars[i]);
+            i += 1;
+        }
+    }
+    (
+        prose.split_whitespace().collect::<Vec<_>>().join(" "),
+        shapes,
+    )
+}
+
+fn format_shape_comment(shapes: &[String]) -> String {
+    let mut cals = Vec::new();
+    let mut csls = Vec::new();
+    for shape in shapes {
+        if let Some(token) = shape.strip_prefix("cal:") {
+            cals.push(token.to_owned());
+        } else if let Some(token) = shape.strip_prefix("csl:") {
+            csls.push(token.to_owned());
+        }
+    }
+    let mut out = String::new();
+    if !csls.is_empty() {
+        out.push_str(&format!("[%csl {}]", csls.join(",")));
+    }
+    if !cals.is_empty() {
+        out.push_str(&format!("[%cal {}]", cals.join(",")));
+    }
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -310,17 +485,21 @@ fn parse_siblings(
             Token::Nag(nag) => {
                 if let Some(last) = siblings.last_mut() {
                     last.nag = Some(*nag);
-                    last.glyphs = nag_glyphs(*nag).to_owned();
+                    if last.glyphs.is_empty() {
+                        last.glyphs = nag_glyphs(*nag).to_owned();
+                    }
                 }
                 *index += 1;
             }
             Token::Move(notation) => {
+                let (notation, glyphs) = split_san_glyphs(notation);
                 let mut next = origin.clone();
                 let mv = resolve_notation(&mut next, notation)
                     .ok_or_else(|| format!("cannot resolve move '{notation}'"))?;
                 let mut node = MoveNode {
                     uci: mv.to_uci(),
                     san: move_san(&next, mv),
+                    glyphs: glyphs.to_owned(),
                     ..MoveNode::default()
                 };
                 next.make_move(mv);
@@ -333,7 +512,9 @@ fn parse_siblings(
                         }
                         Token::Nag(nag) => {
                             node.nag = Some(*nag);
-                            node.glyphs = nag_glyphs(*nag).to_owned();
+                            if node.glyphs.is_empty() {
+                                node.glyphs = nag_glyphs(*nag).to_owned();
+                            }
                             *index += 1;
                         }
                         Token::LParen => {
@@ -359,12 +540,20 @@ fn parse_siblings(
 }
 
 fn attach_comment(node: Option<&mut MoveNode>, comment: &str) {
+    let (prose, shapes) = extract_comment_shapes(comment);
     if let Some(node) = node {
-        if node.comment.is_empty() {
-            node.comment = comment.to_owned();
-        } else {
-            node.comment.push(' ');
-            node.comment.push_str(comment);
+        if !prose.is_empty() {
+            if node.comment.is_empty() {
+                node.comment = prose;
+            } else {
+                node.comment.push(' ');
+                node.comment.push_str(&prose);
+            }
+        }
+        for shape in shapes {
+            if !node.shapes.contains(&shape) {
+                node.shapes.push(shape);
+            }
         }
     }
 }
@@ -379,20 +568,7 @@ fn find_uci(board: &mut Board, uci: &str) -> Result<Move, String> {
 }
 
 fn resolve_notation(board: &mut Board, notation: &str) -> Option<Move> {
-    let cleaned = notation.trim_end_matches(['!', '?', '+', '#']);
-    if let Some(mv) = Move::from_uci(cleaned)
-        && board
-            .generate_legal_moves()
-            .iter()
-            .any(|legal| *legal == mv)
-    {
-        return Some(mv);
-    }
-    board
-        .generate_legal_moves()
-        .iter()
-        .copied()
-        .find(|mv| move_san(board, *mv) == cleaned || mv.to_uci() == cleaned)
+    crate::pgn::resolve_uci(board, notation)
 }
 
 fn move_san(board: &Board, mv: Move) -> String {
@@ -414,6 +590,11 @@ fn is_result(token: &str) -> bool {
     matches!(token, "1-0" | "0-1" | "1/2-1/2" | "*")
 }
 
+fn split_san_glyphs(token: &str) -> (&str, &str) {
+    let end = token.trim_end_matches(['!', '?']).len();
+    (&token[..end], &token[end..])
+}
+
 fn nag_glyphs(nag: u8) -> &'static str {
     match nag {
         1 => "!",
@@ -422,6 +603,12 @@ fn nag_glyphs(nag: u8) -> &'static str {
         4 => "??",
         5 => "!?",
         6 => "?!",
+        10 => "=",
+        13 => "∞",
+        14 => "⩲",
+        15 => "⩱",
+        16 | 18 => "+−",
+        17 | 19 => "−+",
         _ => "",
     }
 }
@@ -453,6 +640,29 @@ mod tests {
     }
 
     #[test]
+    fn json_codec_round_trips_deep_variation_trees() {
+        fn deep(depth: usize) -> MoveNode {
+            MoveNode {
+                uci: "e2e4".into(),
+                san: "e4".into(),
+                children: if depth == 0 {
+                    Vec::new()
+                } else {
+                    vec![deep(depth - 1)]
+                },
+                ..MoveNode::default()
+            }
+        }
+        let tree = MoveTree {
+            start_fen: START_FEN.to_owned(),
+            children: vec![deep(160)],
+        };
+        let encoded = tree.encode().unwrap();
+        let decoded = MoveTree::decode(&encoded).unwrap();
+        assert_eq!(decoded.node_at(&vec![0; 161]).unwrap().san, "e4");
+    }
+
+    #[test]
     fn json_codec_preserves_glyphs() {
         let mut tree = MoveTree::from_mainline(START_FEN, &["e2e4".into()]).unwrap();
         tree.set_glyphs(&[0], "!!".into()).unwrap();
@@ -460,5 +670,37 @@ mod tests {
         let decoded = MoveTree::decode(&tree.encode().unwrap()).unwrap();
         assert_eq!(decoded.children[0].glyphs, "!!");
         assert_eq!(decoded.children[0].comment, "Best by test");
+    }
+
+    #[test]
+    fn pgn_keeps_lichess_shapes_and_san_glyphs() {
+        let tree = MoveTree::from_pgn(
+            START_FEN,
+            "1. e4 e5 2. Nf3 Nc6 3. Bb5? { Natural } { [%csl Ge4][%cal Ge4e5] } a6",
+        )
+        .unwrap();
+        let bb5 = &tree.children[0].children[0].children[0].children[0].children[0];
+        assert_eq!(bb5.san, "Bb5");
+        assert_eq!(bb5.glyphs, "?");
+        assert!(bb5.comment.contains("Natural"));
+        assert!(bb5.shapes.iter().any(|shape| shape == "csl:Ge4"));
+        assert!(bb5.shapes.iter().any(|shape| shape == "cal:Ge4e5"));
+        let encoded = tree.to_pgn();
+        assert!(encoded.contains("[%csl Ge4]"));
+        assert!(encoded.contains("[%cal Ge4e5]"));
+    }
+
+    #[test]
+    fn pgn_accepts_over_disambiguated_knight_san() {
+        let tree = MoveTree::from_pgn(
+            START_FEN,
+            "1. e4 e5 2. Nc3 Nc6 3. Bc4 Bc5 4. Qg4 g6 5. Qf3 Nf6 6. Nge2",
+        )
+        .unwrap();
+        let last = tree
+            .node_at(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            .expect("Nge2");
+        assert_eq!(last.uci, "g1e2");
+        assert!(last.san == "Nge2" || last.san == "Ne2");
     }
 }

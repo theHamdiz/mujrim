@@ -1,11 +1,11 @@
 //! Official cosmobobak/viridithas `alpha_beta` (v20.0.0 src/search.rs).
 
-use super::dedicated_qs::quiescence;
+use super::dedicated_qs::quiescence_snapshot as quiescence;
 use super::{
     INF, MATE_SCORE, MAX_PLY, SearchContext, SearchNode, ThreadState, captured_piece_index,
-    draw_score, gives_direct_check, hybrid_eval, make_search_move, nmp_material_ok, piece_index_on,
-    score_from_tt, score_to_tt, search_time_exceeded, store_killer, undo_search_eval,
-    usable_tt_move,
+    draw_score, gives_direct_check, hybrid_eval, make_search_move_no_undo, nmp_material_ok,
+    piece_index_on, score_from_tt, score_to_tt, search_time_exceeded, store_killer,
+    undo_search_eval, usable_tt_move,
 };
 use crate::move_picker::MovePicker;
 use crate::policy::{
@@ -17,6 +17,19 @@ use crate::tt::{NodeType, TTData};
 use std::sync::atomic::Ordering;
 use types::chess_move::NULL_MOVE;
 use types::{Board, Move};
+
+#[inline(always)]
+fn hint_common_access_once(
+    board: &Board,
+    state: &mut ThreadState,
+    use_nnue: bool,
+    ready: &mut bool,
+) {
+    if use_nnue && !*ready {
+        state.nnue_state.hint_common_access(board);
+        *ready = true;
+    }
+}
 
 pub(crate) fn alpha_beta(
     board: &mut Board,
@@ -33,6 +46,7 @@ pub(crate) fn alpha_beta(
         params,
         use_nnue,
         move_ordering,
+        eval_mode,
         deadline_ms,
         ..
     } = *context;
@@ -111,6 +125,7 @@ pub(crate) fn alpha_beta(
     let mut tt_depth = -1;
     let mut tt_bound = NodeType::Exact;
     let mut raw_eval = None;
+    let mut acc_ready = false;
     let mut tt_was_pv = is_pv;
 
     if !singular && let Some(entry) = tt.probe(board.tt_hash()) {
@@ -134,20 +149,29 @@ pub(crate) fn alpha_beta(
         }
     }
 
-    if use_nnue {
-        state.nnue_state.hint_common_access(board);
-    }
-
     let static_eval = if in_check {
         0
     } else if singular {
         state.static_evals[ply_usize]
     } else if let Some(raw) = raw_eval {
-        raw + state.correction(board, move_ordering)
+        super::corrected_network_eval(
+            board,
+            raw,
+            state.correction(board, move_ordering),
+            state.optimism[board.side_to_move.index()],
+            eval_mode,
+        )
     } else {
         let raw = hybrid_eval(board, state, use_nnue);
         raw_eval = Some(raw);
-        raw + state.correction(board, move_ordering)
+        acc_ready = use_nnue;
+        super::corrected_network_eval(
+            board,
+            raw,
+            state.correction(board, move_ordering),
+            state.optimism[board.side_to_move.index()],
+            eval_mode,
+        )
     };
     if !in_check && !singular {
         state.static_evals[ply_usize] = static_eval;
@@ -200,8 +224,15 @@ pub(crate) fn alpha_beta(
             }
         }
 
+        let tt_tactical = tt_move.is_some_and(|mv| !mv.is_quiet());
         let margin = 65 * depth - i32::from(improving) * 76;
-        if depth < 9 && eval - margin >= beta && beta.abs() < MATE_SCORE - 100 {
+        if !tt_was_pv
+            && depth < 9
+            && eval >= beta
+            && beta.abs() < MATE_SCORE - 100
+            && (tt_move.is_none() || tt_tactical)
+            && eval - margin >= beta
+        {
             return beta + (eval - beta) / 3;
         }
 
@@ -211,6 +242,7 @@ pub(crate) fn alpha_beta(
             && !state.nmp_banned[board.side_to_move.index()]
             && super::viridithas_nmp_static_gate(static_eval, beta, depth, improving)
         {
+            hint_common_access_once(board, state, use_nnue, &mut acc_ready);
             let r = 4
                 + depth / 3
                 + ((static_eval - beta) / 200).min(4)
@@ -218,7 +250,8 @@ pub(crate) fn alpha_beta(
             if state.use_nnue {
                 state.nnue_state.push_null();
             }
-            board.make_null_move();
+            let null_snap = board.snapshot();
+            board.make_null_move_without_undo();
             state.prev_move[ply_usize] = NULL_MOVE;
             if ply_usize + 1 < MAX_PLY {
                 state.in_check[ply_usize + 1] = false;
@@ -240,7 +273,7 @@ pub(crate) fn alpha_beta(
                     allow_null: false,
                 },
             );
-            board.unmake_null_move();
+            board.restore_snapshot(null_snap);
             if state.use_nnue {
                 state.nnue_state.pop_move();
             }
@@ -285,6 +318,7 @@ pub(crate) fn alpha_beta(
         }
 
         if allow_null && depth >= 3 && beta.abs() < MATE_SCORE - 100 {
+            hint_common_access_once(board, state, use_nnue, &mut acc_ready);
             let mut pc_beta = super::viridithas_probcut_beta(beta, improving);
             if tt_score.is_none_or(|ts| ts >= pc_beta) {
                 let depth_base = super::viridithas_probcut_depth_base(depth, static_eval, beta);
@@ -300,7 +334,8 @@ pub(crate) fn alpha_beta(
                         continue;
                     }
                     tt.prefetch(board.tt_hash_after(mv));
-                    make_search_move(board, state, mv);
+                    let pc_snap = board.snapshot();
+                    make_search_move_no_undo(board, state, mv);
                     if ply_usize + 1 < MAX_PLY {
                         state.in_check[ply_usize + 1] = board.in_check();
                     }
@@ -353,7 +388,7 @@ pub(crate) fn alpha_beta(
                             pc_beta = ada_beta;
                         }
                     }
-                    board.unmake_move(mv);
+                    board.restore_snapshot(pc_snap);
                     undo_search_eval(state);
                     if stopped.load(Ordering::Relaxed) {
                         return 0;
@@ -373,9 +408,18 @@ pub(crate) fn alpha_beta(
         depth -= 1;
     }
 
+    hint_common_access_once(board, state, use_nnue, &mut acc_ready);
     let us = board.side_to_move;
-    let threats = super::opponent_attacks_all(board);
-    state.threats[ply_usize] = threats;
+    let threats = std::cell::Cell::new(0u64);
+    let threats_ready = std::cell::Cell::new(false);
+    let resolve_threats = |b: &Board| {
+        if !threats_ready.get() {
+            let all = super::opponent_attacks_all(b);
+            threats.set(all);
+            threats_ready.set(true);
+        }
+        threats.get()
+    };
     let killers = state.killers[ply_usize];
     let mut picker =
         MovePicker::new(board, tt_move, killers, NULL_MOVE).with_move_ordering(move_ordering);
@@ -388,6 +432,7 @@ pub(crate) fn alpha_beta(
     let us_idx = us.index();
     let score_quiet = |b: &Board, mv: Move| {
         let piece = piece_index_on(b, mv.from);
+        let threats = resolve_threats(b);
         // SAFETY: history tables are only read while the picker scores, before make.
         let mut score = unsafe { (*history_ptr).get(threats, us_idx, mv) };
         if ply_usize > 0 && prev_move[ply_usize - 1] != NULL_MOVE {
@@ -543,7 +588,8 @@ pub(crate) fn alpha_beta(
         let moved_piece = piece_index_on(board, mv.from);
         let captured = captured_piece_index(board, mv);
         tt.prefetch(board.tt_hash_after(mv));
-        make_search_move(board, state, mv);
+        let child_snap = board.snapshot();
+        make_search_move_no_undo(board, state, mv);
         let gives_check = board.in_check();
         if ply_usize + 1 < MAX_PLY {
             state.in_check[ply_usize + 1] = gives_check;
@@ -691,7 +737,7 @@ pub(crate) fn alpha_beta(
         };
         state.reductions[ply_usize] = 0;
 
-        board.unmake_move(mv);
+        board.restore_snapshot(child_snap);
         undo_search_eval(state);
         if stopped.load(Ordering::Relaxed) {
             return 0;
@@ -721,11 +767,13 @@ pub(crate) fn alpha_beta(
                     store_killer(&mut state.killers, mv, ply_usize);
                     let bonus = params.history_bonus(depth);
                     let malus = params.history_malus(depth);
+                    let threats = resolve_threats(board);
                     state.history.update(threats, us.index(), mv, bonus);
                     for quiet in quiets[..quiets_len].iter() {
                         state.history.update(threats, us.index(), *quiet, -malus);
                     }
                 } else if let Some(cap) = captured {
+                    let threats = resolve_threats(board);
                     state.cap_hist.update(
                         threats,
                         moved_piece,

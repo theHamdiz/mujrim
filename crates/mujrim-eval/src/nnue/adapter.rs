@@ -717,6 +717,50 @@ pub fn discover_named_network(filename: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Canonical on-disk Ateed artifact shared by train, eval, and search.
+pub const ATEED_NETWORK_FILENAME: &str = "ateed_default.bin";
+
+/// First writable `nnue/` next to the binary or CWD (created if needed).
+pub fn writable_nnue_directory() -> PathBuf {
+    for dir in nnue_search_directories() {
+        let name = dir.file_name().and_then(|name| name.to_str());
+        if name == Some("nnue") && !dir.ends_with("resources") && dir.is_dir() {
+            return dir;
+        }
+    }
+    let dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("nnue");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Existing `ateed_default.bin` if discovered, otherwise `nnue/ateed_default.bin`.
+pub fn ateed_artifact_path() -> PathBuf {
+    discover_named_network(ATEED_NETWORK_FILENAME)
+        .unwrap_or_else(|| writable_nnue_directory().join(ATEED_NETWORK_FILENAME))
+}
+
+/// Map a user/CLI output path onto the shared Ateed artifact when they asked
+/// for the default filename.
+pub fn resolve_ateed_output_path(path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    let parent_empty = path
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty());
+    if file_name == Some(ATEED_NETWORK_FILENAME) && parent_empty {
+        return ateed_artifact_path();
+    }
+    if parent_empty {
+        return writable_nnue_directory().join(path);
+    }
+    path.to_path_buf()
+}
+
 /// Bundled official Lc0 transformer (BT4-it332). Evaluated by official lc0, not in-process.
 pub const LC0_BUNDLED_WEIGHTS_NAME: &str = "lc0_bt4.pb.gz";
 
@@ -756,12 +800,7 @@ pub fn load_network_for_preset(preset: &str) -> Result<ActiveNetwork, String> {
         return Ok(embedded);
     }
     let names: &[&str] = match preset {
-        "viridithas" => &[
-            "sandhi-s2-b200.nnue.zst",
-            "viri_default.nnue.zst",
-            "viri_velarised.nnue.zst",
-            "velarised-2-b800.nnue.zst",
-        ],
+        "viridithas" => &["sandhi-s2-b200.nnue.zst", "viri_default.nnue.zst"],
         "obsidian" => &["obs_default.bin", "net89perm.bin"],
         "plentychess" | "plenty" => &["plenty_default.bin", "0179r.bin"],
         "ateed" => &["ateed_default.bin"],
@@ -1180,8 +1219,7 @@ mod tests {
         else {
             return;
         };
-        let net =
-            load_network(&path).expect("sandhi / velarised / simple Viridithas net must load");
+        let net = load_network(&path).expect("official Viridithas 20 sandhi net must load");
         assert_eq!(net.search_profile(), NnueSearchProfile::Viridithas);
         assert_eq!(net.info().format, NetworkFormat::Viridithas);
         assert!(
@@ -1192,10 +1230,7 @@ mod tests {
         if let ActiveNetwork::ExternalViridithas { network, .. } = &net {
             types::init();
             let startpos = network.evaluate(&types::Board::new());
-            assert!(
-                startpos.abs() < 250,
-                "loaded Viridithas startpos should be a quiet opening score, got {startpos}"
-            );
+            assert_eq!(startpos, 43, "official Viridithas 20 startpos eval");
         }
     }
 
@@ -1305,6 +1340,32 @@ mod tests {
                 Some(std::ffi::OsStr::new(LC0_BUNDLED_WEIGHTS_NAME))
             );
         }
+    }
+
+    #[test]
+    fn resolve_ateed_output_path_maps_default_filename_into_nnue() {
+        let resolved = resolve_ateed_output_path(ATEED_NETWORK_FILENAME);
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some(ATEED_NETWORK_FILENAME)
+        );
+        assert!(
+            resolved
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                == Some("nnue")
+                || resolved
+                    .components()
+                    .any(|component| component.as_os_str() == "nnue")
+        );
+        let custom = resolve_ateed_output_path("scratch.bin");
+        assert_eq!(
+            custom.file_name().and_then(|name| name.to_str()),
+            Some("scratch.bin")
+        );
+        let absolute = resolve_ateed_output_path("/tmp/ateed_default.bin");
+        assert_eq!(absolute, PathBuf::from("/tmp/ateed_default.bin"));
     }
 
     #[cfg(feature = "reckless-nnue")]

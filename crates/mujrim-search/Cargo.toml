@@ -31,4 +31,3 @@ types = { package = "mujrim-types", path = "../mujrim-types" }
 eval = { package = "mujrim-eval", path = "../mujrim-eval", default-features = false }
 rayon = "1.12"
 toml = "0.8"
-sha2 = "0.10"

@@ -8,18 +8,20 @@ use floem::taffy::style::{Display, FlexWrap, Overflow};
 
 use crate::app_core::ateed_studio::{
     AteedCliCommand, AteedJobKind, AteedMonitorTick, AteedPerfReport, AteedSourceKind,
-    AteedStrengthReport, catalog_draft, cli_args, dataset_format_for_path, evaluate_zero_net,
-    format_perf, format_strength, local_mix, monitor_from_progress, plan_job, probe_compute,
+    AteedStrengthReport, LossRing, MetricRing, catalog_draft, cli_args, dataset_format_for_path,
+    ensure_local_source, evaluate_zero_net, format_perf, format_strength,
+    index_tournament_positions, local_mix, monitor_from_progress, plan_job, probe_compute,
     run_mujrim_cli, unlock_ateed, validate_source, validate_weighted_source,
 };
 
-use super::super::state::{AppHandles, AppState, refresh_ateed_cli};
+use super::super::state::{AppHandles, AppState, offer_ateed_index, refresh_ateed_cli};
+use super::super::telemetry_charts;
 use super::super::theme;
 use super::super::widgets;
 
 pub fn studio(state: AppState, handles: AppHandles) -> impl IntoView {
     Stack::new((
-        lock_gate(state).style(move |s| {
+        lock_gate(state, handles.clone()).style(move |s| {
             let s = s.size_full().min_width(0.0).min_height(0.0);
             if state.ateed.unlocked.get() {
                 s.display(Display::None)
@@ -107,6 +109,7 @@ fn resume_ateed_job(state: AppState, handles: &AppHandles) {
     }
     state.ateed.running.set(true);
     state.ateed.progress.set(0.0);
+    reset_telemetry(state, progress_kind_from_command(&job.command));
     push_log(state, &job.summary);
     spawn_cli(state, handles, job.command, "resumed job complete");
 }
@@ -117,7 +120,89 @@ fn discard_ateed_job(state: AppState) {
     push_log(state, "interrupted Ateed job discarded");
 }
 
-fn lock_gate(state: AppState) -> impl IntoView {
+fn ateed_index_banner(state: AppState, handles: AppHandles) -> impl IntoView {
+    Stack::vertical((
+        Label::derived(move || {
+            state
+                .ateed
+                .index_prompt
+                .get()
+                .map_or_else(String::new, |prompt| prompt.summary)
+        })
+        .style(move |s| {
+            s.font_size(13.0)
+                .font_bold()
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(
+                    theme::palette(state.settings.get().board_theme).accent_alt,
+                ))
+        }),
+        Label::new(
+            "Tournament games can be deduped into the shared Ateed dataset before the next train.",
+        )
+        .style(move |s| {
+            s.font_size(11.0)
+                .min_width(0.0)
+                .width_full()
+                .text_wrap()
+                .color(theme::rgba(
+                    theme::palette(state.settings.get().board_theme).text_secondary,
+                ))
+        }),
+        Stack::horizontal((
+            widgets::primary_button(state, "Index games", {
+                let handles = handles.clone();
+                move || index_tournament_games(state, &handles)
+            }),
+            widgets::ghost_button(state, "Later", move || {
+                state.ateed.index_prompt.set(None);
+                push_log(state, "tournament index deferred");
+            }),
+        ))
+        .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
+    ))
+    .style(move |s| {
+        let pal = theme::palette(state.settings.get().board_theme);
+        let s = s
+            .width_full()
+            .row_gap(8.0)
+            .padding(12.0)
+            .border_radius(12.0)
+            .border(1.0)
+            .border_color(theme::rgba(pal.accent))
+            .background(theme::rgba(pal.panel));
+        if state.ateed.index_prompt.get().is_some() && !state.ateed.running.get() {
+            s
+        } else {
+            s.display(Display::None)
+        }
+    })
+}
+
+fn index_tournament_games(state: AppState, handles: &AppHandles) {
+    let result = {
+        let study = handles.study.borrow();
+        let Some(db) = study.as_ref() else {
+            push_log(state, "study database is not open");
+            return;
+        };
+        index_tournament_positions(db)
+    };
+    match result {
+        Ok((dataset, summary)) => {
+            state.ateed.sources.update(|sources| {
+                ensure_local_source(sources, &dataset);
+            });
+            state.ateed.index_prompt.set(None);
+            push_log(state, &summary);
+        }
+        Err(error) => push_log(state, &error),
+    }
+}
+
+fn lock_gate(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let card = widgets::glass_card(
         state,
@@ -144,7 +229,10 @@ fn lock_gate(state: AppState) -> impl IntoView {
                     .width_full()
                     .text_wrap()
             }),
-            widgets::primary_button(state, "Unlock studio", move || try_unlock(state))
+            widgets::primary_button(state, "Unlock studio", {
+                let handles = handles.clone();
+                move || try_unlock(state, &handles)
+            })
                 .style(|s| s.width_full().height(44.0)),
         ))
         .style(|s| s.row_gap(12.0).width_full().max_width(460.0)),
@@ -162,7 +250,9 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     let sources = widgets::card(state, sources_panel(state, handles.clone()));
     let train = widgets::card(state, train_panel(state, handles.clone()));
-    let monitor = widgets::card(state, monitor_panel(state));
+    let status = widgets::card(state, status_panel(state));
+    let datagen = widgets::card(state, datagen_panel(state));
+    let trainer = widgets::card(state, trainer_panel(state));
     let strength = widgets::card(state, strength_panel(state, handles.clone()));
     Stack::vertical((
         Stack::horizontal((
@@ -181,6 +271,7 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
                 .flex_wrap(FlexWrap::Wrap)
         }),
         ateed_resume_banner(state, handles.clone()),
+        ateed_index_banner(state, handles.clone()),
         Label::derived(move || {
             if state.ateed.cli_available.get() {
                 format!("CLI ready · {}", state.ateed.cli_path.get())
@@ -203,7 +294,7 @@ fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
         Stack::horizontal((
             Stack::vertical((sources, train))
                 .style(|s| s.row_gap(16.0).flex_grow(1.0f32).min_width(280.0).max_width(560.0)),
-            Stack::vertical((monitor, strength))
+            Stack::vertical((status, datagen, trainer, strength))
                 .style(|s| s.row_gap(16.0).flex_grow(1.0f32).min_width(280.0).max_width(640.0)),
         ))
         .style(|s| {
@@ -366,32 +457,18 @@ fn train_panel(state: AppState, handles: AppHandles) -> impl IntoView {
     .style(|s| s.row_gap(10.0).width_full())
 }
 
-fn monitor_panel(state: AppState) -> impl IntoView {
+fn status_panel(state: AppState) -> impl IntoView {
     let pal = move || theme::palette(state.settings.get().board_theme);
     Stack::vertical((
-        widgets::section_label("Live monitor", pal),
-        progress_bar(state),
-        Stack::horizontal((
-            metric_chip(state, "Epoch", move || state.ateed.epoch.get().to_string()),
-            metric_chip(state, "Loss", move || {
-                format!("{:.3}", state.ateed.loss.get())
-            }),
-            metric_chip(state, "Expert", move || {
-                state.ateed.expert.get().to_string()
-            }),
-            metric_chip(state, "State", move || {
-                if state.ateed.running.get() {
-                    "running".to_owned()
+        widgets::section_label("Telemetry", pal),
+        Label::derived(move || telemetry_status_label(state)).style(move |s| {
+            s.font_size(16.0)
+                .font_bold()
+                .color(theme::rgba(if telemetry_connected(state) {
+                    pal().accent_alt
                 } else {
-                    "idle".to_owned()
-                }
-            }),
-        ))
-        .style(|s| {
-            s.width_full()
-                .col_gap(8.0)
-                .row_gap(8.0)
-                .flex_wrap(FlexWrap::Wrap)
+                    pal().text_secondary
+                }))
         }),
         Label::derived(move || {
             let lines = state.ateed.log.get();
@@ -401,7 +478,7 @@ fn monitor_panel(state: AppState) -> impl IntoView {
                 lines
                     .iter()
                     .rev()
-                    .take(12)
+                    .take(8)
                     .cloned()
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -424,6 +501,115 @@ fn monitor_panel(state: AppState) -> impl IntoView {
         }),
     ))
     .style(|s| s.row_gap(10.0).width_full())
+}
+
+fn datagen_panel(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        widgets::section_label("Datagen", pal),
+        Stack::horizontal((
+            metric_chip(state, "NPS", move || format_u64(state.ateed.nps.get())),
+            metric_chip(state, "Positions", move || {
+                format_u64(state.ateed.positions.get())
+            }),
+            metric_chip(state, "MB/s", move || {
+                format!("{:.2}", state.ateed.mbps.get())
+            }),
+        ))
+        .style(|s| {
+            s.width_full()
+                .col_gap(8.0)
+                .row_gap(8.0)
+                .flex_wrap(FlexWrap::Wrap)
+        }),
+        wdl_bar(state),
+        telemetry_charts::score_histogram(state, 72.0),
+        Label::derived(move || {
+            format!(
+                "pass {} · drop {} · games {}",
+                format_u64(state.ateed.pass.get()),
+                format_u64(state.ateed.drop.get()),
+                format_u64(state.ateed.games.get())
+            )
+        })
+        .style(move |s| {
+            s.font_size(11.0)
+                .color(theme::rgba(pal().text_secondary))
+                .min_width(0.0)
+                .width_full()
+        }),
+    ))
+    .style(|s| s.row_gap(10.0).width_full())
+}
+
+fn trainer_panel(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::vertical((
+        widgets::section_label("Bullet trainer", pal),
+        telemetry_charts::loss_sparkline(state, 72.0),
+        progress_bar(state),
+        Stack::horizontal((
+            metric_chip(state, "Epoch", move || {
+                format!("{:.0}%", state.ateed.progress.get().clamp(0.0, 1.0) * 100.0)
+            }),
+            metric_chip(state, "MPos/s", move || {
+                format!("{:.3}", state.ateed.mpos.get())
+            }),
+            metric_chip(state, "LR", move || {
+                format!("{:.4}", state.ateed.train_lr.get())
+            }),
+            metric_chip(state, "Train", move || {
+                format!("{:.3}", state.ateed.loss.get())
+            }),
+            metric_chip(state, "Val", move || {
+                format!("{:.3}", state.ateed.val_loss.get())
+            }),
+        ))
+        .style(|s| {
+            s.width_full()
+                .col_gap(8.0)
+                .row_gap(8.0)
+                .flex_wrap(FlexWrap::Wrap)
+        }),
+    ))
+    .style(|s| s.row_gap(10.0).width_full())
+}
+
+fn wdl_bar(state: AppState) -> impl IntoView {
+    let pal = move || theme::palette(state.settings.get().board_theme);
+    Stack::horizontal((
+        Empty::new().style(move |s| {
+            let (white, draw, black) = state.ateed.wdl.get();
+            let total = (white + draw + black).max(1) as f32;
+            s.height(10.0)
+                .flex_grow((white as f32 / total).max(0.001))
+                .border_radius(99.0)
+                .background(theme::rgba(pal().text_primary))
+        }),
+        Empty::new().style(move |s| {
+            let (white, draw, black) = state.ateed.wdl.get();
+            let total = (white + draw + black).max(1) as f32;
+            s.height(10.0)
+                .flex_grow((draw as f32 / total).max(0.001))
+                .background(theme::rgba(pal().text_secondary))
+        }),
+        Empty::new().style(move |s| {
+            let (white, draw, black) = state.ateed.wdl.get();
+            let total = (white + draw + black).max(1) as f32;
+            s.height(10.0)
+                .flex_grow((black as f32 / total).max(0.001))
+                .border_radius(99.0)
+                .background(theme::rgba(pal().accent))
+        }),
+    ))
+    .style(move |s| {
+        s.width_full()
+            .height(10.0)
+            .border_radius(99.0)
+            .background(theme::rgba(pal().bg))
+            .overflow_x(Overflow::Clip)
+            .overflow_y(Overflow::Clip)
+    })
 }
 
 fn strength_panel(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -566,13 +752,14 @@ fn progress_bar(state: AppState) -> impl IntoView {
     })
 }
 
-fn try_unlock(state: AppState) {
+fn try_unlock(state: AppState, handles: &AppHandles) {
     let password = state.ateed.password.get_untracked();
     if unlock_ateed(&password) {
         state.ateed.unlocked.set(true);
         state.ateed.gate_error.set(String::new());
         state.ateed.password.set(String::new());
         refresh_ateed_cli(state);
+        offer_ateed_index(state, handles);
         push_log(state, "studio unlocked");
         state.status.set("Ateed studio unlocked.".to_owned());
     } else {
@@ -796,11 +983,12 @@ fn pump_cli_events(
     done: &'static str,
 ) {
     let mut finished = false;
+    let mut last_progress = None;
     loop {
         match rx.try_recv() {
             Ok(StudioEvent::Line(line)) => {
                 if let Some(progress) = updater::progress::parse_progress_line(&line) {
-                    apply_tick(state, &monitor_from_progress(&progress));
+                    last_progress = Some(progress);
                 } else {
                     push_log(state, &line);
                 }
@@ -808,6 +996,7 @@ fn pump_cli_events(
             Ok(StudioEvent::Done(Ok(()))) => {
                 state.ateed.running.set(false);
                 state.ateed.progress.set(1.0);
+                state.ateed.telemetry_kind.set(None);
                 state.ateed.resume_prompt.set(None);
                 crate::app_core::ateed_resume::ActiveAteedJob::clear();
                 push_log(state, done);
@@ -815,6 +1004,7 @@ fn pump_cli_events(
             }
             Ok(StudioEvent::Done(Err(error))) => {
                 state.ateed.running.set(false);
+                state.ateed.telemetry_kind.set(None);
                 push_log(state, &error);
                 finished = true;
             }
@@ -822,6 +1012,7 @@ fn pump_cli_events(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 if state.ateed.running.get_untracked() {
                     state.ateed.running.set(false);
+                    state.ateed.telemetry_kind.set(None);
                     push_log(state, "CLI stopped");
                 }
                 finished = true;
@@ -829,8 +1020,11 @@ fn pump_cli_events(
             }
         }
     }
+    if let Some(progress) = last_progress {
+        apply_tick(state, &monitor_from_progress(&progress));
+    }
     if !finished {
-        floem::action::exec_after(std::time::Duration::from_millis(80), move |_| {
+        floem::action::exec_after(std::time::Duration::from_millis(250), move |_| {
             pump_cli_events(state, rx, done);
         });
     }
@@ -843,11 +1037,38 @@ enum StudioEvent {
 }
 
 fn apply_tick(state: AppState, tick: &AteedMonitorTick) {
+    state.ateed.telemetry_kind.set(Some(tick.kind));
+    state
+        .ateed
+        .last_tick_ms
+        .set(crate::app_core::tournament_live::now_unix_ms());
     state.ateed.epoch.set(tick.epoch);
     state.ateed.progress.set(tick.progress);
     state.ateed.loss.set(tick.loss);
+    state.ateed.val_loss.set(tick.val_loss);
     state.ateed.expert.set(tick.expert);
-    push_log(state, &tick.message);
+    state.ateed.nps.set(tick.nps);
+    state.ateed.games.set(tick.games);
+    state.ateed.positions.set(tick.positions);
+    state.ateed.mbps.set(tick.mbps);
+    state.ateed.mpos.set(tick.mpos);
+    state.ateed.train_lr.set(tick.lr);
+    state.ateed.wdl.set(tick.wdl);
+    state.ateed.pass.set(tick.pass);
+    state.ateed.drop.set(tick.drop);
+    state.ateed.hist.set(tick.hist);
+    if tick.kind == updater::progress::JobKind::Train {
+        state.ateed.loss_ring.update(|ring| {
+            ring.train.push(tick.loss);
+            ring.val.push(tick.val_loss);
+        });
+    }
+    if tick.kind == updater::progress::JobKind::Datagen && tick.nps > 0 {
+        state
+            .ateed
+            .nps_ring
+            .update(|ring| ring.push(tick.nps as f32));
+    }
 }
 
 fn start_evaluate(state: AppState, handles: &AppHandles) {
@@ -918,6 +1139,7 @@ fn begin_planned_job(state: AppState, kind: AteedJobKind, epochs: u32) -> bool {
         Ok(plan) => {
             state.ateed.running.set(true);
             state.ateed.progress.set(0.0);
+            reset_telemetry(state, progress_kind(kind));
             push_log(state, &plan.summary);
             true
         }
@@ -925,6 +1147,76 @@ fn begin_planned_job(state: AppState, kind: AteedJobKind, epochs: u32) -> bool {
             push_log(state, &error);
             false
         }
+    }
+}
+
+fn progress_kind(kind: AteedJobKind) -> Option<updater::progress::JobKind> {
+    match kind {
+        AteedJobKind::Fetch => Some(updater::progress::JobKind::Fetch),
+        AteedJobKind::Train => Some(updater::progress::JobKind::Train),
+        AteedJobKind::Datagen => Some(updater::progress::JobKind::Datagen),
+        _ => None,
+    }
+}
+
+fn progress_kind_from_command(command: &AteedCliCommand) -> Option<updater::progress::JobKind> {
+    match command {
+        AteedCliCommand::Fetch { .. } => Some(updater::progress::JobKind::Fetch),
+        AteedCliCommand::Train { .. } => Some(updater::progress::JobKind::Train),
+        AteedCliCommand::Datagen { .. } => Some(updater::progress::JobKind::Datagen),
+        AteedCliCommand::Decode { .. } | AteedCliCommand::Merge { .. } => None,
+    }
+}
+
+fn reset_telemetry(state: AppState, kind: Option<updater::progress::JobKind>) {
+    state.ateed.telemetry_kind.set(kind);
+    state
+        .ateed
+        .last_tick_ms
+        .set(crate::app_core::tournament_live::now_unix_ms());
+    state.ateed.nps.set(0);
+    state.ateed.games.set(0);
+    state.ateed.positions.set(0);
+    state.ateed.mbps.set(0.0);
+    state.ateed.mpos.set(0.0);
+    state.ateed.train_lr.set(0.0);
+    state.ateed.val_loss.set(0.0);
+    state.ateed.wdl.set((0, 0, 0));
+    state.ateed.pass.set(0);
+    state.ateed.drop.set(0);
+    state.ateed.hist.set([0; updater::progress::HIST_BUCKETS]);
+    state.ateed.loss_ring.set(LossRing::default());
+    state.ateed.nps_ring.set(MetricRing::default());
+}
+
+fn telemetry_connected(state: AppState) -> bool {
+    if !state.ateed.running.get() {
+        return false;
+    }
+    let last = state.ateed.last_tick_ms.get();
+    last > 0 && state.clock_now_ms.get().saturating_sub(last) < 2_000
+}
+
+fn telemetry_status_label(state: AppState) -> String {
+    if telemetry_connected(state) {
+        match state.ateed.telemetry_kind.get() {
+            Some(updater::progress::JobKind::Datagen) => "Connected · datagen".to_owned(),
+            Some(updater::progress::JobKind::Train) => "Connected · train".to_owned(),
+            Some(updater::progress::JobKind::Fetch) => "Connected · fetch".to_owned(),
+            None => "Connected".to_owned(),
+        }
+    } else {
+        "Disconnected / Idle".to_owned()
+    }
+}
+
+fn format_u64(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 10_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
     }
 }
 
@@ -948,6 +1240,8 @@ mod tests {
         assert!(production.contains("lock_gate"));
         assert!(production.contains("dashboard"));
         assert!(production.contains("ateed_resume_banner"));
+        assert!(production.contains("ateed_index_banner"));
+        assert!(production.contains("Index games"));
         assert!(production.contains("Display::None"));
         assert!(!production.contains("JAHANAM"));
         assert!(production.contains("ateed_studio"));
@@ -956,6 +1250,10 @@ mod tests {
         assert!(production.contains("stockfish-plain"));
         assert!(production.contains("Decode"));
         assert!(production.contains("Merge"));
+        assert!(production.contains("Disconnected / Idle"));
+        assert!(production.contains("Bullet trainer"));
+        assert!(production.contains("Datagen"));
+        assert!(production.contains("from_millis(250)"));
         assert!(
             !production.contains("dyn_view"),
             "lock/dashboard must stay mounted"

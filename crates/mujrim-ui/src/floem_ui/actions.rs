@@ -616,6 +616,31 @@ pub fn import_games(state: AppState, handles: &AppHandles) {
             return;
         };
         let text = String::from_utf8_lossy(&bytes);
+        if mujrim_study::lichess_study::looks_like_lichess_study(&text) {
+            match mujrim_study::lichess_study::parse_studies(&text) {
+                Ok(studies) => {
+                    let mut imported = 0usize;
+                    if let Some(database) = handles.study.borrow_mut().as_mut() {
+                        for mut study in studies {
+                            study.source_key = path.to_string_lossy().into_owned();
+                            if database.save_study(&study).is_ok() {
+                                imported += 1;
+                            }
+                        }
+                    }
+                    refresh_studies(state, &handles);
+                    state.status.set(format!(
+                        "Imported {imported} Lichess stud{}.",
+                        if imported == 1 { "y" } else { "ies" }
+                    ));
+                    return;
+                }
+                Err(error) => {
+                    state.status.set(error);
+                    return;
+                }
+            }
+        }
         match game_export::import_text(&text) {
             Ok(records) => {
                 let mut loaded = false;
@@ -835,10 +860,7 @@ pub fn analyze_game(state: AppState, handles: &AppHandles) {
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             types::init();
-            on_done(run_multi_engine_analysis(
-                request,
-                crate::app_core::engine::builtin_analysis_line,
-            ));
+            on_done(run_multi_engine_analysis(request));
         })
         .ok();
     review_played_game(state, handles);
@@ -881,13 +903,8 @@ pub fn screenshot(state: AppState, _handles: &AppHandles) {
 }
 
 fn capture_png() -> Result<Vec<u8>, String> {
-    use xcap::Monitor;
-    let monitor = Monitor::all()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .next()
+    let image = crate::app_core::recording::capture_screen()
         .ok_or_else(|| "No monitor available.".to_owned())?;
-    let image = monitor.capture_image().map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
     image
         .write_to(
@@ -1372,7 +1389,9 @@ pub fn view_ply(state: AppState, handles: &AppHandles, ply: usize) {
             } else {
                 format!("Reviewing ply {ply}.")
             });
-            sync_move_note(state, handles);
+            if !sync_study_view(state, ply) {
+                sync_move_note(state, handles);
+            }
             sync_lesson_overlays(state);
         }
         Err(error) => state.status.set(format!("Could not navigate: {error}")),
@@ -1582,6 +1601,151 @@ pub fn refresh_studies(state: AppState, handles: &AppHandles) {
     }
 }
 
+pub fn index_lichess_downloads(state: AppState, handles: &AppHandles) {
+    let dir = dirs::download_dir().unwrap_or_else(|| PathBuf::from("/home/hamdiz/Downloads"));
+    let result = handles
+        .study
+        .borrow_mut()
+        .as_mut()
+        .ok_or_else(|| "Study library is unavailable.".to_owned())
+        .and_then(|database| mujrim_study::lichess_study::import_studies_from_dir(database, dir));
+    match result {
+        Ok(report) => {
+            refresh_studies(state, handles);
+            state.status.set(if report.studies == 0 {
+                "No Lichess study PGNs found in Downloads.".to_owned()
+            } else {
+                format!(
+                    "Indexed {} Lichess stud{} ({} chapter{}).",
+                    report.studies,
+                    if report.studies == 1 { "y" } else { "ies" },
+                    report.chapters,
+                    if report.chapters == 1 { "" } else { "s" }
+                )
+            });
+        }
+        Err(error) => state.status.set(error),
+    }
+}
+
+pub fn import_lichess_study(state: AppState, handles: &AppHandles) {
+    let handles = handles.clone();
+    let on_done = create_ext_action(handles.ui_scope, move |path: Option<PathBuf>| {
+        let Some(path) = path else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            state.status.set("Could not read the study PGN.".to_owned());
+            return;
+        };
+        match mujrim_study::lichess_study::parse_studies(&text) {
+            Ok(studies) => {
+                let mut imported = 0usize;
+                let mut chapters = 0usize;
+                if let Some(database) = handles.study.borrow_mut().as_mut() {
+                    for mut study in studies {
+                        study.source_key = path.to_string_lossy().into_owned();
+                        chapters += study.chapters.len();
+                        if database.save_study(&study).is_ok() {
+                            imported += 1;
+                        }
+                    }
+                }
+                refresh_studies(state, &handles);
+                state.status.set(format!(
+                    "Imported {imported} stud{} · {chapters} chapter{}.",
+                    if imported == 1 { "y" } else { "ies" },
+                    if chapters == 1 { "" } else { "s" }
+                ));
+            }
+            Err(error) => state.status.set(error),
+        }
+    });
+    std::thread::spawn(move || {
+        on_done(
+            rfd::FileDialog::new()
+                .add_filter("Lichess study", &["pgn"])
+                .pick_file(),
+        );
+    });
+}
+
+pub fn export_lichess_study(state: AppState, handles: &AppHandles) {
+    let Some(id) = state.active_study_id.get_untracked() else {
+        state.status.set("Open a study first.".to_owned());
+        return;
+    };
+    let Some(study) = state
+        .studies
+        .get_untracked()
+        .into_iter()
+        .find(|study| study.id == id)
+    else {
+        state
+            .status
+            .set("That study is no longer available.".to_owned());
+        return;
+    };
+    let pgn = mujrim_study::lichess_study::export_study(&study);
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        let _ = clipboard.set_text(pgn.clone());
+    }
+    let handles = handles.clone();
+    let suggested = format!(
+        "lichess_study_{}.pgn",
+        study
+            .title
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>()
+    );
+    let on_done = create_ext_action(handles.ui_scope, move |path: Option<PathBuf>| {
+        if let Some(path) = path {
+            match std::fs::write(&path, &pgn) {
+                Ok(()) => state
+                    .status
+                    .set(format!("Exported study to {}.", path.display())),
+                Err(error) => state.status.set(format!("Could not export: {error}")),
+            }
+        } else {
+            state
+                .status
+                .set("Study PGN copied to the clipboard.".to_owned());
+        }
+    });
+    std::thread::spawn(move || {
+        on_done(
+            rfd::FileDialog::new()
+                .add_filter("PGN", &["pgn"])
+                .set_file_name(&suggested)
+                .save_file(),
+        );
+    });
+}
+
+pub fn load_study_chapter(state: AppState, handles: &AppHandles, chapter_id: String) {
+    let Some(study_id) = state.active_study_id.get_untracked() else {
+        return;
+    };
+    let Some(study) = state
+        .studies
+        .get_untracked()
+        .into_iter()
+        .find(|study| study.id == study_id)
+    else {
+        return;
+    };
+    if let Some(chapter) = study
+        .chapters
+        .iter()
+        .find(|chapter| chapter.id == chapter_id)
+        .cloned()
+    {
+        apply_chapter(state, handles, &chapter);
+        state.status.set(format!("Chapter '{}'.", chapter.title));
+    }
+}
+
 pub fn create_study(state: AppState, handles: &AppHandles) {
     let title = state.study_title.get_untracked();
     let title = if title.trim().is_empty() {
@@ -1733,6 +1897,7 @@ pub fn jump_study_path(state: AppState, handles: &AppHandles, path: Vec<usize>) 
             if let Some(node) = chapter.tree.node_at(&state.study_path.get_untracked()) {
                 state.move_note.set(node.comment.clone());
             }
+            apply_study_shapes(state, &chapter, &state.study_path.get_untracked());
             let _ = handles;
         }
         Err(error) => state.status.set(error),
@@ -1803,8 +1968,14 @@ fn persist_study(state: AppState, handles: &AppHandles, study: mujrim_study::stu
         .and_then(|database| database.save_study(&study));
     match result {
         Ok(()) => {
+            let keep_chapter = state.active_chapter_id.get_untracked();
             state.active_study_id.set(Some(study.id.clone()));
-            if let Some(chapter) = study.chapters.first() {
+            if keep_chapter
+                .as_ref()
+                .is_some_and(|id| study.chapters.iter().any(|chapter| &chapter.id == id))
+            {
+                state.active_chapter_id.set(keep_chapter);
+            } else if let Some(chapter) = study.chapters.first() {
                 state.active_chapter_id.set(Some(chapter.id.clone()));
             }
             state.status.set(format!("Saved '{}'.", study.title));
@@ -1823,19 +1994,60 @@ fn apply_chapter(
     state.chapter_title.set(chapter.title.clone());
     state.study_path.set(Vec::new());
     let moves = chapter.tree.mainline();
-    match logic::replay_study_game(&chapter.start_fen, &moves) {
-        Ok(game) => {
+    match logic::replay_study_game(&chapter.start_fen, &[]) {
+        Ok(mut game) => {
             state.initial_fen.set(chapter.start_fen.clone());
             state.move_log.set(moves.clone());
             state.move_annotations.set(vec![None; moves.len()]);
             state
                 .review_ply
-                .set(settings::review_cursor_for_view(moves.len(), moves.len()));
+                .set(settings::review_cursor_for_view(0, moves.len()));
+            if chapter.orientation.eq_ignore_ascii_case("black") {
+                game.flipped = true;
+            }
             state.game.set(Some(game));
-            sync_move_note(state, handles);
+            let _ = handles;
+            let _ = sync_study_view(state, 0);
         }
         Err(error) => state.status.set(error),
     }
+}
+
+fn apply_study_shapes(state: AppState, chapter: &mujrim_study::study_doc::Chapter, path: &[usize]) {
+    let mut encoded = Vec::new();
+    if path.is_empty() {
+        let (_, shapes) = mujrim_study::move_tree::extract_comment_shapes(&chapter.chapter_notes);
+        encoded.extend(shapes);
+    } else if let Some(node) = chapter.tree.node_at(path) {
+        encoded.extend(node.shapes.iter().cloned());
+    }
+    let (arrows, circles) = mujrim_study::lichess_study::shapes_to_marks(&encoded);
+    state.explain_marks.set(circles);
+    if let Some(mut game) = state.game.get_untracked() {
+        game.arrows = arrows;
+        state.game.set(Some(game));
+    }
+}
+
+fn sync_study_view(state: AppState, ply: usize) -> bool {
+    let Some(chapter) = active_chapter(state) else {
+        return false;
+    };
+    let current = state.study_path.get_untracked();
+    let path = if current.is_empty() {
+        vec![0; ply]
+    } else {
+        current.into_iter().take(ply).collect()
+    };
+    state.study_path.set(path.clone());
+    if path.is_empty() {
+        state.move_note.set(chapter.chapter_notes.clone());
+        apply_study_shapes(state, &chapter, &[]);
+    } else if let Some(node) = chapter.tree.node_at(&path) {
+        state.move_note.set(node.comment.clone());
+        apply_study_shapes(state, &chapter, &path);
+    }
+    true
 }
 
 fn active_chapter(state: AppState) -> Option<mujrim_study::study_doc::Chapter> {
@@ -1883,10 +2095,21 @@ fn collect_tree_labels(
         } else {
             String::new()
         };
-        let branch = if index > 0 { " ⊞ " } else { "" };
+        let depth = path.iter().filter(|&&i| i > 0).count() + usize::from(index > 0);
+        let indent = "    ".repeat(depth);
+        let branch = if index > 0 { "(" } else { "" };
+        let branch_end = if index > 0 { ")" } else { "" };
+        let comment = if node.comment.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", node.comment)
+        };
         out.push((
             next.clone(),
-            format!("{branch}{number}{}{}", node.san, node.glyphs),
+            format!(
+                "{indent}{branch}{number}{}{}{branch_end}{comment}",
+                node.san, node.glyphs
+            ),
         ));
         collect_tree_labels(&node.children, &next, ply + 1, out);
     }
@@ -2978,13 +3201,29 @@ pub fn load_historical_tournament(state: AppState, handles: &AppHandles, id: Str
 }
 
 pub fn save_move_note(state: AppState, handles: &AppHandles) {
+    let note = state.move_note.get_untracked();
+    if let Some(id) = state.active_study_id.get_untracked() {
+        let mut studies = state.studies.get_untracked();
+        if let Some(study) = studies.iter_mut().find(|study| study.id == id)
+            && let Some(chapter) = active_chapter_mut(study, state)
+        {
+            let path = state.study_path.get_untracked();
+            if path.is_empty() {
+                chapter.chapter_notes = note.clone();
+            } else if let Err(error) = chapter.tree.set_comment(&path, note.clone()) {
+                state.status.set(error);
+                return;
+            }
+            persist_study(state, handles, study.clone());
+            return;
+        }
+    }
     let Some(fen) = current_position_fen(state) else {
         state
             .status
             .set("Load a position before adding a note.".to_owned());
         return;
     };
-    let note = state.move_note.get_untracked();
     let mut study = handles.study.borrow_mut();
     let Some(database) = study.as_mut() else {
         state.status.set("Study library is unavailable.".to_owned());
@@ -3174,44 +3413,36 @@ fn current_eval_fen(state: AppState) -> String {
 }
 
 fn search_eval_bar_cp(fen: &str, path: Option<&Path>) -> i32 {
-    if let Some(path) = path {
-        let search = crate::app_core::uci_process::ExternalSearchConfig {
-            ponder: false,
-            use_nnue: true,
-            own_book: false,
-            eval_file: None,
-        };
-        if let Some(path) = path.to_str()
-            && let Ok(result) = uci_process::query_best_move(
-                path,
-                ExternalEngineProtocol::Uci,
-                fen,
-                12,
-                Duration::from_millis(250),
-                16,
-                1,
-                &search,
-            )
-        {
-            return result.score;
-        }
-    }
-    if let Ok(mut board) = types::Board::from_fen(fen)
-        && let Ok((_, info)) = crate::app_core::engine::builtin_engine_search(
-            &mut board,
+    let search = crate::app_core::uci_process::ExternalSearchConfig {
+        ponder: false,
+        use_nnue: true,
+        own_book: false,
+        eval_file: None,
+    };
+    let engine_path = path
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .or_else(|| {
+            crate::app_core::engine::discover_default_engine()
+                .and_then(|path| path.to_str().map(str::to_owned))
+        });
+    if let Some(path) = engine_path
+        && let Ok(result) = uci_process::query_best_move(
+            &path,
+            ExternalEngineProtocol::Uci,
+            fen,
+            12,
+            Duration::from_millis(250),
             16,
             1,
-            true,
-            None,
-            Duration::from_millis(200),
-            10,
+            &search,
         )
     {
-        return parse_score_cp(&info).unwrap_or(0);
+        return result.score;
     }
     0
 }
 
+#[allow(dead_code)]
 fn parse_score_cp(label: &str) -> Option<i32> {
     label
         .split("score ")
@@ -3505,6 +3736,11 @@ mod tests {
             "fn set_edit_side",
             "fn cycle_edit_ep",
             "fn editor_kings_ok",
+            "fn import_lichess_study",
+            "fn export_lichess_study",
+            "fn index_lichess_downloads",
+            "fn sync_study_view",
+            "fn apply_study_shapes",
             "fn open_learn",
             "fn handle_board_key",
             "fn navigate_board_ply",

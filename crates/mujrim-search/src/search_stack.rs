@@ -50,7 +50,7 @@ impl EvalMode {
     }
 
     pub const fn defers_threat_maps(self) -> bool {
-        self.is_viridithas_nnue() || self.is_akimbo_nnue()
+        self.is_viridithas_nnue() || self.is_akimbo_nnue() || self.is_ateed_nnue()
     }
 
     pub const fn is_ateed_nnue(self) -> bool {
@@ -236,6 +236,18 @@ impl SearchPolicies {
         }
     }
 
+    pub(crate) fn ateed() -> Self {
+        Self {
+            lmr: LmrDispatch::Ateed,
+            lmp: LmpDispatch::Ateed,
+            futility: FutilityDispatch::Ateed,
+            bad_noisy_futility: BadNoisyFutilityDispatch::Ateed,
+            rfp: RfpDispatch::Ateed,
+            move_ordering: MoveOrderingProfile::Reckless,
+            time_manager: TimeManagerProfile::Reckless,
+        }
+    }
+
     pub(crate) fn expected_for(eval_mode: EvalMode) -> Self {
         match eval_mode {
             EvalMode::MujrimHce | EvalMode::Nnue(NnueSearchProfile::Stockfish) => {
@@ -243,8 +255,8 @@ impl SearchPolicies {
             }
             EvalMode::Nnue(NnueSearchProfile::Akimbo) => Self::akimbo(),
             EvalMode::Nnue(NnueSearchProfile::Reckless)
-            | EvalMode::Nnue(NnueSearchProfile::Ateed)
             | EvalMode::Nnue(NnueSearchProfile::Lc0) => Self::reckless(),
+            EvalMode::Nnue(NnueSearchProfile::Ateed) => Self::ateed(),
             EvalMode::Nnue(NnueSearchProfile::Viridithas) => Self::viridithas(),
             EvalMode::Nnue(NnueSearchProfile::Obsidian) => Self::obsidian(),
             EvalMode::Nnue(NnueSearchProfile::PlentyChess) => Self::plentychess(),
@@ -483,7 +495,7 @@ impl SearchStackProfile for AteedSearchProfile {
     }
 
     fn policies(&self) -> SearchPolicies {
-        SearchPolicies::reckless()
+        SearchPolicies::ateed()
     }
 }
 
@@ -616,11 +628,13 @@ mod tests {
         assert_eq!(ateed.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Ateed));
         assert!(ateed.eval_mode().is_ateed_nnue());
         assert!(!ateed.eval_mode().is_reckless_nnue());
-        assert_eq!(
-            ateed.params.aspiration_window,
-            SearchParams::reckless().aspiration_window
-        );
+        assert_eq!(ateed.params.aspiration_window, 16);
+        assert_ne!(ateed.params.lmr_base, SearchParams::reckless().lmr_base);
+        assert!(matches!(ateed.policies.lmr, LmrDispatch::Ateed));
+        assert!(matches!(ateed.policies.lmp, LmpDispatch::Ateed));
+        assert!(matches!(ateed.policies.rfp, RfpDispatch::Ateed));
         assert_eq!(ateed.policies.move_ordering, MoveOrderingProfile::Reckless);
+        assert!(ateed.eval_mode().defers_threat_maps());
         let lc0 = SearchStack::for_network(NnueSearchProfile::Lc0);
         assert_eq!(lc0.eval_mode(), EvalMode::Nnue(NnueSearchProfile::Lc0));
         assert!(lc0.eval_mode().is_lc0_nnue());
