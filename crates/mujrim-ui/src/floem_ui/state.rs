@@ -138,6 +138,7 @@ pub struct AteedStudioState {
     pub wdl_weight: RwSignal<String>,
     pub running: RwSignal<bool>,
     pub datagen_paused: RwSignal<bool>,
+    pub datagen_started_ms: RwSignal<u64>,
     pub progress: RwSignal<f32>,
     pub epoch: RwSignal<u32>,
     pub loss: RwSignal<f32>,
@@ -310,6 +311,7 @@ impl AppState {
                 wdl_weight: RwSignal::new("0.25".to_owned()),
                 running: RwSignal::new(false),
                 datagen_paused: RwSignal::new(false),
+                datagen_started_ms: RwSignal::new(0),
                 progress: RwSignal::new(0.0),
                 epoch: RwSignal::new(0),
                 loss: RwSignal::new(0.0),
@@ -336,7 +338,9 @@ impl AppState {
                 log: RwSignal::new(Vec::new()),
                 cli_available: RwSignal::new(false),
                 cli_path: RwSignal::new(String::new()),
-                data_path: RwSignal::new("data.txt".to_owned()),
+                data_path: RwSignal::new(
+                    crate::app_core::ateed_studio::default_datagen_output_str(),
+                ),
                 output_path: RwSignal::new("ateed_default.bin".to_owned()),
                 batch_positions: RwSignal::new("1000000000".to_owned()),
                 batch_depth: RwSignal::new("6".to_owned()),
@@ -426,6 +430,22 @@ pub fn offer_ateed_index(state: AppState, handles: &AppHandles) {
                 .to_string_lossy()
                 .into_owned(),
         );
+    }
+    let data_path = state.ateed.data_path.get_untracked();
+    if crate::app_core::ateed_studio::is_legacy_datagen_path(&data_path) || data_path.is_empty() {
+        state
+            .ateed
+            .data_path
+            .set(crate::app_core::ateed_studio::default_datagen_output_str());
+    }
+    for line in crate::app_core::ateed_studio::migrate_legacy_datagen_files() {
+        state.ateed.log.update(|lines| {
+            lines.push(line);
+            if lines.len() > 48 {
+                let drop = lines.len() - 48;
+                lines.drain(..drop);
+            }
+        });
     }
     if !state.ateed.unlocked.get_untracked() {
         return;

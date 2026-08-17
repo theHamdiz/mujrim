@@ -222,4 +222,37 @@ mod tests {
         assert_eq!(job.completed.min(config.num_games), 4);
         assert_eq!(job.extra.get("positions").map(String::as_str), Some("400"));
     }
+
+    #[test]
+    fn datagen_checkpoint_survives_parallel_saves() {
+        let dir = std::env::temp_dir().join(format!(
+            "mujrim-job-parallel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let output = dir.join("data.txt");
+        let config = DatagenConfig {
+            output_path: output.display().to_string(),
+            num_games: 32,
+            num_positions: Some(1_000),
+            ..Default::default()
+        };
+        std::thread::scope(|scope| {
+            for completed in 1..=32 {
+                let config = config.clone();
+                scope.spawn(move || {
+                    datagen_checkpoint(&config, completed, completed * 10)
+                        .save()
+                        .expect("parallel datagen sidecar");
+                });
+            }
+        });
+        assert!(JobCheckpoint::load(&output).is_some());
+        JobCheckpoint::clear(&output);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

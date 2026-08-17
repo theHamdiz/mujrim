@@ -39,6 +39,29 @@ pub fn score_histogram(state: AppState, height: f64) -> impl IntoView {
     })
 }
 
+pub fn nps_sparkline(state: AppState, height: f64) -> impl IntoView {
+    canvas(move |cx, size| {
+        let pal = theme::palette(state.settings.get().board_theme);
+        cx.fill(
+            &Rect::new(0.0, 0.0, size.width, size.height),
+            theme::rgba(pal.panel),
+            0.0,
+        );
+        let ring = state.ateed.nps_ring.get();
+        let mut samples = [0.0f32; METRIC_RING_CAP];
+        let n = ring.copy_oldest_first(&mut samples);
+        let max = samples[..n].iter().copied().fold(1.0f32, f32::max).max(1.0);
+        if let Some(path) = series_path(&samples[..n], size.width, size.height, max) {
+            cx.stroke(&path, theme::rgba(pal.accent_alt), &Stroke::new(2.0));
+        }
+    })
+    .style(move |s| {
+        let _ = state.settings.get();
+        let _ = state.ateed.nps_ring.get();
+        s.width_full().height(height).border_radius(8.0)
+    })
+}
+
 pub fn loss_sparkline(state: AppState, height: f64) -> impl IntoView {
     canvas(move |cx, size| {
         let pal = theme::palette(state.settings.get().board_theme);
@@ -88,4 +111,15 @@ fn series_path(samples: &[f32], width: f64, height: f64, max: f32) -> Option<Bez
         }
     }
     Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn datagen_chart_draws_nps_sparkline() {
+        let src = include_str!("telemetry_charts.rs");
+        assert!(src.contains("pub fn nps_sparkline"));
+        assert!(src.contains("nps_ring"));
+        assert!(src.contains("pub fn score_histogram"));
+    }
 }

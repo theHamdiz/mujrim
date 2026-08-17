@@ -5,8 +5,15 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Sidecar fsync cadence. Per-game commits serialized 32 workers on disk.
+pub const DATAGEN_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+
+use rayon::prelude::*;
 
 use updater::progress::{DatagenBatch, HIST_BUCKETS, JobProgress};
 
@@ -122,6 +129,7 @@ impl DatagenStats {
         positions: u64,
         nps: u64,
         throughput: f32,
+        position_target: Option<u64>,
     ) -> JobProgress {
         JobProgress::datagen_batch(DatagenBatch {
             game,
@@ -137,6 +145,7 @@ impl DatagenStats {
             bytes: self.bytes.load(Ordering::Relaxed),
             hist: self.snapshot_hist(),
         })
+        .with_position_target(position_target)
     }
 }
 
@@ -155,6 +164,9 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
 
     println!("Mujrim Datagen v2.0");
     println!("  Games:   {}", config.num_games);
+    if let Some(positions) = config.num_positions {
+        println!("  Target:  {positions} positions");
+    }
     println!("  Depth:   {}", config.depth);
     println!("  Threads: {}", config.threads);
     println!("  Output:  {}", config.output_path);
@@ -164,18 +176,18 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
     let info = gpu::system_info();
     println!("{info}");
     println!();
+    let _ = std::io::stdout().flush();
 
     let format = crate::formats::DatasetFormat::parse(&config.format)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let stream_text = format == crate::formats::DatasetFormat::MujrimText
         && !config.output_path.ends_with(".gz")
         && !config.output_path.ends_with(".zst");
-    let mut writer = if stream_text {
-        Some(BufWriter::new(open_datagen_output(&config.output_path)?))
+    let sink = Mutex::new(if stream_text {
+        DatagenSink::Stream(BufWriter::new(open_datagen_output(&config.output_path)?))
     } else {
-        None
-    };
-    let mut buffered = Vec::new();
+        DatagenSink::Buffer(Vec::new())
+    });
     let completed = crate::job::resume_datagen(config);
     let resumed_positions = crate::job::resume_datagen_positions(config);
     games_completed.store(completed, Ordering::Relaxed);
@@ -184,83 +196,92 @@ pub fn generate_data(config: &DatagenConfig) -> io::Result<u64> {
         .save()
         .map_err(io::Error::other)?;
     let stats = DatagenStats::new();
-    let mut last_emit = start;
-    let ateed = load_ateed_eval();
+    let last_emit = Mutex::new(None);
+    let last_checkpoint = Mutex::new(None);
+    let job = Mutex::new(());
+    let ateed = load_ateed_eval().map(Arc::new);
     let index_root = eval::nnue::writable_nnue_directory();
     let index_path = mujrim_study::ateed_index::index_path(&index_root);
-    let mut index = mujrim_study::ateed_index::PositionIndex::load(&index_path);
+    let index = Mutex::new(mujrim_study::ateed_index::PositionIndex::load(&index_path));
+    let error = Mutex::new(None);
+    let games_started = AtomicU64::new(completed);
+    let threads = config.threads.max(1);
+    let runtime = DatagenRuntime {
+        config,
+        sink: &sink,
+        index: &index,
+        index_path: index_path.as_path(),
+        stats: &stats,
+        total_positions: &total_positions,
+        games_completed: &games_completed,
+        start,
+        last_emit: &last_emit,
+        last_checkpoint: &last_checkpoint,
+        job: &job,
+    };
 
-    for _game_idx in completed..config.num_games {
-        if stopped.load(Ordering::Relaxed)
-            || datagen_batch_complete(
-                total_positions.load(Ordering::Relaxed),
-                games_completed.load(Ordering::Relaxed),
-                config,
-            )
-        {
-            break;
-        }
+    emit_datagen_progress(&runtime, true);
 
-        let (mut result, in_check_drops) = play_one_game(config, &stopped, ateed.as_ref());
-        let mut written = 0u64;
-
-        if let Some(game) = result.as_mut() {
-            game.positions.retain(|pos| index.insert_fen(&pos.fen));
-            if let Some(writer) = writer.as_mut() {
-                for pos in &game.positions {
-                    writeln!(writer, "{}|{}|{:.1}", pos.fen, pos.score, pos.wdl)?;
-                    written += position_line_bytes(pos);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(io::Error::other)?
+        .install(|| {
+            (0..threads).into_par_iter().for_each(|_| {
+                let ateed = ateed.as_deref();
+                loop {
+                    if stopped.load(Ordering::Relaxed)
+                        || datagen_batch_complete(
+                            total_positions.load(Ordering::Relaxed),
+                            games_completed.load(Ordering::Relaxed),
+                            config,
+                        )
+                    {
+                        stopped.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let ticket = games_started.fetch_add(1, Ordering::Relaxed);
+                    if ticket >= config.num_games {
+                        break;
+                    }
+                    let (mut result, in_check_drops) = play_one_game(config, &stopped, ateed);
+                    if let Err(write_error) =
+                        persist_datagen_game(&runtime, result.as_mut(), in_check_drops)
+                    {
+                        stopped.store(true, Ordering::Relaxed);
+                        *error.lock().unwrap_or_else(|poison| poison.into_inner()) =
+                            Some(write_error);
+                        break;
+                    }
+                    emit_datagen_progress(&runtime, false);
                 }
-            } else {
-                for pos in &game.positions {
-                    written += position_line_bytes(pos);
-                }
-                buffered.extend(game.positions.iter().cloned());
-            }
-            total_positions.fetch_add(game.positions.len() as u64, Ordering::Relaxed);
-        }
-        stats.record(result.as_ref(), in_check_drops, written);
+            });
+        });
 
-        let completed = games_completed.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(writer) = writer.as_mut() {
-            writer.flush()?;
-        }
-        let pos_count = total_positions.load(Ordering::Relaxed);
-        crate::job::datagen_checkpoint(config, completed, pos_count)
-            .save()
-            .map_err(io::Error::other)?;
-        let now = Instant::now();
-        if updater::progress::should_report_now(completed, config.num_games, last_emit, now) {
-            last_emit = now;
-            let elapsed = start.elapsed().as_secs_f64().max(0.001);
-            let nps = (pos_count as f64 / elapsed) as u64;
-            let throughput =
-                stats.bytes.load(Ordering::Relaxed) as f32 / elapsed as f32 / 1_048_576.0;
-            updater::progress::emit_progress(&stats.batch(
-                completed,
-                config.num_games,
-                pos_count,
-                nps,
-                throughput,
-            ));
-            println!(
-                "  [{completed}/{}] {pos_count} positions, {nps} pos/sec",
-                config.num_games
-            );
-            let _ = index.save(&index_path);
-        }
+    if let Some(error) = error
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner())
+    {
+        return Err(error);
     }
-    let _ = index.save(&index_path);
 
-    if let Some(mut writer) = writer {
-        writer.flush()?;
-    } else {
-        crate::formats::write_positions(
+    if let Ok(mut index) = index.lock() {
+        let _ = index.append_dirty(&index_path);
+    }
+    write_datagen_checkpoint(&runtime, true)?;
+    emit_datagen_progress(&runtime, true);
+
+    match sink
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner())
+    {
+        DatagenSink::Stream(mut writer) => writer.flush()?,
+        DatagenSink::Buffer(buffered) => crate::formats::write_positions(
             std::path::Path::new(&config.output_path),
             &buffered,
             format,
         )
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
     }
 
     let total = total_positions.load(Ordering::Relaxed);
@@ -286,7 +307,129 @@ pub fn datagen_batch_complete(positions: u64, games: u64, config: &DatagenConfig
 
 /// Append-only dataset writer so interrupted datagen can resume.
 pub fn open_datagen_output(path: &str) -> io::Result<File> {
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     OpenOptions::new().create(true).append(true).open(path)
+}
+
+enum DatagenSink {
+    Stream(BufWriter<File>),
+    Buffer(Vec<TrainingPosition>),
+}
+
+struct DatagenRuntime<'a> {
+    config: &'a DatagenConfig,
+    sink: &'a Mutex<DatagenSink>,
+    index: &'a Mutex<mujrim_study::ateed_index::PositionIndex>,
+    index_path: &'a std::path::Path,
+    stats: &'a DatagenStats,
+    total_positions: &'a AtomicU64,
+    games_completed: &'a AtomicU64,
+    start: Instant,
+    last_emit: &'a Mutex<Option<Instant>>,
+    last_checkpoint: &'a Mutex<Option<Instant>>,
+    job: &'a Mutex<()>,
+}
+
+fn persist_datagen_game(
+    runtime: &DatagenRuntime<'_>,
+    mut result: Option<&mut GameResult>,
+    in_check_drops: u64,
+) -> io::Result<()> {
+    let mut written = 0u64;
+    if let Some(game) = result.as_mut() {
+        if let Ok(mut index) = runtime.index.lock() {
+            game.positions.retain(|pos| index.insert_fen(&pos.fen));
+            index
+                .append_dirty(runtime.index_path)
+                .map_err(io::Error::other)?;
+        }
+        let mut sink = runtime
+            .sink
+            .lock()
+            .map_err(|_| io::Error::other("datagen sink lock poisoned"))?;
+        match &mut *sink {
+            DatagenSink::Stream(writer) => {
+                for pos in &game.positions {
+                    writeln!(writer, "{}|{}|{:.1}", pos.fen, pos.score, pos.wdl)?;
+                    written += position_line_bytes(pos);
+                }
+                writer.flush()?;
+            }
+            DatagenSink::Buffer(buffered) => {
+                for pos in &game.positions {
+                    written += position_line_bytes(pos);
+                }
+                buffered.extend(game.positions.iter().cloned());
+            }
+        }
+        runtime
+            .total_positions
+            .fetch_add(game.positions.len() as u64, Ordering::Relaxed);
+    }
+    runtime
+        .stats
+        .record(result.as_deref(), in_check_drops, written);
+    runtime.games_completed.fetch_add(1, Ordering::Relaxed);
+    write_datagen_checkpoint(runtime, false)
+}
+
+fn write_datagen_checkpoint(runtime: &DatagenRuntime<'_>, force: bool) -> io::Result<()> {
+    let mut last = runtime
+        .last_checkpoint
+        .lock()
+        .map_err(|_| io::Error::other("datagen checkpoint lock poisoned"))?;
+    let now = Instant::now();
+    if !force && last.is_some_and(|prev| now.duration_since(prev) < DATAGEN_CHECKPOINT_INTERVAL) {
+        return Ok(());
+    }
+    *last = Some(now);
+    drop(last);
+    let _guard = runtime
+        .job
+        .lock()
+        .map_err(|_| io::Error::other("datagen job lock poisoned"))?;
+    crate::job::datagen_checkpoint(
+        runtime.config,
+        runtime.games_completed.load(Ordering::Relaxed),
+        runtime.total_positions.load(Ordering::Relaxed),
+    )
+    .save()
+    .map_err(io::Error::other)
+}
+
+fn emit_datagen_progress(runtime: &DatagenRuntime<'_>, force: bool) {
+    let completed = runtime.games_completed.load(Ordering::Relaxed);
+    let positions = runtime.total_positions.load(Ordering::Relaxed);
+    let now = Instant::now();
+    let mut last = runtime
+        .last_emit
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if !force && !updater::progress::should_report_live(completed, *last, now) {
+        return;
+    }
+    *last = Some(now);
+    drop(last);
+    let elapsed = runtime.start.elapsed().as_secs_f64().max(0.001);
+    let nps = (positions as f64 / elapsed) as u64;
+    let throughput =
+        runtime.stats.bytes.load(Ordering::Relaxed) as f32 / elapsed as f32 / 1_048_576.0;
+    updater::progress::emit_progress(&runtime.stats.batch(
+        completed,
+        runtime.config.num_games,
+        positions,
+        nps,
+        throughput,
+        runtime.config.num_positions,
+    ));
+    println!(
+        "  [{completed}/{}] {positions} positions, {nps} pos/sec",
+        runtime.config.num_games
+    );
 }
 
 /// Play a single self-play game, recording positions.
@@ -522,7 +665,7 @@ mod tests {
         let hist = stats.snapshot_hist();
         assert_eq!(hist[0], 1);
         assert_eq!(hist[8], 1);
-        let batch = stats.batch(1, 2, 2, 100, 0.5);
+        let batch = stats.batch(1, 2, 2, 100, 0.5, None);
         assert_eq!(batch.white, Some(1));
         assert_eq!(batch.pass, Some(2));
         assert_eq!(batch.drop, Some(5));
@@ -557,5 +700,21 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(contents, "a|0|0.5\nb|1|1.0\n");
+    }
+
+    #[test]
+    fn datagen_emits_live_progress_and_uses_rayon() {
+        let src = include_str!("datagen.rs");
+        assert!(src.contains("ThreadPoolBuilder"));
+        assert!(src.contains("num_threads(threads)"));
+        assert!(src.contains("into_par_iter"));
+        assert!(src.contains("should_report_live"));
+        assert!(src.contains("with_position_target"));
+        assert!(src.contains("stdout().flush()"));
+        assert!(src.contains("append_dirty"));
+        assert!(src.contains("DATAGEN_CHECKPOINT_INTERVAL"));
+        let production = src.split("#[cfg(test)]").next().unwrap_or("");
+        assert!(production.contains("create_dir_all"));
+        assert!(!production.contains("index.save("));
     }
 }

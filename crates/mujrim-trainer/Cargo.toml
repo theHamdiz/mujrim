@@ -18,3 +18,4 @@ mujrim-study = { path = "../mujrim-study" }
 flate2 = "1.1"
 zstd = "0.13.3"
 rand = "0.9"
+rayon = "1.12"

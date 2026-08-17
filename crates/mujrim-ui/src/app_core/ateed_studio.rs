@@ -423,6 +423,128 @@ pub fn dataset_format_for_path(path: &str) -> &'static str {
     }
 }
 
+pub fn parse_count(raw: &str) -> u64 {
+    let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    digits.parse().unwrap_or(0)
+}
+
+pub const GENDATA_DIR: &str = "gendata";
+pub const DEFAULT_DATAGEN_FILE: &str = "data.txt";
+
+pub fn default_datagen_output() -> PathBuf {
+    PathBuf::from(GENDATA_DIR).join(DEFAULT_DATAGEN_FILE)
+}
+
+pub fn default_datagen_output_str() -> String {
+    default_datagen_output().to_string_lossy().into_owned()
+}
+
+pub fn is_legacy_datagen_path(path: &str) -> bool {
+    let name = Path::new(path).file_name().and_then(|name| name.to_str());
+    matches!(path, "data.txt" | "./data.txt")
+        || name == Some(DEFAULT_DATAGEN_FILE)
+            && Path::new(path)
+                .parent()
+                .is_none_or(|parent| parent.as_os_str().is_empty() || parent == Path::new("."))
+}
+
+pub fn resolve_datagen_output(raw: &str) -> String {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return raw.to_owned();
+    }
+    if path
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == GENDATA_DIR)
+    {
+        return raw.to_owned();
+    }
+    if is_legacy_datagen_path(raw) || raw.is_empty() {
+        return default_datagen_output_str();
+    }
+    raw.to_owned()
+}
+
+fn datagen_sidecar_names(stem: &str) -> Vec<String> {
+    vec![
+        stem.to_owned(),
+        format!("{stem}.job"),
+        format!("{stem}.partial"),
+        format!("{stem}.bak"),
+    ]
+}
+
+/// Move leftover cwd `data.txt` (+ sidecars) into `./gendata`.
+pub fn migrate_datagen_into_gendata(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let dest_dir = root.join(GENDATA_DIR);
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|error| format!("failed to create {}: {error}", dest_dir.display()))?;
+    let mut names = datagen_sidecar_names(DEFAULT_DATAGEN_FILE);
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("data.txt") && entry.path().is_file() {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    let mut moved = Vec::new();
+    for name in names {
+        let src = root.join(&name);
+        if !src.is_file() {
+            continue;
+        }
+        if src.starts_with(&dest_dir) {
+            continue;
+        }
+        let dest = dest_dir.join(&name);
+        if dest.exists() {
+            continue;
+        }
+        if let Err(error) = std::fs::rename(&src, &dest) {
+            std::fs::copy(&src, &dest)
+                .and_then(|_| std::fs::remove_file(&src))
+                .map_err(|copy_error| {
+                    format!(
+                        "failed to move {} into gendata ({error}; {copy_error})",
+                        src.display()
+                    )
+                })?;
+        }
+        moved.push(dest);
+    }
+    Ok(moved)
+}
+
+pub fn migrate_legacy_datagen_files() -> Vec<String> {
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        roots.push(dir.to_path_buf());
+    }
+    roots.sort();
+    roots.dedup();
+    let mut logs = Vec::new();
+    for root in roots {
+        match migrate_datagen_into_gendata(&root) {
+            Ok(moved) => {
+                for path in moved {
+                    logs.push(format!("moved datagen file to {}", path.display()));
+                }
+            }
+            Err(error) => logs.push(error),
+        }
+    }
+    logs
+}
+
 pub fn datagen_batch_size(sources: &[AteedDataSource]) -> u64 {
     sources
         .iter()
@@ -484,7 +606,7 @@ pub const FIELD_HELP: &[(&str, &str)] = &[
     ),
     (
         "dataset",
-        "The growing file of positions. Each Datagen Play batch appends here. Training reads this whole file, so yesterday’s positions stay in the mix.",
+        "The growing file of positions, kept under ./gendata. Each Datagen Play batch appends here. Training reads this whole file, so yesterday’s positions stay in the mix.",
     ),
     (
         "output",
@@ -770,6 +892,13 @@ pub fn set_live_cli_pid(pid: Option<u32>) {
     LIVE_CLI_PID.store(pid.unwrap_or(0), Ordering::SeqCst);
 }
 
+/// Pause stays disabled this long after Play so the same click cannot SIGSTOP the child.
+pub const DATAGEN_PAUSE_ARM_MS: u64 = 1_500;
+
+pub fn datagen_pause_ready(started_ms: u64, now_ms: u64) -> bool {
+    started_ms > 0 && now_ms.saturating_sub(started_ms) >= DATAGEN_PAUSE_ARM_MS
+}
+
 pub fn cli_signal_command(pid: u32, signal: CliProcessSignal) -> (&'static str, Vec<String>) {
     let flag = match signal {
         CliProcessSignal::Pause => "-STOP",
@@ -810,10 +939,18 @@ pub fn run_mujrim_cli(
     mut on_line: impl FnMut(&str),
 ) -> Result<i32, String> {
     CLI_STOP_REQUESTED.store(false, Ordering::SeqCst);
-    let mut child = Command::new(cli)
+    let mut command = Command::new(cli);
+    command
         .args(args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start {}: {error}", cli.display()))?;
     set_live_cli_pid(Some(child.id()));
@@ -1134,6 +1271,14 @@ mod tests {
             cli_signal_command(4242, CliProcessSignal::Stop),
             ("kill", vec!["-TERM".into(), "4242".into()])
         );
+        assert_eq!(parse_count("1_000_000"), 1_000_000);
+        assert_eq!(parse_count(""), 0);
+        assert!(!datagen_pause_ready(0, 1_000));
+        assert!(!datagen_pause_ready(1_000, 1_400));
+        assert!(datagen_pause_ready(1_000, 1_000 + DATAGEN_PAUSE_ARM_MS));
+        let src = include_str!("ateed_studio.rs");
+        assert!(src.contains("stdin(Stdio::null())"));
+        assert!(src.contains("process_group(0)"));
         assert_eq!(TRAINER_CLI_STEMS[0], "mujrim-train");
         let missing = std::env::temp_dir().join("mujrim-missing-ateed-net.bin");
         let _ = std::fs::remove_file(&missing);
@@ -1151,6 +1296,38 @@ mod tests {
         assert_eq!(kind, AteedSourceKind::Http);
         assert!(value.contains("lczero.org"));
         assert_eq!(dataset_format_for_path("games.binpack.gz"), "binpack");
+        assert_eq!(
+            resolve_datagen_output("data.txt"),
+            default_datagen_output_str()
+        );
+        assert_eq!(
+            resolve_datagen_output("gendata/data.txt"),
+            "gendata/data.txt"
+        );
+        assert!(is_legacy_datagen_path("data.txt"));
+        assert!(!is_legacy_datagen_path("dumps/sf.plain"));
+    }
+
+    #[test]
+    fn migrate_datagen_moves_legacy_cwd_files_into_gendata() {
+        let root = std::env::temp_dir().join(format!(
+            "mujrim-gendata-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let legacy = root.join("data.txt");
+        std::fs::write(&legacy, b"fen|0|0.5\n").expect("legacy file");
+        std::fs::write(root.join("data.txt.job"), b"kind=datagen\n").expect("sidecar");
+        let moved = migrate_datagen_into_gendata(&root).expect("migrate");
+        assert!(moved.iter().any(|path| path.ends_with("data.txt")));
+        assert!(!legacy.exists());
+        assert!(root.join("gendata").join("data.txt").is_file());
+        assert!(root.join("gendata").join("data.txt.job").is_file());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

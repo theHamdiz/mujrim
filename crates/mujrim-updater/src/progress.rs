@@ -162,6 +162,15 @@ impl JobProgress {
         progress.hist = Some(batch.hist);
         progress
     }
+
+    /// Prefer position-target percent when datagen is filling a chunk, not a game cap.
+    pub fn with_position_target(mut self, target: Option<u64>) -> Self {
+        if let Some(target) = target.filter(|&target| target > 0) {
+            self.pct = ratio(self.positions.unwrap_or(0) as f32, Some(target as f32));
+            self.total = Some(target);
+        }
+        self
+    }
 }
 
 pub fn format_progress(progress: &JobProgress) -> String {
@@ -285,6 +294,14 @@ pub fn should_report_now(completed: u64, total: u64, last_emit: Instant, now: In
         return true;
     }
     should_report_step(completed, total) && now.duration_since(last_emit) >= REPORT_INTERVAL
+}
+
+/// Live datagen/train ticks: first completed unit, then every `REPORT_INTERVAL`.
+///
+/// Game-count stride is wrong when the stop condition is a position target
+/// (the UI passes a huge game cap so stride would be millions of games).
+pub fn should_report_live(completed: u64, last_emit: Option<Instant>, now: Instant) -> bool {
+    completed > 0 && last_emit.is_none_or(|last| now.duration_since(last) >= REPORT_INTERVAL)
 }
 
 fn ratio(done: f32, total: Option<f32>) -> f32 {
@@ -425,5 +442,26 @@ mod tests {
             start,
             start + Duration::from_millis(250)
         ));
+        assert!(should_report_live(1, None, start));
+        assert!(should_report_live(
+            1,
+            Some(start),
+            start + Duration::from_millis(250)
+        ));
+        assert!(!should_report_live(
+            1,
+            Some(start),
+            start + Duration::from_millis(10)
+        ));
+        assert!(!should_report_live(
+            0,
+            None,
+            start + Duration::from_millis(250)
+        ));
+        let chunk = JobProgress::datagen(3, 1_000_000_000, 250_000_000)
+            .with_position_target(Some(1_000_000_000));
+        assert!((chunk.pct - 25.0).abs() < 0.2);
+        assert_eq!(chunk.total, Some(1_000_000_000));
+        assert!(chunk.pct > 1.0);
     }
 }

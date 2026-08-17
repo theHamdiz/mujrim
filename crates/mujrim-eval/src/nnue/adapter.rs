@@ -167,30 +167,22 @@ pub enum ActiveNetwork {
 #[inline]
 pub fn default_embedded_network() -> ActiveNetwork {
     #[cfg(feature = "reckless-nnue")]
-    {
-        return ActiveNetwork::EmbeddedReckless;
-    }
+    let network = ActiveNetwork::EmbeddedReckless;
     #[cfg(all(not(feature = "reckless-nnue"), feature = "viridithas-nnue"))]
-    {
-        return ActiveNetwork::EmbeddedViridithas;
-    }
+    let network = ActiveNetwork::EmbeddedViridithas;
     #[cfg(all(
         not(feature = "reckless-nnue"),
         not(feature = "viridithas-nnue"),
         feature = "obsidian-nnue"
     ))]
-    {
-        return ActiveNetwork::EmbeddedObsidian;
-    }
+    let network = ActiveNetwork::EmbeddedObsidian;
     #[cfg(all(
         not(feature = "reckless-nnue"),
         not(feature = "viridithas-nnue"),
         not(feature = "obsidian-nnue"),
         feature = "plentychess-nnue"
     ))]
-    {
-        return ActiveNetwork::EmbeddedPlentyChess;
-    }
+    let network = ActiveNetwork::EmbeddedPlentyChess;
     #[cfg(all(
         not(feature = "reckless-nnue"),
         not(feature = "viridithas-nnue"),
@@ -198,9 +190,7 @@ pub fn default_embedded_network() -> ActiveNetwork {
         not(feature = "plentychess-nnue"),
         feature = "stockfish-nnue"
     ))]
-    {
-        return ActiveNetwork::EmbeddedStockfish;
-    }
+    let network = ActiveNetwork::EmbeddedStockfish;
     #[cfg(all(
         not(feature = "reckless-nnue"),
         not(feature = "viridithas-nnue"),
@@ -208,9 +198,8 @@ pub fn default_embedded_network() -> ActiveNetwork {
         not(feature = "plentychess-nnue"),
         not(feature = "stockfish-nnue")
     ))]
-    {
-        ActiveNetwork::Embedded
-    }
+    let network = ActiveNetwork::Embedded;
+    network
 }
 
 /// Embedded network that matches an explicit EvalPreset / search-profile name.

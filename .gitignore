@@ -57,6 +57,9 @@ sprt/results.pgn
 # Dist trees (built locally; do not commit binaries)
 /dist/
 
+# Ateed self-play dumps
+/gendata/
+
 # Local scratch / downloaded third-party engine trees
 .tmp*/
 .tmp-*

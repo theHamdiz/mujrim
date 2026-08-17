@@ -382,8 +382,8 @@ fn main() {
                                 .short('o')
                                 .long("output")
                                 .value_name("PATH")
-                                .default_value("data.txt")
-                                .help("Append-only dataset path"),
+                                .default_value("gendata/data.txt")
+                                .help("Append-only dataset path under ./gendata"),
                         )
                         .arg(
                             Arg::new("format")
@@ -690,7 +690,7 @@ fn main() {
                         output_path: datagen
                             .get_one::<String>("output")
                             .cloned()
-                            .unwrap_or_else(|| "data.txt".to_string()),
+                            .unwrap_or_else(|| "gendata/data.txt".to_string()),
                         format: datagen
                             .get_one::<String>("format")
                             .cloned()

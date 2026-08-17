@@ -2,16 +2,20 @@
 
 use std::path::PathBuf;
 
+use floem::event::EventPropagation;
 use floem::ext_event::create_ext_action;
 use floem::prelude::*;
 use floem::taffy::style::{Display, FlexWrap, Overflow};
+use floem::ui_events::keyboard::{Key, KeyboardEvent, NamedKey};
+use floem::views::TextInputEnter;
 
 use crate::app_core::ateed_studio::{
     AteedCliCommand, AteedJobKind, AteedMonitorTick, AteedPerfReport, AteedSourceKind,
     AteedStrengthReport, CliProcessSignal, LossRing, MetricRing, catalog_draft, cli_args,
-    continuing_train_base, datagen_batch_size, dataset_format_for_path, ensure_local_source,
-    evaluate_zero_net, field_help, format_perf, format_strength, index_tournament_positions,
-    local_mix, monitor_from_progress, plan_job, probe_compute, run_mujrim_cli, signal_live_cli,
+    continuing_train_base, datagen_batch_size, datagen_pause_ready, dataset_format_for_path,
+    ensure_local_source, evaluate_zero_net, field_help, format_perf, format_strength,
+    index_tournament_positions, local_mix, migrate_legacy_datagen_files, monitor_from_progress,
+    parse_count, plan_job, probe_compute, resolve_datagen_output, run_mujrim_cli, signal_live_cli,
     unlock_ateed, validate_source, validate_weighted_source,
 };
 use crate::app_core::layout;
@@ -219,11 +223,17 @@ fn lock_gate(state: AppState, handles: AppHandles) -> impl IntoView {
                 "Enter the studio key to fetch Stockfish/Lc0/self-play dumps, decode them, merge mix weights, generate data, and train Ateed from the CLI.",
                 pal,
             ),
-            TextInput::new(state.ateed.password).style(|s| {
-                s.width_full()
-                    .height(40.0)
-                    .border_radius(12.0)
-            }),
+            TextInput::new(state.ateed.password)
+                .style(|s| {
+                    s.width_full()
+                        .height(40.0)
+                        .border_radius(12.0)
+                        .keyboard_navigable()
+                })
+                .on_event_stop(TextInputEnter::listener(), {
+                    let handles = handles.clone();
+                    move |_, _| try_unlock(state, &handles)
+                }),
             Label::derived(move || state.ateed.gate_error.get()).style(move |s| {
                 s.font_size(12.0)
                     .color(theme::rgba(pal().accent))
@@ -239,13 +249,38 @@ fn lock_gate(state: AppState, handles: AppHandles) -> impl IntoView {
         ))
         .style(|s| s.row_gap(12.0).width_full().max_width(460.0)),
     );
-    Stack::new((card,)).style(move |s| {
-        s.size_full()
-            .items_center()
-            .justify_center()
-            .padding(24.0)
-            .background(theme::rgba(pal().bg))
-    })
+    Stack::new((card,))
+        .style(move |s| {
+            s.size_full()
+                .items_center()
+                .justify_center()
+                .padding(24.0)
+                .background(theme::rgba(pal().bg))
+                .keyboard_navigable()
+        })
+        .on_event(el::KeyDown, {
+            let handles = handles.clone();
+            move |_, event: &KeyboardEvent| {
+                if ateed_login_enter(event) {
+                    try_unlock(state, &handles);
+                    EventPropagation::Stop
+                } else {
+                    EventPropagation::Continue
+                }
+            }
+        })
+}
+
+fn ateed_login_enter(event: &KeyboardEvent) -> bool {
+    is_ateed_login_enter_key(&event.key)
+}
+
+fn is_ateed_login_enter_key(key: &Key) -> bool {
+    match key {
+        Key::Named(NamedKey::Enter) => true,
+        Key::Character(text) => matches!(text.as_str(), "\r" | "\n"),
+        _ => false,
+    }
 }
 
 fn dashboard(state: AppState, handles: AppHandles) -> impl IntoView {
@@ -514,18 +549,37 @@ fn datagen_panel(state: AppState, handles: AppHandles) -> impl IntoView {
         ),
         explained_field(state, "Self-play depth", "depth", state.ateed.batch_depth),
         Stack::horizontal((
-            widgets::primary_button_when(state, "Play", move || datagen_can_play(state), {
-                let handles = handles.clone();
-                move || play_or_resume_datagen(state, &handles)
-            }),
-            widgets::primary_button_when(state, "Pause", move || datagen_can_pause(state), {
-                move || pause_datagen(state)
-            }),
+            Stack::new((
+                widgets::primary_button_when(state, "Play", move || datagen_can_play(state), {
+                    let handles = handles.clone();
+                    move || play_or_resume_datagen(state, &handles)
+                })
+                .style(move |s| {
+                    if datagen_can_pause(state) {
+                        s.display(Display::None)
+                    } else {
+                        s
+                    }
+                }),
+                widgets::primary_button_when(state, "Pause", move || datagen_can_pause(state), {
+                    move || pause_datagen(state)
+                })
+                .style(move |s| {
+                    if datagen_can_pause(state) {
+                        s
+                    } else {
+                        s.display(Display::None)
+                    }
+                }),
+            ))
+            .style(|s| s.min_width(88.0)),
             widgets::primary_button_when(state, "Stop", move || datagen_can_stop(state), {
                 move || stop_datagen(state)
             }),
         ))
-        .style(|s| s.col_gap(8.0).flex_wrap(FlexWrap::Wrap)),
+        .style(|s| s.col_gap(8.0)),
+        progress_bar(state),
+        telemetry_charts::nps_sparkline(state, 72.0),
         Stack::horizontal((
             metric_chip(state, "NPS", move || format_u64(state.ateed.nps.get())),
             metric_chip(state, "Positions", move || {
@@ -853,7 +907,12 @@ fn datagen_can_play(state: AppState) -> bool {
 }
 
 fn datagen_can_pause(state: AppState) -> bool {
-    datagen_job_active(state) && !state.ateed.datagen_paused.get()
+    datagen_job_active(state)
+        && !state.ateed.datagen_paused.get()
+        && datagen_pause_ready(
+            state.ateed.datagen_started_ms.get(),
+            state.clock_now_ms.get(),
+        )
 }
 
 fn datagen_can_stop(state: AppState) -> bool {
@@ -869,6 +928,12 @@ fn play_or_resume_datagen(state: AppState, handles: &AppHandles) {
 }
 
 fn pause_datagen(state: AppState) {
+    if !datagen_pause_ready(
+        state.ateed.datagen_started_ms.get_untracked(),
+        crate::app_core::tournament_live::now_unix_ms(),
+    ) {
+        return;
+    }
     match signal_live_cli(CliProcessSignal::Pause) {
         Ok(()) => {
             state.ateed.datagen_paused.set(true);
@@ -897,6 +962,7 @@ fn stop_datagen(state: AppState) {
         Ok(()) => {
             state.ateed.datagen_paused.set(false);
             state.ateed.running.set(false);
+            state.ateed.datagen_started_ms.set(0);
             push_log(state, "datagen stopped — sidecar kept for Resume job");
         }
         Err(error) => push_log(state, &error),
@@ -1071,17 +1137,19 @@ fn start_merge(state: AppState, handles: &AppHandles) {
 }
 
 fn start_datagen(state: AppState, handles: &AppHandles) {
+    for line in migrate_legacy_datagen_files() {
+        push_log(state, &line);
+    }
+    let output = resolve_datagen_output(&state.ateed.data_path.get_untracked());
+    state.ateed.data_path.set(output.clone());
+    if let Some(parent) = std::path::Path::new(&output).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if !begin_cli_job(state, AteedJobKind::Datagen) {
         return;
     }
-    let positions = datagen_batch_size(&state.ateed.sources.get_untracked()).max(
-        state
-            .ateed
-            .batch_positions
-            .get_untracked()
-            .parse()
-            .unwrap_or(0),
-    );
+    let positions = datagen_batch_size(&state.ateed.sources.get_untracked())
+        .max(parse_count(&state.ateed.batch_positions.get_untracked()));
     let depth = state.ateed.batch_depth.get_untracked().parse().unwrap_or(6);
     spawn_cli(
         state,
@@ -1090,7 +1158,7 @@ fn start_datagen(state: AppState, handles: &AppHandles) {
             games: positions.max(1),
             positions: Some(positions),
             depth,
-            output: state.ateed.data_path.get_untracked(),
+            output,
             format: dataset_format_for_path(&state.ateed.data_path.get_untracked()).to_owned(),
         },
         "datagen complete",
@@ -1125,12 +1193,11 @@ fn pump_cli_events(
     done: &'static str,
 ) {
     let mut finished = false;
-    let mut last_progress = None;
     loop {
         match rx.try_recv() {
             Ok(StudioEvent::Line(line)) => {
                 if let Some(progress) = updater::progress::parse_progress_line(&line) {
-                    last_progress = Some(progress);
+                    apply_tick(state, &monitor_from_progress(&progress));
                 } else {
                     push_log(state, &line);
                 }
@@ -1139,6 +1206,7 @@ fn pump_cli_events(
                 let was_running = state.ateed.running.get_untracked();
                 state.ateed.running.set(false);
                 state.ateed.datagen_paused.set(false);
+                state.ateed.datagen_started_ms.set(0);
                 if was_running {
                     state.ateed.progress.set(1.0);
                     state.ateed.telemetry_kind.set(None);
@@ -1152,6 +1220,7 @@ fn pump_cli_events(
                 let was_running = state.ateed.running.get_untracked();
                 state.ateed.running.set(false);
                 state.ateed.datagen_paused.set(false);
+                state.ateed.datagen_started_ms.set(0);
                 if was_running {
                     state.ateed.telemetry_kind.set(None);
                     push_log(state, &error);
@@ -1163,6 +1232,7 @@ fn pump_cli_events(
                 if state.ateed.running.get_untracked() {
                     state.ateed.running.set(false);
                     state.ateed.datagen_paused.set(false);
+                    state.ateed.datagen_started_ms.set(0);
                     state.ateed.telemetry_kind.set(None);
                     push_log(state, "CLI stopped");
                 }
@@ -1170,9 +1240,6 @@ fn pump_cli_events(
                 break;
             }
         }
-    }
-    if let Some(progress) = last_progress {
-        apply_tick(state, &monitor_from_progress(&progress));
     }
     if !finished {
         floem::action::exec_after(std::time::Duration::from_millis(250), move |_| {
@@ -1300,6 +1367,10 @@ fn begin_planned_job(state: AppState, kind: AteedJobKind, epochs: u32) -> bool {
         Ok(plan) => {
             state.ateed.running.set(true);
             state.ateed.datagen_paused.set(false);
+            state
+                .ateed
+                .datagen_started_ms
+                .set(crate::app_core::tournament_live::now_unix_ms());
             state.ateed.progress.set(0.0);
             reset_telemetry(state, progress_kind(kind));
             push_log(state, &plan.summary);
@@ -1455,6 +1526,8 @@ mod tests {
         assert!(production.contains("engines/mujrim"));
         assert!(production.contains("continuing_train_base"));
         assert!(production.contains("Batch positions"));
+        assert!(production.contains("resolve_datagen_output"));
+        assert!(production.contains("migrate_legacy_datagen_files"));
         assert!(production.contains("field_help"));
         assert!(production.contains("stockfish-plain"));
         assert!(production.contains("Decode"));
@@ -1467,6 +1540,13 @@ mod tests {
         assert!(production.contains("\"Play\""));
         assert!(production.contains("\"Pause\""));
         assert!(production.contains("\"Stop\""));
+        assert!(production.contains("nps_sparkline"));
+        assert!(production.contains("progress_bar(state)"));
+        assert!(production.contains("datagen_pause_ready"));
+        assert!(production.contains("datagen_started_ms"));
+        assert!(production.contains("ateed_login_enter"));
+        assert!(production.contains("TextInputEnter"));
+        assert!(production.contains("NamedKey::Enter"));
         assert!(production.contains("capped_scroll"));
         assert!(production.contains("filling_scroll"));
         assert!(production.contains("ATEED_PANEL_SCROLL_PX"));
@@ -1508,5 +1588,11 @@ mod tests {
         assert_eq!(format_u64(1_000_000), "1.0M");
         assert_eq!(source_value_caption("http").0, "Download URL");
         assert_eq!(source_value_caption("local").0, "File path");
+        assert!(is_ateed_login_enter_key(&Key::Named(NamedKey::Enter)));
+        assert!(is_ateed_login_enter_key(&Key::Character("\r".into())));
+        assert!(is_ateed_login_enter_key(&Key::Character("\n".into())));
+        assert!(!is_ateed_login_enter_key(&Key::Named(NamedKey::Escape)));
+        assert_eq!(parse_count("1,000,000,000"), 1_000_000_000);
+        assert_eq!(parse_count("1000000000"), 1_000_000_000);
     }
 }

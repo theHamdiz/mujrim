@@ -1,7 +1,7 @@
 //! Deduped Ateed training-position index for datagen and tournament games.
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
@@ -29,11 +29,20 @@ pub struct IndexedPosition {
     pub wdl: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PositionIndex {
     pub keys: HashSet<String>,
     pub games: HashSet<String>,
+    dirty: Vec<String>,
 }
+
+impl PartialEq for PositionIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys == other.keys && self.games == other.games
+    }
+}
+
+impl Eq for PositionIndex {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IndexScan {
@@ -58,7 +67,13 @@ impl PositionIndex {
     }
 
     pub fn insert_fen(&mut self, fen: &str) -> bool {
-        self.keys.insert(position_key(fen))
+        let key = position_key(fen);
+        if self.keys.insert(key.clone()) {
+            self.dirty.push(format!("pos {key}"));
+            true
+        } else {
+            false
+        }
     }
 
     pub fn contains_game(&self, tournament_id: &str, game_index: usize) -> bool {
@@ -67,7 +82,10 @@ impl PositionIndex {
     }
 
     pub fn mark_game(&mut self, tournament_id: &str, game_index: usize) {
-        self.games.insert(Self::game_id(tournament_id, game_index));
+        let id = Self::game_id(tournament_id, game_index);
+        if self.games.insert(id.clone()) {
+            self.dirty.push(format!("game {id}"));
+        }
     }
 
     pub fn load(path: &Path) -> Self {
@@ -91,7 +109,7 @@ impl PositionIndex {
         index
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), String> {
+    pub fn save(&mut self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -113,7 +131,34 @@ impl PositionIndex {
             body.push_str(&key);
             body.push('\n');
         }
-        durable::atomic_write_text(path, &body)
+        durable::atomic_write_text(path, &body)?;
+        self.dirty.clear();
+        Ok(())
+    }
+
+    /// Append only keys added since the last flush. Used by live datagen so
+    /// progress ticks do not rewrite and sort the whole index.
+    pub fn append_dirty(&mut self, path: &Path) -> Result<(), String> {
+        if self.dirty.is_empty() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        if file.metadata().map_err(|error| error.to_string())?.len() == 0 {
+            writeln!(file, "{INDEX_HEADER}").map_err(|error| error.to_string())?;
+        }
+        for line in self.dirty.drain(..) {
+            writeln!(file, "{line}").map_err(|error| error.to_string())?;
+        }
+        file.flush().map_err(|error| error.to_string())
     }
 }
 
@@ -337,6 +382,34 @@ mod tests {
         );
         assert_eq!(scan.new_games, 0);
         assert_eq!(scan.known_games, 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn append_dirty_does_not_rewrite_existing_keys() {
+        let dir = std::env::temp_dir().join(format!(
+            "mujrim-ateed-append-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("position.index");
+        let mut index = PositionIndex::default();
+        assert!(index.insert_fen(START_FEN));
+        index.append_dirty(&path).expect("first append");
+        let first_len = fs::metadata(&path).expect("meta").len();
+        assert!(index.insert_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"));
+        index.append_dirty(&path).expect("second append");
+        let second_len = fs::metadata(&path).expect("meta").len();
+        assert!(second_len > first_len);
+        index.append_dirty(&path).expect("empty dirty");
+        assert_eq!(fs::metadata(&path).expect("meta").len(), second_len);
+        let restored = PositionIndex::load(&path);
+        assert!(restored.contains_fen(START_FEN));
+        assert_eq!(restored.keys.len(), 2);
         let _ = fs::remove_dir_all(dir);
     }
 

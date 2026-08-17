@@ -3,6 +3,9 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static STAGE_TICK: AtomicU64 = AtomicU64::new(0);
 
 pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent()
@@ -21,23 +24,18 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
         file.sync_all()
             .map_err(|error| format!("failed to sync {}: {error}", temporary.display()))?;
     }
-    if backup.exists() {
-        fs::remove_file(&backup)
-            .map_err(|error| format!("failed to clear backup {}: {error}", backup.display()))?;
-    }
+    let _ = fs::remove_file(&backup);
     if path.exists() {
-        fs::rename(path, &backup)
-            .map_err(|error| format!("failed to stage replacement {}: {error}", path.display()))?;
+        let _ = fs::rename(path, &backup);
     }
     if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
         if backup.exists() {
             let _ = fs::rename(&backup, path);
         }
         return Err(format!("failed to commit {}: {error}", path.display()));
     }
-    if backup.exists() {
-        let _ = fs::remove_file(backup);
-    }
+    let _ = fs::remove_file(backup);
     Ok(())
 }
 
@@ -51,8 +49,8 @@ pub fn read_text(path: &Path) -> Option<String> {
 
 pub fn remove_file(path: &Path) {
     let _ = fs::remove_file(path);
-    let _ = fs::remove_file(staging_path(path));
     let _ = fs::remove_file(backup_path(path));
+    remove_staging_files(path);
 }
 
 pub fn sidecar_path(output: &Path, suffix: &str) -> PathBuf {
@@ -64,7 +62,27 @@ pub fn sidecar_path(output: &Path, suffix: &str) -> PathBuf {
 }
 
 fn staging_path(path: &Path) -> PathBuf {
-    sidecar_path(path, ".tmp")
+    let tick = STAGE_TICK.fetch_add(1, Ordering::Relaxed);
+    sidecar_path(path, &format!(".tmp.{tick}"))
+}
+
+fn remove_staging_files(path: &Path) {
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let prefix = format!("{}.tmp.", name.to_string_lossy());
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -103,5 +121,21 @@ mod tests {
             sidecar_path(Path::new("ateed_default.bin"), ".job"),
             PathBuf::from("ateed_default.bin.job")
         );
+    }
+
+    #[test]
+    fn atomic_write_survives_parallel_commits() {
+        let path = unique_path("parallel");
+        std::thread::scope(|scope| {
+            for index in 0..32 {
+                let path = path.clone();
+                scope.spawn(move || {
+                    atomic_write_text(&path, &format!("w{index}")).expect("parallel commit");
+                });
+            }
+        });
+        let text = read_text(&path).expect("final sidecar");
+        assert!(text.starts_with('w'), "{text}");
+        remove_file(&path);
     }
 }
